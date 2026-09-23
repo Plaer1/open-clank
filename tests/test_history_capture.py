@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
-from core.atomic_io import atomic_write_batch, AtomicFileChange
+import pytest
+
+from core.atomic_io import AtomicWriteConflict, atomic_write_batch, AtomicFileChange
 from src.openclank import history_capture
 from src.openclank.history_capture import HistoryContext
 
@@ -72,6 +74,26 @@ def test_history_unavailable_does_not_block_live_write(tmp_path):
     status = history_capture.last_history_status(context)
     assert status["history_status"] == "paused"
     assert status["capture_phase"] == "unavailable"
+
+
+def test_configured_recoverable_batch_is_gated_when_prepare_fails(tmp_path):
+    class FailingBatch(FakeHistoryClient):
+        def prepare_batch(self, envelope, entries):
+            raise RuntimeError("worker stopped before batch acknowledgement")
+
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_bytes(b"before")
+    context = _context(tmp_path, FailingBatch())
+    with pytest.raises(AtomicWriteConflict, match="history_prepare_required"):
+        atomic_write_batch(
+            [
+                AtomicFileChange(str(first), b"after", history_context=context),
+                AtomicFileChange(str(second), b"created", history_context=context),
+            ]
+        )
+    assert first.read_bytes() == b"before"
+    assert not second.exists()
 
 
 def test_failed_after_capture_is_reported_without_rolling_back_live_write(tmp_path):

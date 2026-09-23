@@ -2,20 +2,21 @@
 
 use crate::catalog::{
     ActionRecord, ActionState, CaptureManifest, Catalog, CatalogConflict, CatalogResult,
-    LiveReceipt, LiveStatus, Locator, ResourceKey, ResourceOutcome, Revision, VersionContent,
-    VersionReceipt,
+    LiveReceipt, LiveStatus, Locator, MutationBatch, MutationResource, PrepareReceipt,
+    ResourceExistence, ResourceKey, ResourceMetadata, ResourceOutcome, ResourceType, Revision,
+    VersionContent, VersionReceipt,
 };
 use crate::retention::{BudgetError, ExpiryRecord, ExpiryState, PersistedReservation, PolicySet};
 use crate::usage::{
-    HistoryUsage, RetainedVersionUsage, add_external_storage, measure_root_with_reservations,
+    add_external_storage, measure_root_with_reservations, HistoryUsage, RetainedVersionUsage,
 };
 use crate::{Context, HistoryStore, Partition};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "test_faults")]
@@ -99,6 +100,24 @@ pub struct ActionRequest {
     pub per_resource_outcomes: Option<Vec<ResourceOutcome>>,
 }
 
+/// One exact before-state supplied by a mutation owner. `None` content is
+/// meaningful only together with `ResourceExistence::Absent` (or a provider
+/// type such as a directory whose bytes are not representable); it is never
+/// inferred to mean an unobserved secondary target.
+#[derive(Debug, Clone)]
+pub struct BatchCaptureInput {
+    pub resource_key: ResourceKey,
+    pub old_locator: Option<Locator>,
+    pub new_locator: Option<Locator>,
+    pub expected_revision: Option<Revision>,
+    pub existence: ResourceExistence,
+    pub resource_type: ResourceType,
+    pub metadata: ResourceMetadata,
+    pub content: Option<Bytes>,
+    pub fingerprint: String,
+    pub coverage: CaptureManifest,
+}
+
 fn default_schema_version() -> u32 {
     1
 }
@@ -131,6 +150,8 @@ pub fn new_action_record(request: ActionRequest) -> ActionRecord {
         per_resource_outcomes: request.per_resource_outcomes,
         state: ActionState::Intent,
         before: None,
+        before_resources: Vec::new(),
+        mutation_batch: None,
         after: None,
         live: None,
         before_capture_digest: None,
@@ -607,7 +628,16 @@ impl HistoryCoordinator {
                 .catalog
                 .owner_partition(&action.resource_key.account_id)?;
             let mut expired_roots = BTreeSet::new();
-            for receipt in action.before.iter().chain(action.after.iter()) {
+            let batch_before = action
+                .before_resources
+                .iter()
+                .filter_map(|resource| resource.before.as_ref());
+            for receipt in action
+                .before
+                .iter()
+                .chain(batch_before)
+                .chain(action.after.iter())
+            {
                 let VersionContent::Bytes(reference) = &receipt.content else {
                     continue;
                 };
@@ -840,6 +870,7 @@ impl HistoryCoordinator {
                 &action.resource_key.account_id,
                 content,
                 fingerprint,
+                "single-before",
             )
             .await
         {
@@ -872,6 +903,231 @@ impl HistoryCoordinator {
             }
             Err(error) => {
                 let _ = self.release_capture_reservation(&reservation_id);
+                self.catalog.release_leases(action_id, &lease)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Prepare every resource in a parent mutation before the live owner is
+    /// admitted. Each content payload uses the same Lore writer and durable
+    /// flush as the single-resource path; the catalog acknowledgement is
+    /// published only after all entries have receipts.
+    pub async fn capture_batch_before(
+        &self,
+        action_id: &str,
+        entries: Vec<BatchCaptureInput>,
+    ) -> CatalogResult<ActionRecord> {
+        if entries.is_empty() {
+            return Err("batch prepare requires at least one resource".into());
+        }
+        let mut action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        let declared = action
+            .guard_resource_ids
+            .iter()
+            .chain(action.modified_resource_ids.iter())
+            .chain(std::iter::once(&action.resource_key))
+            .collect::<Vec<_>>();
+        let mut seen_resources = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            if seen_resources
+                .iter()
+                .any(|resource| *resource == entry.resource_key)
+            {
+                return Err(
+                    "history_prepare_duplicate_resource: batch entries must be unique".into(),
+                );
+            }
+            seen_resources.push(entry.resource_key.clone());
+            if entry.resource_key.account_id != action.resource_key.account_id
+                || entry.resource_key.workspace_id != action.resource_key.workspace_id
+                || entry.resource_key.provider != action.resource_key.provider
+            {
+                return Err(format!(
+                    "history_prepare_scope_conflict: {} is outside the parent resource scope",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if !declared
+                .iter()
+                .any(|resource| **resource == entry.resource_key)
+            {
+                return Err(format!(
+                    "history_prepare_undeclared_resource: {} is absent from guard/modified resources",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if entry.existence == ResourceExistence::Present
+                && !matches!(entry.resource_type, ResourceType::File)
+                && entry
+                    .coverage
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("exact_preimage"))
+                    != Some(&serde_json::Value::Bool(true))
+            {
+                return Err(format!(
+                    "history_prepare_inexact_preimage: {} requires exact_preimage coverage",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+        }
+        let logical_bytes = entries.iter().try_fold(0u64, |sum, entry| {
+            sum.checked_add(entry.content.as_ref().map_or(0, |bytes| bytes.len() as u64))
+                .ok_or("batch preimage size overflow")
+        })?;
+        let mut physical_keys = entries
+            .iter()
+            .flat_map(|entry| {
+                [entry.old_locator.as_ref(), entry.new_locator.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|locator| locator.opaque_ref.clone())
+            })
+            .collect::<Vec<_>>();
+        physical_keys.sort();
+        physical_keys.dedup();
+        if !physical_keys.is_empty() {
+            action = self
+                .catalog
+                .add_physical_lease_keys(action_id, &physical_keys)?;
+        }
+        let start_state = if action.state == ActionState::CaptureFailed {
+            ActionState::CaptureFailed
+        } else {
+            ActionState::Intent
+        };
+        let mut lease = lease_ids(&action);
+        for entry in &entries {
+            for locator in [entry.old_locator.as_ref(), entry.new_locator.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(opaque_ref) = &locator.opaque_ref {
+                    lease.push(format!("physical:{opaque_ref}"));
+                }
+            }
+        }
+        lease.sort();
+        lease.dedup();
+        self.catalog.acquire_leases(action_id, &lease)?;
+        if let Err(error) =
+            self.catalog
+                .transition(action_id, start_state, ActionState::CapturingBefore)
+        {
+            self.catalog.release_leases(action_id, &lease)?;
+            return Err(error);
+        }
+        let (reservation_id, scope_id) = match self
+            .reserve_with_reclaim(&action, "before", logical_bytes)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingBefore,
+                    ActionState::CaptureFailed,
+                );
+                self.catalog.release_leases(action_id, &lease)?;
+                return Err(format!("history_paused_budget: {error}").into());
+            }
+        };
+        let mut resources = Vec::with_capacity(entries.len());
+        let mut digest_input = Vec::new();
+        for (index, entry) in entries.into_iter().enumerate() {
+            let content_for_digest = entry.content.as_ref().map(|bytes| bytes.as_ref());
+            digest_input.extend_from_slice(&serde_json::to_vec(&(
+                index,
+                &entry.resource_key,
+                &entry.old_locator,
+                &entry.new_locator,
+                &entry.expected_revision,
+                &entry.existence,
+                &entry.resource_type,
+                &entry.metadata,
+                &entry.coverage,
+                &entry.fingerprint,
+            ))?);
+            if let Some(content) = content_for_digest {
+                digest_input.extend_from_slice(blake3::hash(content).as_bytes());
+            }
+            let receipt = match self
+                .capture(
+                    action_id,
+                    &action.resource_key.account_id,
+                    entry.content,
+                    entry.fingerprint.clone(),
+                    &format!("batch-{index}-{}", entry.resource_key.resource_id),
+                )
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let _ = self.catalog.transition(
+                        action_id,
+                        ActionState::CapturingBefore,
+                        ActionState::CaptureFailed,
+                    );
+                    let _ = self.release_capture_reservation(&reservation_id);
+                    self.catalog.release_leases(action_id, &lease)?;
+                    return Err(format!("history_prepare_failed: {error}").into());
+                }
+            };
+            resources.push(MutationResource {
+                resource_key: entry.resource_key,
+                old_locator: entry.old_locator,
+                new_locator: entry.new_locator,
+                expected_revision: entry.expected_revision,
+                existence: entry.existence,
+                resource_type: entry.resource_type,
+                metadata: entry.metadata,
+                before: Some(receipt),
+                fingerprint: entry.fingerprint,
+                coverage: entry.coverage,
+            });
+        }
+        let batch = MutationBatch {
+            schema_version: 1,
+            parent_action_id: action_id.to_owned(),
+            prepare: PrepareReceipt {
+                batch_version: 1,
+                parent_action_id: action_id.to_owned(),
+                resource_count: resources.len() as u32,
+                logical_bytes,
+                acknowledged: true,
+            },
+            resources,
+        };
+        let digest = blake3::hash(&digest_input).to_hex().to_string();
+        let result = self.catalog.record_batch_before_durable(
+            action_id,
+            batch,
+            digest,
+            scope_id,
+            logical_bytes,
+        );
+        let _ = self.release_capture_reservation(&reservation_id);
+        match result {
+            Ok(record) => {
+                self.held_leases
+                    .lock()
+                    .map_err(|_| "lease lock poisoned")?
+                    .insert(action_id.to_owned(), lease);
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingBefore,
+                    ActionState::CaptureFailed,
+                );
                 self.catalog.release_leases(action_id, &lease)?;
                 Err(error)
             }
@@ -947,6 +1203,7 @@ impl HistoryCoordinator {
                 &action.resource_key.account_id,
                 content,
                 fingerprint,
+                "single-after",
             )
             .await
         {
@@ -1020,6 +1277,10 @@ impl HistoryCoordinator {
             .as_ref()
             .is_some_and(|stored| stored == receipt)
             && !action
+                .before_resources
+                .iter()
+                .any(|resource| resource.before.as_ref() == Some(receipt))
+            && !action
                 .after
                 .as_ref()
                 .is_some_and(|stored| stored == receipt)
@@ -1060,16 +1321,15 @@ impl HistoryCoordinator {
         account_id: &str,
         content: Option<Bytes>,
         fingerprint: String,
+        identity: &str,
     ) -> CatalogResult<VersionReceipt> {
         let partition = self.catalog.ensure_owner_partition(account_id)?;
-        let version_id = unique_version_id(
-            action_id,
-            if content.is_some() {
-                "bytes"
-            } else {
-                "tombstone"
-            },
-        );
+        let phase = if content.is_some() {
+            format!("bytes:{identity}")
+        } else {
+            format!("tombstone:{identity}")
+        };
+        let version_id = unique_version_id(action_id, &phase);
         let context = unique_context(action_id, &version_id);
         let result = async {
             let Some(content) = content else {

@@ -3,11 +3,9 @@
 //! Lore stores bytes and associations; this journal stores provenance, idempotency and phase
 //! receipts. It never performs a live mutation and never replays one during reconciliation.
 
+use crate::retention::{BudgetError, ExpiryRecord, ExpiryState, PersistedReservation, PolicySet};
 use redb::{Database, ReadableTable, TableDefinition};
-use crate::retention::{
-    BudgetError, ExpiryRecord, ExpiryState, PersistedReservation, PolicySet,
-};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -109,6 +107,67 @@ pub struct ResourceOutcome {
     pub resource_id: String,
     pub status: String,
     pub revision: Option<Revision>,
+}
+
+/// The state observed for one resource at preparation time.  `Absent` is an
+/// explicit preimage: a later restore must remove a resource created by the
+/// live mutation rather than treating a missing byte payload as unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ResourceExistence {
+    Absent,
+    Present,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ResourceType {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ResourceMetadata {
+    pub mode: Option<u32>,
+    pub size: Option<u64>,
+    pub modified_millis: Option<u64>,
+    pub opaque: Option<serde_json::Value>,
+}
+
+/// Durable acknowledgement that every required before-state was admitted to
+/// the history worker before the live owner was allowed to mutate anything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrepareReceipt {
+    pub batch_version: u32,
+    pub parent_action_id: String,
+    pub resource_count: u32,
+    pub logical_bytes: u64,
+    pub acknowledged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MutationResource {
+    pub resource_key: ResourceKey,
+    pub old_locator: Option<Locator>,
+    pub new_locator: Option<Locator>,
+    pub expected_revision: Option<Revision>,
+    pub existence: ResourceExistence,
+    pub resource_type: ResourceType,
+    pub metadata: ResourceMetadata,
+    pub before: Option<VersionReceipt>,
+    pub fingerprint: String,
+    pub coverage: CaptureManifest,
+}
+
+/// Versioned parent mutation batch.  Content is referenced by Lore receipts
+/// so large preimages continue to use the existing chunk/content-addressed
+/// path instead of growing the catalog row or IPC frame.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MutationBatch {
+    pub schema_version: u32,
+    pub parent_action_id: String,
+    pub resources: Vec<MutationResource>,
+    pub prepare: PrepareReceipt,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,6 +272,12 @@ pub struct ActionRecord {
     pub per_resource_outcomes: Option<Vec<ResourceOutcome>>,
     pub state: ActionState,
     pub before: Option<VersionReceipt>,
+    /// Exact per-resource before receipts for a prepared mutation batch.
+    /// The legacy `before` field remains the first-resource projection.
+    #[serde(default)]
+    pub before_resources: Vec<MutationResource>,
+    #[serde(default)]
+    pub mutation_batch: Option<MutationBatch>,
     pub after: Option<VersionReceipt>,
     pub live: Option<LiveReceipt>,
     #[serde(default)]
@@ -246,6 +311,10 @@ pub struct ActionReceipt {
     pub after_version_id: Option<String>,
     pub before: Option<VersionReceipt>,
     pub after: Option<VersionReceipt>,
+    #[serde(default)]
+    pub before_resources: Vec<MutationResource>,
+    #[serde(default)]
+    pub mutation_batch: Option<MutationBatch>,
 }
 
 impl ActionRecord {
@@ -271,6 +340,8 @@ impl ActionRecord {
                 .map(|receipt| receipt.version_id.clone()),
             before: self.before.clone(),
             after: self.after.clone(),
+            before_resources: self.before_resources.clone(),
+            mutation_batch: self.mutation_batch.clone(),
         }
     }
 }
@@ -302,14 +373,32 @@ impl std::fmt::Display for BudgetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disabled => write!(f, "history capture is disabled"),
-            Self::ExceedsTarget { requested, available } => {
-                write!(f, "history budget exceeded: requested {requested}, available {available}")
+            Self::ExceedsTarget {
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "history budget exceeded: requested {requested}, available {available}"
+                )
             }
-            Self::ExceedsGlobal { requested, available } => {
-                write!(f, "global history budget exceeded: requested {requested}, available {available}")
+            Self::ExceedsGlobal {
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "global history budget exceeded: requested {requested}, available {available}"
+                )
             }
-            Self::ExceedsScope { requested, available } => {
-                write!(f, "scope history budget exceeded: requested {requested}, available {available}")
+            Self::ExceedsScope {
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "scope history budget exceeded: requested {requested}, available {available}"
+                )
             }
             Self::Arithmetic => write!(f, "history budget arithmetic overflow"),
             Self::InvalidPolicy(reason) => write!(f, "invalid history policy: {reason}"),
@@ -465,7 +554,9 @@ impl Catalog {
         let reservations = table
             .iter()?
             .filter_map(|item| item.ok())
-            .filter_map(|(_, value)| serde_json::from_slice::<PersistedReservation>(value.value()).ok())
+            .filter_map(|(_, value)| {
+                serde_json::from_slice::<PersistedReservation>(value.value()).ok()
+            })
             .collect::<Vec<_>>();
         let all_reserved = reservations
             .iter()
@@ -487,14 +578,18 @@ impl Catalog {
         if global_used > policy.global.total_bytes {
             return Err(BudgetError::ExceedsGlobal {
                 requested: reservation.total_bytes(),
-                available: policy.global.total_bytes.saturating_sub(global_physical_bytes.saturating_add(all_reserved)),
+                available: policy
+                    .global
+                    .total_bytes
+                    .saturating_sub(global_physical_bytes.saturating_add(all_reserved)),
             }
             .into());
         }
         if !global_scope && scoped_used > effective {
             return Err(BudgetError::ExceedsScope {
                 requested: reservation.total_bytes(),
-                available: effective.saturating_sub(scope_logical_bytes.saturating_add(scoped_reserved)),
+                available: effective
+                    .saturating_sub(scope_logical_bytes.saturating_add(scoped_reserved)),
             }
             .into());
         }
@@ -534,7 +629,10 @@ impl Catalog {
     /// Capturing states remain reserved so a reopened worker can resume them safely.
     pub fn reconcile_reservations(&self) -> CatalogResult<u64> {
         let actions = self.list_actions()?;
-        let known = actions.iter().map(|action| action.action_id.clone()).collect::<BTreeSet<_>>();
+        let known = actions
+            .iter()
+            .map(|action| action.action_id.clone())
+            .collect::<BTreeSet<_>>();
         let terminal = actions
             .into_iter()
             .filter(|action| {
@@ -572,7 +670,6 @@ impl Catalog {
         Ok(count)
     }
 
-
     pub fn begin_expiry(&self, record: ExpiryRecord) -> CatalogResult<ExpiryRecord> {
         let write = self.db.begin_write()?;
         let mut table = write.open_table(EXPIRY)?;
@@ -585,7 +682,10 @@ impl Catalog {
             write.commit()?;
             return Ok(existing);
         }
-        table.insert(record.action_id.as_str(), serde_json::to_vec(&record)?.as_slice())?;
+        table.insert(
+            record.action_id.as_str(),
+            serde_json::to_vec(&record)?.as_slice(),
+        )?;
         drop(table);
         write.commit()?;
         Ok(record)
@@ -648,10 +748,7 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn get_restore<T: DeserializeOwned>(
-        &self,
-        restore_id: &str,
-    ) -> CatalogResult<Option<T>> {
+    pub fn get_restore<T: DeserializeOwned>(&self, restore_id: &str) -> CatalogResult<Option<T>> {
         let read = self.db.begin_read()?;
         let table = read.open_table(RESTORES)?;
         table
@@ -844,6 +941,58 @@ impl Catalog {
             record.before_scope_id = Some(scope_id);
             record.before_logical_bytes = logical_bytes;
             record.state = ActionState::BeforeDurable;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn record_batch_before_durable(
+        &self,
+        action_id: &str,
+        batch: MutationBatch,
+        capture_digest: String,
+        scope_id: String,
+        logical_bytes: u64,
+    ) -> CatalogResult<ActionRecord> {
+        if batch.schema_version != 1
+            || batch.prepare.batch_version != 1
+            || !batch.prepare.acknowledged
+            || batch.parent_action_id != action_id
+            || batch.resources.is_empty()
+            || batch.prepare.resource_count as usize != batch.resources.len()
+            || batch.prepare.logical_bytes != logical_bytes
+        {
+            return Err("batch prepare acknowledgement is incomplete".into());
+        }
+        self.update(action_id, |record| {
+            if record.state != ActionState::CapturingBefore {
+                return Err(CatalogConflict::InvalidTransition.into());
+            }
+            record.before = batch
+                .resources
+                .first()
+                .and_then(|resource| resource.before.clone());
+            record.before_resources = batch.resources.clone();
+            record.mutation_batch = Some(batch);
+            record.before_capture_digest = Some(capture_digest);
+            record.before_scope_id = Some(scope_id);
+            record.before_logical_bytes = logical_bytes;
+            record.state = ActionState::BeforeDurable;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn add_physical_lease_keys(
+        &self,
+        action_id: &str,
+        keys: &[String],
+    ) -> CatalogResult<ActionRecord> {
+        self.update(action_id, |record| {
+            for key in keys {
+                if !record.physical_lease_keys.contains(key) {
+                    record.physical_lease_keys.push(key.clone());
+                }
+            }
+            record.physical_lease_keys.sort();
             Ok(())
         })
     }

@@ -3,18 +3,20 @@
 #[cfg(unix)]
 use openclank_history::catalog::{ActionRecord, ActionState, BeginResult};
 #[cfg(unix)]
-use openclank_history::operations::{HistoryCoordinator, begin, capture_input_digest};
+use openclank_history::operations::{
+    begin, capture_input_digest, BatchCaptureInput, HistoryCoordinator,
+};
 #[cfg(unix)]
 use openclank_history::protocol::{
-    ControlEnvelope, ProtocolError, RequestEnvelope, ResourceHandle, ServiceRequest,
-    ServiceResponse, validate as protocol_validate, validate_control as protocol_validate_control,
+    validate as protocol_validate, validate_control as protocol_validate_control, ControlEnvelope,
+    ProtocolError, RequestEnvelope, ResourceHandle, ServiceRequest, ServiceResponse,
 };
 #[cfg(unix)]
 use openclank_history::registry::{ResourceRegistration, ResourceRegistry};
 #[cfg(unix)]
 use openclank_history::restore::{
-    FilesystemRestoreProvider, RestoreProvider, apply_restore_authorized_durable,
-    prepare_restore_authorized,
+    apply_restore_authorized_durable, prepare_restore_authorized, FilesystemRestoreProvider,
+    RestoreProvider,
 };
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
@@ -23,6 +25,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(unix)]
 const MAX_FRAME: usize = 1024 * 1024;
+const MAX_BATCH_RESOURCES: usize = 1024;
+const MAX_BATCH_INLINE_BYTES: usize = 512 * 1024;
 #[cfg(unix)]
 const MAX_STAGE_CHUNK: usize = 512 * 1024;
 /// Staging is a disk-safety reservation, not a per-file eligibility limit. A
@@ -1530,8 +1534,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
     };
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -1933,6 +1937,167 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 code: format!("{error:?}"),
                             },
                         },
+                        Ok(ServiceRequest::PrepareBatch { batch_version, .. })
+                            if batch_version != 1 =>
+                        {
+                            ServiceResponse::Error {
+                                code: format!(
+                                    "unsupported mutation batch version: {batch_version}"
+                                ),
+                            }
+                        }
+                        Ok(ServiceRequest::PrepareBatch {
+                            envelope, entries, ..
+                        }) => {
+                            match auth_bindings
+                                .validate_request_cap(&envelope, "capture")
+                                .and_then(|_| {
+                                    if request_resources_allowed(
+                                        &envelope.request,
+                                        &envelope.auth.actor_id,
+                                        &envelope.auth.account_id,
+                                        &grants,
+                                    ) {
+                                        Ok(())
+                                    } else {
+                                        Err(openclank_history::protocol::ProtocolError::AccountMismatch)
+                                    }
+                                }) {
+                                Ok(()) => {
+                                    let bound_error = if entries.is_empty() || entries.len() > MAX_BATCH_RESOURCES {
+                                        Some(format!("mutation batch resource count exceeds {}", MAX_BATCH_RESOURCES))
+                                    } else {
+                                        None
+                                    };
+                                    let inline_bytes = entries
+                                        .iter()
+                                        .filter_map(|entry| entry.content.as_ref())
+                                        .map(Vec::len)
+                                        .sum::<usize>();
+                                    let bound_error = bound_error.or_else(|| (inline_bytes > MAX_BATCH_INLINE_BYTES)
+                                        .then(|| format!("mutation batch inline bytes exceed {}", MAX_BATCH_INLINE_BYTES)));
+                                    if let Some(error) = bound_error {
+                                        ServiceResponse::Error { code: error }
+                                    } else {
+                                    let mut inputs = Vec::with_capacity(entries.len());
+                                    let mut staged_error = None;
+                                    let mut staged_ids = Vec::new();
+                                    for entry in entries {
+                                        if entry.content.is_some() && entry.staged_upload_id.is_some() {
+                                            staged_error = Some("batch entry must use inline content or staged content, not both".into());
+                                            break;
+                                        }
+                                        if let Some(expected_len) = entry.coverage.byte_len {
+                                            let actual_len = entry.content.as_ref().map_or(0, Vec::len);
+                                            if entry.staged_upload_id.is_none() && expected_len != actual_len as u64 {
+                                                staged_error = Some("batch coverage byte length does not match inline content".into());
+                                                break;
+                                            }
+                                        }
+                                        let content = if let Some(upload_id) = entry.staged_upload_id.clone() {
+                                            let staged = staged_uploads.lock().await.get(&upload_id).cloned();
+                                            match staged {
+                                                Some(upload)
+                                                    if upload.account_id == envelope.auth.account_id
+                                                        && upload.actor_id == envelope.auth.actor_id
+                                                        && upload.action_id == envelope.request.action_id
+                                                        && upload.finished
+                                                        && upload.fingerprint == entry.fingerprint =>
+                                                {
+                                                    let result = verify_staged_upload(&upload)
+                                                        .and_then(|_| std::fs::read(&upload.path).map_err(|error| error.to_string()));
+                                                    if result.is_ok() {
+                                                        staged_ids.push(upload_id.clone());
+                                                    }
+                                                    match result {
+                                                        Ok(bytes) => Some(Bytes::from(bytes)),
+                                                        Err(error) => {
+                                                            staged_error = Some(format!("staged batch preimage failed: {error}"));
+                                                            None
+                                                        }
+                                                    }
+                                                }
+                                                Some(_) => {
+                                                    staged_error = Some("staged batch identity or fingerprint mismatch".into());
+                                                    None
+                                                }
+                                                None => {
+                                                    staged_error = Some("staged batch upload is unknown".into());
+                                                    None
+                                                }
+                                            }
+                                        } else {
+                                            entry.content.map(Bytes::from)
+                                        };
+                                        if let Some(expected_len) = entry.coverage.byte_len {
+                                            let actual_len = content.as_ref().map_or(0, |bytes| bytes.len());
+                                            if expected_len != actual_len as u64 {
+                                                staged_error = Some("batch coverage byte length does not match staged content".into());
+                                            }
+                                        }
+                                        if staged_error.is_some() {
+                                            break;
+                                        }
+                                        inputs.push(BatchCaptureInput {
+                                            resource_key: entry.resource_key,
+                                            old_locator: entry.old_locator,
+                                            new_locator: entry.new_locator,
+                                            expected_revision: entry.expected_revision,
+                                            existence: entry.existence,
+                                            resource_type: entry.resource_type,
+                                            metadata: entry.metadata,
+                                            content,
+                                            fingerprint: entry.fingerprint,
+                                            coverage: entry.coverage,
+                                        });
+                                    }
+                                    if let Some(error) = staged_error {
+                                        ServiceResponse::Error { code: error }
+                                    } else {
+                                    match begin(coordinator.catalog(), envelope.request.clone()) {
+                                        Ok(BeginResult::Existing(record))
+                                            if !matches!(
+                                                record.state,
+                                                ActionState::Intent | ActionState::CaptureFailed
+                                            ) => {
+                                                for upload_id in staged_ids {
+                                                    if let Some(removed) = staged_uploads.lock().await.remove(&upload_id) {
+                                                        remove_staged_upload(&removed, &staged_bytes);
+                                                    }
+                                                }
+                                                ServiceResponse::Action(record)
+                                            },
+                                        Ok(_) => match coordinator
+                                            .capture_batch_before(
+                                                &envelope.request.action_id,
+                                                inputs,
+                                            )
+                                            .await
+                                        {
+                                            Ok(record) => {
+                                                for upload_id in staged_ids {
+                                                    if let Some(removed) = staged_uploads.lock().await.remove(&upload_id) {
+                                                        remove_staged_upload(&removed, &staged_bytes);
+                                                    }
+                                                }
+                                                ServiceResponse::Action(record)
+                                            },
+                                            Err(error) => ServiceResponse::Error {
+                                                code: error.to_string(),
+                                            },
+                                        },
+                                        Err(error) => ServiceResponse::Error {
+                                            code: error.to_string(),
+                                        },
+                                    }
+                                    }
+                                    }
+                                }
+                                Err(error) => ServiceResponse::Error {
+                                    code: format!("{error:?}"),
+                                },
+                            }
+                        }
                         Ok(ServiceRequest::StageBegin {
                             envelope,
                             upload_id,

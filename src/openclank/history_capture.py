@@ -343,6 +343,87 @@ def _envelope(
     }
 
 
+def _batch_entries(
+    *,
+    path: str,
+    paths: list[str],
+    envelope: Mapping[str, Any],
+    context: HistoryContext,
+) -> tuple[list[dict[str, Any]], bytes | None]:
+    """Read every declared before-state for a recoverable parent mutation."""
+    targets = [path, *paths]
+    resource_keys = [envelope["resource_key"], *envelope.get("modified_resource_ids", [])[1:]]
+    entries: list[dict[str, Any]] = []
+    primary_before: bytes | None = None
+    for index, target in enumerate(targets):
+        try:
+            stat = os.lstat(target)
+        except FileNotFoundError:
+            before = None
+            existence = "Absent"
+            resource_type = "File"
+            mode = size = modified = None
+            exact = True
+        except OSError as exc:
+            raise ValueError(f"cannot inspect batch preimage {target}: {exc}") from exc
+        else:
+            existence = "Present"
+            mode = stat.st_mode & 0o7777
+            size = stat.st_size
+            modified = int(stat.st_mtime_ns // 1_000_000)
+            if os.path.islink(target):
+                resource_type = "Symlink"
+                before = os.readlink(target).encode("utf-8", "surrogateescape")
+                exact = True
+            elif os.path.isdir(target):
+                resource_type = "Directory"
+                before = None
+                exact = False
+            else:
+                resource_type = "File"
+                before = pathlib.Path(target).read_bytes()
+                exact = True
+        if index == 0:
+            primary_before = before
+        key = resource_keys[index]
+        resolved = context.root_for(target)
+        if resolved is None:
+            raise ValueError("path is outside the authorized history roots")
+        _root_id, _root_path, relative = resolved
+        coverage = {
+            "metadata": {"exact_preimage": exact},
+            "byte_len": len(before) if before is not None else 0,
+        }
+        entries.append(
+            {
+                "resource_key": key,
+                "old_locator": {
+                    "display_name": os.path.basename(os.path.normpath(target)) or "<unnamed>",
+                    "location_label": relative,
+                    "opaque_ref": key["resource_id"],
+                },
+                "new_locator": {
+                    "display_name": os.path.basename(os.path.normpath(target)) or "<unnamed>",
+                    "location_label": relative,
+                    "opaque_ref": key["resource_id"],
+                },
+                "expected_revision": {
+                    "Opaque": {"kind": "fingerprint", "value": _fingerprint(before)}
+                },
+                "existence": existence,
+                "resource_type": resource_type,
+                "metadata": {
+                    "mode": mode,
+                    "size": size,
+                    "modified_millis": modified,
+                    "opaque": None,
+                },
+                "content": before,
+                "fingerprint": _fingerprint(before),
+                "coverage": coverage,
+            }
+        )
+    return entries, primary_before
 @dataclass
 class CaptureHandle:
     action_id: str
@@ -502,7 +583,19 @@ def begin_file_capture(
             context=context,
             client=client,
         )
-        client.prepare(envelope, content=before, fingerprint=_fingerprint(before))
+        batch_prepare = getattr(client, "prepare_batch", None)
+        if len(all_paths) > 1 and callable(batch_prepare):
+            envelope["coverage"]["kind"] = "KnownMutationHooks"
+            envelope["coverage"]["exclusions"] = []
+            entries, before = _batch_entries(
+                path=path,
+                paths=paths,
+                envelope=envelope,
+                context=context,
+            )
+            batch_prepare(envelope, entries)
+        else:
+            client.prepare(envelope, content=before, fingerprint=_fingerprint(before))
     except Exception as exc:
         paused = "history_paused_budget" in str(exc)
         status = "paused" if paused else "failed"

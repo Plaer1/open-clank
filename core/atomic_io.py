@@ -259,6 +259,13 @@ def atomic_write_batch(changes: Sequence[AtomicFileChange]) -> None:
             if primary
             else None
         )
+        recoverability_requested = any(
+            change.history_context is not None for change in changes
+        ) and len(changes) > 1
+        if recoverability_requested and (history is None or not history.available):
+            raise AtomicWriteConflict(
+                "history_prepare_required: recoverable multi-resource mutation was not durably prepared"
+            )
         staged: dict[str, str] = {}
         backups: dict[str, str] = {}
         installed: set[str] = set()

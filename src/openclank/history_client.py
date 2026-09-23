@@ -510,6 +510,56 @@ class HistoryClient:
                 raise
         return self._call({"Prepare": {"envelope": self._request_envelope(envelope), "content": self._wire_content(content), "fingerprint": fingerprint}})
 
+    def prepare_batch(
+        self,
+        envelope: Mapping[str, Any],
+        entries: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Durably prepare every exact resource preimage in one parent action.
+
+        Batch entries use the same bounded inline encoding as ``Prepare``. A
+        provider with a larger preimage must use its staged/chunk owner path;
+        silently dropping secondary bytes would violate the batch contract.
+        """
+        wire_entries: list[dict[str, Any]] = []
+        staged: list[tuple[str, str]] = []
+        action_id = str(envelope.get("action_id") or "")
+        try:
+            for entry in entries:
+                item = dict(entry)
+                content = item.get("content")
+                item["staged_upload_id"] = None
+                if content is not None:
+                    if not isinstance(content, (bytes, bytearray)):
+                        raise HistoryClientError("batch preimage content must be bytes")
+                    content = bytes(content)
+                    self._check_content(content)
+                    fingerprint = str(item.get("fingerprint") or "missing")
+                    if len(content) > _INLINE_CONTENT_BYTES:
+                        fingerprint = self._canonical_staged_fingerprint(content, fingerprint)
+                        upload_id = self._stage_content(action_id, content, fingerprint)
+                        staged.append((upload_id, action_id))
+                        item["staged_upload_id"] = upload_id
+                        item["fingerprint"] = fingerprint
+                        item["content"] = None
+                    else:
+                        item["content"] = self._wire_content(content)
+                wire_entries.append(item)
+            response = self._call(
+                {
+                    "PrepareBatch": {
+                        "envelope": self._request_envelope(envelope),
+                        "batch_version": 1,
+                        "entries": wire_entries,
+                    }
+                }
+            )
+            return response
+        except Exception:
+            for upload_id, owner_action in staged:
+                self._abort_staged(owner_action, upload_id)
+            raise
+
     def record_live(self, action_id: str, receipt: Mapping[str, Any]) -> dict[str, Any]:
         return self._call({"RecordLive": {"envelope": self._control_envelope(action_id), "receipt": dict(receipt)}})
 

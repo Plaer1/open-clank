@@ -1,9 +1,13 @@
 //! Versioned authenticated local protocol types for the history service.
 
-use crate::operations::{ActionRequest, request_digest};
+use crate::catalog::{
+    CaptureManifest, Locator, ResourceExistence, ResourceKey, ResourceMetadata, ResourceType,
+    Revision,
+};
+use crate::operations::{request_digest, ActionRequest};
+use crate::restore::{HostMetadata, RestoreRequest};
 use crate::retention::PolicySet;
 use crate::usage::HistoryUsage;
-use crate::restore::{HostMetadata, RestoreRequest};
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -40,6 +44,27 @@ pub struct ResourceHandle {
     pub generation: u64,
 }
 
+/// Wire representation of one exact before-state in a parent mutation.
+/// Content remains bounded by the existing inline/staged payload limits.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatchPrepareEntry {
+    pub resource_key: ResourceKey,
+    pub old_locator: Option<Locator>,
+    pub new_locator: Option<Locator>,
+    pub expected_revision: Option<Revision>,
+    pub existence: ResourceExistence,
+    pub resource_type: ResourceType,
+    pub metadata: ResourceMetadata,
+    #[serde(with = "base64_content")]
+    pub content: Option<Vec<u8>>,
+    /// A service-owned staged payload. Exactly one of `content` and this id
+    /// may be present; staging keeps each entry under the IPC frame limit.
+    #[serde(default)]
+    pub staged_upload_id: Option<String>,
+    pub fingerprint: String,
+    pub coverage: CaptureManifest,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServiceRequest {
     Prepare {
@@ -47,6 +72,12 @@ pub enum ServiceRequest {
         #[serde(with = "base64_content")]
         content: Option<Vec<u8>>,
         fingerprint: String,
+    },
+    PrepareBatch {
+        envelope: RequestEnvelope,
+        #[serde(default = "default_batch_version")]
+        batch_version: u32,
+        entries: Vec<BatchPrepareEntry>,
     },
     RecordLive {
         envelope: ControlEnvelope,
@@ -198,6 +229,10 @@ pub enum ServiceRequest {
     },
     Health(ControlEnvelope),
     Shutdown(ControlEnvelope),
+}
+
+fn default_batch_version() -> u32 {
+    1
 }
 
 /// Capture bytes travel as one base64 string on the JSON wire.  The deserializer also accepts

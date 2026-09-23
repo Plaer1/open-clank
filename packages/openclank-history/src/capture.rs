@@ -8,7 +8,7 @@ use crate::catalog::{
     ActionRecord, ActionState, CaptureManifest, CatalogResult, LiveReceipt, LiveStatus, Locator,
     ResourceKey, ResourceOutcome, Revision,
 };
-use crate::operations::{ActionRequest, HistoryCoordinator, begin};
+use crate::operations::{begin, ActionRequest, BatchCaptureInput, HistoryCoordinator};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -119,6 +119,36 @@ impl<'a> CaptureAdapter<'a> {
                 debug_assert_eq!(record.state, ActionState::Intent);
                 self.coordinator
                     .capture_before(&record.action_id, before, fingerprint)
+                    .await
+            }
+        }
+    }
+
+    /// Prepare an exact parent mutation batch. Every supplied entry is
+    /// durable before this method returns; callers that depend on recovery
+    /// must not proceed when it returns an error.
+    pub async fn prepare_batch(
+        &self,
+        envelope: CaptureEnvelope,
+        mut entries: Vec<BatchCaptureInput>,
+    ) -> CatalogResult<ActionRecord> {
+        if entries.is_empty() {
+            return Err("batch prepare requires at least one resource".into());
+        }
+        let mut request = envelope.request();
+        for entry in &entries {
+            if !request.modified_resource_ids.contains(&entry.resource_key) {
+                request
+                    .modified_resource_ids
+                    .push(entry.resource_key.clone());
+            }
+        }
+        match begin(self.coordinator.catalog(), request)? {
+            crate::catalog::BeginResult::Existing(record) => Ok(record),
+            crate::catalog::BeginResult::New(record) => {
+                debug_assert_eq!(record.state, ActionState::Intent);
+                self.coordinator
+                    .capture_batch_before(&record.action_id, std::mem::take(&mut entries))
                     .await
             }
         }
