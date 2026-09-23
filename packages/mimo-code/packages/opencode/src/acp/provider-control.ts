@@ -562,6 +562,38 @@ function discoverySource(connection: ReturnType<typeof validateConnection>): str
   return "provider-account-models"
 }
 
+function enrichDiscoveryModels(
+  connection: ReturnType<typeof validateConnection>,
+  discovered: ParsedDiscovery["models"],
+  modelCatalog: Record<string, ModelsDev.Provider>,
+): ProviderModelRoute[] {
+  const metadata = new Map(
+    frozenModelRoutes(connection.familyID, modelCatalog[connection.familyID]).map((route) => [route.modelID, route]),
+  )
+  return discovered.slice(0, MAX_DISCOVERED_MODELS).map((model) => {
+    const known = metadata.get(model.modelID)
+    if (!known) {
+      return {
+        ...model,
+        provenance: { ...model.provenance, familyID: connection.familyID },
+      } as ProviderModelRoute
+    }
+    const operations = new Set(known.operations)
+    if (model.capabilities.vision === true) operations.add("vision.describe")
+    return {
+      ...model,
+      displayName: known.displayName,
+      operations: [...operations],
+      capabilities: { ...known.capabilities, ...model.capabilities },
+      provenance: {
+        ...model.provenance,
+        familyID: connection.familyID,
+        metadataCatalog: "models.dev-snapshot",
+      },
+    } as ProviderModelRoute
+  })
+}
+
 function discoveryResult(
   accountID: string,
   credentialRevision: number,
@@ -589,6 +621,7 @@ async function accountDiscovery(
   credential: Auth.Info,
   accountID: string,
   credentialRevision: number,
+  modelCatalog: Record<string, ModelsDev.Provider>,
   fetcher: Fetcher,
   now: () => number,
   timeoutMs: number,
@@ -628,10 +661,7 @@ async function accountDiscovery(
       if (response.status === 429 || !response.ok) continue
       const parsed = parseAccountCatalog(connection, await boundedJSON(response))
       const overflow = parsed.models.length > MAX_DISCOVERED_MODELS
-      const models = parsed.models.slice(0, MAX_DISCOVERED_MODELS).map((model) => ({
-        ...model,
-        provenance: { ...model.provenance, familyID: connection.familyID },
-      })) as ProviderModelRoute[]
+      const models = enrichDiscoveryModels(connection, parsed.models, modelCatalog)
       if (parsed.invalidRows > 0 || overflow) {
         return discoveryResult(accountID, credentialRevision, "partial", source, now(), models, "fresh", "discovery_partial")
       }
@@ -937,6 +967,7 @@ export class ControlPlane {
     credential?: Auth.Info,
     modelCatalog?: Record<string, ModelsDev.Provider>,
   ): Promise<ProviderModelRoute[]> {
+    if (connection.kind === "subscription") return []
     if (connection.modelRoutes.length > 0) return connection.modelRoutes as ProviderModelRoute[]
     const live =
       connection.familyID === "ollama" ||
@@ -973,6 +1004,7 @@ export class ControlPlane {
             account.credential,
             account.accountID,
             account.credentialRevision,
+            modelCatalog,
             this.fetcher,
             this.now,
             this.discoveryTimeoutMs,

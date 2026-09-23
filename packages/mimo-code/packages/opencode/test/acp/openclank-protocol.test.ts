@@ -319,6 +319,39 @@ test("official cloud connections publish frozen catalog capabilities", async () 
   expect(result.modelRoutes[0]?.provenance.catalog).toBe("models.dev-snapshot")
 })
 
+test("subscription connection validation publishes no global entitlement routes", async () => {
+  let fetchCalls = 0
+  const control = new ControlPlane(
+    {
+      ...emptyAuth,
+      modelCatalog: async () => ({
+        openai: {
+          id: "openai",
+          name: "OpenAI",
+          env: [],
+          models: { "global-only": catalogModel("global-only") },
+        },
+      }),
+    },
+    () => 1_700_000_000_012,
+    (async () => {
+      fetchCalls++
+      return new Response(JSON.stringify({ models: [{ slug: "should-not-fetch" }] }))
+    }) as unknown as typeof fetch,
+  )
+
+  const result = await control.connectionValidate({
+    familyID: "openai",
+    adapterID: "openai-responses",
+    kind: "subscription",
+    billingLane: "subscription",
+    settings: {},
+  })
+
+  expect(result.modelRoutes).toEqual([])
+  expect(fetchCalls).toBe(0)
+})
+
 test("migrated DeepSeek and Xiaomi API lanes are canonical managed families", async () => {
   const control = new ControlPlane(emptyAuth)
   const catalog = await control.catalog()
@@ -427,7 +460,33 @@ test("subscription discovery is credential-aware, excludes hidden rows, and acce
       }),
     )
   }) as unknown as typeof fetch
-  const control = new ControlPlane(emptyAuth, () => 1_700_000_000_000, fetcher)
+  const control = new ControlPlane(
+    {
+      ...emptyAuth,
+      modelCatalog: async () => ({
+        openai: {
+          id: "openai",
+          name: "OpenAI",
+          env: [],
+          models: {
+            "account-model-a": {
+              ...catalogModel("account-model-a"),
+              name: "Entitled GPT",
+              family: "gpt",
+              attachment: true,
+              reasoning: true,
+              tool_call: true,
+              limit: { context: 128_000, output: 16_384 },
+              modalities: { input: ["text", "image"], output: ["text"] },
+            },
+            "global-only": catalogModel("global-only"),
+          },
+        },
+      }),
+    },
+    () => 1_700_000_000_000,
+    fetcher,
+  )
 
   const result = await control.accountValidate(subscriptionRequest("openai", "openai-responses"))
 
@@ -444,6 +503,19 @@ test("subscription discovery is credential-aware, excludes hidden rows, and acce
     provenance: { source: "codex-account-models", observedAt: 1_700_000_000_000 },
   })
   expect(result.modelRoutes.map((item) => item.modelID)).toEqual(["account-model-a", "new-account-model"])
+  expect(result.modelRoutes.map((item) => item.modelID)).not.toContain("global-only")
+  expect(result.modelRoutes[0]).toMatchObject({
+    displayName: "Entitled GPT",
+    capabilities: {
+      family: "gpt",
+      attachment: true,
+      reasoning: true,
+      tool_call: true,
+      limit: { context: 128_000, output: 16_384 },
+    },
+    provenance: { metadataCatalog: "models.dev-snapshot" },
+  })
+  expect(result.modelRoutes[0]?.operations).toContain("vision.describe")
 })
 
 test("subscription discovery marks malformed mixed Copilot rows partial and uses refresh auth", async () => {
@@ -467,6 +539,78 @@ test("subscription discovery marks malformed mixed Copilot rows partial and uses
   expect(authorization).toBe("Bearer refresh-secret")
   expect(result.discovery).toMatchObject({ status: "partial", errorCode: "discovery_partial", authoritative: false })
   expect(result.discovery.models.map((item) => item.modelID)).toEqual(["copilot-new"])
+  expect(result.discovery.models[0]?.capabilities).toMatchObject({ subscription: true })
+})
+
+test("Copilot discovery retains known metadata and maps authoritative capabilities", async () => {
+  const control = new ControlPlane(
+    {
+      ...emptyAuth,
+      modelCatalog: async () => ({
+        "github-copilot": {
+          id: "github-copilot",
+          name: "GitHub Copilot",
+          env: [],
+          models: {
+            "copilot-known": {
+              ...catalogModel("copilot-known"),
+              name: "Frozen Copilot Label",
+              family: "copilot",
+              attachment: true,
+              reasoning: true,
+              tool_call: true,
+              limit: { context: 64_000, output: 8_192 },
+              modalities: { input: ["text", "image"], output: ["text"] },
+            },
+          },
+        },
+      }),
+    },
+    () => 1_700_000_000_013,
+    (async () =>
+      new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: "copilot-known",
+              name: "Provider Label",
+              capabilities: {
+                family: "copilot-authoritative",
+                limits: {
+                  max_context_window_tokens: 64_000,
+                  max_prompt_tokens: 56_000,
+                  max_output_tokens: 8_192,
+                  vision: { supported_media_types: ["image/png"] },
+                },
+                supports: {
+                  adaptive_thinking: true,
+                  streaming: true,
+                  tool_calls: true,
+                  vision: true,
+                },
+              },
+            },
+            { id: "copilot-new", capabilities: {} },
+          ],
+        }),
+      )) as unknown as typeof fetch,
+  )
+
+  const result = await control.accountValidate(subscriptionRequest("github-copilot", "copilot-chat"))
+  const known = result.discovery.models.find((model) => model.modelID === "copilot-known")
+  expect(known).toMatchObject({
+    displayName: "Frozen Copilot Label",
+    capabilities: {
+      family: "copilot-authoritative",
+      limit: { context: 64_000, input: 56_000, output: 8_192 },
+      reasoning: true,
+      tool_call: true,
+      vision: true,
+      vision_media_types: ["image/png"],
+    },
+  })
+  expect(known?.operations).toContain("vision.describe")
+  expect(result.discovery.models.map((model) => model.modelID)).toEqual(["copilot-known", "copilot-new"])
 })
 
 test("a valid empty subscription inventory is authoritative and distinct from failure", async () => {
