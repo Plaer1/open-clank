@@ -1447,6 +1447,159 @@ async fn batch_service_cleans_consumed_stages_on_late_error_and_rejects_omission
         ServiceResponse::Accepted
     ));
 
+    let unsupported_content = b"unsupported-batch-version";
+    let unsupported_id = "unsupported-batch-version-stage";
+    stage_small(
+        &mut stream,
+        "batch-unsupported-version",
+        unsupported_id,
+        unsupported_content,
+    )
+    .await;
+    let mut unsupported = request();
+    unsupported.action_id = "batch-unsupported-version".into();
+    let unsupported_response = send(
+        &mut stream,
+        ServiceRequest::PrepareBatch {
+            envelope: request_envelope(unsupported),
+            batch_version: 2,
+            entries: vec![denied_entry(
+                request().resource_key,
+                unsupported_id.to_owned(),
+            )],
+        },
+    )
+    .await;
+    assert!(matches!(
+        unsupported_response,
+        ServiceResponse::Error { .. }
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-unsupported-version"),
+                upload_id: unsupported_id.to_owned(),
+                content_length: unsupported_content.len() as u64,
+                fingerprint: sha256_fingerprint(unsupported_content),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageAbort {
+                envelope: control("batch-unsupported-version"),
+                upload_id: unsupported_id.to_owned(),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+
+    let wrong_fingerprint_content = b"wrong-fingerprint-stage";
+    let wrong_fingerprint_id = "wrong-fingerprint-stage";
+    stage_small(
+        &mut stream,
+        "batch-wrong-fingerprint",
+        wrong_fingerprint_id,
+        wrong_fingerprint_content,
+    )
+    .await;
+    let mut wrong_fingerprint = request();
+    wrong_fingerprint.action_id = "batch-wrong-fingerprint".into();
+    let mut wrong_entry = denied_entry(request().resource_key, wrong_fingerprint_id.to_owned());
+    wrong_entry.fingerprint =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000:23".into();
+    let wrong_fingerprint_response = send(
+        &mut stream,
+        ServiceRequest::PrepareBatch {
+            envelope: request_envelope(wrong_fingerprint),
+            batch_version: 1,
+            entries: vec![wrong_entry],
+        },
+    )
+    .await;
+    assert!(matches!(
+        wrong_fingerprint_response,
+        ServiceResponse::Error { .. }
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-wrong-fingerprint"),
+                upload_id: wrong_fingerprint_id.to_owned(),
+                content_length: wrong_fingerprint_content.len() as u64,
+                fingerprint: sha256_fingerprint(wrong_fingerprint_content),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageAbort {
+                envelope: control("batch-wrong-fingerprint"),
+                upload_id: wrong_fingerprint_id.to_owned(),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+
+    let duplicate_content = b"duplicate-stage-reference";
+    let duplicate_id = "duplicate-stage-reference";
+    stage_small(
+        &mut stream,
+        "batch-duplicate-stage",
+        duplicate_id,
+        duplicate_content,
+    )
+    .await;
+    let mut duplicate = request();
+    duplicate.action_id = "batch-duplicate-stage".into();
+    let duplicate_response = send(
+        &mut stream,
+        ServiceRequest::PrepareBatch {
+            envelope: request_envelope(duplicate),
+            batch_version: 1,
+            entries: vec![
+                denied_entry(request().resource_key.clone(), duplicate_id.to_owned()),
+                denied_entry(request().resource_key, duplicate_id.to_owned()),
+            ],
+        },
+    )
+    .await;
+    assert!(matches!(duplicate_response, ServiceResponse::Error { .. }));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-duplicate-stage"),
+                upload_id: duplicate_id.to_owned(),
+                content_length: duplicate_content.len() as u64,
+                fingerprint: sha256_fingerprint(duplicate_content),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageAbort {
+                envelope: control("batch-duplicate-stage"),
+                upload_id: duplicate_id.to_owned(),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+
     let mut omitted = request();
     omitted.action_id = "batch-service-omitted".into();
     omitted.modified_resource_ids = vec![ResourceKey {

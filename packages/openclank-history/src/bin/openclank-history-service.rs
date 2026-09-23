@@ -395,7 +395,7 @@ async fn owned_staged_ids_for_entries(
     action_id: &str,
 ) -> Vec<String> {
     let uploads = staged_uploads.lock().await;
-    entries
+    let ids = entries
         .iter()
         .filter_map(|entry| entry.staged_upload_id.as_ref())
         .filter(|upload_id| {
@@ -406,7 +406,8 @@ async fn owned_staged_ids_for_entries(
             })
         })
         .cloned()
-        .collect()
+        .collect::<BTreeSet<_>>();
+    ids.into_iter().collect()
 }
 
 #[cfg(unix)]
@@ -2089,7 +2090,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             };
                             match authorization {
                                 Ok(()) => {
-                                    let mut staged_ids = owned_staged_ids_for_entries(
+                                    let staged_ids = owned_staged_ids_for_entries(
                                         &staged_uploads,
                                         &entries,
                                         &envelope.auth.actor_id,
@@ -2138,112 +2139,134 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                         ServiceResponse::Error { code: error }
                                     } else {
                                         let mut inputs = Vec::with_capacity(entries.len());
-                                        let mut staged_error = None;
-                                        for entry in entries {
-                                            if entry.content.is_some()
-                                                && entry.staged_upload_id.is_some()
-                                            {
-                                                staged_error = Some("batch entry must use inline content or staged content, not both".into());
-                                                break;
-                                            }
-                                            if let Some(expected_len) = entry.coverage.byte_len {
-                                                let actual_len =
-                                                    entry.content.as_ref().map_or(0, Vec::len);
-                                                if entry.staged_upload_id.is_none()
-                                                    && expected_len != actual_len as u64
+                                        let mut seen_stage_ids = BTreeSet::new();
+                                        let mut staged_error = entries
+                                            .iter()
+                                            .filter_map(|entry| entry.staged_upload_id.as_ref())
+                                            .find_map(|upload_id| {
+                                                seen_stage_ids
+                                                    .insert(upload_id.clone())
+                                                    .then_some(())
+                                                    .is_none()
+                                                    .then(|| {
+                                                        "duplicate staged upload reference in mutation batch"
+                                                            .to_owned()
+                                                    })
+                                            });
+                                        if staged_error.is_none() {
+                                            for entry in entries {
+                                                if entry.content.is_some()
+                                                    && entry.staged_upload_id.is_some()
                                                 {
-                                                    staged_error = Some("batch coverage byte length does not match inline content".into());
+                                                    staged_error = Some("batch entry must use inline content or staged content, not both".into());
                                                     break;
                                                 }
-                                            }
-                                            let content = if let Some(upload_id) =
-                                                entry.staged_upload_id.clone()
-                                            {
-                                                let staged = staged_uploads
-                                                    .lock()
-                                                    .await
-                                                    .get(&upload_id)
-                                                    .cloned();
-                                                match staged {
-                                                    Some(upload)
-                                                        if upload.account_id
-                                                            == envelope.auth.account_id
-                                                            && upload.actor_id
-                                                                == envelope.auth.actor_id
-                                                            && upload.action_id
-                                                                == envelope.request.action_id =>
+                                                if let Some(expected_len) = entry.coverage.byte_len
+                                                {
+                                                    let actual_len =
+                                                        entry.content.as_ref().map_or(0, Vec::len);
+                                                    if entry.staged_upload_id.is_none()
+                                                        && expected_len != actual_len as u64
                                                     {
-                                                        staged_ids.push(upload_id.clone());
-                                                        if !upload.finished {
-                                                            staged_error = Some(
+                                                        staged_error = Some("batch coverage byte length does not match inline content".into());
+                                                        break;
+                                                    }
+                                                }
+                                                let content = if let Some(upload_id) =
+                                                    entry.staged_upload_id.clone()
+                                                {
+                                                    let staged = staged_uploads
+                                                        .lock()
+                                                        .await
+                                                        .get(&upload_id)
+                                                        .cloned();
+                                                    match staged {
+                                                        Some(upload)
+                                                            if upload.account_id
+                                                                == envelope.auth.account_id
+                                                                && upload.actor_id
+                                                                    == envelope.auth.actor_id
+                                                                && upload.action_id
+                                                                    == envelope
+                                                                        .request
+                                                                        .action_id =>
+                                                        {
+                                                            if !upload.finished {
+                                                                staged_error = Some(
                                                                 "staged batch upload is incomplete"
                                                                     .into(),
                                                             );
-                                                            None
-                                                        } else if upload.fingerprint
-                                                            != entry.fingerprint
-                                                        {
-                                                            staged_error = Some(
+                                                                None
+                                                            } else if upload.fingerprint
+                                                                != entry.fingerprint
+                                                            {
+                                                                staged_error = Some(
                                                                 "staged batch identity or fingerprint mismatch"
                                                                     .into(),
                                                             );
-                                                            None
-                                                        } else {
-                                                            let result =
-                                                                verify_staged_upload(&upload)
-                                                                    .and_then(|_| {
-                                                                        std::fs::read(&upload.path)
+                                                                None
+                                                            } else {
+                                                                let result =
+                                                                    verify_staged_upload(&upload)
+                                                                        .and_then(|_| {
+                                                                            std::fs::read(
+                                                                                &upload.path,
+                                                                            )
                                                                             .map_err(|error| {
                                                                                 error.to_string()
                                                                             })
-                                                                    });
-                                                            match result {
-                                                                Ok(bytes) => {
-                                                                    Some(Bytes::from(bytes))
-                                                                }
-                                                                Err(error) => {
-                                                                    staged_error = Some(format!("staged batch preimage failed: {error}"));
-                                                                    None
+                                                                        });
+                                                                match result {
+                                                                    Ok(bytes) => {
+                                                                        Some(Bytes::from(bytes))
+                                                                    }
+                                                                    Err(error) => {
+                                                                        staged_error = Some(format!("staged batch preimage failed: {error}"));
+                                                                        None
+                                                                    }
                                                                 }
                                                             }
                                                         }
+                                                        Some(_) => {
+                                                            staged_error = Some("staged batch identity or fingerprint mismatch".into());
+                                                            None
+                                                        }
+                                                        None => {
+                                                            staged_error = Some(
+                                                                "staged batch upload is unknown"
+                                                                    .into(),
+                                                            );
+                                                            None
+                                                        }
                                                     }
-                                                    Some(_) => {
-                                                        staged_error = Some("staged batch identity or fingerprint mismatch".into());
-                                                        None
-                                                    }
-                                                    None => {
-                                                        staged_error = Some(
-                                                            "staged batch upload is unknown".into(),
-                                                        );
-                                                        None
+                                                } else {
+                                                    entry.content.map(Bytes::from)
+                                                };
+                                                if let Some(expected_len) = entry.coverage.byte_len
+                                                {
+                                                    let actual_len = content
+                                                        .as_ref()
+                                                        .map_or(0, |bytes| bytes.len());
+                                                    if expected_len != actual_len as u64 {
+                                                        staged_error = Some("batch coverage byte length does not match staged content".into());
                                                     }
                                                 }
-                                            } else {
-                                                entry.content.map(Bytes::from)
-                                            };
-                                            if let Some(expected_len) = entry.coverage.byte_len {
-                                                let actual_len =
-                                                    content.as_ref().map_or(0, |bytes| bytes.len());
-                                                if expected_len != actual_len as u64 {
-                                                    staged_error = Some("batch coverage byte length does not match staged content".into());
+                                                if staged_error.is_some() {
+                                                    break;
                                                 }
+                                                inputs.push(BatchCaptureInput {
+                                                    resource_key: entry.resource_key,
+                                                    old_locator: entry.old_locator,
+                                                    new_locator: entry.new_locator,
+                                                    expected_revision: entry.expected_revision,
+                                                    existence: entry.existence,
+                                                    resource_type: entry.resource_type,
+                                                    metadata: entry.metadata,
+                                                    content,
+                                                    fingerprint: entry.fingerprint,
+                                                    coverage: entry.coverage,
+                                                });
                                             }
-                                            if staged_error.is_some() {
-                                                break;
-                                            }
-                                            inputs.push(BatchCaptureInput {
-                                                resource_key: entry.resource_key,
-                                                old_locator: entry.old_locator,
-                                                new_locator: entry.new_locator,
-                                                expected_revision: entry.expected_revision,
-                                                existence: entry.existence,
-                                                resource_type: entry.resource_type,
-                                                metadata: entry.metadata,
-                                                content,
-                                                fingerprint: entry.fingerprint,
-                                                coverage: entry.coverage,
-                                            });
                                         }
                                         if let Some(error) = staged_error {
                                             remove_owned_staged_uploads(
