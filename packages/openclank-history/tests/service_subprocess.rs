@@ -1909,6 +1909,154 @@ async fn staged_admission_rejects_bad_fingerprints_and_reaps_abandoned_uploads()
     let _ = child.wait();
 }
 
+#[cfg(feature = "test_faults")]
+#[tokio::test]
+async fn prepare_read_abort_and_upload_id_reuse_preserve_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("staged-reuse-race.sock");
+    let bin = env!("CARGO_BIN_EXE_openclank-history-service");
+    let mut child = std::process::Command::new(bin)
+        .args([
+            socket.to_str().unwrap(),
+            dir.path().join("catalog.redb").to_str().unwrap(),
+            dir.path().join("lore").to_str().unwrap(),
+            "account",
+            dir.path().to_str().unwrap(),
+        ])
+        .env("OPENCLANK_HISTORY_TOKEN", "token")
+        .env("OPENCLANK_HISTORY_TEST_STAGE_IO_DELAY_MS", "500")
+        .spawn()
+        .unwrap();
+    let action_id = "staged-reuse-race";
+    let old_content = b"old-stage-content".to_vec();
+    let mut staging = connect(&socket).await;
+    stage_small(&mut staging, action_id, "U", &old_content).await;
+
+    let mut action = request();
+    action.action_id = action_id.into();
+    let entry = BatchPrepareEntry {
+        resource_key: action.resource_key.clone(),
+        old_locator: Some(Locator::from("resource")),
+        new_locator: Some(Locator::from("resource")),
+        expected_revision: Some("r1".into()),
+        existence: ResourceExistence::Present,
+        resource_type: ResourceType::File,
+        metadata: ResourceMetadata {
+            size: Some(old_content.len() as u64),
+            ..ResourceMetadata::default()
+        },
+        content: None,
+        staged_upload_id: Some("U".into()),
+        fingerprint: sha256_fingerprint(&old_content),
+        coverage: CaptureManifest {
+            byte_len: Some(old_content.len() as u64),
+            ..CaptureManifest::default()
+        },
+    };
+    let envelope = RequestEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        auth: AuthContext {
+            actor_id: "actor".into(),
+            account_id: "account".into(),
+            token: "token".into(),
+        },
+        claimed_digest: String::new(),
+        request: action,
+    };
+    let mut prepare_stream = connect(&socket).await;
+    let prepare_task = tokio::spawn(async move {
+        send(
+            &mut prepare_stream,
+            ServiceRequest::PrepareBatch {
+                envelope,
+                batch_version: 1,
+                entries: vec![entry],
+            },
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // StageAbort arrives over another connection while PrepareBatch holds the
+    // captured stage lock. Its completion removes only the old instance.
+    let mut abort_stream = connect(&socket).await;
+    let abort_task = tokio::spawn(async move {
+        send(
+            &mut abort_stream,
+            ServiceRequest::StageAbort {
+                envelope: control(action_id),
+                upload_id: "U".into(),
+            },
+        )
+        .await
+    });
+    let abort_response = tokio::time::timeout(std::time::Duration::from_secs(3), abort_task)
+        .await
+        .expect("StageAbort remained blocked behind the staged read")
+        .unwrap();
+    assert!(matches!(abort_response, ServiceResponse::Accepted));
+
+    // Reuse U before the old PrepareBatch has returned. Its cleanup is queued
+    // on the captured lock and must not remove this replacement instance.
+    let replacement = b"replacement-stage".to_vec();
+    let mut reuse = connect(&socket).await;
+    assert!(matches!(
+        send(
+            &mut reuse,
+            ServiceRequest::StageBegin {
+                envelope: control(action_id),
+                upload_id: "U".into(),
+                content_length: replacement.len() as u64,
+                fingerprint: sha256_fingerprint(&replacement),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    let prepare_response = tokio::time::timeout(std::time::Duration::from_secs(3), prepare_task)
+        .await
+        .expect("PrepareBatch did not finish")
+        .unwrap();
+    assert!(matches!(prepare_response, ServiceResponse::Action(_)));
+    assert!(matches!(
+        send(
+            &mut reuse,
+            ServiceRequest::StageChunk {
+                envelope: control(action_id),
+                upload_id: "U".into(),
+                offset: 0,
+                content: Some(replacement.clone()),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut reuse,
+            ServiceRequest::StageFinish {
+                envelope: control(action_id),
+                upload_id: "U".into(),
+            },
+        )
+        .await,
+        ServiceResponse::Staged { .. }
+    ));
+    assert!(matches!(
+        send(
+            &mut reuse,
+            ServiceRequest::StageAbort {
+                envelope: control(action_id),
+                upload_id: "U".into(),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    child.kill().unwrap();
+    let _ = child.wait();
+}
+
 #[tokio::test]
 async fn staged_admission_serializes_reservations_and_keeps_health_responsive() {
     let dir = tempfile::tempdir().unwrap();
@@ -1994,6 +2142,7 @@ async fn staged_admission_serializes_reservations_and_keeps_health_responsive() 
 }
 
 #[tokio::test]
+#[cfg(feature = "test_faults")]
 async fn staged_slow_io_is_not_reaped_and_expiry_frees_staging_admission() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("staged-slow.sock");
@@ -2158,6 +2307,7 @@ async fn staged_slow_io_is_not_reaped_and_expiry_frees_staging_admission() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test_faults")]
 async fn cancelled_staged_io_keeps_reservation_until_blocking_write_finishes() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("staged-cancel.sock");
@@ -2891,6 +3041,7 @@ async fn subprocess_service_prepare_live_complete_read_and_shutdown() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test_faults")]
 async fn restore_service_reopens_after_each_durable_phase() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("restore-phases.sock");
@@ -3186,6 +3337,7 @@ async fn child_kill_leaves_reopenable_catalog_and_lore() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test_faults")]
 async fn child_abort_after_lore_flush_reopens_without_catalog_reference() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("flush-abort.sock");
@@ -3306,6 +3458,7 @@ async fn child_abort_after_lore_flush_reopens_without_catalog_reference() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test_faults")]
 async fn child_abort_before_lore_write_reopens_without_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("before-lore.sock");
@@ -3413,6 +3566,7 @@ async fn child_abort_before_lore_write_reopens_without_bytes() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test_faults")]
 async fn child_abort_applying_and_after_durable_reopen_without_live_replay() {
     let bin = env!("CARGO_BIN_EXE_openclank-history-service");
     let dir = tempfile::tempdir().unwrap();
@@ -3516,6 +3670,7 @@ async fn child_abort_applying_and_after_durable_reopen_without_live_replay() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test_faults")]
 async fn child_abort_committed_before_after_capture_marks_uncertain_without_replay() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("committed-before-after.sock");
@@ -3774,6 +3929,7 @@ async fn stalled_large_response_does_not_hold_coordinator_guard() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test_faults")]
 async fn child_abort_after_durable_capture_preserves_after_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("after-durable.sock");
@@ -3924,6 +4080,7 @@ async fn child_abort_after_durable_capture_preserves_after_bytes() {
 }
 
 #[tokio::test]
+#[cfg(feature = "test_faults")]
 async fn child_abort_after_complete_keeps_idempotent_complete_receipt() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("complete-abort.sock");

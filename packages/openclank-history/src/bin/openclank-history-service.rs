@@ -112,6 +112,13 @@ struct StagedUpload {
 
 #[cfg(unix)]
 #[derive(Clone, Debug)]
+struct OwnedStagedUpload {
+    upload_id: String,
+    io_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug)]
 struct AuthBindings {
     credentials: Vec<ServerCredential>,
     legacy_account: Option<String>,
@@ -357,29 +364,18 @@ async fn remove_owned_staged_uploads(
     actor_id: &str,
     account_id: &str,
     action_id: &str,
-    upload_ids: &[String],
+    uploads_to_remove: &[OwnedStagedUpload],
 ) {
-    for upload_id in upload_ids {
-        let upload_lock = {
-            let uploads = staged_uploads.lock().await;
-            uploads.get(upload_id).and_then(|upload| {
-                (upload.actor_id == actor_id
-                    && upload.account_id == account_id
-                    && upload.action_id == action_id)
-                    .then(|| upload.io_lock.clone())
-            })
-        };
-        let Some(upload_lock) = upload_lock else {
-            continue;
-        };
-        let _io_guard = upload_lock.lock().await;
+    for captured in uploads_to_remove {
+        let _io_guard = captured.io_lock.lock().await;
         let mut uploads = staged_uploads.lock().await;
-        if let Some(upload) = uploads.get(upload_id) {
+        if let Some(upload) = uploads.get(&captured.upload_id) {
             if upload.actor_id == actor_id
                 && upload.account_id == account_id
                 && upload.action_id == action_id
+                && std::sync::Arc::ptr_eq(&upload.io_lock, &captured.io_lock)
             {
-                let upload = uploads.remove(upload_id).expect("upload exists");
+                let upload = uploads.remove(&captured.upload_id).expect("upload exists");
                 remove_staged_upload(&upload, staged_bytes);
             }
         }
@@ -393,21 +389,100 @@ async fn owned_staged_ids_for_entries(
     actor_id: &str,
     account_id: &str,
     action_id: &str,
-) -> Vec<String> {
+) -> Vec<OwnedStagedUpload> {
     let uploads = staged_uploads.lock().await;
     let ids = entries
         .iter()
         .filter_map(|entry| entry.staged_upload_id.as_ref())
-        .filter(|upload_id| {
-            uploads.get(*upload_id).is_some_and(|upload| {
+        .filter_map(|upload_id| {
+            uploads.get(upload_id).and_then(|upload| {
+                (upload.account_id == account_id
+                    && upload.actor_id == actor_id
+                    && upload.action_id == action_id)
+                    .then(|| OwnedStagedUpload {
+                        upload_id: upload_id.clone(),
+                        io_lock: upload.io_lock.clone(),
+                    })
+            })
+        })
+        .filter(|captured| {
+            uploads.get(&captured.upload_id).is_some_and(|upload| {
                 upload.account_id == account_id
                     && upload.actor_id == actor_id
                     && upload.action_id == action_id
             })
         })
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    ids.into_iter().collect()
+        .collect::<Vec<_>>();
+    let mut unique = BTreeSet::new();
+    ids.into_iter()
+        .filter(|captured| unique.insert(captured.upload_id.clone()))
+        .collect()
+}
+
+#[cfg(unix)]
+async fn read_owned_staged_upload(
+    staged_uploads: &std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StagedUpload>>>,
+    captured: &OwnedStagedUpload,
+    actor_id: &str,
+    account_id: &str,
+    action_id: &str,
+    expected_fingerprint: &str,
+) -> Result<bytes::Bytes, String> {
+    let (upload, io_lock, io_active_count) = {
+        let uploads = staged_uploads.lock().await;
+        let Some(upload) = uploads.get(&captured.upload_id) else {
+            return Err("staged batch upload was replaced or removed".into());
+        };
+        if upload.actor_id != actor_id
+            || upload.account_id != account_id
+            || upload.action_id != action_id
+            || !std::sync::Arc::ptr_eq(&upload.io_lock, &captured.io_lock)
+        {
+            return Err("staged batch upload was replaced or removed".into());
+        }
+        upload
+            .io_active_count
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        (
+            upload.clone(),
+            upload.io_lock.clone(),
+            upload.io_active_count.clone(),
+        )
+    };
+    let io_permit = StagedIoPermit {
+        active: io_active_count,
+    };
+    let io_guard = io_lock.lock_owned().await;
+    {
+        let uploads = staged_uploads.lock().await;
+        let Some(current) = uploads.get(&captured.upload_id) else {
+            return Err("staged batch upload was replaced or removed".into());
+        };
+        if current.actor_id != actor_id
+            || current.account_id != account_id
+            || current.action_id != action_id
+            || !std::sync::Arc::ptr_eq(&current.io_lock, &captured.io_lock)
+        {
+            return Err("staged batch upload was replaced or removed".into());
+        }
+    }
+    if !upload.finished {
+        return Err("staged batch upload is incomplete".into());
+    }
+    if upload.fingerprint != expected_fingerprint {
+        return Err("staged batch identity or fingerprint mismatch".into());
+    }
+    let verification = tokio::task::spawn_blocking(move || {
+        #[cfg(all(unix, feature = "test_faults"))]
+        qualification_stage_io_delay();
+        let result = verify_staged_upload(&upload)
+            .and_then(|_| std::fs::read(&upload.path).map_err(|error| error.to_string()))
+            .map(bytes::Bytes::from);
+        (result, io_guard, io_permit)
+    })
+    .await
+    .map_err(|error| format!("staged batch read task failed: {error}"))?;
+    verification.0
 }
 
 #[cfg(unix)]
@@ -2175,66 +2250,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                                 let content = if let Some(upload_id) =
                                                     entry.staged_upload_id.clone()
                                                 {
-                                                    let staged = staged_uploads
-                                                        .lock()
+                                                    let captured =
+                                                        staged_ids.iter().find(|captured| {
+                                                            captured.upload_id == upload_id
+                                                        });
+                                                    match captured {
+                                                        Some(captured) => read_owned_staged_upload(
+                                                            &staged_uploads,
+                                                            captured,
+                                                            &envelope.auth.actor_id,
+                                                            &envelope.auth.account_id,
+                                                            &envelope.request.action_id,
+                                                            &entry.fingerprint,
+                                                        )
                                                         .await
-                                                        .get(&upload_id)
-                                                        .cloned();
-                                                    match staged {
-                                                        Some(upload)
-                                                            if upload.account_id
-                                                                == envelope.auth.account_id
-                                                                && upload.actor_id
-                                                                    == envelope.auth.actor_id
-                                                                && upload.action_id
-                                                                    == envelope
-                                                                        .request
-                                                                        .action_id =>
-                                                        {
-                                                            if !upload.finished {
-                                                                staged_error = Some(
-                                                                "staged batch upload is incomplete"
-                                                                    .into(),
-                                                            );
-                                                                None
-                                                            } else if upload.fingerprint
-                                                                != entry.fingerprint
-                                                            {
-                                                                staged_error = Some(
-                                                                "staged batch identity or fingerprint mismatch"
-                                                                    .into(),
-                                                            );
-                                                                None
-                                                            } else {
-                                                                let result =
-                                                                    verify_staged_upload(&upload)
-                                                                        .and_then(|_| {
-                                                                            std::fs::read(
-                                                                                &upload.path,
-                                                                            )
-                                                                            .map_err(|error| {
-                                                                                error.to_string()
-                                                                            })
-                                                                        });
-                                                                match result {
-                                                                    Ok(bytes) => {
-                                                                        Some(Bytes::from(bytes))
-                                                                    }
-                                                                    Err(error) => {
-                                                                        staged_error = Some(format!("staged batch preimage failed: {error}"));
-                                                                        None
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        Some(_) => {
-                                                            staged_error = Some("staged batch identity or fingerprint mismatch".into());
+                                                        .map(Some)
+                                                        .unwrap_or_else(|error| {
+                                                            staged_error = Some(error);
                                                             None
-                                                        }
+                                                        }),
                                                         None => {
                                                             staged_error = Some(
-                                                                "staged batch upload is unknown"
-                                                                    .into(),
+                                                                "staged batch upload was replaced or removed".into(),
                                                             );
                                                             None
                                                         }
@@ -3729,4 +3766,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 fn main() {
     eprintln!("openclank-history-service: Windows transport is unsupported in this slice");
     std::process::exit(2);
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    fn staged_upload(
+        action_id: &str,
+        path: std::path::PathBuf,
+        io_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    ) -> StagedUpload {
+        StagedUpload {
+            actor_id: "actor".into(),
+            account_id: "account".into(),
+            action_id: action_id.into(),
+            content_length: 1,
+            written: 1,
+            fingerprint: "sha256:00:1".into(),
+            finished: true,
+            last_activity_millis: 0,
+            path,
+            io_lock,
+            io_active_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_does_not_remove_stage_reusing_captured_upload_id() {
+        let root = tempfile::tempdir().unwrap();
+        let old_path = root.path().join("old");
+        let new_path = root.path().join("new");
+        std::fs::write(&old_path, b"o").unwrap();
+        std::fs::write(&new_path, b"n").unwrap();
+        let old_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let new_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let uploads = std::sync::Arc::new(tokio::sync::Mutex::new(BTreeMap::from([(
+            "U".to_owned(),
+            staged_upload("action", old_path.clone(), old_lock.clone()),
+        )])));
+        let captured = owned_staged_ids_for_entries(
+            &uploads,
+            &[BatchPrepareEntry {
+                resource_key: openclank_history::catalog::ResourceKey {
+                    account_id: "account".into(),
+                    workspace_id: "workspace".into(),
+                    provider: "provider".into(),
+                    resource_id: "resource".into(),
+                },
+                old_locator: Some("old".into()),
+                new_locator: Some("new".into()),
+                expected_revision: None,
+                existence: openclank_history::catalog::ResourceExistence::Present,
+                resource_type: openclank_history::catalog::ResourceType::File,
+                metadata: openclank_history::catalog::ResourceMetadata::default(),
+                content: None,
+                staged_upload_id: Some("U".into()),
+                fingerprint: "sha256:00:1".into(),
+                coverage: Default::default(),
+            }],
+            "actor",
+            "account",
+            "action",
+        )
+        .await;
+        assert_eq!(captured.len(), 1);
+        let replacement = staged_upload("action", new_path.clone(), new_lock);
+        uploads.lock().await.insert("U".into(), replacement);
+        let staged_bytes = AtomicU64::new(2);
+        remove_owned_staged_uploads(
+            &uploads,
+            &staged_bytes,
+            "actor",
+            "account",
+            "action",
+            &captured,
+        )
+        .await;
+        assert!(uploads.lock().await.contains_key("U"));
+        assert!(new_path.exists());
+        assert!(old_path.exists());
+        assert_eq!(staged_bytes.load(std::sync::atomic::Ordering::Acquire), 2);
+    }
 }
