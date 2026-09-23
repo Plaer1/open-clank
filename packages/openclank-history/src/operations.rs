@@ -1478,6 +1478,29 @@ impl HistoryCoordinator {
             }
         }
         if action.state == ActionState::AfterDurable {
+            let stored_outcomes = action.per_resource_outcomes.as_ref().ok_or(
+                "durable after-state is missing per-resource outcomes",
+            )?;
+            if action.after_resources.len() != entries.len() || stored_outcomes.len() != entries.len() {
+                return Err("durable after-state coverage does not match retry resources".into());
+            }
+            for ((entry, stored), outcome) in entries
+                .iter()
+                .zip(action.after_resources.iter())
+                .zip(stored_outcomes.iter())
+            {
+                if entry.resource_key != stored.resource_key
+                    || entry.locator != stored.locator
+                    || entry.existence != stored.existence
+                    || entry.resource_type != stored.resource_type
+                    || entry.metadata != stored.metadata
+                    || entry.fingerprint != stored.fingerprint
+                    || entry.coverage != stored.coverage
+                    || &entry.outcome != outcome
+                {
+                    return Err("durable after-state retry payload mismatch".into());
+                }
+            }
             return Ok(action);
         }
         let start_state = if action.state == ActionState::AfterCaptureFailed {
@@ -1565,7 +1588,7 @@ impl HistoryCoordinator {
                 coverage: entry.coverage,
             });
         }
-        let digest = batch_after_capture_digest(&after_resources);
+        let digest = batch_after_capture_digest(&after_resources, &outcomes);
         let result = self.catalog.record_after_batch(
             action_id,
             after_resources,
@@ -1795,10 +1818,10 @@ pub fn batch_capture_digest(entries: &[BatchCaptureInput]) -> String {
     blake3::hash(&input).to_hex().to_string()
 }
 
-fn batch_after_capture_digest(entries: &[AfterResource]) -> String {
+fn batch_after_capture_digest(entries: &[AfterResource], outcomes: &[ResourceOutcome]) -> String {
     let mut input = Vec::new();
     input.extend_from_slice(b"openclank-mutation-after-batch-digest-v1");
-    for (index, entry) in entries.iter().enumerate() {
+    for (index, (entry, outcome)) in entries.iter().zip(outcomes.iter()).enumerate() {
         let metadata = serde_json::to_vec(&(
             index,
             &entry.resource_key,
@@ -1809,6 +1832,7 @@ fn batch_after_capture_digest(entries: &[AfterResource]) -> String {
             &entry.coverage,
             &entry.fingerprint,
             &entry.after.version_id,
+            outcome,
         ))
         .expect("batch after metadata is serializable");
         append_digest_frame(&mut input, b"entry", &metadata);
