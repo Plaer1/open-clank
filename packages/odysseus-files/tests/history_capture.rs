@@ -159,9 +159,9 @@ fn provider_engine_sends_authenticated_before_live_and_after_frames() {
         .skip(1)
         .map(|frame| {
             frame
-                .pointer("/Prepare/envelope/request/action_id")
+                .pointer("/PrepareBatch/envelope/request/action_id")
                 .or_else(|| frame.pointer("/RecordLive/envelope/action_id"))
-                .or_else(|| frame.pointer("/Complete/envelope/action_id"))
+                .or_else(|| frame.pointer("/CompleteBatch/envelope/action_id"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap()
                 .to_owned()
@@ -169,17 +169,25 @@ fn provider_engine_sends_authenticated_before_live_and_after_frames() {
         .collect::<Vec<_>>();
     assert!(action_ids.windows(2).all(|pair| pair[0] == pair[1]));
     assert_eq!(
-        frames[1]["Prepare"]["envelope"]["auth"]["actor_id"],
+        frames[1]["PrepareBatch"]["envelope"]["auth"]["actor_id"],
         "actor-1"
     );
     assert_eq!(
-        frames[1]["Prepare"]["envelope"]["auth"]["account_id"],
+        frames[1]["PrepareBatch"]["envelope"]["auth"]["account_id"],
         "account-1"
     );
     assert_eq!(
-        frames[1]["Prepare"]["envelope"]["request"]["resource_key"]["resource_id"],
+        frames[1]["PrepareBatch"]["envelope"]["request"]["resource_key"]["resource_id"],
         "file:registry:test"
     );
+    let prepare_entry = &frames[1]["PrepareBatch"]["entries"][0];
+    assert_eq!(prepare_entry["existence"], "Present");
+    assert_eq!(prepare_entry["resource_type"], "File");
+    assert_eq!(prepare_entry["content"], "YmVmb3Jl");
+    let complete_entry = &frames[3]["CompleteBatch"]["entries"][0];
+    assert_eq!(complete_entry["existence"], "Present");
+    assert_eq!(complete_entry["content"], "YWZ0ZXI=");
+    assert_eq!(complete_entry["outcome"]["status"], "Committed");
 }
 
 #[test]

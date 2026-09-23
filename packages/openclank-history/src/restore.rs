@@ -82,6 +82,8 @@ pub struct HostMetadata {
     pub modified_unix_millis: Option<u64>,
     pub native_locator: Option<String>,
     pub symlink_target: Option<String>,
+    #[serde(default)]
+    pub resource_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,29 +203,63 @@ impl FilesystemRestoreProvider {
     }
 
     fn mode(&self) -> CatalogResult<Option<u32>> {
-        if !self.path.exists() {
+        if std::fs::symlink_metadata(&self.path).is_err() {
             return Ok(None);
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            return Ok(Some(std::fs::metadata(&self.path)?.permissions().mode()));
+            return Ok(Some(std::fs::symlink_metadata(&self.path)?.permissions().mode()));
         }
         #[cfg(not(unix))]
         { Ok(None) }
     }
 
     fn read_current(&self) -> CatalogResult<(Vec<u8>, Option<u32>)> {
-        if !self.path.exists() {
-            return Ok((Vec::new(), None));
+        let metadata = match std::fs::symlink_metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), None));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            return Ok((std::fs::read_link(&self.path)?.to_string_lossy().as_bytes().to_vec(), self.mode()?));
         }
         Ok((std::fs::read(&self.path)?, self.mode()?))
+    }
+
+    fn persist_receipt(&self, restore_id: &str, digest: &str) -> CatalogResult<()> {
+        let receipt_parent = self.receipt_path.parent().ok_or("receipt has no parent")?;
+        std::fs::create_dir_all(receipt_parent)?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let receipt_temp = receipt_parent.join(format!(
+            ".{}.tmp-{}-{nonce}",
+            self.receipt_path.file_name().unwrap().to_string_lossy(),
+            std::process::id()
+        ));
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&receipt_temp)?;
+            let destination_key = blake3::hash(self.path.to_string_lossy().as_bytes()).to_hex();
+            file.write_all(format!("v1\n{destination_key}\n{restore_id}\n{digest}").as_bytes())?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&receipt_temp, &self.receipt_path)?;
+        std::fs::File::open(receipt_parent)?.sync_all()?;
+        Ok(())
     }
 }
 
 impl RestoreProvider for FilesystemRestoreProvider {
     fn current_fingerprint(&self) -> CatalogResult<Option<String>> {
-        if !self.path.exists() {
+        if std::fs::symlink_metadata(&self.path).is_err() {
             return Ok(None);
         }
         let (bytes, mode) = self.read_current()?;
@@ -231,7 +267,7 @@ impl RestoreProvider for FilesystemRestoreProvider {
     }
 
     fn capture_current(&mut self) -> CatalogResult<CurrentStateReceipt> {
-        if !self.path.exists() {
+        if std::fs::symlink_metadata(&self.path).is_err() {
             return Ok(CurrentStateReceipt {
                 version_id: "host:missing".into(),
                 fingerprint: "missing".into(),
@@ -239,6 +275,7 @@ impl RestoreProvider for FilesystemRestoreProvider {
                 durable: true,
                 host_metadata: HostMetadata {
                     native_locator: Some(self.path.to_string_lossy().into_owned()),
+                    resource_type: Some("Missing".into()),
                     ..HostMetadata::default()
                 },
             });
@@ -253,6 +290,12 @@ impl RestoreProvider for FilesystemRestoreProvider {
             host_metadata: HostMetadata {
                 mode,
                 native_locator: Some(self.path.to_string_lossy().into_owned()),
+                resource_type: Some(if std::fs::symlink_metadata(&self.path)?.file_type().is_symlink() {
+                    "Symlink".into()
+                } else {
+                    "File".into()
+                }),
+                symlink_target: std::fs::read_link(&self.path).ok().map(|target| target.to_string_lossy().into_owned()),
                 ..HostMetadata::default()
             },
         })
@@ -305,6 +348,22 @@ impl RestoreProvider for FilesystemRestoreProvider {
         let parent = self.path.parent().ok_or("host file has no parent")?;
         std::fs::create_dir_all(parent)?;
         let mode = host_metadata.and_then(|metadata| metadata.mode).or(self.mode()?);
+        if let Some(target) = host_metadata.and_then(|metadata| metadata.symlink_target.as_deref()) {
+            #[cfg(unix)]
+            {
+                if std::fs::symlink_metadata(&self.path).is_ok() {
+                    std::fs::remove_file(&self.path)?;
+                }
+                std::os::unix::fs::symlink(target, &self.path)?;
+                std::fs::File::open(parent)?.sync_all()?;
+                self.persist_receipt(restore_id, &digest)?;
+                return Ok(());
+            }
+            #[cfg(not(unix))]
+            {
+                return Err("symlink restore is unsupported on this host".into());
+            }
+        }
         let restore_key = blake3::hash(restore_id.as_bytes()).to_hex().to_string();
         let stem = format!(".openclank-restore-{}-{}-{}", std::process::id(), restore_key, digest);
         let mut temporary = parent.join(&stem);
@@ -339,22 +398,7 @@ impl RestoreProvider for FilesystemRestoreProvider {
         }
         std::fs::rename(&temporary, &self.path)?;
         std::fs::File::open(parent)?.sync_all()?;
-        let receipt_parent = self.receipt_path.parent().ok_or("receipt has no parent")?;
-        std::fs::create_dir_all(receipt_parent)?;
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let receipt_temp = receipt_parent.join(format!(".{}.tmp-{}-{nonce}", self.receipt_path.file_name().unwrap().to_string_lossy(), std::process::id()));
-        {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&receipt_temp)?;
-            let destination_key = blake3::hash(self.path.to_string_lossy().as_bytes()).to_hex();
-            file.write_all(format!("v1\n{destination_key}\n{restore_id}\n{digest}").as_bytes())?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&receipt_temp, &self.receipt_path)?;
-        std::fs::File::open(receipt_parent)?.sync_all()?;
+        self.persist_receipt(restore_id, &digest)?;
         Ok(())
     }
 }

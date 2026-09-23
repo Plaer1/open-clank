@@ -613,15 +613,7 @@ impl MutationCaptureHook for HistoryServiceHook {
             }
             wire_entries.push(entry);
         }
-        let prepared = if targets.len() == 1 {
-            if let Some(upload_id) = staged_uploads.first() {
-                self.request(json!({"PrepareStaged": {"envelope": envelope, "upload_id": upload_id, "fingerprint": Self::fingerprint(targets[0].before.as_deref())}}))
-            } else {
-                self.request(json!({"Prepare": {"envelope": envelope, "content": targets[0].before.as_deref().map(encode_base64), "fingerprint": Self::fingerprint(targets[0].before.as_deref())}}))
-            }
-        } else {
-            self.request(json!({"PrepareBatch": {"envelope": envelope, "batch_version": 1, "entries": wire_entries}}))
-        };
+        let prepared = self.request(json!({"PrepareBatch": {"envelope": envelope, "batch_version": 1, "entries": wire_entries}}));
         if prepared.is_err() {
             for upload_id in &staged_uploads {
                 let _ = self.request(json!({"StageAbort": {"envelope": {"protocol_version": 1, "auth": self.auth(), "action_id": action_id}, "upload_id": upload_id}}));
@@ -709,39 +701,39 @@ impl MutationCaptureTicket for ServiceTicket {
                 .set_status(&self.action_id, "failed", "live", Some(error.clone()));
             return Err(error);
         }
-        if self.resource_ids.len() == 1 {
-            let fingerprint = HistoryServiceHook::fingerprint(content);
-            let result = if let Some(content) = content.filter(|bytes| bytes.len() > INLINE_CONTENT_BYTES) {
-                let upload_id = self.hook.stage_content(&self.action_id, content, &fingerprint)?;
-                let result = self.hook.request(json!({"CompleteStaged": {"envelope": control, "upload_id": upload_id, "fingerprint": fingerprint}}));
-                if result.is_err() {
-                    let _ = self.hook.request(json!({"StageAbort": {"envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id}, "upload_id": upload_id}}));
-                }
-                result
-            } else {
-                self.hook.request(json!({"Complete": {"envelope": control, "content": content.map(encode_base64), "fingerprint": fingerprint}}))
-            };
-            if result.is_err() {
-                self.hook.set_status(&self.action_id, "failed", "after", Some(result.as_ref().err().cloned().unwrap_or_default()));
-            } else {
-                self.hook.set_status(&self.action_id, "complete", "complete", None);
-            }
-            return result.map(|_| ()).map_err(|error| error.to_string());
-        }
         let mut complete_entries = Vec::with_capacity(after.len());
         let mut staged_uploads = Vec::new();
         for (item, resource_id) in after.iter().zip(self.resource_ids.iter()) {
             let fingerprint = HistoryServiceHook::fingerprint(item.after.as_deref());
+            let (resource_type, metadata) = match fs::symlink_metadata(resource_id) {
+                Ok(stat) if stat.file_type().is_symlink() => (
+                    "Symlink",
+                    json!({"mode": mode(&stat), "size": stat.len(), "modified_millis": modified_millis(&stat), "opaque": {"target": fs::read_link(resource_id).ok().map(|target| target.to_string_lossy().into_owned())}}),
+                ),
+                Ok(stat) if stat.is_dir() => (
+                    "Directory",
+                    json!({"mode": mode(&stat), "size": stat.len(), "modified_millis": modified_millis(&stat), "opaque": {"manifest_digest": item.after.as_deref().map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))}}),
+                ),
+                Ok(stat) => (
+                    "File",
+                    json!({"mode": mode(&stat), "size": stat.len(), "modified_millis": modified_millis(&stat), "opaque": null}),
+                ),
+                Err(_) => ("File", json!({"mode": null, "size": null, "modified_millis": null, "opaque": null})),
+            };
+            let after_digest = item
+                .after
+                .as_deref()
+                .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)));
             let mut entry = json!({
                 "resource_key": {"account_id": self.hook.account_id, "workspace_id": self.hook.workspace_id, "provider": "odysseus-files", "resource_id": resource_id},
-                "locator": null,
+                "locator": {"display_name": Path::new(resource_id).file_name().map(|name| name.to_string_lossy()).unwrap_or_default(), "location_label": resource_id, "opaque_ref": resource_id},
                 "existence": if item.after.is_some() { "Present" } else { "Absent" },
-                "resource_type": "File",
-                "metadata": {"mode": null, "size": item.after.as_ref().map(|bytes| bytes.len()), "modified_millis": null, "opaque": null},
+                "resource_type": resource_type,
+                "metadata": metadata,
                 "content": item.after.as_deref().map(encode_base64),
                 "staged_upload_id": null,
                 "fingerprint": fingerprint,
-                "coverage": {"byte_len": item.after.as_ref().map_or(0, |bytes| bytes.len()), "metadata": {"exact_after": true}},
+                "coverage": {"byte_len": item.after.as_ref().map_or(0, |bytes| bytes.len()), "content_digest": after_digest, "metadata": {"exact_after": true}},
                 "outcome": {"resource_id": resource_id, "status": "Committed", "revision": {"Opaque": {"kind": "fingerprint", "value": fingerprint}}},
             });
             if let Some(content) = item.after.as_deref() {
