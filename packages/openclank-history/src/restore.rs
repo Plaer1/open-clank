@@ -8,6 +8,8 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;
+use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -495,6 +497,98 @@ fn is_directory_manifest(content: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+struct ValidatedRestoreEntry {
+    value: Value,
+    relative: PathBuf,
+    key: String,
+    kind: String,
+}
+
+fn validate_restore_entries(entries: &[Value]) -> CatalogResult<Vec<ValidatedRestoreEntry>> {
+    let mut validated = Vec::with_capacity(entries.len());
+    let mut paths = HashSet::new();
+    let mut symlink_paths = HashSet::new();
+    for entry in entries {
+        let relative = entry.get("path").and_then(Value::as_str).ok_or("directory entry has no path")?;
+        let relative_path = Path::new(relative);
+        let mut components = Vec::new();
+        for component in relative_path.components() {
+            match component {
+                Component::Normal(value) => components.push(value.to_string_lossy().into_owned()),
+                Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err("directory restore entry escapes destination".into());
+                }
+            }
+        }
+        if components.is_empty() {
+            return Err("directory restore entry has an empty path".into());
+        }
+        let key = components.join("/");
+        if !paths.insert(key.clone()) {
+            return Err("directory restore manifest contains duplicate paths".into());
+        }
+        let kind = entry.get("type").and_then(Value::as_str).ok_or("directory entry has no type")?.to_owned();
+        if !matches!(kind.as_str(), "directory" | "file" | "symlink") {
+            return Err("directory restore entry has unsupported type".into());
+        }
+        if kind == "symlink" {
+            symlink_paths.insert(key.clone());
+        }
+        validated.push(ValidatedRestoreEntry {
+            value: entry.clone(),
+            relative: relative_path.to_owned(),
+            key,
+            kind,
+        });
+    }
+    for entry in &validated {
+        let mut ancestor = Vec::new();
+        let component_count = entry.relative.components().count();
+        for component in entry.relative.components().take(component_count.saturating_sub(1)) {
+            if let Component::Normal(value) = component {
+                ancestor.push(value.to_string_lossy());
+                if symlink_paths.contains(&ancestor.join("/")) {
+                    return Err(format!("directory restore entry {} has a symlink ancestor", entry.key).into());
+                }
+            }
+        }
+    }
+    Ok(validated)
+}
+
+fn ensure_safe_restore_parents(root: &Path, relative: &Path) -> CatalogResult<()> {
+    let metadata = std::fs::symlink_metadata(root)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("directory restore root is not a real directory".into());
+    }
+    let mut current = root.to_owned();
+    let component_count = relative.components().count();
+    for component in relative.components().take(component_count.saturating_sub(1)) {
+        let Component::Normal(value) = component else {
+            return Err("directory restore parent is not a normal path".into());
+        };
+        current.push(value);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("directory restore parent is a symlink".into());
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err("directory restore parent is not a directory".into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current)?;
+                let created = std::fs::symlink_metadata(&current)?;
+                if created.file_type().is_symlink() || !created.is_dir() {
+                    return Err("directory restore parent changed to a symlink".into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 fn apply_directory_manifest(path: &Path, content: &[u8]) -> CatalogResult<()> {
     let manifest: Value = serde_json::from_slice(content)?;
     if manifest.get("version").and_then(Value::as_u64) != Some(1)
@@ -506,6 +600,7 @@ fn apply_directory_manifest(path: &Path, content: &[u8]) -> CatalogResult<()> {
         .get("entries")
         .and_then(Value::as_array)
         .ok_or("directory restore manifest has no entries")?;
+    let validated = validate_restore_entries(entries)?;
     if std::fs::symlink_metadata(path).is_ok() {
         let metadata = std::fs::symlink_metadata(path)?;
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
@@ -514,56 +609,62 @@ fn apply_directory_manifest(path: &Path, content: &[u8]) -> CatalogResult<()> {
             std::fs::remove_file(path)?;
         }
     }
-    std::fs::create_dir_all(path)?;
-    let mut ordered = entries.clone();
+    std::fs::create_dir(path)?;
+    let mut ordered = validated;
     ordered.sort_by_key(|entry| {
-        let kind = entry.get("type").and_then(Value::as_str).unwrap_or("");
-        let kind_order = match kind {
+        let kind_order = match entry.kind.as_str() {
             "directory" => 0_u8,
             "file" => 1,
             "symlink" => 2,
             _ => 3,
         };
-        (kind_order, entry.get("path").and_then(Value::as_str).unwrap_or("").to_owned())
+        (kind_order, entry.key.clone())
     });
-    for entry in ordered {
-        let relative = entry.get("path").and_then(Value::as_str).ok_or("directory entry has no path")?;
-        let relative_path = Path::new(relative);
-        if relative_path.is_absolute() || relative_path.components().any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
-            return Err("directory restore entry escapes destination".into());
-        }
-        let target = path.join(relative_path);
-        let kind = entry.get("type").and_then(Value::as_str).ok_or("directory entry has no type")?;
-        match kind {
-            "directory" => std::fs::create_dir_all(&target)?,
+    for entry in &ordered {
+        ensure_safe_restore_parents(path, &entry.relative)?;
+        let target = path.join(&entry.relative);
+        let value = &entry.value;
+        match entry.kind.as_str() {
+            "directory" => {
+                match std::fs::symlink_metadata(&target) {
+                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                        return Err("directory restore target is not a real directory".into());
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&target)?,
+                    Err(error) => return Err(error.into()),
+                }
+            }
             "symlink" => {
-                let link_target = entry.get("target").and_then(Value::as_str).ok_or("symlink entry has no target")?;
-                if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+                let link_target = value.get("target").and_then(Value::as_str).ok_or("symlink entry has no target")?;
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(link_target, &target)?;
                 #[cfg(not(unix))]
                 return Err("symlink restore is unsupported on this host".into());
             }
             "file" => {
-                let encoded = entry.get("content").and_then(Value::as_str).ok_or("file entry has no retrievable content")?;
+                let encoded = value.get("content").and_then(Value::as_str).ok_or("file entry has no retrievable content")?;
                 let bytes = STANDARD.decode(encoded).map_err(|_| "file entry content is invalid base64")?;
-                if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
-                std::fs::write(&target, bytes)?;
+                let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
             }
             _ => return Err("directory restore entry has unsupported type".into()),
         }
-        if let Some(mode) = entry.get("mode").and_then(Value::as_u64) {
+        if entry.kind != "symlink" {
+            if let Some(mode) = value.get("mode").and_then(Value::as_u64) {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode as u32))?;
             }
+            }
         }
     }
-    for entry in entries {
-        let relative = entry.get("path").and_then(Value::as_str).ok_or("directory entry has no path")?;
-        let target = path.join(relative);
-        if let Some(millis) = entry.get("mtime_millis").and_then(Value::as_u64) {
+    for entry in &ordered {
+        ensure_safe_restore_parents(path, &entry.relative)?;
+        let target = path.join(&entry.relative);
+        if let Some(millis) = entry.value.get("mtime_millis").and_then(Value::as_u64) {
             set_modified_millis(&target, millis)?;
         }
     }

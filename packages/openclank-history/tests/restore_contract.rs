@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use openclank_history::capture::{CaptureAdapter, CaptureEnvelope, CoverageKind, CoverageReceipt};
 use openclank_history::catalog::{ActionState, LiveReceipt, LiveStatus, Locator, ResourceKey};
 use openclank_history::operations::HistoryCoordinator;
@@ -361,6 +362,35 @@ fn directory_manifest_restores_recursive_files_and_links() {
     assert_eq!(std::fs::read(path.join("nested/data.bin")).unwrap(), b"directory-bytes");
     #[cfg(unix)]
     assert_eq!(std::fs::read_link(path.join("alias")).unwrap().to_string_lossy(), "nested/data.bin");
+}
+
+#[test]
+fn directory_manifest_rejects_symlink_ancestor_before_writing() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("tree");
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let receipt_root = root.path().join("receipts");
+    let manifest = serde_json::json!({
+        "version": 1,
+        "root_type": "directory",
+        "entries": [
+            {"path": "escape", "type": "symlink", "target": "../outside"},
+            {"path": "escape/created.txt", "type": "file", "content": STANDARD.encode(b"must not write")}
+        ]
+    });
+    let mut provider = openclank_history::restore::FilesystemRestoreProvider::new_with_receipt_root(&path, &receipt_root);
+    let error = provider
+        .apply_if_revision_idempotent_with_metadata(
+            "restore-hostile-directory",
+            None,
+            &serde_json::to_vec(&manifest).unwrap(),
+            Some(&HostMetadata { resource_type: Some("Directory".into()), ..HostMetadata::default() }),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("symlink ancestor"));
+    assert!(!outside.join("created.txt").exists());
+    assert!(!path.exists());
 }
 
 #[test]
