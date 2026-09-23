@@ -1,12 +1,13 @@
 #![cfg(unix)]
 
 use openclank_history::catalog::{
-    ActionRecord, ActionState, LiveReceipt, LiveStatus, LoreRef, VersionContent, VersionReceipt,
+    ActionRecord, ActionState, CaptureManifest, LiveReceipt, LiveStatus, Locator, LoreRef,
+    ResourceExistence, ResourceKey, ResourceMetadata, ResourceType, VersionContent, VersionReceipt,
 };
-use openclank_history::operations::{ActionRequest, request_digest};
+use openclank_history::operations::{request_digest, ActionRequest};
 use openclank_history::protocol::{
-    AuthContext, ControlEnvelope, PROTOCOL_VERSION, RequestEnvelope, ServiceRequest,
-    ServiceResponse,
+    AuthContext, BatchPrepareEntry, ControlEnvelope, RequestEnvelope, ServiceRequest,
+    ServiceResponse, PROTOCOL_VERSION,
 };
 use openclank_history::restore::{RestoreOutcome, RestoreRequest};
 use sha2::{Digest, Sha256};
@@ -140,6 +141,54 @@ async fn send(
         .await
         .unwrap();
     serde_json::from_str(&line).unwrap()
+}
+
+async fn stage_small(
+    stream: &mut (
+        tokio::net::unix::OwnedReadHalf,
+        tokio::net::unix::OwnedWriteHalf,
+    ),
+    action_id: &str,
+    upload_id: &str,
+    content: &[u8],
+) {
+    assert!(matches!(
+        send(
+            stream,
+            ServiceRequest::StageBegin {
+                envelope: control(action_id),
+                upload_id: upload_id.to_owned(),
+                content_length: content.len() as u64,
+                fingerprint: sha256_fingerprint(content),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            stream,
+            ServiceRequest::StageChunk {
+                envelope: control(action_id),
+                upload_id: upload_id.to_owned(),
+                offset: 0,
+                content: Some(content.to_vec()),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            stream,
+            ServiceRequest::StageFinish {
+                envelope: control(action_id),
+                upload_id: upload_id.to_owned(),
+            },
+        )
+        .await,
+        ServiceResponse::Staged { .. }
+    ));
 }
 
 async fn send_maybe(
@@ -885,6 +934,578 @@ async fn staged_capture_handles_incompressible_payloads_beyond_one_frame_and_cle
     child.kill().unwrap();
     let _ = child.wait();
     let _ = action;
+}
+
+#[tokio::test]
+async fn batch_service_cleans_consumed_stages_on_late_error_and_rejects_omissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("batch-stage-cleanup.sock");
+    let catalog = dir.path().join("catalog.redb");
+    let lore = dir.path().join("lore");
+    let bin = env!("CARGO_BIN_EXE_openclank-history-service");
+    let mut child = std::process::Command::new(bin)
+        .args([
+            socket.to_str().unwrap(),
+            catalog.to_str().unwrap(),
+            lore.to_str().unwrap(),
+            "account",
+            dir.path().to_str().unwrap(),
+            dir.path().join("receipts").to_str().unwrap(),
+            dir.path().join("resource-map.json").to_str().unwrap(),
+        ])
+        .env("OPENCLANK_HISTORY_TOKEN", "token")
+        .spawn()
+        .unwrap();
+    let mut stream = connect(&socket).await;
+    let mut action = request();
+    action.action_id = "batch-service-cleanup".into();
+    let secondary = ResourceKey {
+        account_id: "account".into(),
+        workspace_id: "workspace".into(),
+        provider: "files".into(),
+        resource_id: "secondary".into(),
+    };
+    action.modified_resource_ids = vec![secondary.clone()];
+    let request_envelope = |action: ActionRequest| RequestEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        auth: AuthContext {
+            actor_id: "actor".into(),
+            account_id: "account".into(),
+            token: "token".into(),
+        },
+        claimed_digest: String::new(),
+        request: action,
+    };
+    let staged = b"staged-before".to_vec();
+    let upload_id = "batch-stage-late-entry".to_owned();
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-service-cleanup"),
+                upload_id: upload_id.clone(),
+                content_length: staged.len() as u64,
+                fingerprint: sha256_fingerprint(&staged),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageChunk {
+                envelope: control("batch-service-cleanup"),
+                upload_id: upload_id.clone(),
+                offset: 0,
+                content: Some(staged.clone()),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageFinish {
+                envelope: control("batch-service-cleanup"),
+                upload_id: upload_id.clone(),
+            },
+        )
+        .await,
+        ServiceResponse::Staged { .. }
+    ));
+    let primary = action.resource_key.clone();
+    let late_bad = BatchPrepareEntry {
+        resource_key: secondary,
+        old_locator: Some(Locator::from("secondary")),
+        new_locator: Some(Locator::from("secondary")),
+        expected_revision: Some("secondary-revision".into()),
+        existence: ResourceExistence::Present,
+        resource_type: ResourceType::File,
+        metadata: ResourceMetadata {
+            size: Some(1),
+            ..ResourceMetadata::default()
+        },
+        content: Some(b"bad".to_vec()),
+        staged_upload_id: None,
+        fingerprint: "secondary-fingerprint".into(),
+        coverage: CaptureManifest {
+            byte_len: Some(99),
+            ..CaptureManifest::default()
+        },
+    };
+    let staged_entry = BatchPrepareEntry {
+        resource_key: primary,
+        old_locator: Some(Locator::from("primary")),
+        new_locator: Some(Locator::from("primary")),
+        expected_revision: Some("primary-revision".into()),
+        existence: ResourceExistence::Present,
+        resource_type: ResourceType::File,
+        metadata: ResourceMetadata {
+            size: Some(staged.len() as u64),
+            ..ResourceMetadata::default()
+        },
+        content: None,
+        staged_upload_id: Some(upload_id.clone()),
+        fingerprint: sha256_fingerprint(&staged),
+        coverage: CaptureManifest {
+            byte_len: Some(staged.len() as u64),
+            ..CaptureManifest::default()
+        },
+    };
+    let response = send(
+        &mut stream,
+        ServiceRequest::PrepareBatch {
+            envelope: request_envelope(action.clone()),
+            batch_version: 1,
+            entries: vec![staged_entry, late_bad],
+        },
+    )
+    .await;
+    assert!(matches!(response, ServiceResponse::Error { .. }));
+
+    // The first staged entry was authenticated and consumed before the late
+    // coverage failure. Reusing its id proves the service removed it.
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-service-cleanup"),
+                upload_id: upload_id.clone(),
+                content_length: staged.len() as u64,
+                fingerprint: sha256_fingerprint(&staged),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageAbort {
+                envelope: control("batch-service-cleanup"),
+                upload_id,
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+
+    let bound_upload_id = "batch-stage-bound-error".to_owned();
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-service-cleanup"),
+                upload_id: bound_upload_id.clone(),
+                content_length: staged.len() as u64,
+                fingerprint: sha256_fingerprint(&staged),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageChunk {
+                envelope: control("batch-service-cleanup"),
+                upload_id: bound_upload_id.clone(),
+                offset: 0,
+                content: Some(staged.clone()),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageFinish {
+                envelope: control("batch-service-cleanup"),
+                upload_id: bound_upload_id.clone(),
+            },
+        )
+        .await,
+        ServiceResponse::Staged { .. }
+    ));
+    let oversized_inline = vec![b'i'; 513 * 1024];
+    let bound_response = send(
+        &mut stream,
+        ServiceRequest::PrepareBatch {
+            envelope: request_envelope(action.clone()),
+            batch_version: 1,
+            entries: vec![
+                BatchPrepareEntry {
+                    resource_key: action.resource_key.clone(),
+                    old_locator: Some(Locator::from("primary")),
+                    new_locator: Some(Locator::from("primary")),
+                    expected_revision: Some("primary-revision".into()),
+                    existence: ResourceExistence::Present,
+                    resource_type: ResourceType::File,
+                    metadata: ResourceMetadata {
+                        size: Some(staged.len() as u64),
+                        ..ResourceMetadata::default()
+                    },
+                    content: None,
+                    staged_upload_id: Some(bound_upload_id.clone()),
+                    fingerprint: sha256_fingerprint(&staged),
+                    coverage: CaptureManifest {
+                        byte_len: Some(staged.len() as u64),
+                        ..CaptureManifest::default()
+                    },
+                },
+                BatchPrepareEntry {
+                    resource_key: action.modified_resource_ids[0].clone(),
+                    old_locator: Some(Locator::from("secondary")),
+                    new_locator: Some(Locator::from("secondary")),
+                    expected_revision: Some("secondary-revision".into()),
+                    existence: ResourceExistence::Present,
+                    resource_type: ResourceType::File,
+                    metadata: ResourceMetadata {
+                        size: Some(oversized_inline.len() as u64),
+                        ..ResourceMetadata::default()
+                    },
+                    content: Some(oversized_inline),
+                    staged_upload_id: None,
+                    fingerprint: "secondary-fingerprint".into(),
+                    coverage: CaptureManifest {
+                        byte_len: Some(513 * 1024),
+                        ..CaptureManifest::default()
+                    },
+                },
+            ],
+        },
+    )
+    .await;
+    assert!(matches!(bound_response, ServiceResponse::Error { .. }));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-service-cleanup"),
+                upload_id: bound_upload_id.clone(),
+                content_length: staged.len() as u64,
+                fingerprint: sha256_fingerprint(&staged),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageAbort {
+                envelope: control("batch-service-cleanup"),
+                upload_id: bound_upload_id,
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+
+    let denied_content = b"denied-stage".to_vec();
+    let denied_owned_id = "denied-owned-stage".to_owned();
+    let denied_other_id = "denied-other-stage".to_owned();
+    for (stage_action, stage_id) in [
+        ("batch-denied", denied_owned_id.clone()),
+        ("other-action", denied_other_id.clone()),
+    ] {
+        assert!(matches!(
+            send(
+                &mut stream,
+                ServiceRequest::StageBegin {
+                    envelope: control(stage_action),
+                    upload_id: stage_id.clone(),
+                    content_length: denied_content.len() as u64,
+                    fingerprint: sha256_fingerprint(&denied_content),
+                },
+            )
+            .await,
+            ServiceResponse::Accepted
+        ));
+        assert!(matches!(
+            send(
+                &mut stream,
+                ServiceRequest::StageChunk {
+                    envelope: control(stage_action),
+                    upload_id: stage_id.clone(),
+                    offset: 0,
+                    content: Some(denied_content.clone()),
+                },
+            )
+            .await,
+            ServiceResponse::Accepted
+        ));
+        assert!(matches!(
+            send(
+                &mut stream,
+                ServiceRequest::StageFinish {
+                    envelope: control(stage_action),
+                    upload_id: stage_id,
+                },
+            )
+            .await,
+            ServiceResponse::Staged { .. }
+        ));
+    }
+    let mut denied = request();
+    denied.action_id = "batch-denied".into();
+    denied.modified_resource_ids = vec![ResourceKey {
+        account_id: "other-account".into(),
+        workspace_id: "workspace".into(),
+        provider: "files".into(),
+        resource_id: "foreign-resource".into(),
+    }];
+    let denied_entry = |resource_key: ResourceKey, upload_id: String| BatchPrepareEntry {
+        resource_key,
+        old_locator: Some(Locator::from("denied")),
+        new_locator: Some(Locator::from("denied")),
+        expected_revision: Some("denied-revision".into()),
+        existence: ResourceExistence::Present,
+        resource_type: ResourceType::File,
+        metadata: ResourceMetadata {
+            size: Some(denied_content.len() as u64),
+            ..ResourceMetadata::default()
+        },
+        content: None,
+        staged_upload_id: Some(upload_id),
+        fingerprint: sha256_fingerprint(&denied_content),
+        coverage: CaptureManifest {
+            byte_len: Some(denied_content.len() as u64),
+            ..CaptureManifest::default()
+        },
+    };
+    let denied_response = send(
+        &mut stream,
+        ServiceRequest::PrepareBatch {
+            envelope: request_envelope(denied.clone()),
+            batch_version: 1,
+            entries: vec![
+                denied_entry(denied.resource_key.clone(), denied_owned_id.clone()),
+                denied_entry(
+                    denied.modified_resource_ids[0].clone(),
+                    denied_other_id.clone(),
+                ),
+            ],
+        },
+    )
+    .await;
+    assert!(matches!(denied_response, ServiceResponse::Error { .. }));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-denied"),
+                upload_id: denied_owned_id.clone(),
+                content_length: denied_content.len() as u64,
+                fingerprint: sha256_fingerprint(&denied_content),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageAbort {
+                envelope: control("batch-denied"),
+                upload_id: denied_owned_id,
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("other-action"),
+                upload_id: denied_other_id.clone(),
+                content_length: denied_content.len() as u64,
+                fingerprint: sha256_fingerprint(&denied_content),
+            },
+        )
+        .await,
+        ServiceResponse::Error { .. }
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageAbort {
+                envelope: control("other-action"),
+                upload_id: denied_other_id,
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+
+    let bad_digest_content = b"bad-digest-stage";
+    let bad_digest_id = "bad-digest-stage";
+    stage_small(
+        &mut stream,
+        "batch-bad-digest",
+        bad_digest_id,
+        bad_digest_content,
+    )
+    .await;
+    let mut bad_digest = request();
+    bad_digest.action_id = "batch-bad-digest".into();
+    let mut bad_digest_envelope = request_envelope(bad_digest);
+    bad_digest_envelope.claimed_digest = "forged-digest".into();
+    let bad_digest_response = send(
+        &mut stream,
+        ServiceRequest::PrepareBatch {
+            envelope: bad_digest_envelope,
+            batch_version: 1,
+            entries: vec![denied_entry(
+                request().resource_key,
+                bad_digest_id.to_owned(),
+            )],
+        },
+    )
+    .await;
+    assert!(matches!(bad_digest_response, ServiceResponse::Error { .. }));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-bad-digest"),
+                upload_id: bad_digest_id.to_owned(),
+                content_length: bad_digest_content.len() as u64,
+                fingerprint: sha256_fingerprint(bad_digest_content),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageAbort {
+                envelope: control("batch-bad-digest"),
+                upload_id: bad_digest_id.to_owned(),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+
+    let invalid_token_content = b"invalid-token-stage";
+    let invalid_token_id = "invalid-token-stage";
+    stage_small(
+        &mut stream,
+        "batch-invalid-token",
+        invalid_token_id,
+        invalid_token_content,
+    )
+    .await;
+    let mut invalid_token = request();
+    invalid_token.action_id = "batch-invalid-token".into();
+    let mut invalid_token_envelope = request_envelope(invalid_token);
+    invalid_token_envelope.auth.token = "wrong-token".into();
+    let invalid_token_response = send(
+        &mut stream,
+        ServiceRequest::PrepareBatch {
+            envelope: invalid_token_envelope,
+            batch_version: 1,
+            entries: vec![denied_entry(
+                request().resource_key,
+                invalid_token_id.to_owned(),
+            )],
+        },
+    )
+    .await;
+    assert!(matches!(
+        invalid_token_response,
+        ServiceResponse::Error { .. }
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageBegin {
+                envelope: control("batch-invalid-token"),
+                upload_id: invalid_token_id.to_owned(),
+                content_length: invalid_token_content.len() as u64,
+                fingerprint: sha256_fingerprint(invalid_token_content),
+            },
+        )
+        .await,
+        ServiceResponse::Error { .. }
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::StageAbort {
+                envelope: control("batch-invalid-token"),
+                upload_id: invalid_token_id.to_owned(),
+            },
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+
+    let mut omitted = request();
+    omitted.action_id = "batch-service-omitted".into();
+    omitted.modified_resource_ids = vec![ResourceKey {
+        account_id: "account".into(),
+        workspace_id: "workspace".into(),
+        provider: "files".into(),
+        resource_id: "omitted-secondary".into(),
+    }];
+    let omitted_entry = BatchPrepareEntry {
+        resource_key: omitted.resource_key.clone(),
+        old_locator: Some(Locator::from("primary")),
+        new_locator: Some(Locator::from("primary")),
+        expected_revision: Some("primary-revision".into()),
+        existence: ResourceExistence::Present,
+        resource_type: ResourceType::File,
+        metadata: ResourceMetadata {
+            size: Some(6),
+            ..ResourceMetadata::default()
+        },
+        content: Some(b"before".to_vec()),
+        staged_upload_id: None,
+        fingerprint: "primary-fingerprint".into(),
+        coverage: CaptureManifest {
+            byte_len: Some(6),
+            ..CaptureManifest::default()
+        },
+    };
+    let response = send(
+        &mut stream,
+        ServiceRequest::PrepareBatch {
+            envelope: request_envelope(omitted.clone()),
+            batch_version: 1,
+            entries: vec![omitted_entry],
+        },
+    )
+    .await;
+    match response {
+        ServiceResponse::Error { code } => assert!(code.contains("missing_resource"), "{code}"),
+        other => panic!("unexpected omitted-resource response: {other:?}"),
+    }
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::Abort {
+                envelope: control(&omitted.action_id),
+            }
+        )
+        .await,
+        ServiceResponse::Action(_)
+    ));
+    assert!(matches!(
+        send(
+            &mut stream,
+            ServiceRequest::Shutdown(control("batch-service-cleanup")),
+        )
+        .await,
+        ServiceResponse::Accepted
+    ));
+    let _ = child.wait();
 }
 
 #[tokio::test]

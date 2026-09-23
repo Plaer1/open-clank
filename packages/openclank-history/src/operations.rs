@@ -921,16 +921,21 @@ impl HistoryCoordinator {
         if entries.is_empty() {
             return Err("batch prepare requires at least one resource".into());
         }
-        let mut action = self
+        let action = self
             .catalog
             .get_action(action_id)?
             .ok_or("unknown action")?;
-        let declared = action
+        let mut declared = Vec::new();
+        for resource in action
             .guard_resource_ids
             .iter()
             .chain(action.modified_resource_ids.iter())
             .chain(std::iter::once(&action.resource_key))
-            .collect::<Vec<_>>();
+        {
+            if !declared.contains(resource) {
+                declared.push(resource.clone());
+            }
+        }
         let mut seen_resources = Vec::with_capacity(entries.len());
         for entry in &entries {
             if seen_resources
@@ -954,7 +959,7 @@ impl HistoryCoordinator {
             }
             if !declared
                 .iter()
-                .any(|resource| **resource == entry.resource_key)
+                .any(|resource| resource == &entry.resource_key)
             {
                 return Err(format!(
                     "history_prepare_undeclared_resource: {} is absent from guard/modified resources",
@@ -1015,42 +1020,22 @@ impl HistoryCoordinator {
                 }
             }
         }
+        if seen_resources.len() != declared.len() {
+            return Err(
+                "history_prepare_missing_resource: every declared resource requires exactly one batch entry"
+                    .into(),
+            );
+        }
         let logical_bytes = entries.iter().try_fold(0u64, |sum, entry| {
             sum.checked_add(entry.content.as_ref().map_or(0, |bytes| bytes.len() as u64))
                 .ok_or("batch preimage size overflow")
         })?;
-        let mut physical_keys = entries
-            .iter()
-            .flat_map(|entry| {
-                [entry.old_locator.as_ref(), entry.new_locator.as_ref()]
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|locator| locator.opaque_ref.clone())
-            })
-            .collect::<Vec<_>>();
-        physical_keys.sort();
-        physical_keys.dedup();
-        if !physical_keys.is_empty() {
-            action = self
-                .catalog
-                .add_physical_lease_keys(action_id, &physical_keys)?;
-        }
         let start_state = if action.state == ActionState::CaptureFailed {
             ActionState::CaptureFailed
         } else {
             ActionState::Intent
         };
         let mut lease = lease_ids(&action);
-        for entry in &entries {
-            for locator in [entry.old_locator.as_ref(), entry.new_locator.as_ref()]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(opaque_ref) = &locator.opaque_ref {
-                    lease.push(format!("physical:{opaque_ref}"));
-                }
-            }
-        }
         lease.sort();
         lease.dedup();
         self.catalog.acquire_leases(action_id, &lease)?;

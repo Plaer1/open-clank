@@ -31,7 +31,7 @@ fn envelope() -> CaptureEnvelope {
         tool_id: Some("filesystem.write".into()),
         resource_key: key("source"),
         guard_resource_ids: Vec::new(),
-        modified_resource_ids: Vec::new(),
+        modified_resource_ids: vec![key("destination"), key("created")],
         operation: "rename-overwrite".into(),
         expected_revision: None,
         before_revision: None,
@@ -206,6 +206,7 @@ async fn batch_prepare_rejects_foreign_scope_and_inexact_directory_before_lore_w
     directory.resource_type = ResourceType::Directory;
     let mut directory_envelope = envelope();
     directory_envelope.action_id = "batch-dir".into();
+    directory_envelope.modified_resource_ids = vec![directory.resource_key.clone()];
     let error = adapter
         .prepare_batch(directory_envelope, vec![directory])
         .await
@@ -223,6 +224,79 @@ async fn batch_prepare_rejects_foreign_scope_and_inexact_directory_before_lore_w
     );
     coordinator.abort("batch-1").unwrap();
     coordinator.abort("batch-dir").unwrap();
+    coordinator.shutdown_checked().await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_prepare_requires_every_declared_resource_and_ignores_forged_aliases() {
+    let root = tempdir().unwrap();
+    let coordinator = HistoryCoordinator::open(
+        root.path().join("catalog"),
+        root.path().join("lore"),
+        "account",
+    )
+    .await
+    .unwrap();
+    let adapter = CaptureAdapter::new(&coordinator);
+
+    let mut omitted_envelope = envelope();
+    omitted_envelope.action_id = "batch-omitted".into();
+    let error = adapter
+        .prepare_batch(
+            omitted_envelope,
+            vec![entry(
+                "source",
+                "src/a.txt",
+                "src/a.txt",
+                ResourceExistence::Present,
+                Some(b"source-before"),
+            )],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("missing_resource"));
+
+    let mut first_envelope = envelope();
+    first_envelope.action_id = "batch-alias-a".into();
+    first_envelope.resource_key = key("alias-a");
+    first_envelope.modified_resource_ids.clear();
+    let mut first = entry(
+        "alias-a",
+        "a.txt",
+        "a.txt",
+        ResourceExistence::Present,
+        Some(b"a-before"),
+    );
+    first.old_locator.as_mut().unwrap().opaque_ref = Some("forged-shared-alias".into());
+    first.new_locator.as_mut().unwrap().opaque_ref = Some("forged-shared-alias".into());
+    let first_record = adapter
+        .prepare_batch(first_envelope, vec![first])
+        .await
+        .unwrap();
+    assert!(first_record.physical_lease_keys.is_empty());
+
+    let mut second_envelope = envelope();
+    second_envelope.action_id = "batch-alias-b".into();
+    second_envelope.resource_key = key("alias-b");
+    second_envelope.modified_resource_ids.clear();
+    let mut second = entry(
+        "alias-b",
+        "b.txt",
+        "b.txt",
+        ResourceExistence::Present,
+        Some(b"b-before"),
+    );
+    second.old_locator.as_mut().unwrap().opaque_ref = Some("forged-shared-alias".into());
+    second.new_locator.as_mut().unwrap().opaque_ref = Some("forged-shared-alias".into());
+    adapter
+        .prepare_batch(second_envelope, vec![second])
+        .await
+        .expect("a client locator alias must not block another logical resource");
+
+    coordinator.abort("batch-omitted").unwrap();
+    coordinator.abort("batch-alias-a").unwrap();
+    coordinator.abort("batch-alias-b").unwrap();
     coordinator.shutdown_checked().await.unwrap();
 }
 

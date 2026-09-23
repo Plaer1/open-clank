@@ -443,7 +443,7 @@ MAX_FRAME_BYTES = 1024 * 1024
 # Keep inline control frames comfortably below the IPC ceiling. Larger
 # payloads use the service-owned chunk staging protocol; this is a wire-shape
 # threshold, not a file eligibility limit.
-_INLINE_CONTENT_BYTES = 640 * 1024
+_INLINE_CONTENT_BYTES = 512 * 1024
 _STAGE_CHUNK_BYTES = 512 * 1024
 _CREDENTIAL_PROVIDER: Any = None
 
@@ -524,6 +524,7 @@ class HistoryClient:
         wire_entries: list[dict[str, Any]] = []
         staged: list[tuple[str, str]] = []
         action_id = str(envelope.get("action_id") or "")
+        inline_bytes = 0
         try:
             for entry in entries:
                 item = dict(entry)
@@ -535,7 +536,7 @@ class HistoryClient:
                     content = bytes(content)
                     self._check_content(content)
                     fingerprint = str(item.get("fingerprint") or "missing")
-                    if len(content) > _INLINE_CONTENT_BYTES:
+                    if len(content) > _INLINE_CONTENT_BYTES or inline_bytes + len(content) > _INLINE_CONTENT_BYTES:
                         fingerprint = self._canonical_staged_fingerprint(content, fingerprint)
                         upload_id = self._stage_content(action_id, content, fingerprint)
                         staged.append((upload_id, action_id))
@@ -544,6 +545,7 @@ class HistoryClient:
                         item["content"] = None
                     else:
                         item["content"] = self._wire_content(content)
+                        inline_bytes += len(content)
                 wire_entries.append(item)
             response = self._call(
                 {

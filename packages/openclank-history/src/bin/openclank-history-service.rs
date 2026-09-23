@@ -8,8 +8,9 @@ use openclank_history::operations::{
 };
 #[cfg(unix)]
 use openclank_history::protocol::{
-    validate as protocol_validate, validate_control as protocol_validate_control, ControlEnvelope,
-    ProtocolError, RequestEnvelope, ResourceHandle, ServiceRequest, ServiceResponse,
+    validate as protocol_validate, validate_control as protocol_validate_control,
+    BatchPrepareEntry, ControlEnvelope, ProtocolError, RequestEnvelope, ResourceHandle,
+    ServiceRequest, ServiceResponse,
 };
 #[cfg(unix)]
 use openclank_history::registry::{ResourceRegistration, ResourceRegistry};
@@ -347,6 +348,65 @@ fn staged_upload_path(root: &std::path::Path, upload_id: &str) -> std::path::Pat
 fn remove_staged_upload(upload: &StagedUpload, staged_bytes: &std::sync::atomic::AtomicU64) {
     let _ = std::fs::remove_file(&upload.path);
     staged_bytes.fetch_sub(upload.content_length, std::sync::atomic::Ordering::AcqRel);
+}
+
+#[cfg(unix)]
+async fn remove_owned_staged_uploads(
+    staged_uploads: &std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StagedUpload>>>,
+    staged_bytes: &std::sync::atomic::AtomicU64,
+    actor_id: &str,
+    account_id: &str,
+    action_id: &str,
+    upload_ids: &[String],
+) {
+    for upload_id in upload_ids {
+        let upload_lock = {
+            let uploads = staged_uploads.lock().await;
+            uploads.get(upload_id).and_then(|upload| {
+                (upload.actor_id == actor_id
+                    && upload.account_id == account_id
+                    && upload.action_id == action_id)
+                    .then(|| upload.io_lock.clone())
+            })
+        };
+        let Some(upload_lock) = upload_lock else {
+            continue;
+        };
+        let _io_guard = upload_lock.lock().await;
+        let mut uploads = staged_uploads.lock().await;
+        if let Some(upload) = uploads.get(upload_id) {
+            if upload.actor_id == actor_id
+                && upload.account_id == account_id
+                && upload.action_id == action_id
+            {
+                let upload = uploads.remove(upload_id).expect("upload exists");
+                remove_staged_upload(&upload, staged_bytes);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn owned_staged_ids_for_entries(
+    staged_uploads: &std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StagedUpload>>>,
+    entries: &[BatchPrepareEntry],
+    actor_id: &str,
+    account_id: &str,
+    action_id: &str,
+) -> Vec<String> {
+    let uploads = staged_uploads.lock().await;
+    entries
+        .iter()
+        .filter_map(|entry| entry.staged_upload_id.as_ref())
+        .filter(|upload_id| {
+            uploads.get(*upload_id).is_some_and(|upload| {
+                upload.account_id == account_id
+                    && upload.actor_id == actor_id
+                    && upload.action_id == action_id
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(unix)]
@@ -1937,9 +1997,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 code: format!("{error:?}"),
                             },
                         },
-                        Ok(ServiceRequest::PrepareBatch { batch_version, .. })
-                            if batch_version != 1 =>
-                        {
+                        Ok(ServiceRequest::PrepareBatch {
+                            batch_version,
+                            envelope,
+                            entries,
+                        }) if batch_version != 1 => {
+                            if auth_bindings.authenticate(&envelope.auth).is_ok() {
+                                let staged_ids = owned_staged_ids_for_entries(
+                                    &staged_uploads,
+                                    &entries,
+                                    &envelope.auth.actor_id,
+                                    &envelope.auth.account_id,
+                                    &envelope.request.action_id,
+                                )
+                                .await;
+                                remove_owned_staged_uploads(
+                                    &staged_uploads,
+                                    &staged_bytes,
+                                    &envelope.auth.actor_id,
+                                    &envelope.auth.account_id,
+                                    &envelope.request.action_id,
+                                    &staged_ids,
+                                )
+                                .await;
+                            }
                             ServiceResponse::Error {
                                 code: format!(
                                     "unsupported mutation batch version: {batch_version}"
@@ -1949,23 +2030,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         Ok(ServiceRequest::PrepareBatch {
                             envelope, entries, ..
                         }) => {
-                            match auth_bindings
+                            let authenticated = auth_bindings.authenticate(&envelope.auth).is_ok();
+                            let authorization = match auth_bindings
                                 .validate_request_cap(&envelope, "capture")
-                                .and_then(|_| {
+                            {
+                                Err(error) => {
+                                    if authenticated {
+                                        let staged_ids = owned_staged_ids_for_entries(
+                                            &staged_uploads,
+                                            &entries,
+                                            &envelope.auth.actor_id,
+                                            &envelope.auth.account_id,
+                                            &envelope.request.action_id,
+                                        )
+                                        .await;
+                                        remove_owned_staged_uploads(
+                                            &staged_uploads,
+                                            &staged_bytes,
+                                            &envelope.auth.actor_id,
+                                            &envelope.auth.account_id,
+                                            &envelope.request.action_id,
+                                            &staged_ids,
+                                        )
+                                        .await;
+                                    }
+                                    Err(error)
+                                }
+                                Ok(_)
                                     if request_resources_allowed(
                                         &envelope.request,
                                         &envelope.auth.actor_id,
                                         &envelope.auth.account_id,
                                         &grants,
-                                    ) {
-                                        Ok(())
-                                    } else {
-                                        Err(openclank_history::protocol::ProtocolError::AccountMismatch)
-                                    }
-                                }) {
+                                    ) =>
+                                {
+                                    Ok(())
+                                }
+                                Ok(_) => {
+                                    let staged_ids = owned_staged_ids_for_entries(
+                                        &staged_uploads,
+                                        &entries,
+                                        &envelope.auth.actor_id,
+                                        &envelope.auth.account_id,
+                                        &envelope.request.action_id,
+                                    )
+                                    .await;
+                                    remove_owned_staged_uploads(
+                                        &staged_uploads,
+                                        &staged_bytes,
+                                        &envelope.auth.actor_id,
+                                        &envelope.auth.account_id,
+                                        &envelope.request.action_id,
+                                        &staged_ids,
+                                    )
+                                    .await;
+                                    Err(openclank_history::protocol::ProtocolError::AccountMismatch)
+                                }
+                            };
+                            match authorization {
                                 Ok(()) => {
-                                    let bound_error = if entries.is_empty() || entries.len() > MAX_BATCH_RESOURCES {
-                                        Some(format!("mutation batch resource count exceeds {}", MAX_BATCH_RESOURCES))
+                                    let mut staged_ids = owned_staged_ids_for_entries(
+                                        &staged_uploads,
+                                        &entries,
+                                        &envelope.auth.actor_id,
+                                        &envelope.auth.account_id,
+                                        &envelope.request.action_id,
+                                    )
+                                    .await;
+                                    let bound_error = if entries.is_empty()
+                                        || entries.len() > MAX_BATCH_RESOURCES
+                                    {
+                                        Some(format!(
+                                            "mutation batch resource count exceeds {}",
+                                            MAX_BATCH_RESOURCES
+                                        ))
                                     } else {
                                         None
                                     };
@@ -1976,139 +2114,240 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             total.checked_add(bytes.len())
                                         });
                                     let bound_error = bound_error.or_else(|| match inline_bytes {
-                                        None => Some("mutation batch inline byte count overflow".into()),
-                                        Some(total) if total > MAX_BATCH_INLINE_BYTES => Some(
-                                            format!(
+                                        None => {
+                                            Some("mutation batch inline byte count overflow".into())
+                                        }
+                                        Some(total) if total > MAX_BATCH_INLINE_BYTES => {
+                                            Some(format!(
                                                 "mutation batch inline bytes exceed {}",
                                                 MAX_BATCH_INLINE_BYTES
-                                            ),
-                                        ),
+                                            ))
+                                        }
                                         Some(_) => None,
                                     });
                                     if let Some(error) = bound_error {
+                                        remove_owned_staged_uploads(
+                                            &staged_uploads,
+                                            &staged_bytes,
+                                            &envelope.auth.actor_id,
+                                            &envelope.auth.account_id,
+                                            &envelope.request.action_id,
+                                            &staged_ids,
+                                        )
+                                        .await;
                                         ServiceResponse::Error { code: error }
                                     } else {
-                                    let mut inputs = Vec::with_capacity(entries.len());
-                                    let mut staged_error = None;
-                                    let mut staged_ids = Vec::new();
-                                    for entry in entries {
-                                        if entry.content.is_some() && entry.staged_upload_id.is_some() {
-                                            staged_error = Some("batch entry must use inline content or staged content, not both".into());
-                                            break;
-                                        }
-                                        if let Some(expected_len) = entry.coverage.byte_len {
-                                            let actual_len = entry.content.as_ref().map_or(0, Vec::len);
-                                            if entry.staged_upload_id.is_none() && expected_len != actual_len as u64 {
-                                                staged_error = Some("batch coverage byte length does not match inline content".into());
+                                        let mut inputs = Vec::with_capacity(entries.len());
+                                        let mut staged_error = None;
+                                        for entry in entries {
+                                            if entry.content.is_some()
+                                                && entry.staged_upload_id.is_some()
+                                            {
+                                                staged_error = Some("batch entry must use inline content or staged content, not both".into());
                                                 break;
                                             }
-                                        }
-                                        let content = if let Some(upload_id) = entry.staged_upload_id.clone() {
-                                            let staged = staged_uploads.lock().await.get(&upload_id).cloned();
-                                            match staged {
-                                                Some(upload)
-                                                    if upload.account_id == envelope.auth.account_id
-                                                        && upload.actor_id == envelope.auth.actor_id
-                                                        && upload.action_id == envelope.request.action_id
-                                                        && upload.finished
-                                                        && upload.fingerprint == entry.fingerprint =>
+                                            if let Some(expected_len) = entry.coverage.byte_len {
+                                                let actual_len =
+                                                    entry.content.as_ref().map_or(0, Vec::len);
+                                                if entry.staged_upload_id.is_none()
+                                                    && expected_len != actual_len as u64
                                                 {
-                                                    let result = verify_staged_upload(&upload)
-                                                        .and_then(|_| std::fs::read(&upload.path).map_err(|error| error.to_string()));
-                                                    if result.is_ok() {
+                                                    staged_error = Some("batch coverage byte length does not match inline content".into());
+                                                    break;
+                                                }
+                                            }
+                                            let content = if let Some(upload_id) =
+                                                entry.staged_upload_id.clone()
+                                            {
+                                                let staged = staged_uploads
+                                                    .lock()
+                                                    .await
+                                                    .get(&upload_id)
+                                                    .cloned();
+                                                match staged {
+                                                    Some(upload)
+                                                        if upload.account_id
+                                                            == envelope.auth.account_id
+                                                            && upload.actor_id
+                                                                == envelope.auth.actor_id
+                                                            && upload.action_id
+                                                                == envelope.request.action_id =>
+                                                    {
                                                         staged_ids.push(upload_id.clone());
-                                                    }
-                                                    match result {
-                                                        Ok(bytes) => Some(Bytes::from(bytes)),
-                                                        Err(error) => {
-                                                            staged_error = Some(format!("staged batch preimage failed: {error}"));
+                                                        if !upload.finished {
+                                                            staged_error = Some(
+                                                                "staged batch upload is incomplete"
+                                                                    .into(),
+                                                            );
                                                             None
+                                                        } else if upload.fingerprint
+                                                            != entry.fingerprint
+                                                        {
+                                                            staged_error = Some(
+                                                                "staged batch identity or fingerprint mismatch"
+                                                                    .into(),
+                                                            );
+                                                            None
+                                                        } else {
+                                                            let result =
+                                                                verify_staged_upload(&upload)
+                                                                    .and_then(|_| {
+                                                                        std::fs::read(&upload.path)
+                                                                            .map_err(|error| {
+                                                                                error.to_string()
+                                                                            })
+                                                                    });
+                                                            match result {
+                                                                Ok(bytes) => {
+                                                                    Some(Bytes::from(bytes))
+                                                                }
+                                                                Err(error) => {
+                                                                    staged_error = Some(format!("staged batch preimage failed: {error}"));
+                                                                    None
+                                                                }
+                                                            }
                                                         }
                                                     }
+                                                    Some(_) => {
+                                                        staged_error = Some("staged batch identity or fingerprint mismatch".into());
+                                                        None
+                                                    }
+                                                    None => {
+                                                        staged_error = Some(
+                                                            "staged batch upload is unknown".into(),
+                                                        );
+                                                        None
+                                                    }
                                                 }
-                                                Some(_) => {
-                                                    staged_error = Some("staged batch identity or fingerprint mismatch".into());
-                                                    None
-                                                }
-                                                None => {
-                                                    staged_error = Some("staged batch upload is unknown".into());
-                                                    None
+                                            } else {
+                                                entry.content.map(Bytes::from)
+                                            };
+                                            if let Some(expected_len) = entry.coverage.byte_len {
+                                                let actual_len =
+                                                    content.as_ref().map_or(0, |bytes| bytes.len());
+                                                if expected_len != actual_len as u64 {
+                                                    staged_error = Some("batch coverage byte length does not match staged content".into());
                                                 }
                                             }
+                                            if staged_error.is_some() {
+                                                break;
+                                            }
+                                            inputs.push(BatchCaptureInput {
+                                                resource_key: entry.resource_key,
+                                                old_locator: entry.old_locator,
+                                                new_locator: entry.new_locator,
+                                                expected_revision: entry.expected_revision,
+                                                existence: entry.existence,
+                                                resource_type: entry.resource_type,
+                                                metadata: entry.metadata,
+                                                content,
+                                                fingerprint: entry.fingerprint,
+                                                coverage: entry.coverage,
+                                            });
+                                        }
+                                        if let Some(error) = staged_error {
+                                            remove_owned_staged_uploads(
+                                                &staged_uploads,
+                                                &staged_bytes,
+                                                &envelope.auth.actor_id,
+                                                &envelope.auth.account_id,
+                                                &envelope.request.action_id,
+                                                &staged_ids,
+                                            )
+                                            .await;
+                                            ServiceResponse::Error { code: error }
                                         } else {
-                                            entry.content.map(Bytes::from)
-                                        };
-                                        if let Some(expected_len) = entry.coverage.byte_len {
-                                            let actual_len = content.as_ref().map_or(0, |bytes| bytes.len());
-                                            if expected_len != actual_len as u64 {
-                                                staged_error = Some("batch coverage byte length does not match staged content".into());
-                                            }
-                                        }
-                                        if staged_error.is_some() {
-                                            break;
-                                        }
-                                        inputs.push(BatchCaptureInput {
-                                            resource_key: entry.resource_key,
-                                            old_locator: entry.old_locator,
-                                            new_locator: entry.new_locator,
-                                            expected_revision: entry.expected_revision,
-                                            existence: entry.existence,
-                                            resource_type: entry.resource_type,
-                                            metadata: entry.metadata,
-                                            content,
-                                            fingerprint: entry.fingerprint,
-                                            coverage: entry.coverage,
-                                        });
-                                    }
-                                    if let Some(error) = staged_error {
-                                        ServiceResponse::Error { code: error }
-                                    } else {
-                                    match begin(coordinator.catalog(), envelope.request.clone()) {
-                                        Ok(BeginResult::Existing(record))
-                                            if !matches!(
-                                                record.state,
-                                                ActionState::Intent | ActionState::CaptureFailed
-                                            ) => {
-                                                let incoming_digest = batch_capture_digest(&inputs);
-                                                if record.before_capture_digest.as_deref()
-                                                    == Some(incoming_digest.as_str())
+                                            match begin(
+                                                coordinator.catalog(),
+                                                envelope.request.clone(),
+                                            ) {
+                                                Ok(BeginResult::Existing(record))
+                                                    if !matches!(
+                                                        record.state,
+                                                        ActionState::Intent
+                                                            | ActionState::CaptureFailed
+                                                    ) =>
                                                 {
-                                                    for upload_id in staged_ids {
-                                                        if let Some(removed) = staged_uploads.lock().await.remove(&upload_id) {
-                                                            remove_staged_upload(&removed, &staged_bytes);
-                                                        }
-                                                    }
-                                                    ServiceResponse::Action(record)
-                                                } else {
-                                                    ServiceResponse::Error {
+                                                    let incoming_digest =
+                                                        batch_capture_digest(&inputs);
+                                                    if record.before_capture_digest.as_deref()
+                                                        == Some(incoming_digest.as_str())
+                                                    {
+                                                        remove_owned_staged_uploads(
+                                                            &staged_uploads,
+                                                            &staged_bytes,
+                                                            &envelope.auth.actor_id,
+                                                            &envelope.auth.account_id,
+                                                            &envelope.request.action_id,
+                                                            &staged_ids,
+                                                        )
+                                                        .await;
+                                                        ServiceResponse::Action(record)
+                                                    } else {
+                                                        remove_owned_staged_uploads(
+                                                            &staged_uploads,
+                                                            &staged_bytes,
+                                                            &envelope.auth.actor_id,
+                                                            &envelope.auth.account_id,
+                                                            &envelope.request.action_id,
+                                                            &staged_ids,
+                                                        )
+                                                        .await;
+                                                        ServiceResponse::Error {
                                                         code: "history_prepare_conflict: existing batch digest differs".into(),
                                                     }
-                                                }
-                                            },
-                                        Ok(_) => match coordinator
-                                            .capture_batch_before(
-                                                &envelope.request.action_id,
-                                                inputs,
-                                            )
-                                            .await
-                                        {
-                                            Ok(record) => {
-                                                for upload_id in staged_ids {
-                                                    if let Some(removed) = staged_uploads.lock().await.remove(&upload_id) {
-                                                        remove_staged_upload(&removed, &staged_bytes);
                                                     }
                                                 }
-                                                ServiceResponse::Action(record)
-                                            },
-                                            Err(error) => ServiceResponse::Error {
-                                                code: error.to_string(),
-                                            },
-                                        },
-                                        Err(error) => ServiceResponse::Error {
-                                            code: error.to_string(),
-                                        },
-                                    }
-                                    }
+                                                Ok(_) => match coordinator
+                                                    .capture_batch_before(
+                                                        &envelope.request.action_id,
+                                                        inputs,
+                                                    )
+                                                    .await
+                                                {
+                                                    Ok(record) => {
+                                                        remove_owned_staged_uploads(
+                                                            &staged_uploads,
+                                                            &staged_bytes,
+                                                            &envelope.auth.actor_id,
+                                                            &envelope.auth.account_id,
+                                                            &envelope.request.action_id,
+                                                            &staged_ids,
+                                                        )
+                                                        .await;
+                                                        ServiceResponse::Action(record)
+                                                    }
+                                                    Err(error) => {
+                                                        remove_owned_staged_uploads(
+                                                            &staged_uploads,
+                                                            &staged_bytes,
+                                                            &envelope.auth.actor_id,
+                                                            &envelope.auth.account_id,
+                                                            &envelope.request.action_id,
+                                                            &staged_ids,
+                                                        )
+                                                        .await;
+                                                        ServiceResponse::Error {
+                                                            code: error.to_string(),
+                                                        }
+                                                    }
+                                                },
+                                                Err(error) => {
+                                                    remove_owned_staged_uploads(
+                                                        &staged_uploads,
+                                                        &staged_bytes,
+                                                        &envelope.auth.actor_id,
+                                                        &envelope.auth.account_id,
+                                                        &envelope.request.action_id,
+                                                        &staged_ids,
+                                                    )
+                                                    .await;
+                                                    ServiceResponse::Error {
+                                                        code: error.to_string(),
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 Err(error) => ServiceResponse::Error {
