@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 from concurrent.futures import ThreadPoolExecutor
+import json
+import os
 
 import pytest
 
@@ -41,6 +44,37 @@ def _context(tmp_path, client):
         roots=(str(tmp_path),),
         client=client,
     )
+
+
+def test_directory_manifest_embeds_exact_recursive_subtree(tmp_path):
+    root = tmp_path / "tree"
+    nested = root / "nested" / "deeper"
+    nested.mkdir(parents=True)
+    child = nested / "payload.bin"
+    content = b"\x00recursive\xff-bytes"
+    child.write_bytes(content)
+    os.chmod(child, 0o751)
+    mtime_ns = 1_700_000_123_000_000_000
+    os.utime(child, ns=(mtime_ns, mtime_ns))
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    link = root / "alias"
+    try:
+        link.symlink_to("nested/deeper/payload.bin")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    manifest = json.loads(history_capture._directory_manifest(str(root)))
+    entries = {entry["path"]: entry for entry in manifest["entries"]}
+    assert entries["nested"]["type"] == "directory"
+    assert entries["nested/deeper"]["type"] == "directory"
+    assert entries["nested/deeper/payload.bin"]["content"] == base64.b64encode(content).decode("ascii")
+    assert entries["nested/deeper/payload.bin"]["content_encoding"] == "base64"
+    assert entries["nested/deeper/payload.bin"]["size"] == len(content)
+    assert entries["nested/deeper/payload.bin"]["mode"] & 0o777 == 0o751
+    assert entries["nested/deeper/payload.bin"]["mtime_millis"] == mtime_ns // 1_000_000
+    assert entries["alias"]["type"] == "symlink"
+    assert entries["alias"]["target"] == "nested/deeper/payload.bin"
 
 
 def test_atomic_batch_prepares_once_and_completes_one_action(tmp_path):

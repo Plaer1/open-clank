@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import base64
 import hashlib
 import json
 import os
@@ -385,6 +386,8 @@ def _directory_manifest(path: str) -> bytes:
                     "type": "file",
                     "size": len(content),
                     "sha256": hashlib.sha256(content).hexdigest(),
+                    "content": base64.b64encode(content).decode("ascii"),
+                    "content_encoding": "base64",
                 })
             entries.append(record)
     return json.dumps(
