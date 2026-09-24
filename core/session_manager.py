@@ -538,6 +538,9 @@ class SessionManager:
 
             # 1) Archive every currently persisted message BEFORE any
             #    projection mutation. Duplicates are idempotent no-ops.
+            #    Archive commit is a hard gate: if append/tombstone fails the
+            #    mutation aborts and source rows stay intact. Never swallow
+            #    append errors then delete.
             existing_rows = (
                 db.query(DbChatMessage)
                 .filter(DbChatMessage.session_id == session_id)
@@ -567,14 +570,11 @@ class SessionManager:
             #    drop without pruning source.
             now = datetime.now(timezone.utc)
             incoming_existing_ids = set(retained_ids)
-            for row in existing_rows:
-                if row.id not in incoming_existing_ids:
-                    db.delete(row)
-                    self._tombstone_projection_drop(
-                        session_id,
-                        row,
-                        owner=getattr(db_session, "owner", None),
-                    )
+            dropped_rows = [
+                row for row in existing_rows if row.id not in incoming_existing_ids
+            ]
+            for row in dropped_rows:
+                db.delete(row)
             # Flush the projection drops before any insert so the SQL order is
             # DELETE then INSERT (and a crash mid-rewrite cannot leave both the
             # dropped row and its replacement visible).
@@ -632,9 +632,19 @@ class SessionManager:
             db_session.last_accessed = now
             db_session.last_message_at = now
 
+            # 4) Tombstone every projection drop as a commit gate. If any
+            #    tombstone fails, roll back the deletes/rekeys and leave source
+            #    intact (recoverable archive-unavailable).
+            for row in dropped_rows:
+                self._tombstone_projection_drop(
+                    session_id,
+                    row,
+                    owner=getattr(db_session, "owner", None),
+                )
+
             db.commit()
 
-            # 4) Record the active compaction projection against the archive.
+            # 5) Record the active compaction projection against the archive.
             #    Source parts are already archived and remain retrievable.
             self._record_projection(session_id, messages, owner=getattr(db_session, "owner", None))
 
@@ -649,97 +659,174 @@ class SessionManager:
             )
             return True
         except Exception as e:
+            # Archive/tombstone gate failure must not leave a half-applied
+            # projection. Recoverable: source stays intact and the caller can
+            # retry once the archive is back. Other failures keep the prior
+            # False contract (reservation / missing session).
             logger.error("Error replacing session history: %s", e)
             db.rollback()
+            try:
+                from src.openclank.conversation_archive import ArchiveUnavailableError
+            except Exception:
+                return False
+            if isinstance(e, ArchiveUnavailableError):
+                raise
             return False
         finally:
             db.close()
 
-    def _archive_existing_rows(self, session_id: str, rows, *, owner=None) -> None:
-        """Archive persisted chat_messages rows as full ordered source parts."""
-        try:
-            from src.openclank.conversation_archive import SourcePart, get_conversation_archive
-        except Exception:
-            logger.debug("conversation archive unavailable", exc_info=True)
-            return
+    def _row_source_parts(
+        self,
+        session_id: str,
+        row,
+        *,
+        owner=None,
+        event_sequence: int = 0,
+    ) -> list:
+        """Decompose a persisted chat_messages row into ordered source parts.
+
+        Parity with the live ``add_message`` capture path: body + tool_calls +
+        tool_results + owned asset refs (not body+assets only). Tool parts that
+        exist only in row ``meta_data`` are decomposed here so a later
+        ``replace_messages`` cannot drop them outside the archive.
+        """
+        from src.openclank.conversation_archive import SourcePart
+
+        metadata = {}
+        if row.meta_data:
+            try:
+                metadata = json.loads(row.meta_data) or {}
+            except (TypeError, ValueError):
+                metadata = {}
+        event_workspace = getattr(row, "workspace_id", None) or metadata.get("event_workspace")
+        actor_id = str(metadata.get("actor_id") or "main")
+        revision = int(metadata.get("source_revision") or 1)
+        role = str(row.role or "user")
+        now = _now_ms()
         parts = []
-        for index, row in enumerate(rows):
-            metadata = {}
-            if row.meta_data:
-                try:
-                    metadata = json.loads(row.meta_data) or {}
-                except (TypeError, ValueError):
-                    metadata = {}
-            event_workspace = getattr(row, "workspace_id", None) or metadata.get("event_workspace")
+
+        def _part(part_id: str, part_type: str, content, *, part_seq: int, part_revision: int, assets=()):
+            return SourcePart(
+                owner=str(owner or ""),
+                chat_id=str(session_id),
+                actor_id=actor_id,
+                message_id=str(row.id),
+                part_id=str(part_id),
+                revision=int(part_revision),
+                runtime_generation=str(metadata.get("runtime_generation") or "0"),
+                event_sequence=event_sequence * 100 + part_seq,
+                event_workspace=event_workspace,
+                event_project=metadata.get("event_project"),
+                role=role,
+                part_type=part_type,
+                content=content,
+                aliases=(("host_message", str(row.id)),),
+                assets=tuple(assets),
+                time_created=now,
+                time_updated=now,
+            )
+
+        seq = 0
+        parts.append(_part("body", "text", row.content, part_seq=seq, part_revision=revision))
+        seq += 1
+        for index, tool_call in enumerate(metadata.get("tool_calls") or []):
+            if isinstance(tool_call, dict):
+                parts.append(
+                    _part(f"tool_call:{index}", "tool_call", tool_call, part_seq=seq, part_revision=revision)
+                )
+                seq += 1
+        for index, tool_result in enumerate(metadata.get("tool_results") or []):
+            if isinstance(tool_result, dict):
+                parts.append(
+                    _part(f"tool_result:{index}", "tool_result", tool_result, part_seq=seq, part_revision=revision)
+                )
+                seq += 1
+        for ref_index, ref in enumerate(attachment_refs_from_metadata(metadata)):
+            asset_spec = {
+                "asset_id": ref.get("attachment_id") or ref.get("id") or "",
+                "content_hash": ref.get("checksum_sha256"),
+                "mime_type": ref.get("mime"),
+                "byte_size": ref.get("size"),
+                "provenance": {"source": "host_upload", "name": ref.get("name")},
+            }
             parts.append(
-                SourcePart(
-                    owner=str(owner or ""),
-                    chat_id=str(session_id),
-                    actor_id=str(metadata.get("actor_id") or "main"),
-                    message_id=str(row.id),
-                    part_id="body",
-                    revision=int(metadata.get("source_revision") or 1),
-                    runtime_generation=str(metadata.get("runtime_generation") or "0"),
-                    event_sequence=index,
-                    event_workspace=event_workspace,
-                    event_project=metadata.get("event_project"),
-                    role=str(row.role or "user"),
-                    part_type="text",
-                    content=row.content,
-                    aliases=(("host_message", str(row.id)),),
-                    time_created=_now_ms(),
-                    time_updated=_now_ms(),
+                _part(
+                    f"asset:{ref_index}",
+                    "asset_refs",
+                    ref,
+                    part_seq=seq,
+                    part_revision=1,
+                    assets=(asset_spec,),
                 )
             )
-            for ref_index, ref in enumerate(attachment_refs_from_metadata(metadata)):
-                parts.append(
-                    SourcePart(
-                        owner=str(owner or ""),
-                        chat_id=str(session_id),
-                        actor_id=str(metadata.get("actor_id") or "main"),
-                        message_id=str(row.id),
-                        part_id=f"asset:{ref_index}",
-                        revision=1,
-                        event_sequence=index * 100 + ref_index,
-                        role=str(row.role or "user"),
-                        part_type="asset_refs",
-                        content=ref,
-                        assets=(
-                            {
-                                "asset_id": ref.get("attachment_id") or ref.get("id") or "",
-                                "content_hash": ref.get("checksum_sha256"),
-                                "mime_type": ref.get("mime"),
-                                "byte_size": ref.get("size"),
-                                "provenance": {"source": "host_upload", "name": ref.get("name")},
-                            },
-                        ),
-                        aliases=(("host_message", str(row.id)),),
-                        time_created=_now_ms(),
-                        time_updated=_now_ms(),
-                    )
-                )
+            seq += 1
+        return parts
+
+    def _archive_existing_rows(self, session_id: str, rows, *, owner=None) -> None:
+        """Archive persisted chat_messages rows as full ordered source parts.
+
+        Raises ``ArchiveUnavailableError`` on any append failure so
+        ``replace_messages`` can refuse to prune projection rows.
+        """
+        try:
+            from src.openclank.conversation_archive import ArchiveUnavailableError, get_conversation_archive
+        except Exception as exc:
+            logger.debug("conversation archive unavailable", exc_info=True)
+            raise ArchiveUnavailableError(message=f"archive import failed: {exc}") from exc
+        parts = []
+        for index, row in enumerate(rows):
+            parts.extend(
+                self._row_source_parts(session_id, row, owner=owner, event_sequence=index)
+            )
         if not parts:
             return
         try:
             get_conversation_archive().append_parts(parts)
-        except Exception:
+        except Exception as exc:
             logger.warning("conversation archive backfill failed", exc_info=True)
+            raise ArchiveUnavailableError(message=f"archive append failed: {exc}") from exc
 
     def _tombstone_projection_drop(self, session_id: str, row, *, owner=None) -> None:
-        """Version a projection drop through the archive; never prune source."""
+        """Version a projection drop through the archive; never prune source.
+
+        Uses the row's real ``actor_id`` (not hardcoded ``"main"``). Raises
+        ``ArchiveUnavailableError`` on failure so the projection rewrite can
+        roll back instead of committing an untombstoned drop.
+        """
         try:
-            from src.openclank.conversation_archive import get_conversation_archive
-            get_conversation_archive().tombstone_part(
-                owner=str(owner or ""),
-                chat_id=str(session_id),
-                actor_id="main",
-                message_id=str(row.id),
-                part_id="body",
-                revision=1,
-                reason="projection_drop",
-            )
-        except Exception:
+            from src.openclank.conversation_archive import ArchiveUnavailableError, get_conversation_archive
+        except Exception as exc:
+            raise ArchiveUnavailableError(message=f"archive import failed: {exc}") from exc
+        try:
+            metadata = {}
+            if getattr(row, "meta_data", None):
+                try:
+                    metadata = json.loads(row.meta_data) or {}
+                except (TypeError, ValueError):
+                    metadata = {}
+            actor_id = str(metadata.get("actor_id") or "main")
+            archive = get_conversation_archive()
+            # Tombstone every part identity this row would have archived so a
+            # drop cannot leave tool parts without a version record.
+            for part in self._row_source_parts(session_id, row, owner=owner):
+                result = archive.tombstone_part(
+                    owner=str(owner or ""),
+                    chat_id=str(session_id),
+                    actor_id=actor_id,
+                    message_id=str(row.id),
+                    part_id=part.part_id,
+                    revision=part.revision,
+                    reason="projection_drop",
+                )
+                if not result.get("ok") and result.get("error") != "not_found":
+                    raise ArchiveUnavailableError(
+                        message=f"projection drop tombstone failed: {result.get('error')}"
+                    )
+        except ArchiveUnavailableError:
+            raise
+        except Exception as exc:
             logger.debug("projection drop tombstone failed", exc_info=True)
+            raise ArchiveUnavailableError(message=f"projection drop tombstone failed: {exc}") from exc
 
     def _record_projection(self, session_id: str, messages: list, *, owner=None) -> None:
         """Record an active-context compaction projection for the archive."""

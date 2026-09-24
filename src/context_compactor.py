@@ -324,6 +324,30 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
     return result
 
 
+def session_has_persistent_engine(session) -> bool:
+    """True when a persistent ACP engine compactor is the sole owner.
+
+    Binds on the actual protocol (``model_target.transport == "acp"`` /
+    managed engine URLs), never on missing ``core.models.Session`` attributes
+    (``has_persistent_engine`` / ``mimo_session_id`` / ``transport``) or UI
+    mode labels. Finite/plain host contexts return False and keep host
+    compaction.
+    """
+    endpoint_url = str(getattr(session, "endpoint_url", "") or "").strip()
+    if endpoint_url.startswith("mimo://") or endpoint_url.startswith("openclank://"):
+        return True
+    try:
+        from src.endpoint_resolver import resolve_model_target
+
+        target = resolve_model_target(
+            endpoint_url=endpoint_url,
+            model=getattr(session, "model", None),
+        )
+        return target.transport == "acp"
+    except Exception:
+        return False
+
+
 async def maybe_compact(
     session,
     endpoint_url: str,
@@ -492,7 +516,18 @@ def _update_session_history(session, split_point: int, summary: str,
         manager = None
     if manager and getattr(session, "id", None):
         # Projection writer: archives source, preserves retained IDs, never
-        # rekeys original history identity.
-        if manager.replace_messages(session.id, new_history):
+        # rekeys original history identity. Archive-unavailable raises
+        # recoverable and aborts — never fall through to an in-memory rewrite
+        # that would look like a successful compaction.
+        from src.openclank.conversation_archive import ArchiveUnavailableError
+
+        try:
+            if manager.replace_messages(session.id, new_history):
+                return
+        except ArchiveUnavailableError:
+            logger.warning(
+                "active projection write aborted; archive unavailable for %s",
+                getattr(session, "id", None),
+            )
             return
     session.history = new_history

@@ -1303,11 +1303,11 @@ def setup_session_routes(
             raise HTTPException(404, f"Session {session_id} not found")
 
         # Protocol binding, not UI mode: a session with a persistent engine
-        # conversation is owned by MiMo's compactor.
-        if getattr(session, "has_persistent_engine", False) or (
-            getattr(session, "mimo_session_id", None)
-            and getattr(session, "transport", None) == "acp"
-        ):
+        # conversation is owned by MiMo's compactor. Use the real ACP binding
+        # (model_target.transport), not missing Session attrs.
+        from src.context_compactor import session_has_persistent_engine
+
+        if session_has_persistent_engine(session):
             raise HTTPException(
                 409,
                 "Persistent ACP sessions compact through the engine "
@@ -1387,7 +1387,18 @@ def setup_session_routes(
             },
         )
         new_history = [summary_msg] + recent
-        if not session_manager.replace_messages(session_id, new_history):
+        try:
+            replaced = session_manager.replace_messages(session_id, new_history)
+        except Exception as exc:
+            from src.openclank.conversation_archive import ArchiveUnavailableError
+
+            if isinstance(exc, ArchiveUnavailableError):
+                raise HTTPException(
+                    503,
+                    "conversation archive unavailable; history unchanged",
+                ) from exc
+            raise
+        if not replaced:
             raise HTTPException(500, "Failed to save compacted history")
 
         return {

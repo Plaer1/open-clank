@@ -1,8 +1,8 @@
 import { Context, Effect, Layer } from "effect"
 import { and, asc, desc, eq, sql } from "drizzle-orm"
 import { Database } from "../storage"
-import { MessageTable, PartTable } from "../session/session.sql"
-import type { MessageID, PartID } from "../session/schema"
+import { MessageTable, PartTable, SessionTable } from "../session/session.sql"
+import type { MessageID, PartID, SessionID } from "../session/schema"
 import { Config } from "../config"
 import { Bus } from "../bus"
 import { Instance } from "../project/instance"
@@ -71,6 +71,7 @@ export interface Interface {
   }) => Effect.Effect<SearchHit[]>
 
   readonly around: (input: {
+    session_id: string
     message_id: string
     before?: number
     after?: number
@@ -78,6 +79,7 @@ export interface Interface {
 
   /** Full-part get. Reads the canonical part body, not an FTS preview. */
   readonly get: (input: {
+    session_id: string
     message_id: string
     part_id: string
     length?: number
@@ -86,6 +88,7 @@ export interface Interface {
 
   /** Explicit single-attachment locator metadata (owned assets only). */
   readonly media: (input: {
+    session_id: string
     message_id: string
     part_id: string
   }) => Effect.Effect<FullPart["attachments"]>
@@ -94,6 +97,52 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/History") {}
 
 const HARD_CAP = 50
+
+/** Code-point-safe UTF-16 paging. Never splits a surrogate pair. */
+function pageUtf16(
+  raw: string,
+  offset: number,
+  budget: number,
+): { text: string; consumed: number; hasMore: boolean } {
+  const skip = Math.max(0, offset)
+  const limit = Math.max(0, budget)
+  let index = 0
+  let skipped = 0
+  while (index < raw.length && skipped < skip) {
+    const cp = raw.codePointAt(index)!
+    const size = cp > 0xffff ? 2 : 1
+    // A skip cursor that lands mid-pair snaps to the pair start (never begins
+    // a slice on a lone surrogate).
+    if (skipped + size > skip) break
+    skipped += size
+    index += size
+  }
+  let end = index
+  let taken = 0
+  while (end < raw.length && taken < limit) {
+    const cp = raw.codePointAt(end)!
+    const size = cp > 0xffff ? 2 : 1
+    if (taken + size > limit) break
+    taken += size
+    end += size
+  }
+  // Guarantee forward progress and whole code points: a budget that cannot
+  // hold the next char still returns that char, never a lone surrogate.
+  if (taken === 0 && index < raw.length) {
+    const cp = raw.codePointAt(index)!
+    const size = cp > 0xffff ? 2 : 1
+    return {
+      text: raw.slice(index, index + size),
+      consumed: size,
+      hasMore: index + size < raw.length,
+    }
+  }
+  return {
+    text: raw.slice(index, end),
+    consumed: taken,
+    hasMore: end < raw.length,
+  }
+}
 
 type Row = {
   part_id: string
@@ -184,6 +233,8 @@ export const layer = Layer.effect(
     const around = Effect.fn("History.around")(function* (input: Parameters<Interface["around"]>[0]) {
       const before = input.before ?? 5
       const after = input.after ?? 5
+      // Scope the anchor to the caller's authorized session/project. Guessed
+      // ids from another chat must not bypass scope through around/get.
       const anchor = Database.use((db) =>
         db
           .select({
@@ -192,7 +243,14 @@ export const layer = Layer.effect(
             time_created: MessageTable.time_created,
           })
           .from(MessageTable)
-          .where(eq(MessageTable.id, input.message_id as MessageID))
+          .innerJoin(SessionTable, eq(MessageTable.session_id, SessionTable.id))
+          .where(
+            and(
+              eq(MessageTable.id, input.message_id as MessageID),
+              eq(MessageTable.session_id, input.session_id as SessionID),
+              eq(SessionTable.project_id, Instance.project.id),
+            ),
+          )
           .get(),
       )
       if (!anchor) return { session_id: "", messages: [] }
@@ -287,24 +345,35 @@ export const layer = Layer.effect(
       return { session_id: anchor.session_id, messages: out }
     })
 
-    // Full-part get: canonical body with UTF-16 paging. Never returns an FTS
-    // preview. Media-safe: attachment bytes are not inlined.
+    // Full-part get: canonical body with code-point-safe UTF-16 paging. Never
+    // returns an FTS preview. Media-safe: attachment bytes are not inlined.
+    // Reads are scoped to the caller's authorized chat/session/owner.
     const GET_LENGTH_MAX = 8000
     const get = Effect.fn("History.get")(function* (input: Parameters<Interface["get"]>[0]) {
       const row = Database.use((db) =>
         db
-          .select()
+          .select({
+            id: PartTable.id,
+            message_id: PartTable.message_id,
+            session_id: PartTable.session_id,
+            data: PartTable.data,
+            time_created: PartTable.time_created,
+          })
           .from(PartTable)
+          .innerJoin(SessionTable, eq(PartTable.session_id, SessionTable.id))
           .where(
             and(
               eq(PartTable.message_id, input.message_id as MessageID),
               eq(PartTable.id, input.part_id as PartID),
+              eq(PartTable.session_id, input.session_id as SessionID),
+              eq(SessionTable.project_id, Instance.project.id),
             ),
           )
           .get(),
       )
       if (!row) return null
-      const d = row.data as {
+      const partRow = row
+      const d = partRow.data as {
         type: string
         text?: string
         tool?: string
@@ -324,37 +393,41 @@ export const layer = Layer.effect(
             : JSON.stringify(d)
       const budget = Math.min(input.length ?? GET_LENGTH_MAX, GET_LENGTH_MAX)
       const offset = Math.max(0, input.offset ?? 0)
-      // Python/JS string slicing is code-point safe; surrogate pairs stay whole.
-      const slice = raw.slice(offset, offset + budget)
-      const hasMore = offset + slice.length < raw.length
+      // Code-point-safe: never slice a surrogate pair in half.
+      const page = pageUtf16(raw, offset, budget)
       const attachments: FullPart["attachments"] = []
       if (d.type === "file") {
         attachments.push({
-          asset_id: row.id,
+          // Owned attachment identity from the part payload (not the part id).
+          asset_id: d.filename ?? d.url ?? String(partRow.id),
           mime_type: d.mime ?? null,
           filename: d.filename ?? null,
-          byte_size: raw.length,
+          byte_size: Buffer.byteLength(raw, "utf8"),
         })
       }
       const role: FullPart["role"] =
-        (row.data as { role?: "user" | "assistant" })?.role === "user" ? "user" : "assistant"
+        (partRow.data as { role?: "user" | "assistant" })?.role === "user" ? "user" : "assistant"
       return {
-        part_id: String(row.id),
-        message_id: String(row.message_id),
-        session_id: String(row.session_id),
+        part_id: String(partRow.id),
+        message_id: String(partRow.message_id),
+        session_id: String(partRow.session_id),
         type: d.type,
         role,
         tool_name: d.type === "tool" ? (d.tool ?? null) : null,
-        text: slice,
-        has_more: hasMore,
-        next_offset: hasMore ? offset + slice.length : null,
+        text: page.text,
+        has_more: page.hasMore,
+        next_offset: page.hasMore ? offset + page.consumed : null,
         attachments,
-        time_created: 0,
+        time_created: Number(partRow.time_created ?? 0),
       }
     })
 
     const media = Effect.fn("History.media")(function* (input: Parameters<Interface["media"]>[0]) {
-      const part = yield* get({ message_id: input.message_id, part_id: input.part_id })
+      const part = yield* get({
+        session_id: input.session_id,
+        message_id: input.message_id,
+        part_id: input.part_id,
+      })
       return part?.attachments ?? []
     })
 

@@ -831,3 +831,241 @@ def test_old_id_aliases_preserved(archive):
     assert host["message_id"] == "new-msg-1"
     assert engine["message_id"] == "new-msg-1"
     assert engine["part_id"] == "body"
+
+
+# ---------------------------------------------------------------------------
+# 8. Cross-review blockers (1900bc20): archive gate, ACP manual refusal,
+#    tool-part capture on the replace_messages archive path.
+# ---------------------------------------------------------------------------
+
+
+def test_replace_messages_archive_failure_blocks_delete(manager_db):
+    """Archive append failure must abort the mutation and leave source intact."""
+    from src.openclank.conversation_archive import ArchiveUnavailableError
+
+    manager, SessionLocal, engine, archive_path = manager_db
+    session_id = _seed_session(SessionLocal)
+    original_id = "orig-stable-archive-fail"
+    _seed_messages(
+        SessionLocal,
+        session_id,
+        [(original_id, "user", "keep this", {"source": "before"})],
+    )
+    session = manager.get_session(session_id)
+    incoming = [
+        ChatMessage(role="system", content="[Conversation summary]\nsummary", metadata={"compacted": True})
+    ]
+
+    def _fail_append(parts, **kwargs):
+        raise RuntimeError("archive db down")
+
+    archive = get_conversation_archive()
+    original_append = archive.append_parts
+    archive.append_parts = _fail_append
+    try:
+        with pytest.raises(ArchiveUnavailableError):
+            manager.replace_messages(session_id, incoming)
+    finally:
+        archive.append_parts = original_append
+
+    db = SessionLocal()
+    try:
+        rows = [r.id for r in db.query(cdb.ChatMessage).filter(cdb.ChatMessage.session_id == session_id)]
+    finally:
+        db.close()
+    assert rows == [original_id], "projection delete ran despite archive failure"
+    assert [m for m in session.history if getattr(m, "metadata", {}) and m.metadata.get("_db_id") == original_id]
+
+
+def test_replace_messages_tombstone_failure_blocks_delete(manager_db):
+    """Tombstone failure must abort the mutation and leave source intact."""
+    from src.openclank.conversation_archive import ArchiveUnavailableError
+
+    manager, SessionLocal, engine, archive_path = manager_db
+    session_id = _seed_session(SessionLocal)
+    original_id = "orig-stable-tombstone-fail"
+    _seed_messages(
+        SessionLocal,
+        session_id,
+        [(original_id, "user", "keep this", {"source": "before"})],
+    )
+    session = manager.get_session(session_id)
+    incoming = [
+        ChatMessage(role="system", content="[Conversation summary]\nsummary", metadata={"compacted": True})
+    ]
+
+    def _fail_tombstone(**kwargs):
+        raise RuntimeError("tombstone store down")
+
+    archive = get_conversation_archive()
+    original_tombstone = archive.tombstone_part
+    archive.tombstone_part = _fail_tombstone
+    try:
+        with pytest.raises(ArchiveUnavailableError):
+            manager.replace_messages(session_id, incoming)
+    finally:
+        archive.tombstone_part = original_tombstone
+
+    db = SessionLocal()
+    try:
+        rows = [r.id for r in db.query(cdb.ChatMessage).filter(cdb.ChatMessage.session_id == session_id)]
+    finally:
+        db.close()
+    assert rows == [original_id], "projection delete ran despite tombstone failure"
+
+
+def test_replace_messages_archives_tool_parts_not_just_body(manager_db):
+    """replace_messages archive path must capture tool_calls/tool_results."""
+    manager, SessionLocal, engine, archive_path = manager_db
+    session_id = _seed_session(SessionLocal)
+    original_id = f"orig-tools-{uuid.uuid4().hex}"
+    _seed_messages(
+        SessionLocal,
+        session_id,
+        [
+            (
+                original_id,
+                "assistant",
+                "calling tools",
+                {
+                    "actor_id": "worker-1",
+                    "tool_calls": [{"name": "read", "id": "c1"}],
+                    "tool_results": [{"tool_call_id": "c1", "output": "file contents"}],
+                    "attachments": [{"attachment_id": "att-1", "name": "a.png", "mime": "image/png"}],
+                },
+            ),
+        ],
+    )
+    session = manager.get_session(session_id)
+    incoming = [
+        ChatMessage(role="system", content="[Conversation summary]\nsummary", metadata={"compacted": True})
+    ]
+    assert manager.replace_messages(session_id, incoming) is True
+
+    archive = ConversationArchive(db_path=str(archive_path))
+    for part_id, expected in (
+        ("body", "calling tools"),
+        ("tool_call:0", {"name": "read", "id": "c1"}),
+        ("tool_result:0", {"tool_call_id": "c1", "output": "file contents"}),
+    ):
+        got = archive.get_part(
+            owner="alice",
+            chat_id=session_id,
+            actor_id="worker-1",
+            message_id=original_id,
+            part_id=part_id,
+        )
+        assert got["ok"] is True, f"source part {part_id} missing after replace_messages"
+        if isinstance(expected, str):
+            assert got["part"]["text"] == expected
+    # Assets ride the row as asset refs.
+    got_assets = archive.get_part(
+        owner="alice",
+        chat_id=session_id,
+        actor_id="worker-1",
+        message_id=original_id,
+        part_id="asset:0",
+    )
+    assert got_assets["ok"] is True
+    # Tombstone used the row's real actor_id, not hardcoded "main".
+    got_body = archive.get_part(
+        owner="alice",
+        chat_id=session_id,
+        actor_id="worker-1",
+        message_id=original_id,
+        part_id="body",
+    )
+    assert got_body["part"]["tombstone"] is True
+    assert got_body["part"]["actor_id"] == "worker-1"
+
+
+def test_manual_compact_routes_refuse_persistent_acp(monkeypatch):
+    """Both host manual compact routes must 409 when MiMo owns compaction."""
+    from types import SimpleNamespace
+
+    from fastapi import APIRouter, FastAPI
+    from fastapi.testclient import TestClient
+
+    import routes.history.history_routes as history_routes
+    import routes.session_routes as session_routes
+    from src.context_compactor import session_has_persistent_engine
+
+    class _FakeQuery:
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return SimpleNamespace(message_count=0, updated_at=None)
+
+    class _FakeDb:
+        def query(self, model):
+            return _FakeQuery()
+
+        def close(self):
+            pass
+
+    class _FakeManager:
+        def __init__(self, session):
+            self.session = session
+
+        def get_session(self, session_id):
+            return self.session
+
+        def replace_messages(self, session_id, messages):  # pragma: no cover - must not run
+            raise AssertionError("host compact must not rewrite ACP sessions")
+
+        def save_sessions(self):  # pragma: no cover
+            pass
+
+    acp_session = SimpleNamespace(
+        id="session-acp",
+        name="ACP",
+        endpoint_url="mimo://acp",
+        model="conn/model",
+        headers={},
+        owner="alice",
+        history=[ChatMessage(role="user", content=f"m{i}") for i in range(8)],
+        message_count=8,
+        get_context_messages=lambda: [{"role": "user", "content": "m"}] * 8,
+    )
+    assert session_has_persistent_engine(acp_session) is True
+
+    finite_session = SimpleNamespace(
+        id="session-finite",
+        name="Finite",
+        endpoint_url="http://localhost:11434",
+        model="llama",
+        headers={},
+        owner="alice",
+        history=[ChatMessage(role="user", content=f"m{i}") for i in range(8)],
+        message_count=8,
+        get_context_messages=lambda: [{"role": "user", "content": "m"}] * 8,
+    )
+    assert session_has_persistent_engine(finite_session) is False
+
+    manager = _FakeManager(acp_session)
+    monkeypatch.setattr(
+        session_routes,
+        "router",
+        APIRouter(prefix="/api", tags=["sessions"]),
+    )
+    monkeypatch.setattr(session_routes, "_verify_session_owner", lambda request, session_id: None)
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda request, session_id: None)
+    monkeypatch.setattr(history_routes, "SessionLocal", lambda: _FakeDb())
+    monkeypatch.setattr(session_routes, "SessionLocal", lambda: _FakeDb())
+    import src.agent_runs as agent_runs
+
+    monkeypatch.setattr(agent_runs, "is_active", lambda session_id: False)
+
+    # Each host compact route is registered alone so both are actually hit
+    # (they share the /api/session/{id}/compact path).
+    for label, include in (
+        ("session_routes", lambda app: app.include_router(session_routes.setup_session_routes(manager, {}))),
+        ("history_routes", lambda app: app.include_router(history_routes.setup_history_routes(manager))),
+    ):
+        app = FastAPI()
+        include(app)
+        response = TestClient(app).post("/api/session/session-acp/compact")
+        assert response.status_code == 409, f"{label} must refuse ACP compact"
+        assert "Persistent ACP" in response.text, label
+        assert len(manager.session.history) == 8, label

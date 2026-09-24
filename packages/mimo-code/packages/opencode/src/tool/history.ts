@@ -107,6 +107,7 @@ export const HistoryTool = Tool.define(
               }
             }
             const part = yield* history.get({
+              session_id: ctx.sessionID,
               message_id: args.message_id,
               part_id: args.part_id,
               length: args.length,
@@ -137,6 +138,7 @@ export const HistoryTool = Tool.define(
               }
             }
             const attachments = yield* history.media({
+              session_id: ctx.sessionID,
               message_id: args.message_id,
               part_id: args.part_id,
             })
@@ -168,6 +170,7 @@ export const HistoryTool = Tool.define(
             }
           }
           const around = yield* history.around({
+            session_id: ctx.sessionID,
             message_id: args.message_id,
             before: args.before,
             after: args.after,

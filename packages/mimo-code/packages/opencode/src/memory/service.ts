@@ -1,4 +1,5 @@
 import { Context, Effect, Layer } from "effect"
+import { RecoverableError } from "@/tool/recoverable"
 import path from "path"
 import os from "os"
 import { Global } from "../global"
@@ -293,8 +294,17 @@ export const defaultLayer = Layer.suspend(() =>
             // (see search below). Kept as a local only for the standalone
             // branch above; managed callers use the Frankenmemory surface.
             void scope
+            // Managed Frankenmemory is the single retrieval surface. On shared-
+            // service failure return recoverable-unavailable (never a silent
+            // empty success and never an unscoped native fallback).
             const fmRows = yield* selected.search(input).pipe(
-              Effect.catchCause(() => Effect.succeed([] as SearchRow[])),
+              Effect.catchCause((cause) =>
+                Effect.die(
+                  new RecoverableError(
+                    `frankenmemory search unavailable: ${String(cause)}`,
+                  ),
+                ),
+              ),
             )
 
             // Managed Frankenmemory is the single retrieval/admission surface.

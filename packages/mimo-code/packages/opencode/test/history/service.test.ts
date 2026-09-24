@@ -151,12 +151,12 @@ describe("History.around", () => {
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const now = Date.now()
+        const projectId = Instance.project.id
         Database.use((db) => {
-          db.insert(ProjectTable).values({ id: "p", worktree: "/tmp", sandboxes: [] as any, time_created: now, time_updated: now } as any).run()
           db.insert(SessionTable)
             .values({
               id: "ses_a" as any,
-              project_id: "p" as any,
+              project_id: projectId as any,
               slug: "x",
               directory: "/tmp",
               title: "t",
@@ -190,7 +190,7 @@ describe("History.around", () => {
         })
 
         const svc = yield* History.Service
-        const ctx = yield* svc.around({ message_id: "m2", before: 1, after: 1 })
+        const ctx = yield* svc.around({ session_id: "ses_a", message_id: "m2", before: 1, after: 1 })
         expect(ctx.session_id).toBe("ses_a")
         expect(ctx.messages.map((m) => m.message_id)).toEqual(["m1", "m2", "m3"])
         expect(ctx.messages.find((m) => m.matched)?.message_id).toBe("m2")
@@ -202,8 +202,240 @@ describe("History.around", () => {
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const svc = yield* History.Service
-        const ctx = yield* svc.around({ message_id: "nope" })
+        const ctx = yield* svc.around({ session_id: "ses_a", message_id: "nope" })
         expect(ctx.messages).toEqual([])
+      }),
+    ),
+  )
+
+  it.live("guessed ids from another session do not bypass scope", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const now = Date.now()
+        const projectId = Instance.project.id
+        Database.use((db) => {
+          db.insert(SessionTable)
+            .values({
+              id: "ses_owner" as any,
+              project_id: projectId as any,
+              slug: "own",
+              directory: "/tmp",
+              title: "own",
+              version: "1",
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+          db.insert(SessionTable)
+            .values({
+              id: "ses_other" as any,
+              project_id: projectId as any,
+              slug: "other",
+              directory: "/tmp",
+              title: "other",
+              version: "1",
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+          db.insert(MessageTable)
+            .values({
+              id: "m_foreign" as any,
+              session_id: "ses_other" as any,
+              agent_id: "main",
+              data: { role: "user" } as any,
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+          db.insert(PartTable)
+            .values({
+              id: "p_foreign" as any,
+              message_id: "m_foreign" as any,
+              session_id: "ses_other" as any,
+              data: { type: "text", text: "secret" } as any,
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+        })
+
+        const svc = yield* History.Service
+        const scoped = yield* svc.around({
+          session_id: "ses_owner",
+          message_id: "m_foreign",
+        })
+        expect(scoped.messages).toEqual([])
+        const got = yield* svc.get({
+          session_id: "ses_owner",
+          message_id: "m_foreign",
+          part_id: "p_foreign",
+        })
+        expect(got).toBeNull()
+        const media = yield* svc.media({
+          session_id: "ses_owner",
+          message_id: "m_foreign",
+          part_id: "p_foreign",
+        })
+        expect(media).toEqual([])
+      }),
+    ),
+  )
+})
+
+describe("History.get", () => {
+  it.live("pages without splitting surrogate pairs", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const now = Date.now()
+        const projectId = Instance.project.id
+        const text = "a😀b"
+        Database.use((db) => {
+          db.insert(SessionTable)
+            .values({
+              id: "ses_a" as any,
+              project_id: projectId as any,
+              slug: "x",
+              directory: "/tmp",
+              title: "t",
+              version: "1",
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+          db.insert(MessageTable)
+            .values({
+              id: "m0" as any,
+              session_id: "ses_a" as any,
+              agent_id: "main",
+              data: { role: "user" } as any,
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+          db.insert(PartTable)
+            .values({
+              id: "p0" as any,
+              message_id: "m0" as any,
+              session_id: "ses_a" as any,
+              data: { type: "text", text } as any,
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+        })
+
+        const svc = yield* History.Service
+        // offset=2 lands mid-pair under UTF-16 slicing ("a" + lone \ude00).
+        // Code-point-safe paging must return the whole emoji, never a lone
+        // surrogate.
+        const mid = yield* svc.get({
+          session_id: "ses_a",
+          message_id: "m0",
+          part_id: "p0",
+          offset: 2,
+          length: 8000,
+        })
+        expect(mid).not.toBeNull()
+        expect(mid!.text.startsWith("😀")).toBe(true)
+        expect(mid!.text.codePointAt(0)).toBe(0x1f600)
+        expect(mid!.text).not.toContain("\ude00")
+
+        // Budget of 1 UTF-16 unit cannot hold the pair; still never emit a
+        // lone surrogate (whole code point wins over the budget).
+        const clipped = yield* svc.get({
+          session_id: "ses_a",
+          message_id: "m0",
+          part_id: "p0",
+          offset: 0,
+          length: 1,
+        })
+        expect(clipped!.text).toBe("a")
+        expect(clipped!.has_more).toBe(true)
+
+        const emojiPage = yield* svc.get({
+          session_id: "ses_a",
+          message_id: "m0",
+          part_id: "p0",
+          offset: 1,
+          length: 1,
+        })
+        expect(emojiPage!.text).toBe("😀")
+        expect(emojiPage!.text.codePointAt(0)).toBe(0x1f600)
+
+        const full = yield* svc.get({
+          session_id: "ses_a",
+          message_id: "m0",
+          part_id: "p0",
+        })
+        expect(full!.text).toBe(text)
+        expect(full!.has_more).toBe(false)
+        expect(full!.time_created).toBe(now)
+      }),
+    ),
+  )
+
+  it.live("scoped get rejects foreign ids", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const now = Date.now()
+        const projectId = Instance.project.id
+        Database.use((db) => {
+          db.insert(SessionTable)
+            .values({
+              id: "ses_a" as any,
+              project_id: projectId as any,
+              slug: "x",
+              directory: "/tmp",
+              title: "t",
+              version: "1",
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+          db.insert(MessageTable)
+            .values({
+              id: "m0" as any,
+              session_id: "ses_a" as any,
+              agent_id: "main",
+              data: { role: "user" } as any,
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+          db.insert(PartTable)
+            .values({
+              id: "p0" as any,
+              message_id: "m0" as any,
+              session_id: "ses_a" as any,
+              data: { type: "text", text: "hello" } as any,
+              time_created: now,
+              time_updated: now,
+            })
+            .run()
+        })
+
+        const svc = yield* History.Service
+        const ok = yield* svc.get({
+          session_id: "ses_a",
+          message_id: "m0",
+          part_id: "p0",
+        })
+        expect(ok?.text).toBe("hello")
+
+        const wrongSession = yield* svc.get({
+          session_id: "ses_b",
+          message_id: "m0",
+          part_id: "p0",
+        })
+        expect(wrongSession).toBeNull()
+
+        const wrongPart = yield* svc.get({
+          session_id: "ses_a",
+          message_id: "m0",
+          part_id: "p_guess",
+        })
+        expect(wrongPart).toBeNull()
       }),
     ),
   )

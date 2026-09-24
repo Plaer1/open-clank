@@ -781,13 +781,27 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
     async def compact_session(request: Request, session_id: str):
         """Manually trigger context compaction for a session."""
         _verify_session_owner(request, session_id)
-        await _prepare_context_mutation(request, session_id)
         from src.auth_helpers import effective_user
         owner = effective_user(request)
         try:
             session = session_manager.get_session(session_id)
         except KeyError:
             raise HTTPException(404, "Session not found")
+
+        # One active compactor per execution context: refuse host compaction
+        # when a persistent ACP engine compactor owns the session. Bind on the
+        # real protocol (model_target.transport), not missing Session attrs.
+        # Checked before any context-mutation side effects.
+        from src.context_compactor import session_has_persistent_engine
+
+        if session_has_persistent_engine(session):
+            raise HTTPException(
+                409,
+                "Persistent ACP sessions compact through the engine "
+                "(session.summarize); host compaction is reserved for "
+                "finite contexts.",
+            )
+        await _prepare_context_mutation(request, session_id)
         try:
             from src.model_context import estimate_tokens, get_context_length
             from src.openclank.modality_facade import complete_text
@@ -858,7 +872,20 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             new_history = [system_summary, summary_msg] + list(recent)
             # Projection writer: archives source parts first, preserves
             # retained message IDs, never rekeys original history identity.
-            if not session_manager.replace_messages(session_id, new_history):
+            # Archive failure raises recoverable-unavailable and leaves source
+            # intact — the broad except below must not swallow that as 500.
+            try:
+                replaced = session_manager.replace_messages(session_id, new_history)
+            except Exception as exc:
+                from src.openclank.conversation_archive import ArchiveUnavailableError
+
+                if isinstance(exc, ArchiveUnavailableError):
+                    raise HTTPException(
+                        503,
+                        "conversation archive unavailable; history unchanged",
+                    ) from exc
+                raise
+            if not replaced:
                 raise HTTPException(500, "Failed to save compacted history")
             session.history = new_history
             session.message_count = len(session.history)
@@ -876,6 +903,8 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "after": pct_after,
             }
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Manual compact error {session_id}: {e}")
             raise HTTPException(500, str(e))
