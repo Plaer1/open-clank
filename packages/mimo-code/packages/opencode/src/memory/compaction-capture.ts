@@ -103,8 +103,10 @@ export const layer: Layer.Layer<CompactionCaptureService, never, Bus.Service | S
     }),
   )
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(Bus.defaultLayer),
-  Layer.provide(Session.defaultLayer),
-  Layer.provide(Config.defaultLayer),
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(Bus.defaultLayer),
+    Layer.provide(Session.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+  ),
 )

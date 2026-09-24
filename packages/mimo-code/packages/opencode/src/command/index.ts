@@ -303,12 +303,19 @@ export const layer = Layer.effect(
  * Application composition variant. The process-wide AppLayer supplies the
  * MCP service so Command and SessionPrompt share one client set instead of
  * each hiding a separately scoped transport layer.
+ *
+ * Layer.suspend defers the Config/Skill/MCP `.defaultLayer` reads to first
+ * use. Without it a circular import that loads this module mid-bootstrap
+ * throws "Cannot access 'defaultLayer' before initialization" and poisons
+ * combined test runs that share the process module registry.
  */
-export const appLayer = layer.pipe(
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(Skill.defaultLayer),
+export const appLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(Skill.defaultLayer),
+  ),
 )
 
-export const defaultLayer = appLayer.pipe(Layer.provide(MCP.defaultLayer))
+export const defaultLayer = Layer.suspend(() => appLayer.pipe(Layer.provide(MCP.defaultLayer)))
 
 export * as Command from "."
