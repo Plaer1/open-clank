@@ -70,16 +70,23 @@ const MIMOCODE_DISABLE_EXTERNAL_SKILLS = truthy("MIMOCODE_DISABLE_EXTERNAL_SKILL
 const MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS =
   MIMOCODE_DISABLE_EXTERNAL_SKILLS || MIMOCODE_DISABLE_CLAUDE_CODE || truthy("MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS")
 const copy = process.env["MIMOCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
-const MIMOCODE_SERVER_PASSWORD =
+// Operator-supplied password (env or inherited worker-auth fd). Captured once:
+// consumeInheritedServerPassword() closes the descriptor.
+const suppliedServerPassword =
   consumeInheritedServerPassword() ?? process.env["MIMOCODE_SERVER_PASSWORD"]
 
 let generatedServerPassword: string | undefined
 
+/**
+ * Generate the password for an implicit listener, once. Idempotent; a
+ * user-supplied password always wins and nothing is generated in that case.
+ */
 export function generateServerPassword() {
-  if (process.env["MIMOCODE_SERVER_PASSWORD"]) return
+  if (suppliedServerPassword) return
   generatedServerPassword ??= Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")
 }
 
+/** Disarm the generated password once its listener is gone. */
 export function clearGeneratedServerPassword() {
   generatedServerPassword = undefined
 }
@@ -208,7 +215,17 @@ export const Flag = {
   // the working directory. Use to avoid touching git in restricted/sandboxed
   // environments or where git startup probing is undesirable.
   MIMOCODE_DISABLE_GIT: truthy("MIMOCODE_DISABLE_GIT"),
-  MIMOCODE_SERVER_PASSWORD,
+  /** Live: falls back to the throwaway generated for an implicit listener. */
+  get MIMOCODE_SERVER_PASSWORD() {
+    return suppliedServerPassword ?? generatedServerPassword
+  },
+  /**
+   * True only when the operator supplied a password. Containment rule keys on
+   * this: a generated password must not look like a user-asked-for listener.
+   */
+  get MIMOCODE_SERVER_PASSWORD_SUPPLIED() {
+    return Boolean(suppliedServerPassword)
+  },
   MIMOCODE_SERVER_USERNAME: process.env["MIMOCODE_SERVER_USERNAME"],
   MIMOCODE_ENABLE_QUESTION_TOOL: truthy("MIMOCODE_ENABLE_QUESTION_TOOL"),
 

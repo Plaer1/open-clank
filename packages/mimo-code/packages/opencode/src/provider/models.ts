@@ -169,12 +169,31 @@ export async function refresh(force = false) {
   })
 }
 
-if (!Flag.MIMOCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
+/**
+ * Start best-effort background refresh. Import has no network side effect.
+ * Embedders that do not go through `src/index.ts` / TUI worker MUST call this
+ * after installing their fetch adapter, or the catalog stays frozen at snapshot∪cache.
+ * Returns a stop function so hosts can tear the timer down.
+ */
+export function startRefresh(): () => void {
+  if (Flag.MIMOCODE_DISABLE_MODELS_FETCH || process.argv.includes("--get-yargs-completions")) {
+    return () => {}
+  }
   void refresh()
-  setInterval(
+  const timer = setInterval(
     async () => {
       await refresh()
     },
     60 * 1000 * 60,
-  ).unref()
+  )
+  timer.unref()
+  return () => {
+    clearInterval(timer)
+  }
 }
+
+/**
+ * Named export so `import { ModelsDev } from "./provider/models"` (index.ts, node.ts)
+ * resolves. Mirrors the pinned 2bda1794 barrel: a namespace of this module's API.
+ */
+export * as ModelsDev from "./models"

@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
+import { ObservingStdioTransport } from "./stdio-transport"
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 import {
   CallToolResultSchema,
@@ -262,7 +263,7 @@ export const layer = Layer.effect(
     const auth = yield* McpAuth.Service
     const bus = yield* Bus.Service
 
-    type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
+    type Transport = StdioClientTransport | ObservingStdioTransport | StreamableHTTPClientTransport | SSEClientTransport
 
     /**
      * Connect a client via the given transport with resource safety:
@@ -399,21 +400,22 @@ export const layer = Layer.effect(
     ) {
       const [cmd, ...args] = mcp.command
       const cwd = yield* InstanceState.directory
-      const transport = new StdioClientTransport({
-        stderr: "pipe",
+      // ObservingStdioTransport owns the child through child_process and applies
+      // childProcessEnv() at the spawn site — local MCP servers are third-party
+      // binaries running as the user. Replaces StdioClientTransport so exit
+      // identity stays observable after close().
+      const transport = new ObservingStdioTransport({
         command: cmd,
         args,
         cwd,
         env: {
-          // childProcessEnv: MCP servers are third-party binaries running as the user.
-          ...childProcessEnv(),
           ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
           ...mcp.environment,
         },
       })
-      transport.stderr?.on("data", (chunk: Buffer) => {
-        log.info(`mcp stderr: ${chunk.toString()}`, { key })
-      })
+      transport.onStderr = (text: string) => {
+        log.info(`mcp stderr: ${text}`, { key })
+      }
 
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
       return yield* connectTransport(transport, connectTimeout).pipe(
@@ -547,7 +549,10 @@ export const layer = Layer.effect(
                     const memory = yield* Effect.promise(() => import("@/memory/mcp-client"))
                     memory.unregisterManagedMcpClient(name, client)
                   }
-                  const pid = client.transport instanceof StdioClientTransport ? client.transport.pid : null
+                  const pid =
+                    client.transport instanceof ObservingStdioTransport || client.transport instanceof StdioClientTransport
+                      ? client.transport.pid
+                      : null
                   if (typeof pid === "number") {
                     const pids = yield* descendants(pid)
                     for (const dpid of pids) {

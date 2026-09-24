@@ -47,6 +47,21 @@ test("withoutCredentials leaves non-credential keys alone", () => {
 // spawn either fixed tooling with no attacker-controlled command (taskkill, gh, sqlite3) or go through
 // the wrappers below; a structural rule ("only wrappers may import child_process") would close it and
 // is the natural next step if the list grows.
+test("MCP and process spawn sites do not spread process.env", async () => {
+  const offenders = await scan(
+    /\.\.\.\s*(?:globalThis\.)?process\.env|env:\s*(?:globalThis\.)?process\.env\b/,
+    new Set(["env/index.ts"]),
+  )
+  expect(offenders).toEqual([])
+  // Explicit pin for the live local-MCP path that previously leaked at mcp/index.ts:407.
+  const mcp = await lines("mcp/index.ts")
+  expect(mcp.some((line) => /\.\.\.\s*process\.env/.test(line))).toBe(false)
+  const stdio = await lines("mcp/stdio-transport.ts")
+  expect(stdio.some((line) => /\.\.\.\s*process\.env/.test(line))).toBe(false)
+  const processFunnel = await lines("util/process.ts")
+  expect(processFunnel.some((line) => line.includes("childProcessEnv("))).toBe(true)
+})
+
 test("no spawn site hands the inherited environment over without scrubbing credentials", async () => {
   // In-process snapshot for the Env service, not an environment handed to a child.
   const offenders = await scan(

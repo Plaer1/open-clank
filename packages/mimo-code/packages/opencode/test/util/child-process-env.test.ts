@@ -109,6 +109,32 @@ test("all inherited external process paths use childProcessEnv", async () => {
   expect(ripgrep).not.toMatch(/env: env\(\),\s*extendEnv: true/)
 })
 
+test("process and MCP spawn paths scrub inherited credentials", async () => {
+  const root = path.join(import.meta.dir, "..", "..", "src")
+
+  // process.ts: the cross-spawn run/spawn funnel.
+  const processFunnel = await Bun.file(path.join(root, "util", "process.ts")).text()
+  // spawn() is the single funnel: it always wraps with childProcessEnv(opts.env).
+  // run() may forward opts.env into spawn(); scrubbing happens at that boundary.
+  expect(processFunnel).toContain("childProcessEnv(opts.env)")
+  expect(processFunnel).toContain("env: opts.env === null ? {} : childProcessEnv(opts.env)")
+
+  // pty/index.ts: terminal spawn must not hand the parent environment over wholesale.
+  const pty = await Bun.file(path.join(root, "pty", "index.ts")).text()
+  expect(pty).toContain("childProcessEnv(")
+  expect(pty).not.toContain("...process.env")
+
+  // mcp/index.ts: local MCP stdio spawn. ObservingStdioTransport applies
+  // childProcessEnv at its own spawn; the service must not spread process.env.
+  const mcp = await Bun.file(path.join(root, "mcp", "index.ts")).text()
+  expect(mcp).toContain("ObservingStdioTransport")
+  expect(mcp).not.toMatch(/\.\.\.\s*(?:globalThis\.)?process\.env/)
+
+  const stdio = await Bun.file(path.join(root, "mcp", "stdio-transport.ts")).text()
+  expect(stdio).toContain("childProcessEnv(")
+  expect(stdio).not.toMatch(/\.\.\.\s*(?:globalThis\.)?process\.env/)
+})
+
 test("native child_process calls explicitly use childProcessEnv", async () => {
   const root = path.join(import.meta.dir, "..", "..", "src")
   const files = [...new Bun.Glob("**/*.ts").scanSync(root)]
