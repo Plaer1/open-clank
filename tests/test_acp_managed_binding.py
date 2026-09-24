@@ -118,12 +118,16 @@ def test_real_ensure_fresh_two_bridge_race_discards_only_loser(sqlite_projection
         def __init__(self, session_id):
             self.session_id = session_id
 
-        async def new_session(self, *_args, **_kwargs):
+        async def reserve_session(self):
+            sid = getattr(self, "session_id", None) or "ses_reserved_test"
+            return {"sessionID": sid, "provisional": True}
+
+        async def new_session(self, *_args, provisional_session_id=None, **_kwargs):
             created.append(self.session_id)
             if len(created) == 2:
                 ready.set()
             await ready.wait()
-            return {"sessionId": self.session_id, "models": {}}
+            return {"sessionId": provisional_session_id or self.session_id, "models": {}}
 
         async def resume_session(self, session_id, *_args, **_kwargs):
             assert session_id in {"engine-c1", "engine-c2"}
@@ -198,12 +202,16 @@ def test_real_ensure_missing_session_remap_race_returns_one_winner(sqlite_projec
                 raise RPCError(404, "missing", {"code": "OPENCLANK_SESSION_MISSING"})
             return {"models": {}}
 
-        async def new_session(self, *_args, **_kwargs):
+        async def reserve_session(self):
+            sid = getattr(self, "session_id", None) or "ses_reserved_test"
+            return {"sessionID": sid, "provisional": True}
+
+        async def new_session(self, *_args, provisional_session_id=None, **_kwargs):
             created.append(self.session_id)
             if len(created) == 2:
                 ready.set()
             await ready.wait()
-            return {"sessionId": self.session_id, "models": {}}
+            return {"sessionId": provisional_session_id or self.session_id, "models": {}}
 
         async def discard_session(self, session_id, cwd):
             discarded.append((session_id, cwd))
@@ -298,7 +306,11 @@ def test_fenced_chat_rejects_real_ensure_before_engine_rpc(tmp_path):
     calls = []
 
     class Client:
-        async def new_session(self, *_args, **_kwargs):
+        async def reserve_session(self):
+            sid = getattr(self, "session_id", None) or "ses_reserved_test"
+            return {"sessionID": sid, "provisional": True}
+
+        async def new_session(self, *_args, provisional_session_id=None, **_kwargs):
             calls.append("new")
             raise AssertionError("fenced routing reached the engine")
 
@@ -411,6 +423,54 @@ def test_rpc_error_preserves_typed_missing_session_signal():
     assert generic.session_missing is False
 
 
+def _engine_discard_wire_ack():
+    """Exact engine `_odysseus/session/discard` RPC result.
+
+    Locked to ``contracts/openclank/acp-session-discard-ack-v1.json``; the
+    engine extMethod test asserts the live handler returns this dict.
+    """
+    import json
+
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "contracts"
+        / "openclank"
+        / "acp-session-discard-ack-v1.json"
+    )
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
+def test_engine_discard_wire_ack_satisfies_host_predicate(tmp_path):
+    """Non-mocked cross-check of the engine wire result against the host predicate.
+
+    The engine extMethod test locks the live handler to the shared fixture;
+    this test feeds that exact dict through the real
+    ``ACPClient.discard_session`` acknowledgement predicate (only the JSON-RPC
+    transport is stubbed). Mocking ``discard_session`` itself would hide the
+    wire break this proves closed.
+    """
+    from src.openclank.acp_client import ACPClient
+
+    engine_wire = _engine_discard_wire_ack()
+    assert engine_wire == {"deleted": True}
+
+    client = ACPClient.__new__(ACPClient)
+    calls = []
+
+    async def send(method, params):
+        calls.append((method, params))
+        return engine_wire
+
+    client._send_request = send
+    # Real host predicate: raises unless the engine wire result is exactly
+    # {"deleted": True}.
+    asyncio.run(client.discard_session("ses_engine_candidate", str(tmp_path.resolve())))
+    assert calls == [(
+        "_odysseus/session/discard",
+        {"sessionId": "ses_engine_candidate", "cwd": str(tmp_path.resolve())},
+    )]
+
+
 def test_private_discard_sends_canonical_candidate_cwd(tmp_path):
     from src.openclank.acp_client import ACPClient
 
@@ -419,7 +479,7 @@ def test_private_discard_sends_canonical_candidate_cwd(tmp_path):
 
     async def send(method, params):
         calls.append((method, params))
-        return {"deleted": True}
+        return _engine_discard_wire_ack()
 
     client._send_request = send
     canonical_cwd = str(tmp_path.resolve())
@@ -824,7 +884,11 @@ def test_ordinary_restart_recovers_staged_orphan_without_remap(sqlite_projection
         async def discard_session(self, session_id, cwd):
             discarded.append((session_id, cwd))
 
-        async def new_session(self, *_args, **_kwargs):
+        async def reserve_session(self):
+            sid = getattr(self, "session_id", None) or "ses_reserved_test"
+            return {"sessionID": sid, "provisional": True}
+
+        async def new_session(self, *_args, provisional_session_id=None, **_kwargs):
             raise AssertionError("recovery must not create a session")
 
     bridge = ACPBridge.__new__(ACPBridge)
@@ -905,7 +969,11 @@ def test_resume_bad_descriptor_does_not_discard_or_delete_mapping(sqlite_project
         async def discard_session(self, session_id, cwd):
             discarded.append((session_id, cwd))
 
-        async def new_session(self, *_args, **_kwargs):
+        async def reserve_session(self):
+            sid = getattr(self, "session_id", None) or "ses_reserved_test"
+            return {"sessionID": sid, "provisional": True}
+
+        async def new_session(self, *_args, provisional_session_id=None, **_kwargs):
             raise AssertionError("bad descriptor must not silently create")
 
     bridge = ACPBridge.__new__(ACPBridge)
@@ -939,8 +1007,14 @@ def test_create_failed_discard_never_deletes_winning_mapping(sqlite_projection, 
     discarded = []
 
     class Client:
-        async def new_session(self, *_args, **_kwargs):
-            return {"sessionId": "engine-candidate", "models": {}}
+        async def reserve_session(self):
+            return {"sessionID": "engine-candidate", "provisional": True}
+
+        async def new_session(self, *_args, provisional_session_id=None, **_kwargs):
+            return {
+                "sessionId": provisional_session_id or "engine-candidate",
+                "models": {},
+            }
 
         async def resume_session(self, session_id, *_args, **_kwargs):
             if session_id == "engine-candidate":
@@ -1039,11 +1113,17 @@ def _two_process_ensure_worker(
         def on_session_update(self, *_args):
             pass
 
-        async def new_session(self, cwd_arg, mcp_servers=None):
+        async def reserve_session(self):
+            return {"sessionID": engine_id, "provisional": True}
+
+        async def new_session(self, cwd_arg, mcp_servers=None, provisional_session_id=None):
             # True barrier: both processes create an engine session before
             # either publishes its map binding.
             barrier.wait(timeout=20)
-            return {"sessionId": engine_id, "models": {"availableModels": []}}
+            return {
+                "sessionId": provisional_session_id or engine_id,
+                "models": {"availableModels": []},
+            }
 
         async def resume_session(self, session_id, cwd_arg, mcp_servers=None):
             if missing_old and session_id == "engine-old":

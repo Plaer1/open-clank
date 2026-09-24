@@ -1182,11 +1182,14 @@ class ACPBridge:
         authority_workspace_id: str = "",
         memory_workspace_id: str = "",
         publish_handshake: bool = True,
+        provisional_session_id: Optional[str] = None,
     ) -> str:
         """Create a new mimo session and return the ses_… id directly.
 
         Also stores the available models from mimo's handshake so the bridge
         can match thesius model names to mimo model IDs later.
+        When ``provisional_session_id`` is omitted the bridge reserves one
+        first so create-and-publish always uses a known identity.
         """
         requested_workspace = str(cwd or "").strip()
         target_cwd = requested_workspace or self._cwd
@@ -1204,8 +1207,22 @@ class ACPBridge:
                 mapping_revision=0,
             ),
         ] + list(extra_mcp_servers or [])) if with_agent_tools else []
-        result = await self._client.new_session(target_cwd, mcp_servers=mcp_servers)
+        # Reserve-without-create, then create-and-publish under the reserved
+        # identity. Interruptions before SDK create delete nothing and name no
+        # orphan; after create, recovery names this exact ses_… id.
+        if provisional_session_id is None:
+            reserve = await self._client.reserve_session()
+            provisional_session_id = reserve["sessionID"]
+        result = await self._client.new_session(
+            target_cwd,
+            mcp_servers=mcp_servers,
+            provisional_session_id=provisional_session_id,
+        )
         session_id = result["sessionId"]
+        if session_id != provisional_session_id:
+            raise RuntimeError(
+                "engine create-and-publish did not keep the reserved provisional session id"
+            )
         if publish_handshake:
             self._capture_handshake(session_id, result)
         else:
@@ -1680,6 +1697,11 @@ class ACPBridge:
                         self._fence_admission(odysseus_session, "orphan managed binding")
                         raise RuntimeError("orphan managed binding could not be reconciled") from exc
                     previous_binding = None
+            # Reserve-without-create, then create-and-publish under that exact
+            # identity (see open_session). Candidate binding is staged after
+            # create and before map publish so concurrent fresh admissions can
+            # still race cleanly on CAS; interruptions before SDK create delete
+            # nothing and name no orphan.
             new_id = await self.open_session(
                 cwd=cwd,
                 owner=owner,
@@ -2149,7 +2171,148 @@ class ACPBridge:
     async def forget_session_async(self, odysseus_session: str) -> None:
         """Forget authority without blocking the event loop on flock."""
         async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
-            self._forget_session_locked(odysseus_session)
+            await self._forget_session_locked_async(odysseus_session)
+
+    async def _fence_admission_async(self, chat_id: str, reason: str) -> None:
+        """Persist fail-closed authority off the event loop."""
+        try:
+            await self._durable_session_map.async_fence(chat_id)
+            self._session_map = await self._durable_session_map.async_flat_current()
+        except Exception as exc:
+            logger.exception("unable to persist admission fence for %s (%s)", chat_id, reason)
+            raise RuntimeError("managed admission fence could not be persisted") from exc
+
+    async def _forget_session_locked_async(self, odysseus_session: str) -> None:
+        """Map-first idempotent forget with every map op off the event loop.
+
+        ``forget_session_async`` must not take ``fcntl.flock`` on the loop:
+        one long map lock would freeze unrelated chats. All OwnerSessionMap
+        calls therefore route through ``async_*`` / ``async_call``.
+        """
+        expected_engine = self._session_map.get(odysseus_session)
+        if expected_engine is None:
+            expected_engine = odysseus_session
+        entry = await self._durable_session_map.async_lookup(odysseus_session)
+        if entry is None:
+            from src.openclank.transcript_projection import (
+                delete_managed_binding,
+                delete_projection,
+                get_managed_binding,
+            )
+
+            try:
+                orphan_binding = await asyncio.to_thread(
+                    get_managed_binding, odysseus_session, owner=self._owner
+                )
+            except KeyError:
+                return
+            except Exception as exc:
+                await self._fence_admission_async(
+                    odysseus_session, "managed binding read during orphan forget"
+                )
+                raise RuntimeError(
+                    "managed binding authority could not be read during orphan forget"
+                ) from exc
+            if not orphan_binding:
+                try:
+                    # A previous map-first attempt may already have removed
+                    # the binding and crashed before projection cleanup.  The
+                    # projection is independently owner-qualified, so retry
+                    # it even when the canonical binding is now empty.
+                    await asyncio.to_thread(
+                        delete_projection, odysseus_session, owner=self._owner
+                    )
+                except KeyError:
+                    pass
+                except Exception as exc:
+                    raise RuntimeError(
+                        "orphan managed projection cleanup was not confirmed"
+                    ) from exc
+                return
+            try:
+                await asyncio.to_thread(
+                    delete_managed_binding,
+                    odysseus_session,
+                    owner=self._owner,
+                    expected_workspace_revision=orphan_binding.get("workspaceRevision"),
+                    expected_engine_session_id=orphan_binding.get("engineSessionID"),
+                    expected_map_revision=orphan_binding.get("mapRevision"),
+                    expected_mapping_revision=orphan_binding.get("mappingRevision"),
+                )
+                await asyncio.to_thread(
+                    delete_projection, odysseus_session, owner=self._owner
+                )
+            except KeyError:
+                return
+            except Exception as exc:
+                raise RuntimeError(
+                    "orphan managed authority cleanup was not confirmed"
+                ) from exc
+            return
+        if entry.get("current") != expected_engine:
+            self._session_map = await self._durable_session_map.async_flat_current()
+            return
+        mimo_session = expected_engine
+        map_revision, mapping_revision = await self._durable_session_map.async_revisions(
+            odysseus_session
+        )
+        from src.openclank.transcript_projection import (
+            delete_managed_binding,
+            delete_projection,
+            get_managed_binding,
+        )
+
+        try:
+            previous_binding = await asyncio.to_thread(
+                get_managed_binding, odysseus_session, owner=self._owner
+            )
+        except KeyError:
+            previous_binding = None
+        except Exception as exc:
+            await self._fence_admission_async(
+                odysseus_session, "managed binding read during forget"
+            )
+            raise RuntimeError(
+                "managed binding authority could not be read during forget"
+            ) from exc
+        try:
+            await self._durable_session_map.async_forget(
+                odysseus_session,
+                expected_map_revision=None,
+                expected_current=mimo_session,
+                expected_mapping_revision=mapping_revision,
+            )
+        except Exception:
+            raise
+        if previous_binding:
+            try:
+                await asyncio.to_thread(
+                    delete_managed_binding,
+                    odysseus_session,
+                    owner=self._owner,
+                    expected_workspace_revision=previous_binding.get("workspaceRevision"),
+                    expected_engine_session_id=mimo_session,
+                    expected_map_revision=previous_binding.get("mapRevision"),
+                    expected_mapping_revision=previous_binding.get("mappingRevision"),
+                )
+            except Exception as exc:
+                # The map-first prefix is intentionally fail-closed.  The
+                # owner-qualified binding remains available for idempotent
+                # restart cleanup; the map is already absent, so do not add a
+                # quarantine marker that would block that retry path.
+                raise RuntimeError("managed binding deletion was not confirmed") from exc
+        self._session_map = await self._durable_session_map.async_flat_current()
+        self._session_models.pop(mimo_session, None)
+        self._session_state.pop(mimo_session, None)
+        self._session_context.pop(mimo_session, None)
+        self._turns.pop(mimo_session, None)
+        self._queues.pop(mimo_session, None)
+        try:
+            await asyncio.to_thread(delete_projection, odysseus_session, owner=self._owner)
+        except KeyError:
+            pass
+        except Exception as exc:
+            raise RuntimeError("managed projection deletion was not confirmed") from exc
 
     def _forget_session_locked(self, odysseus_session: str) -> None:
         # The local map identifies the engine this bridge owns.  A stale bridge

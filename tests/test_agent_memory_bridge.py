@@ -739,9 +739,12 @@ async def test_agent_session_uses_lifetools_as_memory_scope_carrier(tmp_path, mo
         def register_callback(self, _name, _callback):
             return None
 
-        async def new_session(self, _cwd, *, mcp_servers):
+        async def reserve_session(self):
+            return {"sessionID": "mimo-1", "provisional": True}
+
+        async def new_session(self, _cwd, *, mcp_servers, provisional_session_id=None):
             self.new_servers = mcp_servers
-            return {"sessionId": "mimo-1", "models": {}}
+            return {"sessionId": provisional_session_id or "mimo-1", "models": {}}
 
         async def resume_session(self, _session_id, _cwd, *, mcp_servers):
             self.resumed_servers = mcp_servers

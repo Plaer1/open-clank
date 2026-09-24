@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import type { McpServer } from "@agentclientprotocol/sdk"
 import type { OpencodeClient } from "@mimo-ai/sdk/v2"
+import { ACP } from "../../src/acp/agent"
 import { ACPSessionManager, reserveProvisionalSessionID } from "../../src/acp/session"
 import { memorySessionScope, registerMemorySessionScope, unregisterMemorySessionScope } from "../../src/memory/session-scope"
 
@@ -112,6 +113,30 @@ describe("ACPSessionManager memory scope registration", () => {
       "discard session delete was not confirmed",
     )
     expect(memorySessionScope(created.at(-1)!)).toBeUndefined()
+  })
+
+  test("discard wire result is exactly the shared host-ack fixture", async () => {
+    const manager = new ACPSessionManager(sdk)
+    const fixturePath = new URL(
+      "../../../../../../contracts/openclank/acp-session-discard-ack-v1.json",
+      import.meta.url,
+    )
+    const fixture = (await Bun.file(fixturePath).json()) as Record<string, unknown>
+    // Host ACPClient.discard_session requires this exact dict. Keep the rich
+    // DiscardAck internal to ACPSessionManager.discard.
+    expect(fixture).toEqual({ deleted: true })
+    const receiver = {
+      sessionManager: manager,
+      providerControl: { handle: async () => ({}) },
+      managedOperations: { handle: async () => ({}) },
+    }
+    const wire = await ACP.Agent.prototype.extMethod.call(
+      receiver as never,
+      "_odysseus/session/discard",
+      { sessionId: "ses_wire_ack", cwd: "/workspace" },
+    )
+    expect(wire).toEqual({ deleted: true })
+    expect(wire).toStrictEqual(fixture)
   })
 
   test("discard treats an exact SDK missing result as already deleted", async () => {

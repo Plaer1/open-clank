@@ -205,7 +205,16 @@ export class Agent implements ACPAgent {
         throw RequestError.invalidParams("canonical cwd is required for session discard")
       }
       const ack = await this.sessionManager.discard(sessionId, params.cwd, [], "explicit")
-      return { ...ack } as Record<string, unknown>
+      // Wire contract with the host ACPClient.discard_session predicate:
+      // the RPC result is exactly {"deleted": true}. The rich ack stays
+      // internal for logs only.
+      log.info("session_discard_ack", {
+        sessionID: ack.sessionID,
+        cwd: ack.cwd,
+        reason: ack.reason,
+        deleted: ack.deleted,
+      })
+      return { deleted: true } as Record<string, unknown>
     }
     await this.sessionManager.release(sessionId)
     return {}

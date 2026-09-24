@@ -71,13 +71,48 @@ class ACPClient:
         self.agent_info = result.get("agentInfo")
         return result
 
-    async def new_session(self, cwd: str, mcp_servers: Optional[List[dict]] = None) -> dict:
+    async def reserve_session(self) -> dict:
+        """Reserve a provisional engine ``ses_…`` without creating a session row.
+
+        The host persists its projection-first candidate against this exact
+        identity, then create-and-publishes it via ``session/new`` with
+        ``_meta.provisionalSessionID``. Interruptions before SDK create delete
+        nothing and name no orphan.
+        """
+        result = await self._send_request("_odysseus/session/reserve", {})
+        if not isinstance(result, dict):
+            raise RuntimeError("engine session reserve returned a non-object result")
+        session_id = result.get("sessionID")
+        if (
+            not isinstance(session_id, str)
+            or not session_id.startswith("ses_")
+            or session_id != session_id.strip()
+        ):
+            raise RuntimeError("engine session reserve did not return a provisional ses_ id")
+        if result.get("provisional") is not True:
+            raise RuntimeError("engine session reserve must confirm provisional identity")
+        return {"sessionID": session_id, "provisional": True}
+
+    async def new_session(
+        self,
+        cwd: str,
+        mcp_servers: Optional[List[dict]] = None,
+        provisional_session_id: Optional[str] = None,
+    ) -> dict:
         """Create a new mimo session. Returns the full ACP response dict
-        (sessionId, models, configOptions, modes, _meta)."""
-        return await self._send_request("session/new", {
+        (sessionId, models, configOptions, modes, _meta).
+
+        When ``provisional_session_id`` is provided it is wired as the
+        non-breaking ACP extension seam ``_meta.provisionalSessionID`` so
+        create-and-publish keeps one reserved identity.
+        """
+        params: Dict[str, Any] = {
             "cwd": cwd,
             "mcpServers": mcp_servers or [],
-        })
+        }
+        if provisional_session_id is not None:
+            params["_meta"] = {"provisionalSessionID": provisional_session_id}
+        return await self._send_request("session/new", params)
 
     async def resume_session(self, session_id: str, cwd: str, mcp_servers: Optional[List[dict]] = None) -> dict:
         return await self._send_request("session/resume", {
