@@ -49,8 +49,76 @@ export const Info = z.object({
   requiresToolsets: z.array(z.string()).optional(),
   trust: z.string().optional(),
   lastAudit: z.number().optional(),
+  /** Upstream disable-model-invocation: user-explicit only; never model-discovered. */
+  disableModelInvocation: z.boolean().optional(),
 })
 export type Info = z.infer<typeof Info>
+
+/** How a skill is being invoked. */
+export type InvocationMode = "model" | "explicit"
+
+export type InvocationDenial =
+  | "not_found"
+  | "disabled"
+  | "untrusted"
+  | "revoked"
+  | "staged"
+  | "hidden_from_model"
+  | "model_invocation_disabled"
+
+export type InvocationResult =
+  | { ok: true; info: Info }
+  | { ok: false; reason: InvocationDenial; name: string }
+
+/**
+ * Disabled, untrusted, revoked, or staged skills never run in any mode.
+ * Hidden alone is not a denial: trusted+enabled hidden skills stay available
+ * to user-explicit invocation while remaining absent from model discovery.
+ */
+export function isRunnableSkill(skill: Info): boolean {
+  const trust = (skill.trust ?? "").toLowerCase()
+  const status = (skill.status ?? "").toLowerCase()
+  if (trust === "untrusted" || trust === "revoked") return false
+  if (status === "revoked" || status === "disabled" || status === "staged" || status === "draft") return false
+  return true
+}
+
+/** Positive trust is required to invoke a hidden skill; hidden alone is never trust. */
+export function isTrustedForHiddenInvocation(skill: Info): boolean {
+  const trust = (skill.trust ?? "").toLowerCase()
+  return trust === "verified" || trust === "waived" || trust === "published"
+}
+
+export function isModelInvocable(skill: Info): boolean {
+  if (!isRunnableSkill(skill)) return false
+  if (skill.hidden) return false
+  if (skill.disableModelInvocation) return false
+  return true
+}
+
+/**
+ * Gate a single skill for the given invocation mode.
+ * Model mode: only non-hidden, model-invocable, runnable skills.
+ * Explicit mode: runnable skills, including hidden ones when positively trusted.
+ * Disabled, untrusted, revoked, and staged skills fail both modes.
+ */
+export function evaluateInvocation(skill: Info | undefined, mode: InvocationMode): InvocationResult {
+  if (!skill) return { ok: false, reason: "not_found", name: "" }
+  const trust = (skill.trust ?? "").toLowerCase()
+  const status = (skill.status ?? "").toLowerCase()
+  if (trust === "revoked" || status === "revoked") return { ok: false, reason: "revoked", name: skill.name }
+  if (status === "disabled") return { ok: false, reason: "disabled", name: skill.name }
+  if (trust === "untrusted") return { ok: false, reason: "untrusted", name: skill.name }
+  if (status === "staged" || status === "draft") return { ok: false, reason: "staged", name: skill.name }
+  if (mode === "model") {
+    if (skill.hidden) return { ok: false, reason: "hidden_from_model", name: skill.name }
+    if (skill.disableModelInvocation) return { ok: false, reason: "model_invocation_disabled", name: skill.name }
+  } else if (skill.hidden && !isTrustedForHiddenInvocation(skill)) {
+    // Hidden flag alone never grants trust.
+    return { ok: false, reason: "untrusted", name: skill.name }
+  }
+  return { ok: true, info: skill }
+}
 
 // Open Clank injects its central lifecycle catalogue separately from each
 // worker's private runtime data root.
@@ -411,6 +479,8 @@ export interface Interface {
   readonly dirs: () => Effect.Effect<string[]>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Info[]>
   readonly reload: () => Effect.Effect<void>
+  /** Resolve a skill for model or user-explicit invocation with trust/visibility gates. */
+  readonly getForInvocation: (name: string, mode: InvocationMode) => Effect.Effect<InvocationResult>
 }
 
 const add = Effect.fnUntraced(function* (
@@ -453,7 +523,19 @@ const add = Effect.fnUntraced(function* (
   if (!activation) return
   const activeMd = activation.md
 
-  const parsed = Info.pick({ name: true, description: true, aliases: true, hidden: true }).safeParse(activeMd.data)
+  const parsed = Info.pick({
+    name: true,
+    description: true,
+    aliases: true,
+    hidden: true,
+    disableModelInvocation: true,
+  }).safeParse({
+    name: activeMd.data.name,
+    description: activeMd.data.description,
+    aliases: activeMd.data.aliases,
+    hidden: activeMd.data.hidden,
+    disableModelInvocation: activeMd.data["disable-model-invocation"] ?? activeMd.data.disableModelInvocation,
+  })
   if (!parsed.success) return
 
   const isBundled = bundledRoots.some((root) => match.startsWith(root))
@@ -491,7 +573,8 @@ const add = Effect.fnUntraced(function* (
     aliases: parsed.data.aliases,
     location: activeLocation,
     content: activeMd.content,
-    hidden: remote ? true : activation.state?.published ? false : parsed.data.hidden,
+    hidden: remote ? true : parsed.data.hidden ?? (activation.state?.published ? false : undefined),
+    disableModelInvocation: parsed.data.disableModelInvocation,
     bundled: isBundled || undefined,
     skillID: typeof activeMd.data.skill_id === "string" ? activeMd.data.skill_id : undefined,
     revision: typeof activeMd.data.revision === "number" ? activeMd.data.revision : undefined,
@@ -746,11 +829,20 @@ export const layer = Layer.effect(
 
     const available = Effect.fn("Skill.available")(function* (agent?: Agent.Info) {
       const s = yield* InstanceState.get(state)
-      let list: Info[] = Object.values(s.skills).filter((skill) => !skill.hidden)
+      // Model-facing catalog: only authorized, trusted, enabled, model-invocable
+      // skills. Hidden, disabled, untrusted, revoked, staged, and
+      // disable-model-invocation skills stay out of autonomous discovery.
+      let list: Info[] = Object.values(s.skills).filter((skill) => isModelInvocable(skill))
 
       list = list.toSorted((a, b) => a.name.localeCompare(b.name))
       if (!agent) return list
       return list.filter((skill) => Permission.evaluate("skill", skill.name, agent.permission).action !== "deny")
+    })
+
+    const getForInvocation = Effect.fn("Skill.getForInvocation")(function* (name: string, mode: InvocationMode) {
+      const s = yield* InstanceState.get(state)
+      const item = s.skills[name]
+      return evaluateInvocation(item, mode) as InvocationResult
     })
 
     const reload = Effect.fn("Skill.reload")(function* () {
@@ -758,7 +850,7 @@ export const layer = Layer.effect(
       yield* InstanceState.invalidate(state)
     })
 
-    return Service.of({ get, all, dirs, available, reload })
+    return Service.of({ get, all, dirs, available, reload, getForInvocation })
   }),
 )
 

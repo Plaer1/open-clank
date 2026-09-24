@@ -276,6 +276,37 @@ describe("tool.write", () => {
       ),
     )
 
+    it.live("rejects an expected_fingerprint mismatch and leaves the file untouched", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "guarded.txt")
+          yield* Effect.promise(() => fs.writeFile(filepath, "original", "utf-8"))
+          const staleFingerprint = "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+          const exit = yield* run({
+            file_path: filepath,
+            content: "replacement",
+            expected_fingerprint: staleFingerprint,
+          }).pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+          expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("original")
+        }),
+      ),
+    )
+
+    it.live("reports Lore history status honestly and does not claim recoverability", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "history-status.txt")
+          const result = yield* run({ file_path: filepath, content: "body" })
+          expect(result.metadata.history.durable).toBe(false)
+          expect(result.metadata.history.coverage).not.toBe("ExactBatch")
+          expect(["unconfigured", "paused", "failed"]).toContain(result.metadata.history.status ?? "unconfigured")
+        }),
+      ),
+    )
+
     // Skip: root bypasses file permissions, chmod 0o444 has no effect when running as root
     it.live.skip("throws error when OS denies write access", () =>
       provideTmpdirInstance((dir) =>
