@@ -1,10 +1,18 @@
 import json
 import multiprocessing
 import os
+import queue
 
 import pytest
 
 from src.openclank.session_map import OwnerSessionMap, SessionMapCollision
+
+
+def _admission_lock_process(path, entered, release):
+    mapping = OwnerSessionMap(path, "alice")
+    with mapping.chat_admission_lock("chat"):
+        entered.put("entered")
+        release.wait(10)
 
 
 def _bind_process(path, owner, engine, start, result, chat="chat", ready=None):
@@ -247,6 +255,26 @@ def test_two_real_processes_can_mutate_different_chats_without_global_revision_s
     )
     assert mapping.lookup("chat-a")["current"] == "engine-a"
     assert mapping.lookup("chat-b")["current"] == "engine-b"
+
+
+def test_two_process_admission_lock_serializes_same_chat(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    path = tmp_path / "session-map.json"
+    entered = ctx.Queue()
+    release = ctx.Event()
+    first = ctx.Process(target=_admission_lock_process, args=(path, entered, release))
+    second = ctx.Process(target=_admission_lock_process, args=(path, entered, release))
+    first.start()
+    assert entered.get(timeout=10) == "entered"
+    second.start()
+    with pytest.raises(queue.Empty):
+        entered.get(timeout=0.25)
+    release.set()
+    assert entered.get(timeout=10) == "entered"
+    first.join(timeout=10)
+    second.join(timeout=10)
+    assert first.exitcode == 0
+    assert second.exitcode == 0
 
 
 def test_post_replace_directory_fsync_ambiguity_does_not_accept_different_candidate(tmp_path, monkeypatch):

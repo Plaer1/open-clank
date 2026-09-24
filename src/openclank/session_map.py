@@ -8,11 +8,12 @@ owner-wide inverse index, and publish one fsync'd replacement.
 from __future__ import annotations
 
 import copy
+import asyncio
 import json
 import os
 import tempfile
 import stat
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -220,6 +221,55 @@ class OwnerSessionMap:
                         msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
         finally:
             os.close(descriptor)
+
+    @contextmanager
+    def chat_admission_lock(self, chat: str):
+        """Serialize the cross-store binding/map admission for one chat.
+
+        The lock is separate from ``session-map.lock`` so callers can hold it
+        while committing the owner-qualified SQLite binding and then invoking
+        the map CAS without recursively acquiring the map lock.
+        """
+        chat = _strict_identifier(chat, "chat")
+        import hashlib
+
+        lock_path = self.path.parent.parent / (
+            f".session-chat-{self.owner_hash}-"
+            f"{hashlib.sha256(chat.encode('utf-8')).hexdigest()[:24]}.lock"
+        )
+        with self._lock(lock_path):
+            yield
+
+    @asynccontextmanager
+    async def async_chat_admission_lock(self, chat: str):
+        """Return an async-compatible stable chat guard.
+
+        The filesystem lock is synchronous, so acquire and release it in a
+        worker thread when an admission path must await engine cleanup while
+        holding the guard.  The same descriptor remains held across the
+        await; other processes still observe one serialized authority.
+        """
+        guard = self.chat_admission_lock(chat)
+        acquire = asyncio.create_task(asyncio.to_thread(guard.__enter__))
+        try:
+            await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            # Do not strand a descriptor if cancellation arrives while a
+            # contended process lock is still waiting in the worker thread.
+            await acquire
+            await asyncio.to_thread(guard.__exit__, None, None, None)
+            raise
+        try:
+            yield
+        finally:
+            release = asyncio.create_task(
+                asyncio.to_thread(guard.__exit__, None, None, None)
+            )
+            try:
+                await asyncio.shield(release)
+            except asyncio.CancelledError:
+                await release
+                raise
 
     def _epoch(self) -> str:
         try:
