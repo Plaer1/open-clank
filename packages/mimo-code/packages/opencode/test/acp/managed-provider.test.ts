@@ -734,6 +734,76 @@ test("generic admission refuses reconciling state while the explicit retry can s
   unregisterMemorySessionScope(sessionID)
 })
 
+test("explicit reconciliation clears an uncommitted transition when authority remains unchanged", async () => {
+  const sessionID = "engine-binding-reconciling-unchanged"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  beginManagedSessionTransition(sessionID, "/work/child", "reconcile-unchanged", 1)
+  markManagedSessionReconciling(sessionID, "reconcile-unchanged", 1)
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (!method.endsWith("/binding/read")) throw new Error(`unexpected ${method}`)
+      return {
+        engineSessionID: sessionID,
+        stableChatID: "chat-1",
+        owner: "alice",
+        engineAliases: [],
+        canonicalCwd: "/work",
+        memoryWorkspaceID: "global",
+        authorityWorkspaceID: "authority",
+        copalWorkspace: "copal",
+        workspaceRevision: 1,
+        mapRevision: 4,
+        mappingRevision: 2,
+        memoryEnabled: true,
+      }
+    },
+  } as any)
+  await expect(ManagedProvider.admitManagedSessionBinding(sessionID)).rejects.toThrow("reconciling")
+  expect(managedSessionBinding(sessionID)?.physicalCwd).toBe("/work")
+  expect(managedSessionBinding(sessionID)?.transition).toBeNull()
+  await expect(ManagedProvider.admitManagedSessionBinding(sessionID)).resolves.toMatchObject({
+    physicalCwd: "/work",
+    transition: null,
+  })
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("explicit reconciliation replaces every authority descriptor axis", async () => {
+  const sessionID = "engine-binding-reconciling-axes"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  beginManagedSessionTransition(sessionID, "/work/child", "reconcile-axes", 1)
+  markManagedSessionReconciling(sessionID, "reconcile-axes", 1)
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (!method.endsWith("/binding/read")) throw new Error(`unexpected ${method}`)
+      return {
+        engineSessionID: sessionID,
+        stableChatID: "chat-1",
+        owner: "alice",
+        engineAliases: ["prior-engine"],
+        canonicalCwd: "/work",
+        memoryWorkspaceID: "memory-new",
+        authorityWorkspaceID: "authority-new",
+        copalWorkspace: "copal-new",
+        workspaceRevision: 1,
+        mapRevision: 4,
+        mappingRevision: 2,
+        memoryEnabled: false,
+      }
+    },
+  } as any)
+  await expect(ManagedProvider.admitManagedSessionBinding(sessionID)).rejects.toThrow("reconciling")
+  expect(managedSessionBinding(sessionID)).toMatchObject({
+    engineAliases: ["prior-engine"],
+    memoryWorkspaceID: "memory-new",
+    authorityWorkspaceID: "authority-new",
+    copalWorkspace: "copal-new",
+    memoryEnabled: false,
+    transition: null,
+  })
+  unregisterMemorySessionScope(sessionID)
+})
+
 test("binding read rejects extra authority fields", async () => {
   const sessionID = "engine-binding-extra-field"
   registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
@@ -793,5 +863,43 @@ test("a pending binding read cannot install after unregister and re-registration
   })
   await expect(admitted).rejects.toThrow("registration changed")
   expect(managedSessionBinding(sessionID)?.physicalCwd).toBe("/work/new")
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("a pending binding read rejects a same-generation re-registration with changed authority axes", async () => {
+  const sessionID = "engine-binding-auxiliary-generation-race"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  ManagedProvider.invalidateManagedSessionBindingMarkerForTest(sessionID)
+  let release!: (value: unknown) => void
+  const pending = new Promise((resolve) => { release = resolve })
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (!method.endsWith("/binding/read")) throw new Error(`unexpected ${method}`)
+      return pending
+    },
+  } as any)
+  const admitted = ManagedProvider.ensureManagedSessionBinding(sessionID)
+  unregisterMemorySessionScope(sessionID)
+  const replacement = bindingDescriptor(sessionID)
+  replacement.env = replacement.env.map((item: { name: string; value: string }) =>
+    item.name === "COPAL_WORKSPACE" ? { ...item, value: "copal-new" } : item,
+  )
+  registerMemorySessionScope(sessionID, [replacement], "/work")
+  release({
+    engineSessionID: sessionID,
+    stableChatID: "chat-1",
+    owner: "alice",
+    engineAliases: [],
+    canonicalCwd: "/work",
+    memoryWorkspaceID: "global",
+    authorityWorkspaceID: "authority",
+    copalWorkspace: "copal",
+    workspaceRevision: 1,
+    mapRevision: 4,
+    mappingRevision: 2,
+    memoryEnabled: true,
+  })
+  await expect(admitted).rejects.toThrow("registration changed")
+  expect(managedSessionBinding(sessionID)?.copalWorkspace).toBe("copal-new")
   unregisterMemorySessionScope(sessionID)
 })
