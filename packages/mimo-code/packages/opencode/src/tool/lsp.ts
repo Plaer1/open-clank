@@ -5,6 +5,7 @@ import path from "path"
 import { LSP } from "../lsp"
 import DESCRIPTION from "./lsp.txt"
 import { Instance } from "../project/instance"
+import { SessionCwd } from "./session-cwd"
 import { pathToFileURL } from "url"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
@@ -35,15 +36,15 @@ export const LspTool = Tool.define(
         line: z.number().int().min(1).describe("The line number (1-based, as shown in editors)"),
         character: z.number().int().min(1).describe("The character offset (1-based, as shown in editors)"),
       }),
-      resources: (args: { file_path: string }) => ({
-        reads: [path.isAbsolute(args.file_path) ? args.file_path : path.join(Instance.directory, args.file_path)],
+      resources: (args: { file_path: string }, ctx: Tool.Context) => ({
+        reads: [path.isAbsolute(args.file_path) ? args.file_path : path.join(SessionCwd.get(ctx.sessionID), args.file_path)],
       }),
       execute: (
         args: { operation: (typeof operations)[number]; file_path: string; line: number; character: number },
         ctx: Tool.Context,
       ) =>
         Effect.gen(function* () {
-          const file = path.isAbsolute(args.file_path) ? args.file_path : path.join(Instance.directory, args.file_path)
+          const file = path.isAbsolute(args.file_path) ? args.file_path : path.join(SessionCwd.get(ctx.sessionID), args.file_path)
           yield* assertExternalDirectoryEffect(ctx, file)
           yield* ctx.ask({ permission: "lsp", patterns: ["*"], always: ["*"], metadata: {} })
 

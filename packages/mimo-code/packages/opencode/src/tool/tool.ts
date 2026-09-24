@@ -8,6 +8,7 @@ import { RecoverableError } from "./recoverable"
 import { Agent } from "@/agent/agent"
 import { SessionCwd } from "./session-cwd"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
+import { ManagedProvider } from "@/acp/managed-provider"
 
 export interface Metadata {
   [key: string]: any
@@ -110,6 +111,13 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
           ...(ctx.callID ? { "tool.call_id": ctx.callID } : {}),
         }
         return Effect.gen(function* () {
+          const managed = yield* Effect.tryPromise({
+            try: () => ManagedProvider.ensureManagedSessionBinding(ctx.sessionID),
+            catch: () => new RecoverableError("managed session binding is unavailable or reconciling"),
+          })
+          if (managed?.transition) {
+            throw new Error("managed session binding is unavailable or reconciling")
+          }
           yield* Effect.try({
             try: () => toolInfo.parameters.parse(args),
             catch: (error) => {

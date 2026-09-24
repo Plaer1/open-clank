@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { ManagedProvider } from "../../src/acp/managed-provider"
+import { requestManagedCwdForTest } from "../../src/tool/change-directory"
+import { beginManagedSessionTransition, managedSessionBinding, registerMemorySessionScope, unregisterMemorySessionScope } from "../../src/memory/session-scope"
 
 const route = {
   rootOperationID: "root-1",
@@ -480,4 +482,210 @@ test("standalone mode keeps the callback-free compatibility path", async () => {
     async () => 42,
   )
   expect(result).toBe(42)
+})
+
+function bindingDescriptor(sessionID: string, cwd = "/work", mapRevision = 4, mappingRevision = 2) {
+  return {
+    name: "lifetools_test",
+    command: "python",
+    args: [],
+    env: [
+      { name: "FM_OWNER", value: "alice" },
+      { name: "FM_WORKSPACE_ID", value: "global" },
+      { name: "SESSION_ID", value: "chat-1" },
+      { name: "OPEN_CLANK_AUTHORITY_WORKSPACE_ID", value: "authority" },
+      { name: "COPAL_WORKSPACE", value: "copal" },
+      { name: "WORKSPACE", value: cwd },
+      { name: "OPEN_CLANK_ENGINE_SESSION_ALIASES", value: "[]" },
+      { name: "OPEN_CLANK_SESSION_BINDING_REVISION", value: "1" },
+      { name: "OPEN_CLANK_SESSION_MAP_REVISION", value: String(mapRevision) },
+      { name: "OPEN_CLANK_SESSION_MAPPING_REVISION", value: String(mappingRevision) },
+      { name: "FM_MEMORY_ENABLED", value: "1" },
+      { name: "OPEN_CLANK_TEST_SESSION", value: sessionID },
+    ],
+  } as any
+}
+
+test("binding admission reads authoritative state after marker invalidation", async () => {
+  const sessionID = "engine-binding-read"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  ManagedProvider.invalidateManagedSessionBindingMarkerForTest(sessionID)
+  let reads = 0
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      expect(method).toBe("_openclank/session/v1/binding/read")
+      reads += 1
+      return {
+        engineSessionID: sessionID,
+        stableChatID: "chat-1",
+        owner: "alice",
+        engineAliases: [],
+        canonicalCwd: "/work/child",
+        memoryWorkspaceID: "global",
+        authorityWorkspaceID: "authority",
+        copalWorkspace: "copal",
+        workspaceRevision: 1,
+        mapRevision: 5,
+        mappingRevision: 2,
+        memoryEnabled: true,
+      }
+    },
+  } as any)
+  const [first, second] = await Promise.all([
+    ManagedProvider.ensureManagedSessionBinding(sessionID),
+    ManagedProvider.ensureManagedSessionBinding(sessionID),
+  ])
+  expect(reads).toBe(1)
+  expect(first?.physicalCwd).toBe("/work/child")
+  expect(second?.physicalCwd).toBe("/work/child")
+  expect(managedSessionBinding(sessionID)?.mapRevision).toBe(5)
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("session cwd accepts exact revisions and preserves explicit rejection", async () => {
+  let response: unknown = {
+    outcome: "accepted",
+    canonicalCwd: "/work/child",
+    workspaceRevision: 2,
+    changed: true,
+    transitionID: "transition-1",
+  }
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      expect(method).toBe("_openclank/session/v1/cwd/change")
+      return response
+    },
+  } as any)
+  const accepted = await ManagedProvider.requestSessionCwdChange("engine-cwd", "/work/child", 1, "transition-1")
+  expect(accepted.outcome).toBe("accepted")
+  response = { outcome: "rejected", committed: false, code: "workspace_rejected", transitionID: "transition-2" }
+  const rejected = await ManagedProvider.requestSessionCwdChange("engine-cwd", "/work/other", 2, "transition-2")
+  expect(rejected.outcome).toBe("rejected")
+  response = { outcome: "accepted", canonicalCwd: "/work/child", workspaceRevision: 4, changed: false, transitionID: "transition-3" }
+  await expect(ManagedProvider.requestSessionCwdChange("engine-cwd", "/work/child", 3, "transition-3")).rejects.toThrow("invalid accepted")
+  response = { outcome: "rejected", committed: false, code: "not-a-contract-code", transitionID: "transition-4" }
+  await expect(ManagedProvider.requestSessionCwdChange("engine-cwd", "/work/other", 3, "transition-4")).rejects.toThrow("invalid session cwd result")
+})
+
+test("ambiguous cwd response settles unchanged authority and fails the requested transition", async () => {
+  const sessionID = "engine-cwd-ambiguous-old"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (method.endsWith("/cwd/change")) throw new Error("ambiguous host response")
+      if (method.endsWith("/binding/read")) {
+        return {
+          engineSessionID: sessionID,
+          stableChatID: "chat-1",
+          owner: "alice",
+          engineAliases: [],
+          canonicalCwd: "/work",
+          memoryWorkspaceID: "global",
+          authorityWorkspaceID: "authority",
+          copalWorkspace: "copal",
+          workspaceRevision: 1,
+          mapRevision: 4,
+          mappingRevision: 2,
+          memoryEnabled: true,
+        }
+      }
+      throw new Error(`unexpected ${method}`)
+    },
+  } as any)
+  await expect(requestManagedCwdForTest(sessionID, "/work/child")).rejects.toThrow("ambiguous host response")
+  expect(managedSessionBinding(sessionID)?.physicalCwd).toBe("/work")
+  expect(managedSessionBinding(sessionID)?.transition).toBeNull()
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("ambiguous cwd response accepts a durably advanced authority", async () => {
+  const sessionID = "engine-cwd-ambiguous-new"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (method.endsWith("/cwd/change")) throw new Error("ambiguous host response")
+      if (method.endsWith("/binding/read")) {
+        return {
+          engineSessionID: sessionID,
+          stableChatID: "chat-1",
+          owner: "alice",
+          engineAliases: [],
+          canonicalCwd: "/work/child",
+          memoryWorkspaceID: "global",
+          authorityWorkspaceID: "authority",
+          copalWorkspace: "copal",
+          workspaceRevision: 2,
+          mapRevision: 5,
+          mappingRevision: 2,
+          memoryEnabled: true,
+        }
+      }
+      throw new Error(`unexpected ${method}`)
+    },
+  } as any)
+  const result = await requestManagedCwdForTest(sessionID, "/work/child")
+  expect(result).toMatchObject({ outcome: "accepted", canonicalCwd: "/work/child", workspaceRevision: 2 })
+  expect(managedSessionBinding(sessionID)?.transition).toBeNull()
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("binding admission rejects a changed transition while its read is pending", async () => {
+  const sessionID = "engine-binding-transition-race"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  ManagedProvider.invalidateManagedSessionBindingMarkerForTest(sessionID)
+  let release!: (value: unknown) => void
+  const pending = new Promise((resolve) => { release = resolve })
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (!method.endsWith("/binding/read")) throw new Error(`unexpected ${method}`)
+      return pending
+    },
+  } as any)
+  const admitted = ManagedProvider.ensureManagedSessionBinding(sessionID)
+  beginManagedSessionTransition(sessionID, "/work/other", "transition-race", 1)
+  release({
+    engineSessionID: sessionID,
+    stableChatID: "chat-1",
+    owner: "alice",
+    engineAliases: [],
+    canonicalCwd: "/work",
+    memoryWorkspaceID: "global",
+    authorityWorkspaceID: "authority",
+    copalWorkspace: "copal",
+    workspaceRevision: 1,
+    mapRevision: 4,
+    mappingRevision: 2,
+    memoryEnabled: true,
+  })
+  await expect(admitted).rejects.toThrow("binding changed during reconciliation")
+  expect(managedSessionBinding(sessionID)?.transition?.transitionID).toBe("transition-race")
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("binding admission rejects authority evidence that regresses map revisions", async () => {
+  const sessionID = "engine-binding-map-regression"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID, "/work", 4, 2)], "/work")
+  ManagedProvider.invalidateManagedSessionBindingMarkerForTest(sessionID)
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (!method.endsWith("/binding/read")) throw new Error(`unexpected ${method}`)
+      return {
+        engineSessionID: sessionID,
+        stableChatID: "chat-1",
+        owner: "alice",
+        engineAliases: [],
+        canonicalCwd: "/work",
+        memoryWorkspaceID: "global",
+        authorityWorkspaceID: "authority",
+        copalWorkspace: "copal",
+        workspaceRevision: 1,
+        mapRevision: 3,
+        mappingRevision: 2,
+        memoryEnabled: true,
+      }
+    },
+  } as any)
+  await expect(ManagedProvider.ensureManagedSessionBinding(sessionID)).rejects.toThrow("map evidence regressed")
+  expect(managedSessionBinding(sessionID)?.physicalCwd).toBe("/work")
+  unregisterMemorySessionScope(sessionID)
 })

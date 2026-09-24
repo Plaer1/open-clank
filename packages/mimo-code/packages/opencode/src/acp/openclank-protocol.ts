@@ -441,11 +441,42 @@ export interface OperationExecuteResult {
 export interface SessionCwdChangeRequest {
   readonly sessionID: string
   readonly requestedCwd: string
+  readonly expectedWorkspaceRevision: number
+  readonly transitionID: string
 }
 
-export interface SessionCwdChangeResult {
+export type SessionCwdChangeResult =
+  | {
+      readonly outcome: "accepted"
+      readonly canonicalCwd: string
+      readonly workspaceRevision: number
+      readonly changed: boolean
+      readonly transitionID: string
+    }
+  | {
+      readonly outcome: "rejected"
+      readonly transitionID: string
+      readonly committed: false
+      readonly code: "invalid_cwd" | "unknown_session" | "stale_engine_session" | "owner_mismatch" | "workspace_rejected" | "workspace_revision_conflict" | "binding_unavailable"
+    }
+
+export interface SessionBindingReadRequest {
+  readonly sessionID: string
+}
+
+export interface SessionBindingReadResult {
+  readonly engineSessionID: string
+  readonly stableChatID: string
+  readonly owner: string
   readonly canonicalCwd: string
-  readonly workspaceRevision?: number
+  readonly workspaceRevision: number
+  readonly authorityWorkspaceID: string
+  readonly memoryWorkspaceID: string
+  readonly copalWorkspace: string
+  readonly memoryEnabled: boolean
+  readonly engineAliases: readonly string[]
+  readonly mapRevision: number
+  readonly mappingRevision: number
 }
 
 export interface MethodRequestMap {
@@ -463,6 +494,7 @@ export interface MethodRequestMap {
   "_openclank/operations/v1/artifact/write": ArtifactWriteRequest
   "_openclank/operations/v1/executor/invoke": ExecutorInvokeRequest
   "_openclank/session/v1/cwd/change": SessionCwdChangeRequest
+  "_openclank/session/v1/binding/read": SessionBindingReadRequest
 }
 
 export interface MethodResultMap {
@@ -480,6 +512,7 @@ export interface MethodResultMap {
   "_openclank/operations/v1/artifact/write": ArtifactDescriptor
   "_openclank/operations/v1/executor/invoke": ArtifactDescriptor
   "_openclank/session/v1/cwd/change": SessionCwdChangeResult
+  "_openclank/session/v1/binding/read": SessionBindingReadResult
 }
 
 export interface EngineMethodRequestMap {

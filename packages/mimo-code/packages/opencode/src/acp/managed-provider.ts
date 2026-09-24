@@ -4,6 +4,15 @@ import path from "node:path"
 import { Auth } from "@/auth"
 import { AccountSelection } from "@/provider/account-selection"
 import { OpenClankManagedProtocol } from "./openclank-protocol"
+import {
+  installManagedSessionBinding,
+  invalidateManagedSessionMarkerForTest,
+  managedSessionBinding,
+  markerMatches,
+  registerManagedSessionAdmissionReset,
+  resetManagedSessionScopesForTest,
+  replaceManagedSessionBinding,
+} from "@/memory/session-scope"
 
 export const MANAGED_ENV = "OPEN_CLANK_MANAGED" as const
 
@@ -100,11 +109,6 @@ const RefreshLease = Schema.Struct({
   renewable: Schema.Boolean,
 })
 
-const SessionCwdChangeResult = Schema.Struct({
-  canonicalCwd: Schema.String,
-  workspaceRevision: Schema.optional(Schema.Number),
-})
-
 let host: AgentSideConnection | undefined
 
 type ActiveOperation = {
@@ -150,17 +154,122 @@ export function installHostConnection(value: AgentSideConnection): void {
 export async function requestSessionCwdChange(
   sessionID: string,
   requestedCwd: string,
+  expectedWorkspaceRevision: number,
+  transitionID: string,
 ): Promise<OpenClankManagedProtocol.SessionCwdChangeResult> {
   const raw = await OpenClankManagedProtocol.callHost(connection(), "_openclank/session/v1/cwd/change", {
     sessionID,
     requestedCwd,
+    expectedWorkspaceRevision,
+    transitionID,
   })
-  const result = decode(SessionCwdChangeResult, raw, "session cwd change result")
-  if (!path.isAbsolute(result.canonicalCwd)) {
-    throw new ManagedProviderError("Managed provider host returned a non-absolute session cwd")
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ManagedProviderError("Managed provider host returned an invalid session cwd result")
   }
-  return result
+  const result = raw as Record<string, unknown>
+  if (result.outcome === "accepted") {
+    if (typeof result.canonicalCwd !== "string" || !path.isAbsolute(result.canonicalCwd) || path.normalize(result.canonicalCwd) !== result.canonicalCwd || typeof result.workspaceRevision !== "number" || !Number.isSafeInteger(result.workspaceRevision) || result.workspaceRevision !== expectedWorkspaceRevision + (result.changed ? 1 : 0) || typeof result.changed !== "boolean" || result.transitionID !== transitionID) {
+      throw new ManagedProviderError("Managed provider host returned an invalid accepted session cwd result")
+    }
+    return result as unknown as OpenClankManagedProtocol.SessionCwdChangeResult
+  }
+  const rejectionCodes = new Set(["invalid_cwd", "unknown_session", "stale_engine_session", "owner_mismatch", "workspace_rejected", "workspace_revision_conflict", "binding_unavailable"])
+  if (result.outcome !== "rejected" || result.transitionID !== transitionID || result.committed !== false || typeof result.code !== "string" || !rejectionCodes.has(result.code)) {
+    throw new ManagedProviderError("Managed provider host returned an invalid session cwd result")
+  }
+  return result as unknown as OpenClankManagedProtocol.SessionCwdChangeResult
 }
+
+export async function readManagedSessionBinding(
+  sessionID: string,
+): Promise<OpenClankManagedProtocol.SessionBindingReadResult> {
+  const raw = await OpenClankManagedProtocol.callHost(connection(), "_openclank/session/v1/binding/read", { sessionID })
+  const decoded = decode(Schema.Unknown, raw, "managed session binding")
+  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
+    throw new ManagedProviderError("Managed provider host returned an invalid managed session binding")
+  }
+  const result = decoded as Record<string, unknown>
+  const requiredStrings = ["engineSessionID", "stableChatID", "owner", "canonicalCwd", "memoryWorkspaceID", "authorityWorkspaceID", "copalWorkspace"]
+  const revisions = ["workspaceRevision", "mapRevision", "mappingRevision"]
+  const aliases = result.engineAliases
+  if (result.engineSessionID !== sessionID || requiredStrings.some((key) => typeof result[key] !== "string" || !(result[key] as string).trim() || (result[key] as string) !== (result[key] as string).trim()) || !path.isAbsolute(result.canonicalCwd as string) || path.normalize(result.canonicalCwd as string) !== result.canonicalCwd || revisions.some((key) => typeof result[key] !== "number" || !Number.isSafeInteger(result[key]) || (result[key] as number) < 0) || typeof result.memoryEnabled !== "boolean" || !Array.isArray(aliases) || aliases.length > 16 || aliases.some((item) => typeof item !== "string" || !item.trim() || item !== item.trim()) || new Set(aliases).size !== aliases.length || aliases.includes(result.engineSessionID)) {
+    throw new ManagedProviderError("Managed provider host returned an invalid managed session binding")
+  }
+  return result as unknown as OpenClankManagedProtocol.SessionBindingReadResult
+}
+
+const bindingReads = new Map<string, Promise<OpenClankManagedProtocol.SessionBindingReadResult>>()
+
+export async function ensureManagedSessionBinding(sessionID: string) {
+  if (!enabled()) return managedSessionBinding(sessionID)
+  const initial = managedSessionBinding(sessionID)
+  if (initial?.transition?.phase === "in_flight") {
+    throw new ManagedProviderError("managed session binding is in flight")
+  }
+  if (initial && !initial.transition && markerMatches(sessionID, initial)) return initial
+  const initialTransition = initial?.transition ? { ...initial.transition } : undefined
+  let pending = bindingReads.get(sessionID)
+  if (!pending) {
+    pending = readManagedSessionBinding(sessionID)
+    bindingReads.set(sessionID, pending)
+  }
+  try {
+    const authority = await pending
+    const latest = managedSessionBinding(sessionID)
+    if (latest?.transition?.phase === "in_flight") {
+      throw new ManagedProviderError("managed session binding changed during reconciliation")
+    }
+    if (initialTransition) {
+      if (!latest?.transition || latest.transition.transitionID !== initialTransition.transitionID || latest.transition.phase !== initialTransition.phase) {
+        throw new ManagedProviderError("managed session transition changed during reconciliation")
+      }
+    } else if (latest?.transition) {
+      throw new ManagedProviderError("managed session binding changed during reconciliation")
+    }
+    if (latest && (authority.owner !== latest.owner || authority.stableChatID !== latest.stableChatID || authority.workspaceRevision < latest.bindingRevision)) {
+      throw new ManagedProviderError("managed session binding authority regressed during reconciliation")
+    }
+    if (latest && latest.engineSessionID === authority.engineSessionID && latest.owner === authority.owner && latest.stableChatID === authority.stableChatID && latest.mapRevision === authority.mapRevision && latest.mappingRevision === authority.mappingRevision && latest.bindingRevision === authority.workspaceRevision && latest.physicalCwd === path.normalize(authority.canonicalCwd) && markerMatches(sessionID, latest)) {
+      return latest
+    }
+    if (initial && latest && (initial.engineSessionID !== latest.engineSessionID || initial.owner !== latest.owner || initial.stableChatID !== latest.stableChatID || initial.mapRevision !== latest.mapRevision || initial.mappingRevision !== latest.mappingRevision || initial.bindingRevision !== latest.bindingRevision || initial.physicalCwd !== latest.physicalCwd)) {
+      throw new ManagedProviderError("managed session binding generation changed during reconciliation")
+    }
+    if (initial && (authority.mapRevision < initial.mapRevision || authority.mappingRevision < initial.mappingRevision)) {
+      throw new ManagedProviderError("managed session binding map evidence regressed during reconciliation")
+    }
+    const replacement = {
+      owner: authority.owner,
+      stableChatID: authority.stableChatID,
+      engineSessionID: authority.engineSessionID,
+      engineAliases: [...authority.engineAliases],
+      memoryWorkspaceID: authority.memoryWorkspaceID,
+      authorityWorkspaceID: authority.authorityWorkspaceID,
+      copalWorkspace: authority.copalWorkspace,
+      physicalCwd: path.normalize(authority.canonicalCwd),
+      bindingRevision: authority.workspaceRevision,
+      mapRevision: authority.mapRevision,
+      mappingRevision: authority.mappingRevision,
+      memoryEnabled: authority.memoryEnabled,
+      transition: null,
+    } as const
+    if (latest) replaceManagedSessionBinding(sessionID, replacement, { expectedTransitionID: initialTransition?.transitionID ?? null, expectedWorkspaceRevision: initial?.bindingRevision ?? latest.bindingRevision })
+    else installManagedSessionBinding(sessionID, replacement)
+    return managedSessionBinding(sessionID)
+  } finally {
+    if (bindingReads.get(sessionID) === pending) bindingReads.delete(sessionID)
+  }
+}
+
+export function resetManagedSessionAdmission(sessionID: string) {
+  bindingReads.delete(sessionID)
+}
+
+export function invalidateManagedSessionBindingMarkerForTest(sessionID: string) {
+  invalidateManagedSessionMarkerForTest(sessionID)
+}
+
+registerManagedSessionAdmissionReset(resetManagedSessionAdmission)
 
 export function currentScope(sessionID: string): AccountSelection.Scope | undefined {
   return operations.get(sessionID)?.scope
@@ -683,6 +792,8 @@ export function resetForTest(): void {
   host = undefined
   operations.clear()
   hostContexts.clear()
+  bindingReads.clear()
+  resetManagedSessionScopesForTest()
 }
 
 export * as ManagedProvider from "./managed-provider"

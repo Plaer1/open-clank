@@ -3,6 +3,7 @@ import type { ACPSessionState } from "./types"
 import { Log } from "@/util"
 import type { OpencodeClient } from "@mimo-ai/sdk/v2"
 import { registerMemorySessionScope, unregisterMemorySessionScope } from "@/memory/session-scope"
+import { resetManagedSessionAdmission } from "./managed-provider"
 
 const log = Log.create({ service: "acp-session-manager" })
 
@@ -41,7 +42,12 @@ export class ACPSessionManager {
     log.info("creating_session", { state })
 
     // Register first: a throwing registration must not leave a stale entry.
-    registerMemorySessionScope(sessionId, mcpServers, cwd)
+    try {
+      registerMemorySessionScope(sessionId, mcpServers, cwd)
+    } catch (error) {
+      resetManagedSessionAdmission(sessionId)
+      throw error
+    }
     this.sessions.set(sessionId, state)
     return state
   }
@@ -74,7 +80,12 @@ export class ACPSessionManager {
     log.info("loading_session", { state })
 
     // Register first: a throwing registration must not leave a stale entry.
-    registerMemorySessionScope(sessionId, mcpServers, cwd)
+    try {
+      registerMemorySessionScope(sessionId, mcpServers, cwd)
+    } catch (error) {
+      resetManagedSessionAdmission(sessionId)
+      throw error
+    }
     this.sessions.set(sessionId, state)
     return state
   }
@@ -83,7 +94,10 @@ export class ACPSessionManager {
     const session = this.sessions.get(sessionId)
     if (!session) {
       log.error("session not found", { sessionId })
-      throw RequestError.invalidParams(JSON.stringify({ error: `Session not found: ${sessionId}` }))
+      throw new RequestError(-32602, "Open Clank managed session is missing", {
+        code: "OPENCLANK_SESSION_MISSING",
+        sessionId,
+      })
     }
     return session
   }
@@ -102,6 +116,7 @@ export class ACPSessionManager {
       ),
     )
     unregisterMemorySessionScope(sessionId)
+    resetManagedSessionAdmission(sessionId)
     this.sessions.delete(sessionId)
   }
 

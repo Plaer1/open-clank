@@ -77,6 +77,8 @@ import { ToolScriptTool, renderToolScriptDeclarations } from "./tool-script"
 import { toolScriptRegistry } from "./tool-script-ref"
 import { usesGPTToolset } from "./gpt"
 import { ManageFilesTool } from "./manage-files"
+import { ManagedProvider } from "@/acp/managed-provider"
+import { RecoverableError } from "./recoverable"
 
 const log = Log.create({ service: "tool.registry" })
 
@@ -189,10 +191,17 @@ export const layer = Layer.effect(
             description: def.description,
             execute: (args, toolCtx) =>
               Effect.gen(function* () {
+                const managed = yield* Effect.tryPromise({
+                  try: () => ManagedProvider.ensureManagedSessionBinding(toolCtx.sessionID),
+                  catch: () => new RecoverableError("managed session binding is unavailable or reconciling"),
+                }).pipe(Effect.orDie)
+                if (managed?.transition) {
+                  throw new Error("managed session binding is unavailable or reconciling")
+                }
                 const pluginCtx: PluginToolContext = {
                   ...toolCtx,
                   ask: (req) => toolCtx.ask(req),
-                  directory: ctx.directory,
+                  directory: SessionCwd.get(toolCtx.sessionID),
                   worktree: ctx.worktree,
                 }
                 const result = yield* Effect.promise(() => def.execute(args as any, pluginCtx))

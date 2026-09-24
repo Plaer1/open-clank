@@ -15,14 +15,42 @@ const sdk = {
   },
 } as unknown as OpencodeClient
 
-const lifetools = (env: Array<{ name: string; value: string }>): McpServer =>
-  ({ name: "lifetools_test", command: "python", args: [], env }) as McpServer
+const lifetools = (env: Array<{ name: string; value: string }>, cwd = "/workspace"): McpServer =>
+  ({
+    name: "lifetools_test",
+    command: "python",
+    args: [],
+    env: [
+      { name: "FM_OWNER", value: "alice" },
+      { name: "FM_WORKSPACE_ID", value: "global" },
+      { name: "SESSION_ID", value: "chat-stable" },
+      { name: "OPEN_CLANK_AUTHORITY_WORKSPACE_ID", value: "authority" },
+      { name: "COPAL_WORKSPACE", value: "copal" },
+      { name: "WORKSPACE", value: cwd },
+      { name: "OPEN_CLANK_ENGINE_SESSION_ALIASES", value: "[]" },
+      { name: "OPEN_CLANK_SESSION_BINDING_REVISION", value: "0" },
+      { name: "OPEN_CLANK_SESSION_MAP_REVISION", value: "0" },
+      { name: "OPEN_CLANK_SESSION_MAPPING_REVISION", value: "0" },
+      ...env,
+    ],
+  }) as McpServer
 
 afterEach(() => {
   for (const id of created.splice(0)) unregisterMemorySessionScope(id)
 })
 
 describe("ACPSessionManager memory scope registration", () => {
+  test("missing persistent session is classified with typed managed data", () => {
+    const manager = new ACPSessionManager(sdk)
+    try {
+      manager.get("missing-session")
+      throw new Error("expected missing session")
+    } catch (error: any) {
+      expect(error.data?.code).toBe("OPENCLANK_SESSION_MISSING")
+      expect(error.data?.sessionId).toBe("missing-session")
+    }
+  })
+
   test("a disabled-memory lifetools descriptor without owner/workspace creates cleanly", async () => {
     const manager = new ACPSessionManager(sdk)
     const state = await manager.create("/workspace", [
@@ -35,11 +63,11 @@ describe("ACPSessionManager memory scope registration", () => {
 
   test("a throwing scope registration leaves no stale session entry", async () => {
     const manager = new ACPSessionManager(sdk)
-    // Memory enabled but the descriptor lacks FM_WORKSPACE_ID.
-    const servers = [lifetools([{ name: "FM_OWNER", value: "alice" }])]
+    // Memory enabled but the descriptor lacks the required workspace axis.
+    const servers = [lifetools([{ name: "FM_WORKSPACE_ID", value: "" }])]
 
     await expect(manager.create("/workspace", servers)).rejects.toThrow(
-      "requires owner and workspace",
+      "requires owner, stable chat, workspaces",
     )
     expect(manager.tryGet(created.at(-1)!)).toBeUndefined()
   })

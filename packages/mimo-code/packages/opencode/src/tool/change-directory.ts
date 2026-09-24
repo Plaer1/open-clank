@@ -1,4 +1,5 @@
 import path from "path"
+import { randomUUID } from "node:crypto"
 import z from "zod"
 import { Effect } from "effect"
 import { InstanceState } from "@/effect"
@@ -7,6 +8,13 @@ import { Bus } from "@/bus"
 import { ManagedProvider } from "@/acp/managed-provider"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { SessionCwd } from "./session-cwd"
+import {
+  beginManagedSessionTransition,
+  clearManagedSessionTransition,
+  managedSessionBinding,
+  markManagedSessionReconciling,
+  replaceManagedSessionBinding,
+} from "@/memory/session-scope"
 import * as Tool from "./tool"
 
 const DESCRIPTION = [
@@ -21,6 +29,71 @@ const DESCRIPTION = [
   "Pass an absolute path, or a relative path (resolved from the current working directory).",
   'Pass "~" to reset back to the project root.',
 ].join("\n")
+
+async function requestManagedCwd(sessionID: string, cwd: string) {
+  const binding = managedSessionBinding(sessionID)
+  if (!binding || binding.transition) throw new Error("managed session binding is unavailable")
+  const transitionID = randomUUID()
+  let settledFromAuthority = false
+  beginManagedSessionTransition(sessionID, cwd, transitionID, binding.bindingRevision)
+  let result: Awaited<ReturnType<typeof ManagedProvider.requestSessionCwdChange>>
+  try {
+    result = await ManagedProvider.requestSessionCwdChange(sessionID, cwd, binding.bindingRevision, transitionID)
+  } catch (error) {
+    try {
+      const recovered = await ManagedProvider.readManagedSessionBinding(sessionID)
+      if (recovered.engineSessionID !== binding.engineSessionID || recovered.stableChatID !== binding.stableChatID || recovered.owner !== binding.owner || recovered.mapRevision < binding.mapRevision || recovered.mappingRevision !== binding.mappingRevision || recovered.workspaceRevision < binding.bindingRevision) throw error
+      replaceManagedSessionBinding(sessionID, {
+        ...binding,
+        engineSessionID: recovered.engineSessionID,
+        engineAliases: recovered.engineAliases,
+        memoryWorkspaceID: recovered.memoryWorkspaceID,
+        authorityWorkspaceID: recovered.authorityWorkspaceID,
+        copalWorkspace: recovered.copalWorkspace,
+        physicalCwd: recovered.canonicalCwd,
+        bindingRevision: recovered.workspaceRevision,
+        mapRevision: recovered.mapRevision,
+        mappingRevision: recovered.mappingRevision,
+        memoryEnabled: recovered.memoryEnabled,
+        transition: null,
+      }, { expectedTransitionID: transitionID, expectedWorkspaceRevision: binding.bindingRevision })
+      settledFromAuthority = true
+      if (recovered.canonicalCwd !== cwd) throw error
+      return {
+        outcome: "accepted" as const,
+        canonicalCwd: recovered.canonicalCwd,
+        workspaceRevision: recovered.workspaceRevision,
+        changed: recovered.canonicalCwd !== binding.physicalCwd,
+        transitionID,
+      }
+    } catch {
+      if (settledFromAuthority) throw error
+      markManagedSessionReconciling(sessionID, transitionID, binding.bindingRevision)
+      throw error
+    }
+  }
+  if (result.outcome === "rejected") {
+    clearManagedSessionTransition(sessionID, transitionID, binding.bindingRevision)
+    throw new Error(`workspace change rejected: ${result.code}`)
+  }
+  const expectedRevision = binding.bindingRevision + (result.changed ? 1 : 0)
+  if (result.transitionID !== transitionID || !path.isAbsolute(result.canonicalCwd) || path.normalize(result.canonicalCwd) !== result.canonicalCwd || result.workspaceRevision !== expectedRevision || result.changed !== (result.canonicalCwd !== binding.physicalCwd)) {
+    markManagedSessionReconciling(sessionID, transitionID, binding.bindingRevision)
+    throw new Error("managed session cwd acknowledgement is invalid")
+  }
+      replaceManagedSessionBinding(sessionID, {
+        ...binding,
+        physicalCwd: result.canonicalCwd,
+        bindingRevision: result.workspaceRevision,
+        transition: null,
+      }, { expectedTransitionID: transitionID, expectedWorkspaceRevision: binding.bindingRevision })
+  return result
+}
+
+// Kept as a narrow seam for the managed cwd reconciliation proof. The tool
+// remains the only production caller; tests use it to exercise ambiguous host
+// responses without constructing the full tool layer.
+export const requestManagedCwdForTest = requestManagedCwd
 
 export const ChangeDirectoryTool = Tool.define(
   "change_directory",
@@ -54,9 +127,7 @@ export const ChangeDirectoryTool = Tool.define(
 
           if (params.path === "~" || params.path === "") {
             const approved = ManagedProvider.enabled()
-              ? yield* Effect.tryPromise(() => ManagedProvider.requestSessionCwdChange(ctx.sessionID, ins.directory)).pipe(
-                  Effect.orDie,
-                )
+              ? yield* Effect.tryPromise(() => requestManagedCwd(ctx.sessionID, ins.directory)).pipe(Effect.orDie)
               : undefined
             const nextCwd = approved?.canonicalCwd ?? ins.directory
             if (nextCwd === ins.directory) SessionCwd.clear(ctx.sessionID)
@@ -93,9 +164,7 @@ export const ChangeDirectoryTool = Tool.define(
           yield* assertExternalDirectoryEffect(ctx, normalized, { kind: "directory" })
 
           const approved = ManagedProvider.enabled()
-              ? yield* Effect.tryPromise(() => ManagedProvider.requestSessionCwdChange(ctx.sessionID, normalized)).pipe(
-                  Effect.orDie,
-                )
+              ? yield* Effect.tryPromise(() => requestManagedCwd(ctx.sessionID, normalized)).pipe(Effect.orDie)
             : undefined
           const nextCwd = approved?.canonicalCwd ?? normalized
           SessionCwd.set(ctx.sessionID, nextCwd)

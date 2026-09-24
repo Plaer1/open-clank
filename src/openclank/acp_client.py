@@ -243,7 +243,7 @@ class ACPClient:
             if fut and not fut.done():
                 if "error" in msg:
                     err = msg["error"]
-                    fut.set_exception(RPCError(err.get("code", -1), err.get("message", "unknown")))
+                    fut.set_exception(RPCError(err.get("code", -1), err.get("message", "unknown"), err.get("data")))
                 else:
                     fut.set_result(msg.get("result", {}))
 
@@ -300,6 +300,11 @@ class TransportError(Exception):
 
 
 class RPCError(Exception):
-    def __init__(self, code: int, message: str) -> None:
+    def __init__(self, code: int, message: str, data: Any = None) -> None:
         super().__init__(message)
         self.code = code
+        self.data = data
+
+    @property
+    def session_missing(self) -> bool:
+        return isinstance(self.data, dict) and self.data.get("code") == "OPENCLANK_SESSION_MISSING"

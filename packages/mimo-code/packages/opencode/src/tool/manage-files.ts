@@ -38,14 +38,14 @@ function requestedPath(value: string, sessionID: Tool.Context["sessionID"]) {
   return path.isAbsolute(value) ? value : path.resolve(SessionCwd.get(sessionID), value)
 }
 
-function trashScope() {
+function trashScope(sessionID: Tool.Context["sessionID"]) {
   const scopedOwner =
     process.env.OPEN_CLANK_OWNER?.trim().toLowerCase() || process.env.FM_OWNER?.trim().toLowerCase()
   if (process.env.OPEN_CLANK_MANAGED === "1" && !scopedOwner) {
     throw new RecoverableError("manage_files: managed sessions require an authenticated owner")
   }
   const owner = scopedOwner || "local"
-  const workspace = AppFileSystem.resolve(Instance.directory)
+  const workspace = AppFileSystem.resolve(SessionCwd.get(sessionID))
   if (workspace === path.parse(workspace).root) {
     throw new RecoverableError("manage_files: filesystem root cannot be the active workspace")
   }
@@ -72,7 +72,7 @@ export const ManageFilesTool = Tool.define(
         "Move files without overwriting, or delete them to recoverable trash. Supports restore and paginated trash listing.",
       parameters: Parameters,
       resources: (params: z.infer<typeof Parameters>, ctx: Tool.Context) => {
-        const scope = trashScope()
+        const scope = trashScope(ctx.sessionID)
         if (params.action === "list_trash") return { reads: [scope.root] }
         if (params.action === "restore") {
           const manifest = path.join(scope.root, `${params.trash_id ?? ""}.json`)
@@ -100,7 +100,7 @@ export const ManageFilesTool = Tool.define(
       },
       execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const scope = trashScope()
+          const scope = trashScope(ctx.sessionID)
           const root = scope.root
           if (params.action === "list_trash") {
             const cursor = params.cursor ?? 0
