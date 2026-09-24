@@ -61,6 +61,7 @@ import {
   isEmptyStep,
 } from "../session/prompt/empty-step-detection"
 import { builtinSkillRoot, matchDocumentSkills } from "@/skill/builtin/extract"
+import { Skill } from "@/skill"
 import { ToolRegistry } from "../tool"
 import { MCP } from "../mcp"
 import { normalizeToolResult } from "../mcp/tool-result"
@@ -749,14 +750,12 @@ ${entries}
         (p) => p.type === "text" && p.text.startsWith('<skill_content name="'),
       )
       if (!alreadyWrapped) {
-        const bodyText = userMessage.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n")
-        const stripped = bodyText.replace(/```[\s\S]*?```/g, " ").replace(/`[^`\n]*`/g, " ")
+        // Same synthetic-filtered extraction as isUserExplicitRequest / userSlashMentions:
+        // a synthetic /name is not a user-typed mention and must not drive body injection.
         const mentioned: string[] = []
         const seen = new Set<string>()
-        const mentionRe = /(?:^|\s)\/([A-Za-z][A-Za-z0-9_:-]*)(?=[^A-Za-z0-9_:-]|$)/g
-        for (const m of stripped.matchAll(mentionRe)) {
-          const name = m[1]
-          if (!name || seen.has(name)) continue
+        for (const name of Skill.userSlashMentions(input.messages)) {
+          if (seen.has(name)) continue
           seen.add(name)
           const resolved = yield* sys.getForInvocation(name, "explicit")
           if (!resolved.ok) continue

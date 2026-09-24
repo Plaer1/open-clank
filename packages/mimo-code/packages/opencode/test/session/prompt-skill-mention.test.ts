@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
-// This regex is duplicated from `mentionRe` in src/session/prompt.ts to pin its behavior.
-// If the source regex changes, this test must be updated to match.
+// This regex is duplicated from `MENTION_RE` in src/skill/index.ts (userSlashMentions)
+// to pin its behavior. If the source regex changes, this test must be updated to match.
 const mentionRe = /(?:^|\s)\/([A-Za-z][A-Za-z0-9_:-]*)(?=[^A-Za-z0-9_:-]|$)/g
 
 function extractMentions(text: string) {

@@ -469,10 +469,12 @@ Use this skill.
               }
 
               // Model (autonomous) invocation must not reach a hidden skill.
+              // Gated denials share the not-found shape (no existence oracle).
               const modelExit = yield* Effect.exit(tool.execute({ name: "hidden-trusted" }, ctx))
               expect(modelExit._tag).toBe("Failure")
               const modelMsg = modelExit._tag === "Failure" ? Cause.pretty(modelExit.cause) : ""
-              expect(modelMsg).toContain("is not invocable in this context")
+              expect(modelMsg).toContain("not found")
+              expect(modelMsg).not.toContain("is not invocable in this context")
               // Denial must not coach the invocation flip.
               expect(modelMsg).not.toContain("invocation")
               expect(modelMsg).not.toContain("explicit")
@@ -485,7 +487,8 @@ Use this skill.
               )
               expect(claimed._tag).toBe("Failure")
               const claimedMsg = claimed._tag === "Failure" ? Cause.pretty(claimed.cause) : ""
-              expect(claimedMsg).toContain("is not invocable in this context")
+              expect(claimedMsg).toContain("not found")
+              expect(claimedMsg).not.toContain("is not invocable in this context")
               expect(claimedMsg).not.toContain("invocation")
               expect(claimedMsg).not.toContain("explicit")
               expect(requests).toEqual([])
@@ -713,7 +716,8 @@ GATED_BODY_MARKER
           const modelExit = yield* Effect.exit(tool.execute({ name: "gated-skill" }, ctx))
           expect(modelExit._tag).toBe("Failure")
           const modelMsg = modelExit._tag === "Failure" ? Cause.pretty(modelExit.cause) : ""
-          expect(modelMsg).toContain("is not invocable in this context")
+          expect(modelMsg).toContain("not found")
+          expect(modelMsg).not.toContain("is not invocable in this context")
           // Generic deny: no gate-name existence oracle, no invocation-flip coaching.
           expect(modelMsg).not.toContain("disable-model-invocation")
           expect(modelMsg).not.toContain("/gated-skill")
@@ -727,7 +731,8 @@ GATED_BODY_MARKER
           const claimed = yield* Effect.exit(tool.execute({ name: "gated-skill", invocation: "explicit" }, ctx))
           expect(claimed._tag).toBe("Failure")
           const claimedMsg = claimed._tag === "Failure" ? Cause.pretty(claimed.cause) : ""
-          expect(claimedMsg).toContain("is not invocable in this context")
+          expect(claimedMsg).toContain("not found")
+          expect(claimedMsg).not.toContain("is not invocable in this context")
           expect(claimedMsg).not.toContain("invocation")
           expect(claimedMsg).not.toContain("explicit")
           expect(requests).toEqual([])
@@ -803,6 +808,22 @@ hidden: true
           expect(tool.description).not.toContain("gated-skill")
           expect(tool.description).not.toContain("hidden-skill")
           expect(tool.description).toContain("listed in the system prompt")
+
+          // Gated and missing probes must be indistinguishable (same message shape).
+          const gatedExit = yield* Effect.exit(tool.execute({ name: "gated-skill" }, ctx))
+          expect(gatedExit._tag).toBe("Failure")
+          const gatedMsg = gatedExit._tag === "Failure" ? Cause.pretty(gatedExit.cause) : ""
+          const skillErr = (text: string) => text.split("\n").find((line) => line.includes("Skill ")) ?? ""
+          expect(skillErr(gatedMsg)).toContain("not found")
+          expect(skillErr(gatedMsg)).not.toContain("is not invocable")
+          expect(skillErr(gatedMsg).split("gated-skill").join("<name>")).toBe(
+            skillErr(msg).split("gated-skil").join("<name>"),
+          )
+          // Miss catalog still never lists gated/hidden names.
+          const availableList = skillErr(gatedMsg).split("Available skills: ")[1] ?? ""
+          expect(availableList).not.toContain("gated-skill")
+          expect(availableList).not.toContain("hidden-skill")
+          expect(availableList).toContain("open-skill")
         }),
       { git: true },
     ),

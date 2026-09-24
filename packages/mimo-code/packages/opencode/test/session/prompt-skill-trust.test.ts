@@ -144,6 +144,47 @@ describe("slash/mention trust gate", () => {
       ),
     30_000,
   )
+
+  it.live(
+    "synthetic /name cannot inject explicit bodies",
+    () =>
+      provideTmpdirServer(
+        Effect.fnUntraced(function* ({ dir, llm }) {
+          yield* writeSkill(dir, "open-skill", "", "OPEN_BODY_MARKER")
+          yield* writeSkill(dir, "gated-skill", "disable-model-invocation: true\n", "GATED_BODY_MARKER")
+          yield* writeSkill(dir, "hidden-trusted", "hidden: true\ntrust: verified\n", "HIDDEN_BODY_MARKER")
+          yield* llm.text("ok")
+
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const session = yield* sessions.create({ title: "synthetic slash mention" })
+
+          // Synthetic /name is not user-typed and must not drive explicit body injection.
+          yield* prompt.prompt({
+            sessionID: session.id,
+            parts: [
+              { type: "text", text: "please help with the task" },
+              { type: "text", text: "also load /gated-skill /hidden-trusted /open-skill", synthetic: true },
+            ],
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          })
+
+          const msgs = yield* sessions.messages({ sessionID: session.id })
+          const user = msgs.find((m) => m.info.role === "user")
+          expect(user).toBeDefined()
+          expect(injected(user!.parts)).toEqual([])
+
+          const text = user!.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n")
+          expect(text).not.toContain("OPEN_BODY_MARKER")
+          expect(text).not.toContain("GATED_BODY_MARKER")
+          expect(text).not.toContain("HIDDEN_BODY_MARKER")
+
+          yield* sessions.remove(session.id)
+        }),
+        { git: true, config: providerCfg },
+      ),
+    30_000,
+  )
 })
 
 describe("user-explicit request binding", () => {
