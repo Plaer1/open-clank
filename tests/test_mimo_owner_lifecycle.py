@@ -1,6 +1,8 @@
 import asyncio
 import json
+import multiprocessing
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,21 @@ from src.openclank.mimo_supervisor import (
     SupervisorAdmissionError,
     _pick_small_model,
 )
+from src.openclank.session_map import OwnerSessionMap, SessionMapCollision
+
+
+def _hold_stale_owner_writer(path, owner, ready, release, attempt, result):
+    mapping = OwnerSessionMap(path, owner, lifecycle_epoch="0")
+    with mapping._lock(mapping.lifecycle_lock_path):
+        ready.set()
+        release.wait(10)
+    attempt.wait(10)
+    try:
+        mapping.bind("chat", "late-engine", expected_current=None, expected_mapping_revision=0)
+    except Exception as exc:
+        result.put(type(exc).__name__)
+    else:  # pragma: no cover - a stale writer must never get here
+        result.put("ok")
 
 
 def _database(tmp_path, monkeypatch):
@@ -523,3 +540,72 @@ async def test_rename_fences_and_stops_unpublished_startup_candidate(
     assert candidate.stop_calls == 1
     assert "alice" not in pool._workers
     assert "alice" not in pool._states
+
+
+def test_owner_epoch_survives_pool_restart_and_fences_cached_map_writer(tmp_path, monkeypatch):
+    _database(tmp_path, monkeypatch)
+    pool = MimoSupervisorPool(auth_enabled=True, data_dir=tmp_path)
+    owner = "alice"
+    runtime = pool._runtime_home(owner)
+    runtime.mkdir(parents=True)
+    path = runtime / "session-map.json"
+    pool._advance_durable_owner_epoch(owner, 1)
+    mapping = OwnerSessionMap(path, owner, lifecycle_epoch="1")
+    mapping.bind("chat", "engine-1", expected_map_revision=0, expected_current=None, expected_mapping_revision=0)
+    pool._advance_durable_owner_epoch(owner, 2)
+
+    restarted = MimoSupervisorPool(auth_enabled=True, data_dir=tmp_path)
+    assert restarted._durable_owner_epoch(owner) == "2"
+    with pytest.raises(SessionMapCollision, match="epoch"):
+        mapping.bind(
+            "chat",
+            "engine-2",
+            expected_current="engine-1",
+            expected_mapping_revision=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rename_holds_owner_guard_against_live_stale_map_writer(tmp_path, monkeypatch):
+    _database(tmp_path, monkeypatch)
+    pool = MimoSupervisorPool(auth_enabled=True, data_dir=tmp_path)
+    runtime = pool._runtime_home("alice")
+    runtime.mkdir(parents=True)
+    path = runtime / "session-map.json"
+    path.write_text("{}", encoding="utf-8")
+    ctx = multiprocessing.get_context("spawn")
+    ready, release, attempt, result = ctx.Event(), ctx.Event(), ctx.Event(), ctx.Queue()
+    writer = ctx.Process(target=_hold_stale_owner_writer, args=(path, "alice", ready, release, attempt, result))
+    writer.start()
+    assert ready.wait(10)
+    rename = asyncio.create_task(pool.rename_owner("alice", "alice2"))
+    threading.Timer(0.05, release.set).start()
+    await rename
+    attempt.set()
+    assert result.get(timeout=10) == "SessionMapCollision"
+    writer.join(timeout=10)
+    assert writer.exitcode == 0
+    assert pool._runtime_home("alice2").exists()
+
+
+@pytest.mark.asyncio
+async def test_purge_holds_owner_guard_against_live_stale_map_writer(tmp_path, monkeypatch):
+    _database(tmp_path, monkeypatch)
+    pool = MimoSupervisorPool(auth_enabled=True, data_dir=tmp_path)
+    runtime = pool._runtime_home("alice")
+    runtime.mkdir(parents=True)
+    path = runtime / "session-map.json"
+    path.write_text("{}", encoding="utf-8")
+    ctx = multiprocessing.get_context("spawn")
+    ready, release, attempt, result = ctx.Event(), ctx.Event(), ctx.Event(), ctx.Queue()
+    writer = ctx.Process(target=_hold_stale_owner_writer, args=(path, "alice", ready, release, attempt, result))
+    writer.start()
+    assert ready.wait(10)
+    purge = asyncio.create_task(pool.purge_owner("alice"))
+    threading.Timer(0.05, release.set).start()
+    await purge
+    attempt.set()
+    assert result.get(timeout=10) == "SessionMapCollision"
+    writer.join(timeout=10)
+    assert writer.exitcode == 0
+    assert not runtime.exists()

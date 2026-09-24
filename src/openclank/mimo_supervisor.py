@@ -629,6 +629,15 @@ class MimoSupervisor:
         )
         self._bridge.set_session_delete_callback(self.delete_session)
 
+        # Ordinary restart recovers SQLite ↔ session-map crash-seam candidates
+        # before any later remap or new admission can observe them.
+        try:
+            recovered = await self._bridge.recover_admission_orphans()
+            if recovered:
+                logger.info("recovered managed admission orphans: %s", recovered)
+        except Exception as exc:
+            logger.warning("managed admission orphan recovery failed: %s", exc)
+
         await self._warm_model_catalog()
 
         # Start health monitor
@@ -941,7 +950,7 @@ class MimoSupervisor:
             response = await client.delete(f"/session/{quote(mimo_session, safe='')}")
         if response.status_code != 404:
             response.raise_for_status()
-        self._bridge.forget_session(odysseus_session)
+        await self._bridge.forget_session_async(odysseus_session)
 
     def is_alive(self, owner: str | None = None) -> bool:
         return self._proc is not None and self._proc.returncode is None

@@ -13,6 +13,9 @@ from sqlalchemy.exc import OperationalError
 from core.database import ChatMessage, MimoProjection, Session, SessionLocal
 
 
+_EXPECTED_UNSET = object()
+
+
 @dataclass(frozen=True)
 class CanonicalSnapshot:
     session_id: str
@@ -181,14 +184,14 @@ def delete_projection(session_id: str, owner: Optional[str] = None) -> None:
         raise ValueError("projection deletes require an owner")
     db = SessionLocal()
     try:
-        try:
-            query = db.query(MimoProjection).filter(MimoProjection.odysseus_session_id == session_id)
-            if owner is not None:
-                query = query.filter(MimoProjection.owner == owner)
-            query.delete(synchronize_session=False)
-            db.commit()
-        except OperationalError:
-            db.rollback()
+        query = db.query(MimoProjection).filter(MimoProjection.odysseus_session_id == session_id)
+        if owner is not None:
+            query = query.filter(MimoProjection.owner == owner)
+        query.delete(synchronize_session=False)
+        db.commit()
+    except OperationalError:
+        db.rollback()
+        raise RuntimeError("managed projection deletion was not confirmed")
     finally:
         db.close()
 
@@ -270,6 +273,9 @@ def save_managed_binding(
     *,
     owner: Optional[str] = None,
     expected_workspace_revision: Optional[int] = None,
+    expected_engine_session_id: object = _EXPECTED_UNSET,
+    expected_map_revision: object = _EXPECTED_UNSET,
+    expected_mapping_revision: object = _EXPECTED_UNSET,
 ) -> dict:
     """Merge a host binding without clobbering unrelated session state."""
     if not owner:
@@ -278,14 +284,28 @@ def save_managed_binding(
         "owner", "stableChatID", "engineSessionID", "memoryWorkspaceID",
         "authorityWorkspaceID", "copalWorkspace", "physicalCwd",
     )
-    if any(not isinstance(binding.get(key), str) or not binding[key].strip() for key in required_strings):
+    if any(
+        not isinstance(binding.get(key), str)
+        or not binding[key]
+        or binding[key] != binding[key].strip()
+        for key in required_strings
+    ):
         raise ValueError("managed binding is incomplete")
     if binding.get("owner") != owner or binding.get("stableChatID") != session_id or not os.path.isabs(binding["physicalCwd"]):
         raise ValueError("managed binding owner or cwd is invalid")
-    if os.path.normpath(binding["physicalCwd"]) != binding["physicalCwd"]:
+    if str(os.path.realpath(binding["physicalCwd"])) != binding["physicalCwd"]:
         raise ValueError("managed binding cwd is not canonical")
     aliases = binding.get("engineAliases")
-    if not isinstance(aliases, list) or len(aliases) > 16 or any(not isinstance(value, str) or not value.strip() for value in aliases):
+    if (
+        not isinstance(aliases, list)
+        or len(aliases) > 16
+        or any(
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            for value in aliases
+        )
+    ):
         raise ValueError("managed binding aliases are invalid")
     if len(set(aliases)) != len(aliases) or binding["engineSessionID"] in aliases:
         raise ValueError("managed binding aliases are not unique")
@@ -314,6 +334,15 @@ def save_managed_binding(
         actual = int(previous.get("workspaceRevision") or 0)
         if expected_workspace_revision is not None and actual != int(expected_workspace_revision):
             raise ValueError("managed binding workspace revision conflict")
+        actual_engine = str(previous.get("engineSessionID") or "") or None
+        actual_map = int(previous.get("mapRevision") or 0)
+        actual_mapping = int(previous.get("mappingRevision") or 0)
+        if expected_engine_session_id is not _EXPECTED_UNSET and actual_engine != expected_engine_session_id:
+            raise ValueError("managed binding engine-session conflict")
+        if expected_map_revision is not _EXPECTED_UNSET and actual_map != int(expected_map_revision):
+            raise ValueError("managed binding map revision conflict")
+        if expected_mapping_revision is not _EXPECTED_UNSET and actual_mapping != int(expected_mapping_revision):
+            raise ValueError("managed binding mapping revision conflict")
         candidate = dict(binding)
         candidate["workspaceRevision"] = int(candidate.get("workspaceRevision", actual))
         if previous and candidate.get("engineSessionID") != previous.get("engineSessionID"):
@@ -343,6 +372,9 @@ def delete_managed_binding(
     *,
     owner: Optional[str] = None,
     expected_workspace_revision: Optional[int] = None,
+    expected_engine_session_id: object = _EXPECTED_UNSET,
+    expected_map_revision: object = _EXPECTED_UNSET,
+    expected_mapping_revision: object = _EXPECTED_UNSET,
 ) -> None:
     """Remove a host binding as compensation for an unexposed engine.
 
@@ -368,6 +400,15 @@ def delete_managed_binding(
         actual = int(previous.get("workspaceRevision") or 0) if isinstance(previous, dict) else 0
         if expected_workspace_revision is not None and actual != int(expected_workspace_revision):
             raise ValueError("managed binding workspace revision conflict")
+        actual_engine = str(previous.get("engineSessionID") or "") or None if isinstance(previous, dict) else None
+        actual_map = int(previous.get("mapRevision") or 0) if isinstance(previous, dict) else 0
+        actual_mapping = int(previous.get("mappingRevision") or 0) if isinstance(previous, dict) else 0
+        if expected_engine_session_id is not _EXPECTED_UNSET and actual_engine != expected_engine_session_id:
+            raise ValueError("managed binding engine-session conflict")
+        if expected_map_revision is not _EXPECTED_UNSET and actual_map != int(expected_map_revision):
+            raise ValueError("managed binding map revision conflict")
+        if expected_mapping_revision is not _EXPECTED_UNSET and actual_mapping != int(expected_mapping_revision):
+            raise ValueError("managed binding mapping revision conflict")
         if not isinstance(previous, dict):
             db.commit()
             return

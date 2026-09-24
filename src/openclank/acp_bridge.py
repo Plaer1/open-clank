@@ -22,7 +22,7 @@ from src.memory_scope import chat_workspace, memory_owner
 from src.openclank.acp_client import ACPClient, RPCError, TransportError
 from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 from src.openclank.permission_grants import derive_pattern
-from src.openclank.session_map import OwnerSessionMap
+from src.openclank.session_map import OwnerSessionMap, _EXPECTED_UNSET
 
 logger = logging.getLogger(__name__)
 
@@ -451,6 +451,7 @@ class ACPBridge:
         self._session_context: Dict[str, dict] = {}
         self._session_context_locks: Dict[str, asyncio.Lock] = {}
         self._session_admission_locks: Dict[tuple[str, str], asyncio.Lock] = {}
+        self._pending_session_results: Dict[str, dict] = {}
         self.question_handler = QuestionHandler()
         from src.openclank.acp_terminal import ACPTerminalManager
 
@@ -505,7 +506,7 @@ class ACPBridge:
         if permission_handler is not None and hasattr(permission_handler, "on_request"):
             permission_handler.on_request(self._surface_permission)
 
-    def _bind_engine_session(
+    async def _bind_engine_session(
         self,
         chat_id: str,
         engine_id: str,
@@ -513,12 +514,15 @@ class ACPBridge:
         expected_current: Optional[str] = None,
         expected_mapping_revision: Optional[int] = None,
     ) -> dict:
-        expected_map_revision = self._durable_session_map.map_revision()
+        # Per-chat create/remap CAS uses only the chat's own current/mapping
+        # evidence.  A pre-read owner-wide map revision is not a valid expected
+        # axis here: an unrelated chat's bind/remap/forget would otherwise fail
+        # this chat even though its own mapping is unchanged.
         try:
-            item = self._durable_session_map.bind(
+            item = await self._durable_session_map.async_bind(
                 chat_id,
                 engine_id,
-                expected_map_revision=expected_map_revision,
+                expected_map_revision=None,
                 expected_current=expected_current,
                 expected_mapping_revision=expected_mapping_revision,
             )
@@ -527,13 +531,13 @@ class ACPBridge:
             # reported an error. Re-read the authority before treating the
             # admission as lost; this is safe because the expected-current
             # CAS remains the winner test.
-            current = self._durable_session_map.lookup(chat_id)
+            current = await self._durable_session_map.async_lookup(chat_id)
             if not current or current.get("current") != engine_id:
                 raise
-            map_revision, mapping_revision = self._durable_session_map.revisions(chat_id)
+            map_revision, mapping_revision = await self._durable_session_map.async_revisions(chat_id)
             item = dict(current)
             item.update({"mapRevision": map_revision, "mappingRevision": mapping_revision})
-        self._session_map = self._durable_session_map.flat_current()
+        self._session_map = await self._durable_session_map.async_flat_current()
         return item
 
     def _session_admission_lock(self, chat_id: str, owner: str) -> asyncio.Lock:
@@ -758,6 +762,24 @@ class ACPBridge:
                 binding_kwargs = {"owner": save_kwargs["owner"]}
                 if expected_workspace_revision is not None:
                     binding_kwargs["expected_workspace_revision"] = expected_workspace_revision
+                # Binding replacement is a four-axis CAS.  Workspace
+                # revision alone cannot distinguish a stale remap from a
+                # later winner that happens to have the same cwd revision.
+                expected_binding = managed_binding
+                binding_kwargs.update({
+                    "expected_engine_session_id": (
+                        expected_binding.get("engineSessionID")
+                        if isinstance(expected_binding, dict) else None
+                    ),
+                    "expected_map_revision": (
+                        int(expected_binding.get("mapRevision") or 0)
+                        if isinstance(expected_binding, dict) else 0
+                    ),
+                    "expected_mapping_revision": (
+                        int(expected_binding.get("mappingRevision") or 0)
+                        if isinstance(expected_binding, dict) else 0
+                    ),
+                })
                 saved_binding = save_managed_binding(
                     context["odysseus_session_id"], managed_binding, **binding_kwargs
                 )
@@ -784,9 +806,13 @@ class ACPBridge:
                         prior_binding,
                         owner=context.get("owner") or self._owner,
                         expected_workspace_revision=saved_binding.get("workspaceRevision"),
+                        expected_engine_session_id=saved_binding.get("engineSessionID"),
+                        expected_map_revision=saved_binding.get("mapRevision"),
+                        expected_mapping_revision=saved_binding.get("mappingRevision"),
                     )
                 except Exception:
                     logger.exception("managed binding compensation failed for %s", mimo_session)
+                    self._fence_admission(context.get("odysseus_session_id"), "state compensation")
             elif saved_binding:
                 try:
                     from src.openclank.transcript_projection import delete_managed_binding
@@ -795,9 +821,13 @@ class ACPBridge:
                         context["odysseus_session_id"],
                         owner=context.get("owner") or self._owner,
                         expected_workspace_revision=saved_binding.get("workspaceRevision"),
+                        expected_engine_session_id=saved_binding.get("engineSessionID"),
+                        expected_map_revision=saved_binding.get("mapRevision"),
+                        expected_mapping_revision=saved_binding.get("mappingRevision"),
                     )
                 except Exception:
                     logger.exception("managed binding deletion compensation failed for %s", mimo_session)
+                    self._fence_admission(context.get("odysseus_session_id"), "state deletion compensation")
             raise
 
     def negotiated_state(self, odysseus_session: str) -> dict:
@@ -934,7 +964,8 @@ class ACPBridge:
         if not context:
             raise ValueError("unknown managed engine session")
         chat_id = str(context.get("odysseus_session_id") or "").strip()
-        if not chat_id or self._session_map.get(chat_id) != mimo_session_id:
+        durable_entry = self._durable_session_map.lookup(chat_id) if chat_id else None
+        if not chat_id or not durable_entry or durable_entry.get("current") != mimo_session_id:
             raise ValueError("stale managed engine session")
         entry = self._session_map_entry(chat_id)
         if entry.get("current") != mimo_session_id:
@@ -999,9 +1030,60 @@ class ACPBridge:
         if str(context.get("owner") or self._owner) != self._owner:
             logger.warning("ignoring cwd update from a different owner for %s", chat_id)
             return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "owner_mismatch"}
+
+        def authority_matches_context() -> bool:
+            binding = context.get("managed_binding")
+            if not isinstance(binding, dict):
+                return False
+            try:
+                entry = self._durable_session_map.lookup(chat_id)
+                if not entry or entry.get("current") != mimo_session_id:
+                    return False
+                map_revision, mapping_revision = self._durable_session_map.revisions(chat_id)
+                from src.openclank.transcript_projection import get_managed_binding
+
+                persisted = get_managed_binding(chat_id, owner=self._owner)
+                if not isinstance(persisted, dict):
+                    return False
+                if persisted.get("transition") is not None:
+                    return False
+                for key, expected in (
+                    ("owner", self._owner),
+                    ("stableChatID", chat_id),
+                    ("engineSessionID", mimo_session_id),
+                    ("physicalCwd", binding.get("physicalCwd")),
+                    ("workspaceRevision", binding.get("workspaceRevision")),
+                    ("mapRevision", binding.get("mapRevision")),
+                    ("mappingRevision", binding.get("mappingRevision")),
+                    ("memoryWorkspaceID", binding.get("memoryWorkspaceID")),
+                    ("authorityWorkspaceID", binding.get("authorityWorkspaceID")),
+                    ("copalWorkspace", binding.get("copalWorkspace")),
+                    ("memoryEnabled", binding.get("memoryEnabled")),
+                    ("engineAliases", binding.get("engineAliases")),
+                ):
+                    if persisted.get(key) != expected or binding.get(key) != expected:
+                        return False
+                workspace_revision = binding.get("workspaceRevision")
+                local_map_revision = binding.get("mapRevision")
+                local_mapping_revision = binding.get("mappingRevision")
+                if any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in (workspace_revision, local_map_revision, local_mapping_revision)
+                ):
+                    return False
+                return local_map_revision <= map_revision and local_mapping_revision == mapping_revision
+            except (KeyError, ValueError, TypeError, OSError):
+                return False
+
+        if not authority_matches_context():
+            logger.warning("ignoring cwd update against stale durable authority for %s", chat_id)
+            return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "stale_engine_session"}
         canonical = str(Path(value).expanduser().resolve(strict=False))
         lock = self._session_context_locks.setdefault(mimo_session_id, asyncio.Lock())
         async with lock:
+            if not authority_matches_context():
+                logger.warning("ignoring cwd update after durable authority changed for %s", chat_id)
+                return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "stale_engine_session"}
             previous_context = copy.deepcopy(context)
             had_state = mimo_session_id in self._session_state
             state = self._session_state.setdefault(mimo_session_id, {})
@@ -1099,6 +1181,7 @@ class ACPBridge:
         copal_workspace: str = "default",
         authority_workspace_id: str = "",
         memory_workspace_id: str = "",
+        publish_handshake: bool = True,
     ) -> str:
         """Create a new mimo session and return the ses_… id directly.
 
@@ -1123,25 +1206,182 @@ class ACPBridge:
         ] + list(extra_mcp_servers or [])) if with_agent_tools else []
         result = await self._client.new_session(target_cwd, mcp_servers=mcp_servers)
         session_id = result["sessionId"]
-        self._capture_handshake(session_id, result)
+        if publish_handshake:
+            self._capture_handshake(session_id, result)
+        else:
+            # Admission owns publication.  Keep the handshake private until
+            # the durable map and complete managed binding both exist.
+            self._pending_session_results[session_id] = dict(result)
 
         # Store mimo's available models so we can match thesius model names
         models = result.get("models", {})
         available = models.get("availableModels", [])
-        if available:
+        if available and publish_handshake:
             self._session_models[session_id] = available
             self.available_models = available
             logger.info("mimo session %s: %d models available", session_id, len(available))
 
         return session_id
 
-    async def _discard_unbound_engine_session(self, session_id: str) -> None:
-        """Release a privately created engine session if durable admission fails."""
+    def _publish_admitted_session(self, session_id: str) -> None:
+        result = self._pending_session_results.pop(session_id, None)
+        if result is None:
+            return
+        self._capture_handshake(session_id, result)
+        available = (result.get("models") or {}).get("availableModels", [])
+        if available:
+            self._session_models[session_id] = available
+
+    def _finalize_admitted_session(self, session_id: str) -> None:
+        available = self._session_models.get(session_id)
+        if available:
+            self.available_models = list(available)
+
+    async def _discard_unbound_engine_session(
+        self,
+        session_id: str,
+        *,
+        chat_id: Optional[str] = None,
+        cwd: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> None:
+        """Destructively discard a privately created engine session.
+
+        The engine requires the canonical physical cwd to resolve its durable
+        store. Prefer the exact persisted candidate binding, falling back only
+        to a caller-supplied canonical candidate cwd for the pre-binding
+        failure window.
+        """
+        candidate_cwd = None
+        binding_owner = owner if owner is not None else self._owner
+        if chat_id:
+            try:
+                from src.openclank.transcript_projection import get_managed_binding
+
+                binding = get_managed_binding(chat_id, owner=binding_owner)
+                if binding.get("engineSessionID") == session_id:
+                    value = binding.get("physicalCwd")
+                    if isinstance(value, str) and value and os.path.isabs(value) and str(Path(value).resolve(strict=False)) == value:
+                        candidate_cwd = value
+            except KeyError:
+                pass
+            except Exception:
+                logger.warning("unable to read candidate binding before discard %s", session_id)
+        if candidate_cwd is None and isinstance(cwd, str) and cwd and os.path.isabs(cwd):
+            candidate_cwd = str(Path(cwd).resolve(strict=False))
+        if candidate_cwd is None:
+            if chat_id:
+                self._fence_admission(chat_id, "candidate discard cwd unavailable")
+            raise RuntimeError("candidate discard requires an authoritative canonical cwd")
+        self._pending_session_results.pop(session_id, None)
+        self._session_models.pop(session_id, None)
+        self._session_state.pop(session_id, None)
+        self._session_context.pop(session_id, None)
+        self._turns.pop(session_id, None)
+        self._queues.pop(session_id, None)
         try:
-            if hasattr(self._client, "release_session"):
-                await self._client.release_session(session_id)
+            await self.cleanup_session(session_id)
         except Exception:
-            logger.warning("failed to release unbound engine session %s", session_id)
+            logger.warning("failed to clean up unbound engine session %s", session_id)
+        discarded = False
+        discard = getattr(self._client, "discard_session", None)
+        if discard is not None:
+            try:
+                await discard(session_id, candidate_cwd)
+                discarded = True
+            except Exception:
+                logger.warning("failed to discard unbound engine session %s", session_id)
+        if not discarded:
+            if chat_id:
+                self._fence_admission(chat_id, "candidate engine discard")
+            raise RuntimeError("candidate engine discard was not confirmed")
+
+    def _fence_admission(self, chat_id: str, reason: str) -> None:
+        """Persist fail-closed authority when cross-store repair is unknown."""
+        try:
+            self._durable_session_map.fence(chat_id)
+            self._session_map = self._durable_session_map.flat_current()
+        except Exception as exc:
+            logger.exception("unable to persist admission fence for %s (%s)", chat_id, reason)
+            raise RuntimeError("managed admission fence could not be persisted") from exc
+
+    async def _recover_orphan_binding(self, odysseus_session: str) -> bool:
+        """Repair one SQLite ↔ session-map crash-seam candidate.
+
+        Projection-first staging can leave a complete candidate binding whose
+        mapping revision is exactly one past the authoritative map row.  That
+        pair is an explicit recoverable fence: discard the unexposed candidate
+        engine and rewrite the binding to the map winner.  Candidate-only
+        caches are cleaned exactly with the discarded engine.
+        """
+        from src.openclank.transcript_projection import get_managed_binding, save_managed_binding
+
+        async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+            target_entry = await self._durable_session_map.async_lookup(odysseus_session)
+            target = target_entry.get("current") if target_entry else None
+            if not target:
+                return False
+            orphan_binding = get_managed_binding(odysseus_session, owner=self._owner or None)
+            current_mapping_revision = int(target_entry.get("revision") or 0)
+            orphan_engine = orphan_binding.get("engineSessionID") if isinstance(orphan_binding, dict) else None
+            orphan_map_revision = orphan_binding.get("mapRevision") if isinstance(orphan_binding, dict) else None
+            orphan_mapping_revision = orphan_binding.get("mappingRevision") if isinstance(orphan_binding, dict) else None
+            if not (
+                isinstance(orphan_engine, str)
+                and orphan_engine
+                and orphan_engine != target
+                and target in (orphan_binding.get("engineAliases") or [])
+                and isinstance(orphan_map_revision, int)
+                and isinstance(orphan_mapping_revision, int)
+                and orphan_mapping_revision == current_mapping_revision + 1
+            ):
+                return False
+            await self._discard_unbound_engine_session(
+                orphan_engine,
+                chat_id=odysseus_session,
+                cwd=orphan_binding.get("physicalCwd"),
+                owner=self._owner,
+            )
+            recovered = dict(orphan_binding)
+            recovered["engineSessionID"] = target
+            recovered["engineAliases"] = [
+                value for value in (orphan_binding.get("engineAliases") or [])
+                if value not in {target, orphan_engine}
+            ]
+            recovered["mapRevision"] = await self._durable_session_map.async_map_revision()
+            recovered["mappingRevision"] = current_mapping_revision
+            recovered["transition"] = None
+            try:
+                save_managed_binding(
+                    odysseus_session,
+                    recovered,
+                    owner=self._owner,
+                    expected_workspace_revision=orphan_binding.get("workspaceRevision"),
+                    expected_engine_session_id=orphan_engine,
+                    expected_map_revision=orphan_map_revision,
+                    expected_mapping_revision=orphan_mapping_revision,
+                )
+            except Exception as exc:
+                self._fence_admission(odysseus_session, "orphan binding recovery")
+                raise RuntimeError("orphan managed binding recovery was not confirmed") from exc
+            return True
+
+    async def recover_admission_orphans(self) -> list[str]:
+        """Ordinary-restart recovery for the SQLite ↔ session-map crash seam.
+
+        Runs without a later remap: every mapped chat with a recoverable
+        candidate fence is repaired before new admission work proceeds.
+        """
+        recovered: list[str] = []
+        for chat_id in list(await self._durable_session_map.async_flat_current()):
+            try:
+                if await self._recover_orphan_binding(chat_id):
+                    recovered.append(chat_id)
+            except Exception:
+                logger.exception("managed admission recovery failed for %s", chat_id)
+                raise
+        self._session_map = await self._durable_session_map.async_flat_current()
+        return recovered
 
     def _compensate_candidate_binding(
         self,
@@ -1152,7 +1392,7 @@ class ACPBridge:
     ) -> None:
         """Restore host authority only while this candidate still owns the map."""
         if self._session_map_entry(chat_id).get("current") != candidate_id:
-            return
+            raise RuntimeError("candidate map authority moved before binding compensation")
         from src.openclank.transcript_projection import (
             delete_managed_binding,
             get_managed_binding,
@@ -1161,19 +1401,200 @@ class ACPBridge:
 
         current = get_managed_binding(chat_id, owner=owner)
         candidate_revision = current.get("workspaceRevision")
+        candidate_engine = current.get("engineSessionID")
+        candidate_map = current.get("mapRevision")
+        candidate_mapping = current.get("mappingRevision")
+        if candidate_engine != candidate_id:
+            raise RuntimeError("candidate binding authority moved before compensation")
+        if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                   for value in (candidate_revision, candidate_map, candidate_mapping)):
+            raise RuntimeError("candidate managed binding has invalid CAS axes")
+        cas = {
+            "expected_engine_session_id": candidate_engine,
+            "expected_map_revision": candidate_map,
+            "expected_mapping_revision": candidate_mapping,
+        }
         if isinstance(previous_binding, dict):
             save_managed_binding(
                 chat_id,
                 previous_binding,
                 owner=owner,
                 expected_workspace_revision=candidate_revision,
+                **cas,
             )
         else:
             delete_managed_binding(
                 chat_id,
                 owner=owner,
                 expected_workspace_revision=candidate_revision,
+                **cas,
             )
+
+    def _compensate_staged_binding(
+        self,
+        chat_id: str,
+        candidate_id: str,
+        owner: str,
+        previous_binding: Optional[dict],
+    ) -> None:
+        """CAS-restore a projection staged before map publication.
+
+        This path is used when map admission itself loses.  It deliberately
+        does not infer authority from the map: the complete candidate binding
+        axes are the cleanup guard, so a later winner cannot be removed.
+        """
+        from src.openclank.transcript_projection import (
+            delete_managed_binding,
+            get_managed_binding,
+            save_managed_binding,
+        )
+        current = get_managed_binding(chat_id, owner=owner)
+        if current.get("engineSessionID") != candidate_id:
+            raise RuntimeError("staged binding authority moved before compensation")
+        cas = {
+            "expected_workspace_revision": current.get("workspaceRevision"),
+            "expected_engine_session_id": candidate_id,
+            "expected_map_revision": current.get("mapRevision"),
+            "expected_mapping_revision": current.get("mappingRevision"),
+        }
+        if isinstance(previous_binding, dict):
+            save_managed_binding(chat_id, previous_binding, owner=owner, **cas)
+        else:
+            delete_managed_binding(chat_id, owner=owner, **cas)
+
+    def _compensate_staged_binding_if_current(
+        self,
+        chat_id: str,
+        candidate_id: str,
+        owner: str,
+        previous_binding: Optional[dict],
+    ) -> bool:
+        """Restore a staged candidate only when it still owns the binding.
+
+        A loser may have failed before its projection write because another
+        process already published a winner.  In that case the current binding
+        is evidence of the winner, not a failed candidate to compensate.
+        """
+        from src.openclank.transcript_projection import get_managed_binding
+
+        current = get_managed_binding(chat_id, owner=owner)
+        if not current or current.get("engineSessionID") != candidate_id:
+            return False
+        self._compensate_staged_binding(chat_id, candidate_id, owner, previous_binding)
+        return True
+
+    def _align_binding_to_map(self, chat_id: str, engine_id: str, owner: str) -> None:
+        """Refresh only the map evidence after a CAS rollback mutation."""
+        from src.openclank.transcript_projection import get_managed_binding, save_managed_binding
+
+        binding = get_managed_binding(chat_id, owner=owner)
+        if binding.get("engineSessionID") != engine_id:
+            raise RuntimeError("rollback binding engine mismatch")
+        map_revision, mapping_revision = self._durable_session_map.revisions(chat_id)
+        if binding.get("mapRevision") == map_revision and binding.get("mappingRevision") == mapping_revision:
+            return
+        updated = dict(binding)
+        updated["mapRevision"] = map_revision
+        updated["mappingRevision"] = mapping_revision
+        save_managed_binding(
+            chat_id,
+            updated,
+            owner=owner,
+            expected_workspace_revision=int(binding.get("workspaceRevision") or 0),
+            expected_engine_session_id=engine_id,
+            expected_map_revision=binding.get("mapRevision"),
+            expected_mapping_revision=binding.get("mappingRevision"),
+        )
+
+    def _stage_candidate_binding(
+        self,
+        chat_id: str,
+        candidate_id: str,
+        owner: str,
+        *,
+        previous_binding: Optional[dict],
+        cwd: str,
+        authority_workspace_id: str,
+        memory_enabled: bool,
+        copal_workspace: str,
+        memory_workspace_id: str,
+        expected_current: Optional[str] | object = _EXPECTED_UNSET,
+        expected_mapping_revision: Optional[int] = None,
+    ) -> dict:
+        """Persist a complete candidate binding before publishing its map row.
+
+        The file map and SQLite projection cannot share one transaction.  The
+        safe ordering is therefore projection first, map second: a crash can
+        leave an unreferenced binding, but never an authoritative map entry
+        without its complete binding.  Every axis is checked again by both
+        stores and cleanup is CAS-protected.
+        """
+        from src.openclank.transcript_projection import save_managed_binding
+
+        entry = self._durable_session_map.lookup(chat_id)
+        old_engine = str(entry.get("current") or "") if entry else None
+        map_revision = self._durable_session_map.map_revision()
+        mapping_revision = int(entry.get("revision") or 0) if entry else 0
+        if expected_current is not _EXPECTED_UNSET and old_engine != expected_current:
+            raise ValueError("managed candidate map current changed during admission")
+        if expected_mapping_revision is not None and mapping_revision != int(expected_mapping_revision):
+            raise ValueError("managed candidate mapping revision changed during admission")
+        prior = dict(previous_binding) if isinstance(previous_binding, dict) else {}
+        if prior:
+            if prior.get("owner") != owner or prior.get("stableChatID") != chat_id:
+                raise RuntimeError("managed binding identity mismatch")
+            prior_mapping_revision = int(prior.get("mappingRevision") or 0)
+            if prior_mapping_revision != mapping_revision:
+                # A crash after projection-first staging leaves an orphaned
+                # candidate while the old map row remains authoritative.  The
+                # caller must destructively reconcile that candidate while
+                # holding the cross-process admission lock; never overwrite
+                # its binding here.
+                if old_engine and prior.get("engineSessionID") != old_engine and old_engine in (prior.get("engineAliases") or []) and prior_mapping_revision == mapping_revision + 1:
+                    raise RuntimeError("orphan candidate requires admission reconciliation")
+                else:
+                    raise RuntimeError("managed binding is stale relative to the durable map")
+            physical_cwd = str(prior.get("physicalCwd") or "").strip()
+            workspace_revision = int(prior.get("workspaceRevision") or 0)
+            aliases = list(prior.get("engineAliases") or [])
+            memory_workspace_id = str(prior.get("memoryWorkspaceID") or memory_workspace_id)
+            authority_workspace_id = str(prior.get("authorityWorkspaceID") or authority_workspace_id)
+            copal_workspace = str(prior.get("copalWorkspace") or copal_workspace)
+            memory_enabled = bool(prior.get("memoryEnabled", memory_enabled))
+        else:
+            physical_cwd = str(cwd or "").strip()
+            workspace_revision = 0
+            aliases = []
+        if not physical_cwd or not os.path.isabs(physical_cwd):
+            raise RuntimeError("managed candidate has no canonical physical cwd")
+        candidate = {
+            **prior,
+            "owner": owner,
+            "stableChatID": chat_id,
+            "engineSessionID": candidate_id,
+            "engineAliases": [value for value in dict.fromkeys([old_engine, *aliases]) if value and value != candidate_id][:16],
+            "memoryWorkspaceID": memory_workspace_id,
+            "authorityWorkspaceID": authority_workspace_id,
+            "copalWorkspace": copal_workspace,
+            "physicalCwd": str(Path(physical_cwd).resolve(strict=False)),
+            "workspaceRevision": workspace_revision,
+            "mapRevision": map_revision + 1,
+            "mappingRevision": mapping_revision + 1,
+            "memoryEnabled": memory_enabled,
+            "transition": None,
+        }
+        expected_binding_map_revision = int(prior.get("mapRevision") or 0) if prior else 0
+        expected_binding_mapping_revision = int(prior.get("mappingRevision") or 0) if prior else 0
+        save_managed_binding(
+            chat_id,
+            candidate,
+            owner=owner,
+            expected_workspace_revision=workspace_revision,
+            expected_engine_session_id=old_engine,
+            expected_map_revision=expected_binding_map_revision,
+            expected_mapping_revision=expected_binding_mapping_revision,
+        )
+        return candidate
 
     async def ensure_session(
         self,
@@ -1185,6 +1606,8 @@ class ACPBridge:
         copal_workspace: str = "default",
         authority_workspace_id: str = "",
     ) -> str:
+        if owner is not None and owner != self._owner:
+            raise ValueError("managed session owner does not match this bridge")
         effective_owner = owner if owner is not None else self._owner
         async with self._session_admission_lock(odysseus_session, effective_owner):
             return await self._ensure_session_locked(
@@ -1216,19 +1639,47 @@ class ACPBridge:
         Also refreshes the available models from mimo so the bridge always
         has the latest model list (covers session reconnect after restart).
         """
-        target_entry = self._durable_session_map.lookup(odysseus_session)
+        target_entry = await self._durable_session_map.async_lookup(odysseus_session)
         target = target_entry.get("current") if target_entry else None
         if target is None:
             effective_owner = owner if owner is not None else self._owner
             previous_binding = None
-            try:
-                from src.openclank.transcript_projection import get_managed_binding
+            expected_candidate_current: Optional[str] | object = None
+            expected_candidate_mapping_revision = 0
+            async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+                if await self._durable_session_map.async_lookup(odysseus_session) is not None:
+                    raise RuntimeError("managed session mapping appeared during fresh admission")
+                expected_candidate_current = None
+                expected_candidate_mapping_revision = 0
+                try:
+                    from src.openclank.transcript_projection import get_managed_binding
 
-                previous_binding = get_managed_binding(
-                    odysseus_session, owner=effective_owner or None
-                ) or None
-            except (KeyError, ValueError):
-                previous_binding = None
+                    previous_binding = get_managed_binding(
+                        odysseus_session, owner=effective_owner or None
+                    ) or None
+                except (KeyError, ValueError):
+                    previous_binding = None
+                if previous_binding:
+                    from src.openclank.transcript_projection import delete_managed_binding
+
+                    try:
+                        await self._discard_unbound_engine_session(
+                            str(previous_binding["engineSessionID"]),
+                            chat_id=odysseus_session,
+                            owner=effective_owner,
+                        )
+                        delete_managed_binding(
+                            odysseus_session,
+                            owner=effective_owner,
+                            expected_workspace_revision=previous_binding.get("workspaceRevision"),
+                            expected_engine_session_id=previous_binding.get("engineSessionID"),
+                            expected_map_revision=previous_binding.get("mapRevision"),
+                            expected_mapping_revision=previous_binding.get("mappingRevision"),
+                        )
+                    except Exception as exc:
+                        self._fence_admission(odysseus_session, "orphan managed binding")
+                        raise RuntimeError("orphan managed binding could not be reconciled") from exc
+                    previous_binding = None
             new_id = await self.open_session(
                 cwd=cwd,
                 owner=owner,
@@ -1238,14 +1689,30 @@ class ACPBridge:
                 with_memory=with_memory,
                 copal_workspace=copal_workspace,
                 authority_workspace_id=authority_workspace_id,
+                publish_handshake=False,
             )
             try:
-                self._bind_engine_session(
-                    odysseus_session,
-                    new_id,
-                    expected_current=None,
-                    expected_mapping_revision=0,
-                )
+                async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+                    self._stage_candidate_binding(
+                        odysseus_session,
+                        new_id,
+                        effective_owner,
+                        previous_binding=previous_binding,
+                        cwd=cwd or self._cwd,
+                        authority_workspace_id=authority_workspace_id,
+                        memory_enabled=with_memory,
+                        copal_workspace=copal_workspace,
+                        memory_workspace_id=chat_workspace(),
+                        expected_current=expected_candidate_current,
+                        expected_mapping_revision=expected_candidate_mapping_revision,
+                    )
+                    await self._bind_engine_session(
+                        odysseus_session,
+                        new_id,
+                        expected_current=None,
+                        expected_mapping_revision=0,
+                    )
+                self._publish_admitted_session(new_id)
                 self._bind_canonical_session(
                     new_id,
                     odysseus_session,
@@ -1264,11 +1731,15 @@ class ACPBridge:
                     copal_workspace=copal_workspace,
                     authority_workspace_id=authority_workspace_id,
                 )
+                self._finalize_admitted_session(new_id)
             except Exception:
+                preserve_candidate = False
+                candidate_discarded = False
                 try:
                     winner = self._session_map_entry(odysseus_session).get("current")
                     if winner and winner != new_id:
-                        await self._discard_unbound_engine_session(new_id)
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=cwd or self._cwd, owner=effective_owner)
+                        candidate_discarded = True
                         self._session_map = self._durable_session_map.flat_current()
                         await self.resume_session(
                             odysseus_session,
@@ -1290,35 +1761,75 @@ class ACPBridge:
                             logger.exception(
                                 "candidate binding compensation failed for %s", odysseus_session
                             )
-                        self._durable_session_map.forget(
-                            odysseus_session,
-                            expected_current=new_id,
-                            expected_mapping_revision=int(
-                                self._session_map_entry(odysseus_session).get("revision") or 0
-                            ),
-                        )
+                            self._fence_admission(odysseus_session, "candidate binding compensation")
+                            preserve_candidate = True
+                            raise
+                        try:
+                            current_entry = self._session_map_entry(odysseus_session)
+                            self._durable_session_map.forget(
+                                odysseus_session,
+                                expected_map_revision=None,
+                                expected_current=new_id,
+                                expected_mapping_revision=int(current_entry.get("revision") or 0),
+                            )
+                        except Exception:
+                            self._fence_admission(odysseus_session, "candidate map rollback")
+                            preserve_candidate = True
+                            raise
                         self._session_map = self._durable_session_map.flat_current()
+                    else:
+                        self._compensate_staged_binding_if_current(
+                            odysseus_session,
+                            new_id,
+                            effective_owner,
+                            previous_binding,
+                        )
                 finally:
-                    await self._discard_unbound_engine_session(new_id)
+                    if not preserve_candidate and not candidate_discarded:
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=cwd or self._cwd, owner=effective_owner)
                 raise
             return new_id
+        from src.openclank.transcript_projection import get_managed_binding
+        async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+            target_entry = self._durable_session_map.lookup(odysseus_session)
+            target = target_entry.get("current") if target_entry else None
+            if not target:
+                raise RuntimeError("managed session mapping disappeared during admission")
+        if await self._recover_orphan_binding(odysseus_session):
+            async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+                target_entry = self._durable_session_map.lookup(odysseus_session)
+                target = target_entry.get("current") if target_entry else None
+                if not target:
+                    raise RuntimeError("managed session mapping disappeared during admission")
         restored_workspace = self.mapped_session_workspace(odysseus_session)
+        persisted_binding = get_managed_binding(odysseus_session, owner=self._owner or None)
+        persisted_owner = persisted_binding["owner"]
+        persisted_memory = str(persisted_binding["memoryWorkspaceID"])
+        persisted_authority = str(persisted_binding["authorityWorkspaceID"])
+        persisted_copal = str(persisted_binding["copalWorkspace"])
+        persisted_memory_enabled = bool(persisted_binding["memoryEnabled"])
+        persisted_aliases = list(persisted_binding["engineAliases"])
+        persisted_binding_revision = int(persisted_binding["workspaceRevision"])
+        persisted_map_revision = int(persisted_binding["mapRevision"])
+        persisted_mapping_revision = int(persisted_binding["mappingRevision"])
+        expected_candidate_current = target
+        expected_candidate_mapping_revision = int(target_entry.get("revision") or 0)
         # A mapped chat is host-owned state. A caller's cwd can seed only a new
         # chat; it must not revert a persisted engine workspace on reconnect.
         resume_cwd = str(restored_workspace or cwd or self._cwd).strip()
         mcp_servers = [
             lifetools_mcp_descriptor(
-                owner=owner if owner is not None else self._owner,
+                owner=persisted_owner,
                 session_id=odysseus_session,
                 workspace=resume_cwd,
-                authority_workspace_id=authority_workspace_id,
-                memory_workspace_id=str((self._session_context.get(target) or {}).get("managed_binding", {}).get("memoryWorkspaceID") or chat_workspace()),
-                memory_enabled=with_memory,
-                copal_workspace=copal_workspace,
-                engine_session_aliases=list(self._session_map_entry(odysseus_session).get("aliases", [])),
-                binding_revision=self._binding_revision_for_chat(odysseus_session),
-                map_revision=self._map_revisions_for_chat(odysseus_session)[0],
-                mapping_revision=self._map_revisions_for_chat(odysseus_session)[1],
+                authority_workspace_id=persisted_authority,
+                memory_workspace_id=persisted_memory,
+                memory_enabled=bool(with_memory),
+                copal_workspace=persisted_copal,
+                engine_session_aliases=persisted_aliases,
+                binding_revision=persisted_binding_revision,
+                map_revision=persisted_map_revision,
+                mapping_revision=persisted_mapping_revision,
             ),
             *(extra_mcp_servers or []),
         ]
@@ -1334,17 +1845,6 @@ class ACPBridge:
             logger.warning(
                 "mimo resume failed for %s (%s) — opening a fresh mimo session", target, e
             )
-            new_id = await self.open_session(
-                cwd=resume_cwd,
-                owner=owner,
-                odysseus_session=odysseus_session,
-                extra_mcp_servers=extra_mcp_servers,
-                with_agent_tools=False,
-                with_memory=with_memory,
-                copal_workspace=copal_workspace,
-                authority_workspace_id=authority_workspace_id,
-                memory_workspace_id=str((self._session_context.get(target) or {}).get("managed_binding", {}).get("memoryWorkspaceID") or chat_workspace()),
-            )
             previous_binding = None
             try:
                 from src.openclank.transcript_projection import get_managed_binding
@@ -1355,13 +1855,40 @@ class ACPBridge:
                 ) or None
             except (KeyError, ValueError):
                 previous_binding = None
+            new_id = await self.open_session(
+                cwd=resume_cwd,
+                owner=owner,
+                odysseus_session=odysseus_session,
+                extra_mcp_servers=extra_mcp_servers,
+                with_agent_tools=False,
+                with_memory=with_memory,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
+                memory_workspace_id=str((self._session_context.get(target) or {}).get("managed_binding", {}).get("memoryWorkspaceID") or chat_workspace()),
+                publish_handshake=False,
+            )
             try:
-                self._bind_engine_session(
-                    odysseus_session,
-                    new_id,
-                    expected_current=target,
-                    expected_mapping_revision=int((target_entry or {}).get("revision") or 0),
-                )
+                async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+                    self._stage_candidate_binding(
+                        odysseus_session,
+                        new_id,
+                        owner if owner is not None else self._owner,
+                        previous_binding=previous_binding,
+                        cwd=resume_cwd,
+                        authority_workspace_id=authority_workspace_id,
+                        memory_enabled=with_memory,
+                        copal_workspace=copal_workspace,
+                        memory_workspace_id=str((self._session_context.get(target) or {}).get("managed_binding", {}).get("memoryWorkspaceID") or chat_workspace()),
+                        expected_current=expected_candidate_current,
+                        expected_mapping_revision=expected_candidate_mapping_revision,
+                    )
+                    await self._bind_engine_session(
+                        odysseus_session,
+                        new_id,
+                        expected_current=target,
+                        expected_mapping_revision=int((target_entry or {}).get("revision") or 0),
+                    )
+                self._publish_admitted_session(new_id)
                 self._bind_canonical_session(
                     new_id,
                     odysseus_session,
@@ -1381,11 +1908,15 @@ class ACPBridge:
                     copal_workspace=copal_workspace,
                     authority_workspace_id=authority_workspace_id,
                 )
+                self._finalize_admitted_session(new_id)
             except Exception:
+                preserve_candidate = False
+                candidate_discarded = False
                 try:
                     winner = self._session_map_entry(odysseus_session).get("current")
                     if winner and winner != new_id:
-                        await self._discard_unbound_engine_session(new_id)
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=resume_cwd, owner=owner if owner is not None else self._owner)
+                        candidate_discarded = True
                         self._session_map = self._durable_session_map.flat_current()
                         await self.resume_session(
                             odysseus_session,
@@ -1407,17 +1938,38 @@ class ACPBridge:
                             logger.exception(
                                 "candidate binding compensation failed for %s", odysseus_session
                             )
-                        self._durable_session_map.bind(
-                            odysseus_session,
-                            target,
-                            expected_current=new_id,
-                            expected_mapping_revision=int(
-                                self._session_map_entry(odysseus_session).get("revision") or 0
-                            ),
-                        )
+                            self._fence_admission(odysseus_session, "candidate binding compensation")
+                            preserve_candidate = True
+                            raise
+                        try:
+                            current_entry = self._session_map_entry(odysseus_session)
+                            self._durable_session_map.bind(
+                                odysseus_session,
+                                target,
+                                expected_map_revision=None,
+                                expected_current=new_id,
+                                expected_mapping_revision=int(current_entry.get("revision") or 0),
+                            )
+                            self._align_binding_to_map(
+                                odysseus_session,
+                                target,
+                                owner if owner is not None else self._owner,
+                            )
+                        except Exception:
+                            self._fence_admission(odysseus_session, "candidate map rollback or binding alignment")
+                            preserve_candidate = True
+                            raise
                         self._session_map = self._durable_session_map.flat_current()
+                    else:
+                        self._compensate_staged_binding_if_current(
+                            odysseus_session,
+                            new_id,
+                            owner if owner is not None else self._owner,
+                            previous_binding,
+                        )
                 finally:
-                    await self._discard_unbound_engine_session(new_id)
+                    if not preserve_candidate and not candidate_discarded:
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=resume_cwd, owner=owner if owner is not None else self._owner)
                 raise
             return new_id
 
@@ -1459,19 +2011,44 @@ class ACPBridge:
         life-tools server so the session has tools and a memory scope carrier.
         """
         workspace = self.mapped_session_workspace(odysseus_session)
+        durable_entry = self._durable_session_map.lookup(odysseus_session)
+        if not durable_entry or durable_entry.get("current") != mimo_session_id:
+            raise RuntimeError("managed session engine is no longer the durable current mapping")
+        from src.openclank.transcript_projection import get_managed_binding
+        persisted_binding = get_managed_binding(odysseus_session, owner=self._owner or None)
+        map_revision, mapping_revision = self._durable_session_map.revisions(odysseus_session)
+        binding_map_revision = persisted_binding.get("mapRevision")
+        binding_mapping_revision = persisted_binding.get("mappingRevision")
+        binding_workspace_revision = persisted_binding.get("workspaceRevision")
+        valid_revisions = all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in (binding_map_revision, binding_mapping_revision, binding_workspace_revision)
+        )
+        if (
+            persisted_binding.get("owner") != self._owner
+            or persisted_binding.get("stableChatID") != odysseus_session
+            or persisted_binding.get("engineSessionID") != mimo_session_id
+            or not valid_revisions
+            or binding_map_revision > map_revision
+            or binding_mapping_revision != mapping_revision
+            or persisted_binding.get("transition") is not None
+        ):
+            raise RuntimeError("managed session binding is no longer the durable current mapping")
         mcp_servers = [
             lifetools_mcp_descriptor(
-                owner=self._owner,
+                owner=persisted_binding["owner"],
                 session_id=odysseus_session,
                 workspace=workspace,
-                authority_workspace_id=authority_workspace_id,
-                memory_workspace_id=str((self._session_context.get(mimo_session_id) or {}).get("managed_binding", {}).get("memoryWorkspaceID") or chat_workspace()),
-                memory_enabled=with_memory,
-                copal_workspace=copal_workspace,
-                engine_session_aliases=list(self._session_map_entry(odysseus_session).get("aliases", [])),
-                binding_revision=self._binding_revision_for_chat(odysseus_session),
-                map_revision=self._map_revisions_for_chat(odysseus_session)[0],
-                mapping_revision=self._map_revisions_for_chat(odysseus_session)[1],
+                authority_workspace_id=str(persisted_binding["authorityWorkspaceID"]),
+                memory_workspace_id=str(persisted_binding["memoryWorkspaceID"]),
+                # Conversational memory enablement is a per-call carrier flag.
+                # The managed binding entry itself stays installed either way.
+                memory_enabled=bool(with_memory),
+                copal_workspace=str(persisted_binding["copalWorkspace"]),
+                engine_session_aliases=list(persisted_binding["engineAliases"]),
+                binding_revision=binding_workspace_revision,
+                map_revision=map_revision,
+                mapping_revision=mapping_revision,
             ),
         ]
         await self._client.resume_session(mimo_session_id, workspace, mcp_servers=mcp_servers)
@@ -1518,21 +2095,36 @@ class ACPBridge:
         return self._session_models.get(odysseus_session, [])
 
     def mapped_session_id(self, odysseus_session: str) -> str:
+        self._session_map = self._durable_session_map.flat_current()
         return self._session_map.get(odysseus_session, odysseus_session)
 
     def mapped_session_workspace(self, odysseus_session: str) -> str:
-        mimo_session = self.mapped_session_id(odysseus_session)
-        if odysseus_session in self._session_map:
+        entry = self._durable_session_map.lookup(odysseus_session)
+        self._session_map = self._durable_session_map.flat_current()
+        mimo_session = str(entry.get("current") or "") if entry else odysseus_session
+        if entry:
             try:
                 from src.openclank.transcript_projection import get_managed_binding
                 binding = get_managed_binding(odysseus_session, owner=self._owner or None)
             except Exception as exc:
                 raise RuntimeError("managed session binding is unavailable") from exc
             map_revision, mapping_revision = self._map_revisions_for_chat(odysseus_session)
-            if binding.get("owner") != self._owner or binding.get("stableChatID") != odysseus_session or binding.get("engineSessionID") != mimo_session or binding.get("mapRevision", -1) > map_revision or binding.get("mappingRevision") != mapping_revision:
+            # A complete candidate binding can be committed before its map
+            # replace.  Only async admission can confirm destructive cleanup
+            # of that exact candidate before repairing the old pair.
+            if (
+                binding.get("engineSessionID") != mimo_session
+                and mimo_session in (binding.get("engineAliases") or [])
+                and binding.get("mappingRevision") == mapping_revision + 1
+                and isinstance(binding.get("mapRevision"), int)
+                and not isinstance(binding.get("mapRevision"), bool)
+                and 0 <= binding.get("mapRevision") <= map_revision + 1
+            ):
+                raise RuntimeError("mapped managed session has an unadopted candidate binding")
+            if binding.get("owner") != self._owner or binding.get("stableChatID") != odysseus_session or binding.get("engineSessionID") != mimo_session or isinstance(binding.get("mapRevision"), bool) or not isinstance(binding.get("mapRevision"), int) or binding.get("mapRevision") < 0 or binding.get("mapRevision") > map_revision or binding.get("mappingRevision") != mapping_revision or binding.get("transition") is not None:
                 raise RuntimeError("mapped managed session binding is stale")
             restored = str(binding.get("physicalCwd") or "").strip()
-            if restored:
+            if restored and os.path.isabs(restored) and str(Path(restored).resolve(strict=False)) == restored:
                 return restored
             raise RuntimeError("mapped managed session has no authoritative physical cwd")
         current = str(self._session_context.get(mimo_session, {}).get("workspace") or "").strip()
@@ -1543,14 +2135,113 @@ class ACPBridge:
     def mapped_sessions(self, owner: Optional[str] = None) -> dict[str, str]:
         if owner is not None and owner != self._owner:
             return {}
+        self._session_map = self._durable_session_map.flat_current()
         return dict(self._session_map)
 
     def forget_session(self, odysseus_session: str) -> None:
-        mimo_session = self._session_map.get(odysseus_session, odysseus_session)
-        self._durable_session_map.forget(
-            odysseus_session,
-            expected_map_revision=self._durable_session_map.map_revision(),
+        # Map and owner-qualified projection are one logical authority pair.
+        # Serialize the whole transition with the stable parent-level guard so
+        # a concurrent candidate cannot stage or publish between our map CAS
+        # and binding/projection cleanup.
+        with self._durable_session_map.chat_admission_lock(odysseus_session):
+            self._forget_session_locked(odysseus_session)
+
+    async def forget_session_async(self, odysseus_session: str) -> None:
+        """Forget authority without blocking the event loop on flock."""
+        async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+            self._forget_session_locked(odysseus_session)
+
+    def _forget_session_locked(self, odysseus_session: str) -> None:
+        # The local map identifies the engine this bridge owns.  A stale bridge
+        # must verify that exact candidate against durable authority; it must
+        # never adopt the fresh winner merely because it is the latest row.
+        expected_engine = self._session_map.get(odysseus_session)
+        if expected_engine is None:
+            expected_engine = odysseus_session
+        entry = self._durable_session_map.lookup(odysseus_session)
+        if entry is None:
+            from src.openclank.transcript_projection import (
+                delete_managed_binding,
+                delete_projection,
+                get_managed_binding,
+            )
+            try:
+                orphan_binding = get_managed_binding(odysseus_session, owner=self._owner)
+            except KeyError:
+                return
+            except Exception as exc:
+                self._fence_admission(odysseus_session, "managed binding read during orphan forget")
+                raise RuntimeError("managed binding authority could not be read during orphan forget") from exc
+            if not orphan_binding:
+                try:
+                    # A previous map-first attempt may already have removed
+                    # the binding and crashed before projection cleanup.  The
+                    # projection is independently owner-qualified, so retry
+                    # it even when the canonical binding is now empty.
+                    delete_projection(odysseus_session, owner=self._owner)
+                except KeyError:
+                    pass
+                except Exception as exc:
+                    raise RuntimeError("orphan managed projection cleanup was not confirmed") from exc
+                return
+            try:
+                delete_managed_binding(
+                    odysseus_session,
+                    owner=self._owner,
+                    expected_workspace_revision=orphan_binding.get("workspaceRevision"),
+                    expected_engine_session_id=orphan_binding.get("engineSessionID"),
+                    expected_map_revision=orphan_binding.get("mapRevision"),
+                    expected_mapping_revision=orphan_binding.get("mappingRevision"),
+                )
+                delete_projection(odysseus_session, owner=self._owner)
+            except KeyError:
+                return
+            except Exception as exc:
+                raise RuntimeError("orphan managed authority cleanup was not confirmed") from exc
+            return
+        if entry.get("current") != expected_engine:
+            self._session_map = self._durable_session_map.flat_current()
+            return
+        mimo_session = expected_engine
+        map_revision, mapping_revision = self._durable_session_map.revisions(odysseus_session)
+        from src.openclank.transcript_projection import (
+            delete_managed_binding,
+            delete_projection,
+            get_managed_binding,
         )
+
+        try:
+            previous_binding = get_managed_binding(odysseus_session, owner=self._owner)
+        except KeyError:
+            previous_binding = None
+        except Exception as exc:
+            self._fence_admission(odysseus_session, "managed binding read during forget")
+            raise RuntimeError("managed binding authority could not be read during forget") from exc
+        try:
+            self._durable_session_map.forget(
+                odysseus_session,
+                expected_map_revision=None,
+                expected_current=mimo_session,
+                expected_mapping_revision=mapping_revision,
+            )
+        except Exception:
+            raise
+        if previous_binding:
+            try:
+                delete_managed_binding(
+                    odysseus_session,
+                    owner=self._owner,
+                    expected_workspace_revision=previous_binding.get("workspaceRevision"),
+                    expected_engine_session_id=mimo_session,
+                    expected_map_revision=previous_binding.get("mapRevision"),
+                    expected_mapping_revision=previous_binding.get("mappingRevision"),
+                )
+            except Exception as exc:
+                # The map-first prefix is intentionally fail-closed.  The
+                # owner-qualified binding remains available for idempotent
+                # restart cleanup; the map is already absent, so do not add a
+                # quarantine marker that would block that retry path.
+                raise RuntimeError("managed binding deletion was not confirmed") from exc
         self._session_map = self._durable_session_map.flat_current()
         self._session_models.pop(mimo_session, None)
         self._session_state.pop(mimo_session, None)
@@ -1558,11 +2249,11 @@ class ACPBridge:
         self._turns.pop(mimo_session, None)
         self._queues.pop(mimo_session, None)
         try:
-            from src.openclank.transcript_projection import delete_projection
-
             delete_projection(odysseus_session, owner=self._owner)
+        except KeyError:
+            pass
         except Exception as exc:
-            logger.debug("projection cleanup skipped for %s: %s", odysseus_session, exc)
+            raise RuntimeError("managed projection deletion was not confirmed") from exc
 
     async def _maybe_inject_digest(
         self,

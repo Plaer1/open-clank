@@ -8,11 +8,12 @@ owner-wide inverse index, and publish one fsync'd replacement.
 from __future__ import annotations
 
 import copy
+import asyncio
 import json
 import os
 import tempfile
 import stat
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,12 @@ class SessionMapCorrupt(ValueError):
 _EXPECTED_UNSET = object()
 
 
+def _strict_identifier(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"managed session map {label} must be a nonempty canonical string")
+    return value
+
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows only
@@ -38,7 +45,12 @@ except ImportError:  # pragma: no cover - Windows only
 class OwnerSessionMap:
     def __init__(self, path: Path, owner: str, *, lifecycle_epoch: str | None = None):
         self.path = Path(path)
-        self.owner = str(owner or "").strip()
+        if owner is None:
+            self.owner = ""
+        else:
+            if not isinstance(owner, str) or owner != owner.strip():
+                raise ValueError("managed session map owner must be a canonical string")
+            self.owner = owner
         self.lock_path = self.path.parent / "session-map.lock"
         self.lifecycle_lock_path = self.path.parent.parent / f".session-map-{self.owner_hash}.lock"
         self.epoch_path = self.path.parent.parent / f".session-map-{self.owner_hash}.epoch"
@@ -61,11 +73,17 @@ class OwnerSessionMap:
                 raise SessionMapCorrupt("managed session map revision is malformed")
             out["mapRevision"] = map_revision
             quarantine = raw.get("quarantine", [])
-            if not isinstance(quarantine, list) or any(not isinstance(value, str) or not value for value in quarantine):
+            if not isinstance(quarantine, list):
                 raise SessionMapCorrupt("managed session map quarantine is malformed")
-            out["quarantine"] = list(dict.fromkeys(quarantine))
+            try:
+                normalized_quarantine = [_strict_identifier(value, "quarantine chat") for value in quarantine]
+            except ValueError as exc:
+                raise SessionMapCorrupt("managed session map quarantine is malformed") from exc
+            if len(set(normalized_quarantine)) != len(normalized_quarantine):
+                raise SessionMapCorrupt("managed session map quarantine is duplicated")
+            out["quarantine"] = normalized_quarantine
             for chat, item in raw["chats"].items():
-                if not isinstance(chat, str) or not isinstance(item, dict):
+                if not isinstance(chat, str) or not chat or chat != chat.strip() or not isinstance(item, dict):
                     raise SessionMapCorrupt("managed session map contains a malformed chat entry")
                 owner = item.get("owner")
                 current = item.get("current")
@@ -91,14 +109,17 @@ class OwnerSessionMap:
                     "revision": revision,
                 }
             return out
-        if isinstance(raw, dict) and raw and "version" not in raw:
+        # The original v1 format was a flat chat -> engine object.  An empty
+        # object is therefore a valid empty v1 map and must be upgraded on the
+        # first mutation just like a non-empty legacy map.
+        if isinstance(raw, dict) and "version" not in raw:
             out = self._empty()
             for chat, current in raw.items():
-                if not isinstance(chat, str) or not chat or not isinstance(current, str) or not current.strip():
+                if not isinstance(chat, str) or not chat or chat != chat.strip() or not isinstance(current, str) or not current or current != current.strip():
                     raise SessionMapCorrupt("legacy managed session map contains a malformed entry")
                 out["chats"][chat] = {
                     "owner": self.owner,
-                    "current": current.strip(),
+                    "current": current,
                     "aliases": [],
                     "revision": 0,
                 }
@@ -201,6 +222,123 @@ class OwnerSessionMap:
         finally:
             os.close(descriptor)
 
+    @contextmanager
+    def chat_admission_lock(self, chat: str):
+        """Serialize the cross-store binding/map admission for one chat.
+
+        The lock is separate from ``session-map.lock`` so callers can hold it
+        while committing the owner-qualified SQLite binding and then invoking
+        the map CAS without recursively acquiring the map lock.
+        """
+        chat = _strict_identifier(chat, "chat")
+        import hashlib
+
+        lock_path = self.path.parent.parent / (
+            f".session-chat-{self.owner_hash}-"
+            f"{hashlib.sha256(chat.encode('utf-8')).hexdigest()[:24]}.lock"
+        )
+        with self._lock(lock_path):
+            yield
+
+    @asynccontextmanager
+    async def async_chat_admission_lock(self, chat: str):
+        """Return an async-compatible stable chat guard.
+
+        The filesystem lock is synchronous, so acquire and release it in a
+        worker thread when an admission path must await engine cleanup while
+        holding the guard.  The same descriptor remains held across the
+        await; other processes still observe one serialized authority.
+        """
+        async def drain(task: asyncio.Task) -> bool:
+            """Wait for a lock worker despite repeated task cancellation."""
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(task)
+                    return cancelled
+                except asyncio.CancelledError:
+                    cancelled = True
+
+        guard = self.chat_admission_lock(chat)
+        acquire = asyncio.create_task(asyncio.to_thread(guard.__enter__))
+        cancelled = await drain(acquire)
+        if cancelled:
+            # Do not strand a descriptor if cancellation arrives while a
+            # contended process lock is still waiting in the worker thread.
+            release = asyncio.create_task(
+                asyncio.to_thread(guard.__exit__, None, None, None)
+            )
+            await drain(release)
+            raise asyncio.CancelledError
+        try:
+            yield
+        finally:
+            release = asyncio.create_task(
+                asyncio.to_thread(guard.__exit__, None, None, None)
+            )
+            cancelled = await drain(release)
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def async_call(self, fn, /, *args, **kwargs):
+        """Run one sync map operation off the event loop.
+
+        Map mutations take blocking POSIX/Windows file locks.  Calling them
+        directly from an async server path can freeze unrelated chats while
+        another process holds ``session-map.lock``.  Every async caller must
+        route through this helper (or ``asyncio.to_thread``) instead.
+        """
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    async def async_lookup(self, chat: str) -> dict[str, Any] | None:
+        return await self.async_call(self.lookup, chat)
+
+    async def async_bind(
+        self,
+        chat: str,
+        engine: str,
+        *,
+        expected_map_revision: int | None = None,
+        expected_current: str | None | object = _EXPECTED_UNSET,
+        expected_mapping_revision: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.async_call(
+            self.bind,
+            chat,
+            engine,
+            expected_map_revision=expected_map_revision,
+            expected_current=expected_current,
+            expected_mapping_revision=expected_mapping_revision,
+        )
+
+    async def async_forget(
+        self,
+        chat: str,
+        *,
+        expected_map_revision: int | None = None,
+        expected_current: str | None | object = _EXPECTED_UNSET,
+        expected_mapping_revision: int | None = None,
+    ) -> dict[str, int] | None:
+        return await self.async_call(
+            self.forget,
+            chat,
+            expected_map_revision=expected_map_revision,
+            expected_current=expected_current,
+            expected_mapping_revision=expected_mapping_revision,
+        )
+
+    async def async_revisions(self, chat: str) -> tuple[int, int]:
+        return await self.async_call(self.revisions, chat)
+
+    async def async_map_revision(self) -> int:
+        return await self.async_call(self.map_revision)
+
+    async def async_flat_current(self) -> dict[str, str]:
+        return await self.async_call(self.flat_current)
+
+    async def async_fence(self, chat: str) -> None:
+        await self.async_call(self.fence, chat)
+
     def _epoch(self) -> str:
         try:
             return self.epoch_path.read_text(encoding="utf-8")
@@ -230,6 +368,7 @@ class OwnerSessionMap:
                 return result
 
     def lookup(self, chat: str) -> dict[str, Any] | None:
+        chat = _strict_identifier(chat, "chat")
         data = self.read()
         if chat in self.quarantined:
             raise SessionMapCollision("chat is quarantined due to an engine-session collision")
@@ -245,8 +384,9 @@ class OwnerSessionMap:
         expected_current: str | None | object = _EXPECTED_UNSET,
         expected_mapping_revision: int | None = None,
     ) -> dict[str, Any]:
-        chat, engine = str(chat or "").strip(), str(engine or "").strip()
-        if not chat or not engine or not self.owner:
+        chat = _strict_identifier(chat, "chat")
+        engine = _strict_identifier(engine, "engine session")
+        if not self.owner:
             raise ValueError("owner, stable chat and engine session are required")
 
         def mutate(data):
@@ -300,6 +440,8 @@ class OwnerSessionMap:
         expected_current: str | None | object = _EXPECTED_UNSET,
         expected_mapping_revision: int | None = None,
     ) -> dict[str, int] | None:
+        chat = _strict_identifier(chat, "chat")
+
         def mutate(data):
             if expected_map_revision is not None and int(data.get("mapRevision") or 0) != int(expected_map_revision):
                 raise ValueError("session map revision conflict")
@@ -324,6 +466,7 @@ class OwnerSessionMap:
         return {chat: item["current"] for chat, item in data["chats"].items() if item.get("current") and chat not in self.quarantined}
 
     def revisions(self, chat: str) -> tuple[int, int]:
+        chat = _strict_identifier(chat, "chat")
         data = self.read()
         item = data["chats"].get(chat)
         if item is None or chat in self.quarantined:
@@ -332,3 +475,22 @@ class OwnerSessionMap:
 
     def map_revision(self) -> int:
         return int(self.read().get("mapRevision") or 0)
+
+    def fence(self, chat: str) -> None:
+        """Quarantine a chat after an unconfirmed cross-store compensation.
+
+        The row remains available for forensic recovery, but lookup/routing is
+        fail-closed until an operator or a deterministic reconciler clears the
+        fence under the same map lock.
+        """
+        chat = _strict_identifier(chat, "chat")
+        def mutate(data):
+            quarantine = list(data.get("quarantine") or [])
+            if chat in quarantine:
+                return None, False
+            quarantine.append(chat)
+            data["quarantine"] = sorted(set(quarantine))
+            data["mapRevision"] = int(data.get("mapRevision") or 0) + 1
+            return None, True
+
+        self._mutate(mutate)

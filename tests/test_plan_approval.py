@@ -1,6 +1,11 @@
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 import src.plan_approval as plan_approval
+import src.openclank.transcript_projection as projection
+import core.database as database
+from core.database import Base, Session
 
 
 def test_draft_is_not_executable(monkeypatch):
@@ -64,3 +69,79 @@ def test_artifact_path_rejects_typo_and_traversal(monkeypatch):
         plan_approval.bind_artifact_path("s", "alice", ".clankers/futures/one.md")
     with pytest.raises(ValueError):
         plan_approval.bind_artifact_path("s", "alice", ".futures/../one.md")
+
+
+def test_real_plan_save_preserves_newer_managed_binding(tmp_path, monkeypatch):
+    """A stale plan snapshot cannot erase a binding committed by the host."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'plan-binding.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", sessions)
+    monkeypatch.setattr(projection, "SessionLocal", sessions)
+    db = sessions()
+    db.add(Session(
+        id="chat-plan",
+        name="chat",
+        endpoint_url="http://example.test",
+        model="model",
+        owner="alice",
+        mimo_state={
+            "plan_state": {
+                "plan": "draft",
+                "revision": 1,
+                "digest": "a" * 64,
+                "approved_revision": None,
+                "approved_digest": None,
+                "status": "draft",
+            }
+        },
+    ))
+    db.commit()
+    db.close()
+
+    binding = {
+        "owner": "alice",
+        "stableChatID": "chat-plan",
+        "engineSessionID": "engine-new",
+        "engineAliases": [],
+        "memoryWorkspaceID": "memory:chat-plan",
+        "authorityWorkspaceID": "workspace:chat-plan",
+        "copalWorkspace": "default",
+        "physicalCwd": str(tmp_path.resolve()),
+        "workspaceRevision": 0,
+        "mapRevision": 1,
+        "mappingRevision": 1,
+        "memoryEnabled": True,
+        "transition": None,
+    }
+    projection.save_managed_binding(
+        "chat-plan",
+        binding,
+        owner="alice",
+        expected_workspace_revision=0,
+        expected_engine_session_id=None,
+        expected_map_revision=0,
+        expected_mapping_revision=0,
+    )
+    original_save = plan_approval.save_mimo_state
+    raced = False
+
+    def save_with_binding_race(session_id, state, **kwargs):
+        nonlocal raced
+        if not raced:
+            raced = True
+            projection.save_managed_binding(
+                "chat-plan",
+                {**binding, "engineSessionID": "engine-newer", "mapRevision": 2, "mappingRevision": 2},
+                owner="alice",
+                expected_workspace_revision=0,
+                expected_engine_session_id="engine-new",
+                expected_map_revision=1,
+                expected_mapping_revision=1,
+            )
+        return original_save(session_id, state, **kwargs)
+
+    monkeypatch.setattr(plan_approval, "save_mimo_state", save_with_binding_race)
+    saved = plan_approval.save_plan_draft("chat-plan", "alice", "new draft")
+    assert saved["status"] == "draft"
+    assert projection.get_managed_binding("chat-plan", owner="alice")["engineSessionID"] == "engine-newer"
