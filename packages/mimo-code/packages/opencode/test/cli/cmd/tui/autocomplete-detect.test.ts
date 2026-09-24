@@ -94,21 +94,21 @@ describe("detectTrigger", () => {
 
 describe("exactSubmitOption", () => {
   const options = [
-    { display: "/frontend-design  " },
-    { display: "/前端设计  ", submitOnSelect: true },
+    { display: "/product-design  " },
+    { display: "/产品设计  ", submitOnSelect: true },
   ]
 
   test("returns an exact Chinese skill alias for immediate submission", () => {
-    expect(exactSubmitOption("/", "前端设计", options)).toBe(options[1])
+    expect(exactSubmitOption("/", "产品设计", options)).toBe(options[1])
   })
 
   test("does not immediately submit partial aliases or canonical commands", () => {
-    expect(exactSubmitOption("/", "前端", options)).toBeUndefined()
-    expect(exactSubmitOption("/", "frontend-design", options)).toBeUndefined()
+    expect(exactSubmitOption("/", "产品", options)).toBeUndefined()
+    expect(exactSubmitOption("/", "product-design", options)).toBeUndefined()
   })
 
   test("does not submit from non-slash autocomplete", () => {
-    expect(exactSubmitOption("@", "前端设计", options)).toBeUndefined()
+    expect(exactSubmitOption("@", "产品设计", options)).toBeUndefined()
   })
 })
 

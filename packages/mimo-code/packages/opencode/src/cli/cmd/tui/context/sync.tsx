@@ -119,6 +119,34 @@ export type SessionGoal = {
   lastMessageID?: string
 }
 
+/**
+ * Solid MERGES plain objects into an existing store node, so a status that
+ * omits a field would inherit it from the previous status. Wrap with
+ * solid-store `reconcile` so each status stands alone.
+ */
+export function nextSessionStatus(status: SessionStatus) {
+  return reconcile(status)
+}
+
+// Pick the bucket the session view should render. `main` is the normal case; a
+// peer child runs its turns under agentID == its own sessionID, so attaching to
+// one lands on agentID "main" with an empty main bucket and must fall back to
+// the self-id bucket. A session whose turns ran under an ACTOR id has neither
+// key, so the last arm picks the newest non-empty bucket.
+export function selectMessages<M extends { id: string }>(
+  buckets: Record<string, M[]> | undefined,
+  agentID: string,
+  sessionID: string,
+): M[] {
+  if (agentID !== "main" || buckets?.["main"]?.length) return buckets?.[agentID] ?? []
+  if (buckets?.[sessionID]?.length) return buckets[sessionID]
+  const newest = Object.entries(buckets ?? {})
+    .filter(([key, msgs]) => key !== "main" && msgs.length > 0)
+    .sort(([, a], [, b]) => (b.at(-1)?.id ?? "").localeCompare(a.at(-1)?.id ?? ""))
+    .at(0)
+  return newest?.[1] ?? []
+}
+
 export type ActorEntry = {
   actor_id: string
   session_id: string
