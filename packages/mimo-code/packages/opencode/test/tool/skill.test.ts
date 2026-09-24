@@ -7,11 +7,12 @@ import fs from "fs/promises"
 import { createHash } from "crypto"
 import type { Permission } from "../../src/permission"
 import type { Tool } from "../../src/tool"
+import type { MessageV2 } from "../../src/session/message-v2"
 import { Instance } from "../../src/project/instance"
 import { SkillTool } from "../../src/tool/skill"
 import { ToolRegistry } from "../../src/tool"
 import { provideTmpdirInstance } from "../fixture/fixture"
-import { SessionID, MessageID } from "../../src/session/schema"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
 import {
   bindMemorySessionClient,
@@ -28,6 +29,40 @@ const baseCtx: Omit<Tool.Context, "ask"> = {
   abort: AbortSignal.any([]),
   messages: [],
   metadata: () => Effect.void,
+}
+
+/** Bind explicit mode to a real user slash/mention of `name` on this turn. */
+function withUserMention(name: string, ctx: Tool.Context): Tool.Context {
+  const messageID = MessageID.make("msg_user_mention")
+  return {
+    ...ctx,
+    messages: [
+      {
+        info: {
+          id: messageID,
+          sessionID: ctx.sessionID,
+          role: "user",
+        },
+        parts: [
+          {
+            id: PartID.make("part_user_mention"),
+            messageID,
+            sessionID: ctx.sessionID,
+            type: "text",
+            text: `Please run /${name} on this.`,
+          },
+        ],
+      },
+    ] as unknown as MessageV2.WithParts[],
+  }
+}
+
+/** Host-issued user-explicit token from the request envelope. */
+function withHostToken(name: string, ctx: Tool.Context): Tool.Context {
+  return {
+    ...ctx,
+    extra: { ...(ctx.extra ?? {}), userExplicitSkills: [name] },
+  }
 }
 
 afterEach(async () => {
@@ -437,15 +472,39 @@ Use this skill.
               const modelExit = yield* Effect.exit(tool.execute({ name: "hidden-trusted" }, ctx))
               expect(modelExit._tag).toBe("Failure")
               const modelMsg = modelExit._tag === "Failure" ? Cause.pretty(modelExit.cause) : ""
-              expect(modelMsg).toContain("hidden from autonomous model discovery")
-              expect(modelMsg).toContain('invocation: "explicit"')
+              expect(modelMsg).toContain("is not invocable in this context")
+              // Denial must not coach the invocation flip.
+              expect(modelMsg).not.toContain("invocation")
+              expect(modelMsg).not.toContain("explicit")
+              expect(modelMsg).not.toContain("retry")
               expect(requests).toEqual([])
 
-              // User-explicit invocation reaches the same trusted enabled hidden skill.
-              const explicit = yield* tool.execute({ name: "hidden-trusted", invocation: "explicit" }, ctx)
+              // Model-claimed explicit without a user-originated signal stays in model mode.
+              const claimed = yield* Effect.exit(
+                tool.execute({ name: "hidden-trusted", invocation: "explicit" }, ctx),
+              )
+              expect(claimed._tag).toBe("Failure")
+              const claimedMsg = claimed._tag === "Failure" ? Cause.pretty(claimed.cause) : ""
+              expect(claimedMsg).toContain("is not invocable in this context")
+              expect(claimedMsg).not.toContain("invocation")
+              expect(claimedMsg).not.toContain("explicit")
+              expect(requests).toEqual([])
+
+              // User slash/mention binds explicit: reaches the trusted enabled hidden skill.
+              const userBound = withUserMention("hidden-trusted", ctx)
+              const explicit = yield* tool.execute(
+                { name: "hidden-trusted", invocation: "explicit" },
+                userBound,
+              )
               expect(explicit.output).toContain("# Hidden body")
               expect(requests.length).toBe(1)
               expect(requests[0].permission).toBe("skill")
+
+              // Host-issued user-explicit token is also a real user-originated signal.
+              const hostBound = withHostToken("hidden-trusted", { ...ctx, messages: [] })
+              const viaHost = yield* tool.execute({ name: "hidden-trusted", invocation: "explicit" }, hostBound)
+              expect(viaHost.output).toContain("# Hidden body")
+              expect(requests.length).toBe(2)
             }),
           ({ previousDir, previousSkills, previousOwner }) =>
             Effect.sync(() => {
@@ -497,7 +556,8 @@ status: revoked
           }
 
           for (const invocation of [undefined, "explicit"] as const) {
-            const exit = yield* Effect.exit(tool.execute({ name: "revoked-skill", invocation }, ctx))
+            const claimedCtx = invocation === "explicit" ? withUserMention("revoked-skill", ctx) : ctx
+            const exit = yield* Effect.exit(tool.execute({ name: "revoked-skill", invocation }, claimedCtx))
             expect(exit._tag).toBe("Failure")
             const msg = exit._tag === "Failure" ? Cause.pretty(exit.cause) : ""
             expect(msg).toContain("is revoked and cannot run")
@@ -538,7 +598,8 @@ status: disabled
           const ctx: Tool.Context = { ...baseCtx, ask: () => Effect.void }
 
           for (const invocation of [undefined, "explicit"] as const) {
-            const exit = yield* Effect.exit(tool.execute({ name: "disabled-skill", invocation }, ctx))
+            const claimedCtx = invocation === "explicit" ? withUserMention("disabled-skill", ctx) : ctx
+            const exit = yield* Effect.exit(tool.execute({ name: "disabled-skill", invocation }, claimedCtx))
             expect(exit._tag).toBe("Failure")
             const msg = exit._tag === "Failure" ? Cause.pretty(exit.cause) : ""
             expect(msg).toContain("is disabled and cannot run")
@@ -590,13 +651,19 @@ hidden: true
           if (!tool) throw new Error("Skill tool not found")
           const ctx: Tool.Context = { ...baseCtx, ask: () => Effect.void }
 
-          const untrusted = yield* Effect.exit(tool.execute({ name: "untrusted-skill", invocation: "explicit" }, ctx))
+          const untrustedCtx = withUserMention("untrusted-skill", ctx)
+          const untrusted = yield* Effect.exit(
+            tool.execute({ name: "untrusted-skill", invocation: "explicit" }, untrustedCtx),
+          )
           expect(untrusted._tag).toBe("Failure")
           const untrustedMsg = untrusted._tag === "Failure" ? Cause.pretty(untrusted.cause) : ""
           expect(untrustedMsg).toMatch(/untrusted|not published/)
           expect(untrustedMsg).not.toContain("Untrusted body")
 
-          const hiddenAlone = yield* Effect.exit(tool.execute({ name: "hidden-untrusted", invocation: "explicit" }, ctx))
+          const hiddenCtx = withUserMention("hidden-untrusted", ctx)
+          const hiddenAlone = yield* Effect.exit(
+            tool.execute({ name: "hidden-untrusted", invocation: "explicit" }, hiddenCtx),
+          )
           expect(hiddenAlone._tag).toBe("Failure")
           const hiddenMsg = hiddenAlone._tag === "Failure" ? Cause.pretty(hiddenAlone.cause) : ""
           expect(hiddenMsg).toContain("untrusted")
@@ -607,7 +674,7 @@ hidden: true
     ),
   )
 
-  it.live("refuses a disable-model-invocation skill from model mode and points at the user slash command", () =>
+  it.live("refuses a disable-model-invocation skill without a user-originated signal and does not coach the flip", () =>
     provideTmpdirInstance(
       (dir) =>
         Effect.gen(function* () {
@@ -646,13 +713,28 @@ GATED_BODY_MARKER
           const modelExit = yield* Effect.exit(tool.execute({ name: "gated-skill" }, ctx))
           expect(modelExit._tag).toBe("Failure")
           const modelMsg = modelExit._tag === "Failure" ? Cause.pretty(modelExit.cause) : ""
-          expect(modelMsg).toContain("disable-model-invocation")
-          expect(modelMsg).toContain("/gated-skill")
+          expect(modelMsg).toContain("is not invocable in this context")
+          // Generic deny: no gate-name existence oracle, no invocation-flip coaching.
+          expect(modelMsg).not.toContain("disable-model-invocation")
+          expect(modelMsg).not.toContain("/gated-skill")
+          expect(modelMsg).not.toContain("invocation")
+          expect(modelMsg).not.toContain("explicit")
+          expect(modelMsg).not.toContain("retry")
           expect(modelMsg).not.toContain("GATED_BODY_MARKER")
           expect(requests).toEqual([])
 
+          // Model-claimed explicit without a user signal stays in model mode.
+          const claimed = yield* Effect.exit(tool.execute({ name: "gated-skill", invocation: "explicit" }, ctx))
+          expect(claimed._tag).toBe("Failure")
+          const claimedMsg = claimed._tag === "Failure" ? Cause.pretty(claimed.cause) : ""
+          expect(claimedMsg).toContain("is not invocable in this context")
+          expect(claimedMsg).not.toContain("invocation")
+          expect(claimedMsg).not.toContain("explicit")
+          expect(requests).toEqual([])
+
           // User-explicit invocation of the same model-disabled skill succeeds.
-          const explicit = yield* tool.execute({ name: "gated-skill", invocation: "explicit" }, ctx)
+          const userBound = withUserMention("gated-skill", ctx)
+          const explicit = yield* tool.execute({ name: "gated-skill", invocation: "explicit" }, userBound)
           expect(explicit.output).toContain("GATED_BODY_MARKER")
           expect(requests.length).toBe(1)
         }),

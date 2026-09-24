@@ -51,6 +51,11 @@ export interface Interface {
   readonly skills: (agent: Agent.Info, model?: SkillSearchModel) => Effect.Effect<string | undefined>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Skill.Info[]>
   readonly all: () => Effect.Effect<Skill.Info[]>
+  /** Trust-gated resolve for host slash/mention injection (user-explicit mode). */
+  readonly getForInvocation: (
+    name: string,
+    mode: Skill.InvocationMode,
+  ) => Effect.Effect<Skill.InvocationResult>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
@@ -157,6 +162,13 @@ export const layer = Layer.effect(
 
       all: Effect.fn("SystemPrompt.all")(function* () {
         return yield* skill.all()
+      }),
+
+      getForInvocation: Effect.fn("SystemPrompt.getForInvocation")(function* (
+        name: string,
+        mode: Skill.InvocationMode,
+      ) {
+        return yield* skill.getForInvocation(name, mode)
       }),
     })
   }),

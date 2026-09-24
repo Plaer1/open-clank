@@ -1,7 +1,7 @@
 import z from "zod"
 import { Effect } from "effect"
 import { Ripgrep } from "../file/ripgrep"
-import { Skill, type InvocationDenial } from "../skill"
+import { Skill, type InvocationDenial, type InvocationMode } from "../skill"
 import { BuiltinWorkflow } from "../workflow/builtin"
 import * as Tool from "./tool"
 import { renderSkillContent } from "./skill-content"
@@ -13,26 +13,19 @@ const Parameters = z.object({
     .enum(["model", "explicit"])
     .optional()
     .describe(
-      'Set to "explicit" only when the user themselves requested this skill by name ' +
-        "(for example a hidden skill the user named or a /slash-command). " +
-        'Default "model" is autonomous selection from the available_skills catalog.',
+      'Set to "explicit" only when the user themselves requested this skill by name this turn ' +
+        "(a /slash-command or user mention). A model claim of \"explicit\" without a user-originated " +
+        'signal is ignored and stays in "model" mode. Default "model" is autonomous selection from ' +
+        "the available_skills catalog.",
     ),
 })
 
 function denialMessage(denial: InvocationDenial, name: string): string {
   switch (denial) {
+    // Gated names get a generic deny (no existence-oracle reason, no flip coaching).
     case "hidden_from_model":
-      return (
-        `Skill "${name}" is hidden from autonomous model discovery. ` +
-        `If the user explicitly requested it, retry with invocation: "explicit". ` +
-        `Otherwise pick a skill from available_skills or continue without one.`
-      )
     case "model_invocation_disabled":
-      return (
-        `Skill "${name}" has disable-model-invocation set. Only the user may start it ` +
-        `(via /${name} or an explicit request). If the user explicitly requested it, ` +
-        `retry with invocation: "explicit".`
-      )
+      return `Skill "${name}" is not invocable in this context.`
     case "disabled":
       return `Skill "${name}" is disabled and cannot run.`
     case "untrusted":
@@ -46,6 +39,21 @@ function denialMessage(denial: InvocationDenial, name: string): string {
   }
 }
 
+/**
+ * A model parameter alone cannot flip explicit mode. Explicit requires a real
+ * user-originated signal for THIS turn: a user slash/mention of that skill, or
+ * a host-issued user-explicit token from the request envelope.
+ */
+function resolveMode(params: { name: string; invocation?: "model" | "explicit" }, ctx: Tool.Context): InvocationMode {
+  if (params.invocation !== "explicit") return "model"
+  const bound = Skill.isUserExplicitRequest({
+    name: params.name,
+    messages: ctx.messages,
+    hostTokens: ctx.extra?.userExplicitSkills,
+  })
+  return bound ? "explicit" : "model"
+}
+
 export const SkillTool = Tool.define(
   "skill",
   Effect.gen(function* () {
@@ -57,7 +65,7 @@ export const SkillTool = Tool.define(
       parameters: Parameters,
       execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const mode = params.invocation ?? "model"
+          const mode = resolveMode(params, ctx)
           const result = yield* skill.getForInvocation(params.name, mode)
           if (!result.ok) {
             // A common miss: the name is a built-in WORKFLOW, not a skill (e.g.

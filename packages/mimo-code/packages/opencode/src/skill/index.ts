@@ -96,6 +96,49 @@ export function isModelInvocable(skill: Info): boolean {
   return true
 }
 
+/** User-explicit invocable: runnable skills, including trusted hidden and model-disabled. */
+export function isExplicitlyInvocable(skill: Info): boolean {
+  return evaluateInvocation(skill, "explicit").ok
+}
+
+const MENTION_RE = /(?:^|\s)\/([A-Za-z][A-Za-z0-9_:-]*)(?=[^A-Za-z0-9_:-]|$)/g
+
+/**
+ * Slash/mention tokens the user themselves typed on the current turn.
+ * Synthetic parts (injected skill bodies, reminders) are not user-originated.
+ */
+export function userSlashMentions(
+  messages: ReadonlyArray<{
+    info: { role: string }
+    parts: ReadonlyArray<{ type: string; text?: string; synthetic?: boolean }>
+  }>,
+): string[] {
+  const lastUser = messages.findLast((msg) => msg.info.role === "user")
+  if (!lastUser) return []
+  const text = lastUser.parts
+    .flatMap((p) => (p.type === "text" && !p.synthetic ? [p.text ?? ""] : []))
+    .join("\n")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`\n]*`/g, " ")
+  return [...text.matchAll(MENTION_RE)]
+    .map((m) => m[1])
+    .filter((name): name is string => Boolean(name))
+}
+
+/**
+ * True only when a real user-originated signal for THIS turn names the skill:
+ * a user slash/mention of that skill, or a host-issued user-explicit token
+ * from the request envelope. A model tool parameter alone never counts.
+ */
+export function isUserExplicitRequest(input: {
+  name: string
+  messages: Parameters<typeof userSlashMentions>[0]
+  hostTokens?: unknown
+}): boolean {
+  if (Array.isArray(input.hostTokens) && input.hostTokens.some((token) => token === input.name)) return true
+  return userSlashMentions(input.messages).includes(input.name)
+}
+
 /**
  * Gate a single skill for the given invocation mode.
  * Model mode: only non-hidden, model-invocable, runnable skills.
@@ -481,6 +524,8 @@ export interface Interface {
   readonly reload: () => Effect.Effect<void>
   /** Resolve a skill for model or user-explicit invocation with trust/visibility gates. */
   readonly getForInvocation: (name: string, mode: InvocationMode) => Effect.Effect<InvocationResult>
+  /** Skills a user may explicitly invoke (slash/mention), including trusted hidden. */
+  readonly explicit: () => Effect.Effect<Info[]>
 }
 
 const add = Effect.fnUntraced(function* (
@@ -845,12 +890,19 @@ export const layer = Layer.effect(
       return evaluateInvocation(item, mode) as InvocationResult
     })
 
+    const explicit = Effect.fn("Skill.explicit")(function* () {
+      const s = yield* InstanceState.get(state)
+      return Object.values(s.skills)
+        .filter((skill) => isExplicitlyInvocable(skill))
+        .toSorted((a, b) => a.name.localeCompare(b.name))
+    })
+
     const reload = Effect.fn("Skill.reload")(function* () {
       yield* InstanceState.invalidate(discovered)
       yield* InstanceState.invalidate(state)
     })
 
-    return Service.of({ get, all, dirs, available, reload, getForInvocation })
+    return Service.of({ get, all, dirs, available, reload, getForInvocation, explicit })
   }),
 )
 

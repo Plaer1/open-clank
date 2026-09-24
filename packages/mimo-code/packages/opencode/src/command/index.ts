@@ -261,7 +261,10 @@ export const layer = Layer.effect(
         }
       }
 
-      for (const item of yield* skill.all()) {
+      // Host slash entries use the same trust filter as the skill tool's
+      // user-explicit mode. Skill.all is NOT a trust filter — disabled,
+      // untrusted, revoked, and staged skills must never become commands.
+      for (const item of yield* skill.explicit()) {
         if (commands[item.name]) continue
         commands[item.name] = {
           name: item.name,

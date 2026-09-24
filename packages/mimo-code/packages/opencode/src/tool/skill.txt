@@ -4,8 +4,9 @@ Use this tool to inject the skill's instructions and resources into current conv
 
 The skill name must match one of the skills listed in your system prompt.
 
-When the user themselves explicitly requested a skill by name (including a hidden skill
-the user named or a /slash-command), pass invocation: "explicit". For autonomous model
-selection leave invocation unset (defaults to "model"). Disabled, untrusted, or revoked
-skills cannot run in either mode. Hidden skills are never listed in available_skills and
-are only reachable with invocation: "explicit" when the user requested them.
+invocation: "explicit" takes effect only when the user themselves requested this skill by name
+this turn (a /slash-command or user mention) or the host issued a user-explicit token. A model
+claim of "explicit" without that user-originated signal is ignored and stays in "model" mode.
+Autonomous model selection leaves invocation unset (defaults to "model"). Disabled, untrusted,
+or revoked skills cannot run in either mode. Hidden skills are never listed in available_skills
+and are only reachable when the user requested them. Hidden alone never grants trust.

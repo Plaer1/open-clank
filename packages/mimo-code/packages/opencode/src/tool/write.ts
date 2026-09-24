@@ -14,6 +14,7 @@ import { Instance } from "../project/instance"
 import { SessionCwd } from "./session-cwd"
 import { trimDiff } from "./edit"
 import { assertWriteAllowed, askEditUnlessMemory } from "./external-directory"
+import { assertFileRead } from "./read-state"
 import { RecoverableError } from "./recoverable"
 import { fileResult } from "./file-contract"
 import { assertProjectFilePolicy } from "./project-policy"
@@ -51,6 +52,9 @@ export const WriteTool = Tool.define(
           const history = AppFileSystem.historyContextFromTool(ctx, filepath)
 
           const exists = yield* fs.existsSafe(filepath)
+          // Overwriting an existing file requires a prior read (same contract as
+          // edit/multiedit). Creating a new file does not.
+          const readFingerprint = exists ? assertFileRead(ctx, filepath, "write") : undefined
           const snapshot = exists
             ? yield* fs.readTextSnapshot(filepath).pipe(
                 Effect.catch(() =>
@@ -60,6 +64,7 @@ export const WriteTool = Tool.define(
             : undefined
           const observedFingerprint = snapshot?.fingerprint
           if (
+            (exists && readFingerprint && observedFingerprint && readFingerprint !== observedFingerprint) ||
             (exists && params.expected_fingerprint && params.expected_fingerprint !== observedFingerprint) ||
             (!exists && params.expected_fingerprint && params.expected_fingerprint !== "missing")
           ) {

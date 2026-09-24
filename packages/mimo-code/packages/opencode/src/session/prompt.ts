@@ -743,55 +743,55 @@ ${entries}
 
       // Sole injection point for skill bodies — free-text mentions ("/foo ... /bar") and slash-command
       // invocations alike. Runs every step, so the guard keeps step 2+ from restacking step 1's blocks.
+      // User slash/mention is a real user-originated explicit signal: gate every injection through
+      // evaluateInvocation/getForInvocation("explicit"). Skill.all is NOT a trust filter.
       const alreadyWrapped = userMessage.parts.some(
         (p) => p.type === "text" && p.text.startsWith('<skill_content name="'),
       )
       if (!alreadyWrapped) {
-        // Use all() to bypass per-agent permission filtering — respect the user's explicit /mention action
-        const allSkills = yield* sys.all()
-        if (allSkills.length > 0) {
-          const bodyText = userMessage.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n")
-          const stripped = bodyText.replace(/```[\s\S]*?```/g, " ").replace(/`[^`\n]*`/g, " ")
-          const mentioned: string[] = []
-          const seen = new Set<string>()
-          const mentionRe = /(?:^|\s)\/([A-Za-z][A-Za-z0-9_:-]*)(?=[^A-Za-z0-9_:-]|$)/g
-          for (const m of stripped.matchAll(mentionRe)) {
-            const name = m[1]
-            if (!name || seen.has(name)) continue
-            if (!allSkills.some((s) => s.name === name)) continue
-            seen.add(name)
-            mentioned.push(name)
+        const bodyText = userMessage.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("\n")
+        const stripped = bodyText.replace(/```[\s\S]*?```/g, " ").replace(/`[^`\n]*`/g, " ")
+        const mentioned: string[] = []
+        const seen = new Set<string>()
+        const mentionRe = /(?:^|\s)\/([A-Za-z][A-Za-z0-9_:-]*)(?=[^A-Za-z0-9_:-]|$)/g
+        for (const m of stripped.matchAll(mentionRe)) {
+          const name = m[1]
+          if (!name || seen.has(name)) continue
+          seen.add(name)
+          const resolved = yield* sys.getForInvocation(name, "explicit")
+          if (!resolved.ok) continue
+          mentioned.push(name)
+        }
+
+        if (mentioned.length > 0) {
+          const MAX_AUTOLOAD = 3
+          const toLoad = mentioned.slice(0, MAX_AUTOLOAD)
+          const overflow = mentioned.slice(MAX_AUTOLOAD)
+          for (const name of toLoad) {
+            const resolved = yield* sys.getForInvocation(name, "explicit")
+            if (!resolved.ok) continue
+            const part = yield* sessions.updatePart({
+              id: PartID.ascending(),
+              messageID: userMessage.info.id,
+              sessionID: userMessage.info.sessionID,
+              type: "text",
+              text: `<skill_content name="${name}">\n${resolved.info.content}\n</skill_content>`,
+              synthetic: true,
+            })
+            userMessage.parts.push(part)
           }
 
-          if (mentioned.length > 0) {
-            const MAX_AUTOLOAD = 3
-            const toLoad = mentioned.slice(0, MAX_AUTOLOAD)
-            const overflow = mentioned.slice(MAX_AUTOLOAD)
-            for (const name of toLoad) {
-              const info = allSkills.find((s) => s.name === name)
-              if (!info) continue
-              const part = yield* sessions.updatePart({
-                id: PartID.ascending(),
-                messageID: userMessage.info.id,
-                sessionID: userMessage.info.sessionID,
-                type: "text",
-                text: `<skill_content name="${name}">\n${info.content}\n</skill_content>`,
-                synthetic: true,
-              })
-              userMessage.parts.push(part)
-            }
-
-            if (mentioned.length >= 2) {
-              const loadedHint =
-                toLoad.length > 0 ? `SKILL.md for [${toLoad.join(", ")}] has been auto-loaded above.` : ""
-              const overflowHint =
-                overflow.length > 0 ? `For [${overflow.join(", ")}], use the Skill tool to load them on demand.` : ""
-              const part = yield* sessions.updatePart({
-                id: PartID.ascending(),
-                messageID: userMessage.info.id,
-                sessionID: userMessage.info.sessionID,
-                type: "text",
-                text: `<system-reminder>
+          if (mentioned.length >= 2) {
+            const loadedHint =
+              toLoad.length > 0 ? `SKILL.md for [${toLoad.join(", ")}] has been auto-loaded above.` : ""
+            const overflowHint =
+              overflow.length > 0 ? `For [${overflow.join(", ")}], use the Skill tool to load them on demand.` : ""
+            const part = yield* sessions.updatePart({
+              id: PartID.ascending(),
+              messageID: userMessage.info.id,
+              sessionID: userMessage.info.sessionID,
+              type: "text",
+              text: `<system-reminder>
 The user has explicitly referenced multiple skills in this message: ${mentioned.join(", ")}.
 ${loadedHint} ${overflowHint}
 
@@ -804,10 +804,9 @@ Before starting work, complete an orchestration plan:
 
 Keep planning proportional to task complexity: for simple combinations, two or three sentences suffice.
 </system-reminder>`,
-                synthetic: true,
-              })
-              userMessage.parts.push(part)
-            }
+              synthetic: true,
+            })
+            userMessage.parts.push(part)
           }
         }
       }
