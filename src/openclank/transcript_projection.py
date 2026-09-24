@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -72,7 +73,10 @@ def record_projection(
     try:
         row = (
             db.query(MimoProjection)
-            .filter(MimoProjection.odysseus_session_id == snapshot.session_id)
+            .filter(
+                MimoProjection.odysseus_session_id == snapshot.session_id,
+                MimoProjection.owner == snapshot.owner,
+            )
             .first()
         )
         values = {
@@ -100,6 +104,8 @@ def record_projection(
 
 
 def get_projection(session_id: str, owner: Optional[str] = None) -> Optional[dict]:
+    if owner is None:
+        raise ValueError("projection reads require an owner")
     db = SessionLocal()
     try:
         query = db.query(MimoProjection).filter(
@@ -154,12 +160,15 @@ def list_projections(owner: Optional[str] = None) -> list[dict]:
         db.close()
 
 
-def mark_projection_stale(session_id: str) -> None:
+def mark_projection_stale(session_id: str, owner: Optional[str] = None) -> None:
+    if owner is None:
+        raise ValueError("projection updates require an owner")
     db = SessionLocal()
     try:
-        row = db.query(MimoProjection).filter(
-            MimoProjection.odysseus_session_id == session_id
-        ).first()
+        query = db.query(MimoProjection).filter(MimoProjection.odysseus_session_id == session_id)
+        if owner is not None:
+            query = query.filter(MimoProjection.owner == owner)
+        row = query.first()
         if row is not None:
             row.lifecycle_state = "stale"
             db.commit()
@@ -167,13 +176,16 @@ def mark_projection_stale(session_id: str) -> None:
         db.close()
 
 
-def delete_projection(session_id: str) -> None:
+def delete_projection(session_id: str, owner: Optional[str] = None) -> None:
+    if owner is None:
+        raise ValueError("projection deletes require an owner")
     db = SessionLocal()
     try:
         try:
-            db.query(MimoProjection).filter(
-                MimoProjection.odysseus_session_id == session_id
-            ).delete(synchronize_session=False)
+            query = db.query(MimoProjection).filter(MimoProjection.odysseus_session_id == session_id)
+            if owner is not None:
+                query = query.filter(MimoProjection.owner == owner)
+            query.delete(synchronize_session=False)
             db.commit()
         except OperationalError:
             db.rollback()
@@ -200,10 +212,12 @@ def save_mimo_state(
     state: dict,
     *,
     owner: Optional[str] = None,
+    expected_workspace_revision: Optional[int] = None,
 ) -> dict:
     """Persist a secret-free negotiated control-plane snapshot."""
     db = SessionLocal()
     try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
         query = db.query(Session).filter(Session.id == session_id)
         if owner is not None:
             query = query.filter(Session.owner == owner)
@@ -211,16 +225,156 @@ def save_mimo_state(
         if session is None:
             raise KeyError(f"Canonical session {session_id!r} not found")
         previous = dict(session.mimo_state or {})
+        if expected_workspace_revision is not None:
+            binding = previous.get("managed_binding")
+            actual_workspace_revision = int(binding.get("workspaceRevision") or 0) if isinstance(binding, dict) else 0
+            if actual_workspace_revision != int(expected_workspace_revision):
+                raise ValueError("managed binding workspace revision conflict")
         before = {key: value for key, value in previous.items() if key != "revision"}
         after = {key: value for key, value in state.items() if key != "revision"}
+        previous_binding = previous.get("managed_binding")
+        # Whole-state callers never own the host binding. Preserve an existing
+        # record unconditionally, and discard an attempted first write; host
+        # binding creation/replacement goes through save_managed_binding so it
+        # has one owner-qualified CAS boundary.
+        if isinstance(previous_binding, dict):
+            after["managed_binding"] = previous_binding
+        else:
+            after.pop("managed_binding", None)
         revision = int(previous.get("revision") or 0)
         if before != after:
             revision += 1
+        # Whole-state writers are merge-safe: managed binding is owned by the
+        # host cwd CAS and cannot be erased by a stale plan/model snapshot.
         payload = dict(after)
         payload["revision"] = revision
         session.mimo_state = payload
         db.commit()
         return payload
+    finally:
+        db.close()
+
+
+def get_managed_binding(session_id: str, owner: Optional[str] = None) -> dict:
+    """Return the detached owner-qualified host binding, if present."""
+    if not owner:
+        raise ValueError("managed binding reads require an owner")
+    state = get_mimo_state(session_id, owner=owner)
+    binding = state.get("managed_binding")
+    return dict(binding) if isinstance(binding, dict) else {}
+
+
+def save_managed_binding(
+    session_id: str,
+    binding: dict,
+    *,
+    owner: Optional[str] = None,
+    expected_workspace_revision: Optional[int] = None,
+) -> dict:
+    """Merge a host binding without clobbering unrelated session state."""
+    if not owner:
+        raise ValueError("managed binding writes require an owner")
+    required_strings = (
+        "owner", "stableChatID", "engineSessionID", "memoryWorkspaceID",
+        "authorityWorkspaceID", "copalWorkspace", "physicalCwd",
+    )
+    if any(not isinstance(binding.get(key), str) or not binding[key].strip() for key in required_strings):
+        raise ValueError("managed binding is incomplete")
+    if binding.get("owner") != owner or binding.get("stableChatID") != session_id or not os.path.isabs(binding["physicalCwd"]):
+        raise ValueError("managed binding owner or cwd is invalid")
+    if os.path.normpath(binding["physicalCwd"]) != binding["physicalCwd"]:
+        raise ValueError("managed binding cwd is not canonical")
+    aliases = binding.get("engineAliases")
+    if not isinstance(aliases, list) or len(aliases) > 16 or any(not isinstance(value, str) or not value.strip() for value in aliases):
+        raise ValueError("managed binding aliases are invalid")
+    if len(set(aliases)) != len(aliases) or binding["engineSessionID"] in aliases:
+        raise ValueError("managed binding aliases are not unique")
+    if not isinstance(binding.get("memoryEnabled"), bool):
+        raise ValueError("managed binding memory flag is invalid")
+    for key in ("workspaceRevision", "mapRevision", "mappingRevision"):
+        value = binding.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("managed binding revisions are invalid")
+    transition = binding.get("transition")
+    if transition is not None:
+        if not isinstance(transition, dict) or transition.get("phase") not in {"in_flight", "reconciling"}:
+            raise ValueError("managed binding transition is invalid")
+    db = SessionLocal()
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        query = db.query(Session).filter(Session.id == session_id)
+        if owner is not None:
+            query = query.filter(Session.owner == owner)
+        session = query.first()
+        if session is None:
+            raise KeyError(f"Canonical session {session_id!r} not found")
+        state = dict(session.mimo_state or {})
+        previous = state.get("managed_binding")
+        previous = dict(previous) if isinstance(previous, dict) else {}
+        actual = int(previous.get("workspaceRevision") or 0)
+        if expected_workspace_revision is not None and actual != int(expected_workspace_revision):
+            raise ValueError("managed binding workspace revision conflict")
+        candidate = dict(binding)
+        candidate["workspaceRevision"] = int(candidate.get("workspaceRevision", actual))
+        if previous and candidate.get("engineSessionID") != previous.get("engineSessionID"):
+            same_axes = all(
+                candidate.get(key) == previous.get(key)
+                for key in ("workspaceRevision", "mapRevision", "mappingRevision")
+            )
+            if same_axes:
+                raise ValueError("managed binding engine replacement lacks a mapping revision")
+        state["managed_binding"] = candidate
+        before = {key: value for key, value in state.items() if key != "revision"}
+        old_state = dict(session.mimo_state or {})
+        old_state.pop("revision", None)
+        revision = int(session.mimo_state.get("revision", 0) if session.mimo_state else 0)
+        if before != old_state:
+            revision += 1
+        state["revision"] = revision
+        session.mimo_state = state
+        db.commit()
+        return dict(candidate)
+    finally:
+        db.close()
+
+
+def delete_managed_binding(
+    session_id: str,
+    *,
+    owner: Optional[str] = None,
+    expected_workspace_revision: Optional[int] = None,
+) -> None:
+    """Remove a host binding as compensation for an unexposed engine.
+
+    This is deliberately owner-qualified and CAS-protected.  The engine
+    admission transaction uses it only while the durable map still points at
+    the candidate, so a competing winner cannot have its binding removed by a
+    stale cleanup path.
+    """
+    if not owner:
+        raise ValueError("managed binding deletes require an owner")
+    db = SessionLocal()
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        session = (
+            db.query(Session)
+            .filter(Session.id == session_id, Session.owner == owner)
+            .first()
+        )
+        if session is None:
+            raise KeyError(f"Canonical session {session_id!r} not found")
+        state = dict(session.mimo_state or {})
+        previous = state.get("managed_binding")
+        actual = int(previous.get("workspaceRevision") or 0) if isinstance(previous, dict) else 0
+        if expected_workspace_revision is not None and actual != int(expected_workspace_revision):
+            raise ValueError("managed binding workspace revision conflict")
+        if not isinstance(previous, dict):
+            db.commit()
+            return
+        state.pop("managed_binding", None)
+        state["revision"] = int(state.get("revision") or 0) + 1
+        session.mimo_state = state
+        db.commit()
     finally:
         db.close()
 
@@ -232,7 +386,9 @@ async def purge_execution_projection(
     owner: Optional[str] = None,
 ) -> bool:
     """Securely remove any Open Clank agent execution state for a canonical session."""
-    row = get_projection(session_id)
+    if owner is None:
+        raise ValueError("projection purge requires an owner")
+    row = get_projection(session_id, owner=owner)
     if row is not None and owner is not None and row["owner"] != owner:
         raise PermissionError("Open Clank agent projection belongs to another owner")
     effective_owner = owner or (row["owner"] if row is not None else None)

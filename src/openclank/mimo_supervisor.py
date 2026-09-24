@@ -20,6 +20,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -286,6 +287,7 @@ class MimoSupervisor:
         projection_generation: int = 0,
         crash_callback=None,
         local_executor_broker=None,
+        lifecycle_epoch: str | None = None,
     ) -> None:
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr_task: asyncio.Task | None = None
@@ -307,6 +309,7 @@ class MimoSupervisor:
         self._provider_apis: dict[str, str] = {}
         self._managed_callbacks = None
         self._local_executor_broker = local_executor_broker
+        self._lifecycle_epoch = lifecycle_epoch
         # The ACP command already owns an HTTP server. Pin its loopback port so
         # Open Clank can use the private session-control HTTP API without
         # launching a second engine server. Keep it stable across restarts.
@@ -613,8 +616,13 @@ class MimoSupervisor:
             memory_provider=self._memory_provider,
             managed_provider_context=self._managed_callbacks.resolve_route_context,
             session_workspace_adapter=self._validate_session_workspace,
+            lifecycle_epoch=self._lifecycle_epoch,
             session_map_path=(
-                self._runtime_home / "session-map.json"
+                (
+                    self._runtime_home.parent.parent
+                    if self._runtime_home.parent.name == "generations"
+                    else self._runtime_home
+                ) / "session-map.json"
                 if self._runtime_home is not None
                 else None
             ),
@@ -1000,14 +1008,6 @@ class MimoSupervisor:
             await self._bridge.ensure_session(session_id, owner=owner)
         mimo_session = self._bridge.mapped_session_id(session_id)
         workspace = self._bridge.mapped_session_workspace(session_id)
-        try:
-            from src.openclank.transcript_projection import get_projection
-
-            projection = get_projection(session_id, owner=owner)
-            if projection and projection.get("mimo_session_id") == mimo_session:
-                workspace = str(projection.get("workspace") or workspace)
-        except KeyError:
-            pass
         path = f"/session/{quote(mimo_session, safe='')}/{suffix.lstrip('/')}"
         kwargs = {"params": {"directory": workspace}}
         if payload is not None:
@@ -1172,6 +1172,41 @@ class MimoSupervisorPool:
     def _runtime_home(self, owner: str) -> Path:
         digest = hashlib.sha256(owner.encode("utf-8")).hexdigest()
         return self._owners_root / digest
+
+    def _owner_epoch_path(self, owner: str) -> Path:
+        digest = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:24]
+        return self._owners_root / f".session-map-{digest}.epoch"
+
+    def _durable_owner_epoch(self, owner: str) -> str:
+        path = self._owner_epoch_path(owner)
+        try:
+            value = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return "0"
+        if not re.fullmatch(r"(?:0|[1-9][0-9]*)", value):
+            raise RuntimeError("owner lifecycle epoch is corrupt")
+        return value
+
+    @contextmanager
+    def _owner_map_guards(self, owners):
+        with ExitStack() as stack:
+            for owner in sorted(set(owners)):
+                path = self._runtime_home(owner) / "session-map.json"
+                mapping = __import__("src.openclank.session_map", fromlist=["OwnerSessionMap"]).OwnerSessionMap(path, owner)
+                stack.enter_context(mapping._lock(mapping.lifecycle_lock_path))
+            yield
+
+    def _advance_durable_owner_epoch(self, owner: str, value: int) -> str:
+        path = self._owner_epoch_path(owner)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+        temporary.write_text(str(value), encoding="utf-8")
+        with temporary.open("r+", encoding="utf-8") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        self._fsync_directory(path.parent)
+        return str(value)
 
     def _owner_memory_data_dirs(self, owner: str) -> list[Path]:
         """Return only this owner's managed-engine data roots.
@@ -1393,7 +1428,12 @@ class MimoSupervisorPool:
         return self._states.setdefault(owner, _OwnerLifecycle())
 
     def _owner_lifecycle_epoch(self, owner: str) -> int:
-        return self._owner_lifecycle_epochs.get(owner, 0)
+        local = self._owner_lifecycle_epochs.get(owner, 0)
+        try:
+            durable = int(self._durable_owner_epoch(owner))
+        except ValueError as exc:
+            raise RuntimeError("owner lifecycle epoch is corrupt") from exc
+        return max(local, durable)
 
     def _assert_owner_lifecycle(self, owner: str, epoch: int) -> None:
         if (
@@ -1406,7 +1446,7 @@ class MimoSupervisorPool:
                 phase="identity",
             )
 
-    def _new_worker(self, owner: str, snapshot, generation: int, fence: str) -> MimoSupervisor:
+    def _new_worker(self, owner: str, snapshot, generation: int, fence: str, lifecycle_epoch: str | None = None) -> MimoSupervisor:
         runtime_home = None
         if self._auth_enabled:
             runtime_home = self._runtime_home(owner) / "generations" / f"{generation}-{fence}"
@@ -1421,6 +1461,7 @@ class MimoSupervisorPool:
             projection_generation=generation,
             crash_callback=self._worker_crashed,
             local_executor_broker=self._local_executor_broker,
+            lifecycle_epoch=lifecycle_epoch if lifecycle_epoch is not None else self._durable_owner_epoch(owner),
         )
 
     async def _start_campaign(
@@ -1431,6 +1472,7 @@ class MimoSupervisorPool:
         fence: str,
         *,
         worker_factory=None,
+        lifecycle_epoch: str | None = None,
     ):
         deadline = self._clock() + self._readiness_budget
         delay = _RESTART_DELAY_INITIAL
@@ -1439,7 +1481,7 @@ class MimoSupervisorPool:
             candidate = (
                 worker_factory()
                 if worker_factory is not None
-                else self._new_worker(owner, snapshot, generation, fence)
+                else self._new_worker(owner, snapshot, generation, fence, lifecycle_epoch)
             )
             try:
                 await candidate.start()
@@ -1506,7 +1548,10 @@ class MimoSupervisorPool:
                 fence = uuid.uuid4().hex[:12]
                 state.fence = fence
                 try:
-                    candidate = await self._start_campaign(owner, snapshot, generation, fence)
+                    candidate = await self._start_campaign(
+                        owner, snapshot, generation, fence,
+                        lifecycle_epoch=self._durable_owner_epoch(owner),
+                    )
                 except SupervisorAdmissionError as exc:
                     self._assert_owner_lifecycle(owner, epoch)
                     state.breaker_open_until[snapshot.fingerprint] = now + self._readiness_budget
@@ -2168,13 +2213,17 @@ class MimoSupervisorPool:
             )
         self._states.pop(owner, None)
 
+    def _begin_owner_lifecycle_locked(self, owner: str) -> None:
+        """Fence one owner while its parent lifecycle guard is held."""
+        self._owner_lifecycle_blocked.add(owner)
+        next_epoch = self._owner_lifecycle_epoch(owner) + 1
+        self._owner_lifecycle_epochs[owner] = next_epoch
+        self._advance_durable_owner_epoch(owner, next_epoch)
+
     def _begin_owner_lifecycle(self, owner: str) -> list[str]:
         keys = [owner]
-        for key in keys:
-            self._owner_lifecycle_blocked.add(key)
-            self._owner_lifecycle_epochs[key] = (
-                self._owner_lifecycle_epoch(key) + 1
-            )
+        with self._owner_map_guards(keys):
+            self._begin_owner_lifecycle_locked(owner)
         return keys
 
     async def _quiesce_owner_lifecycle(self, keys: list[str]) -> None:
@@ -2499,10 +2548,12 @@ class MimoSupervisorPool:
         )
         for lifecycle_owner in (old_key, new_key):
             self._assert_no_owner_purge(lifecycle_owner)
-        lifecycle_keys: list[str] = []
-        for key in (old_key, new_key):
-            lifecycle_keys.extend(self._begin_owner_lifecycle(key))
+        lifecycle_keys = [old_key, new_key]
+        map_guards = self._owner_map_guards(lifecycle_keys)
+        map_guards.__enter__()
         try:
+            for key in lifecycle_keys:
+                self._begin_owner_lifecycle_locked(key)
             await self._quiesce_owner_lifecycle(lifecycle_keys)
             first, second = sorted((old_key, new_key))
             async with self._owner_lock(first):
@@ -2548,6 +2599,7 @@ class MimoSupervisorPool:
                     if self._host_provider_owner == old_key:
                         self._host_provider_owner = new_key
         finally:
+            map_guards.__exit__(None, None, None)
             for key in lifecycle_keys:
                 self._owner_lifecycle_blocked.discard(key)
         return {
@@ -2582,10 +2634,12 @@ class MimoSupervisorPool:
         )
         for lifecycle_owner in (old_key, new_key):
             self._assert_no_owner_purge(lifecycle_owner)
-        lifecycle_keys: list[str] = []
-        for key in (old_key, new_key):
-            lifecycle_keys.extend(self._begin_owner_lifecycle(key))
+        lifecycle_keys = [old_key, new_key]
+        map_guards = self._owner_map_guards(lifecycle_keys)
+        map_guards.__enter__()
         try:
+            for key in lifecycle_keys:
+                self._begin_owner_lifecycle_locked(key)
             await self._quiesce_owner_lifecycle(lifecycle_keys)
             first, second = sorted((old_key, new_key))
             async with self._owner_lock(first):
@@ -2628,6 +2682,7 @@ class MimoSupervisorPool:
                     if self._host_provider_owner == new_key:
                         self._host_provider_owner = old_key
         finally:
+            map_guards.__exit__(None, None, None)
             for key in lifecycle_keys:
                 self._owner_lifecycle_blocked.discard(key)
         return {
@@ -2655,14 +2710,9 @@ class MimoSupervisorPool:
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
-        try:
-            descriptor = os.open(path, os.O_RDONLY)
-        except OSError:
-            return
+        descriptor = os.open(path, os.O_RDONLY)
         try:
             os.fsync(descriptor)
-        except OSError:
-            pass
         finally:
             os.close(descriptor)
 
@@ -2695,8 +2745,12 @@ class MimoSupervisorPool:
         if not isinstance(expected, dict) or expected.get("schema_version") != 1:
             raise RuntimeError("invalid Agent purge inventory")
         self._validate_agent_inventory(expected, key, label="purge")
-        lifecycle_keys = self._begin_owner_lifecycle(key)
+        lifecycle_keys = [key]
+        map_guards = self._owner_map_guards(lifecycle_keys)
+        map_guards.__enter__()
         try:
+            for key in lifecycle_keys:
+                self._begin_owner_lifecycle_locked(key)
             await self._quiesce_owner_lifecycle(lifecycle_keys)
             async with self._owner_lock(key):
                 self._validate_owner_lifecycle_roots(create=True)
@@ -2780,6 +2834,7 @@ class MimoSupervisorPool:
                     pass
                 self._fsync_directory(journal_root.parent)
         finally:
+            map_guards.__exit__(None, None, None)
             for lifecycle_key in lifecycle_keys:
                 self._owner_lifecycle_blocked.discard(lifecycle_key)
         return {
