@@ -1386,6 +1386,9 @@ def setup_chat_routes(
             structured_resources=model_target.transport == "acp",
             root_operation_id=root_operation_id,
             provider_grant_id=getattr(sess, "provider_grant_id", None),
+            # Protocol binding, not UI mode: ACP persistent sessions compact
+            # in MiMo; host pre-dispatch compaction is skipped for them.
+            has_persistent_engine=model_target.transport == "acp",
         )
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope

@@ -1288,12 +1288,33 @@ def setup_session_routes(
 
     @router.post("/session/{session_id}/compact")
     async def compact_session(request: Request, session_id: str):
-        """Summarize older messages into one compacted history entry."""
+        """Summarize older messages into one compacted history entry.
+
+        Finite/plain host contexts only. ACP persistent sessions must use the
+        engine-side MiMo compactor (``session.summarize``); this route refuses
+        to become a second active compactor for those sessions. The host path
+        writes an active-context projection; original source parts remain
+        retrievable through the conversation archive.
+        """
         _verify_session_owner(request, session_id)
         try:
             session = session_manager.get_session(session_id)
         except KeyError:
             raise HTTPException(404, f"Session {session_id} not found")
+
+        # Protocol binding, not UI mode: a session with a persistent engine
+        # conversation is owned by MiMo's compactor.
+        if getattr(session, "has_persistent_engine", False) or (
+            getattr(session, "mimo_session_id", None)
+            and getattr(session, "transport", None) == "acp"
+        ):
+            raise HTTPException(
+                409,
+                "Persistent ACP sessions compact through the engine "
+                "(session.summarize); host compaction is reserved for "
+                "finite contexts.",
+            )
+
         await _prepare_context_mutation(request, session_id)
 
         history = list(session.history or [])
@@ -1349,12 +1370,19 @@ def setup_session_routes(
             logger.error("Manual compaction failed: %s", e)
             raise HTTPException(500, "Compaction failed")
 
+        if not (summary or "").strip():
+            # Unusable summary: rollback. Keep the live transcript unchanged.
+            raise HTTPException(502, "Compaction summary was empty; history unchanged")
+
         summary_msg = ChatMessage(
             role="system",
             content=f"[Conversation summary]\n{summary}",
             metadata={
                 "compacted": True,
                 "summarized_count": len(older),
+                "compaction_trigger": "manual",
+                "compaction_actor": "host_finite",
+                "source_boundary_split": len(older),
                 "timestamp": utcnow_naive().isoformat(),
             },
         )
@@ -1367,6 +1395,8 @@ def setup_session_routes(
             "summarized": len(older),
             "kept": len(recent),
             "message_count": len(new_history),
+            "projection": "host_finite",
+            "source_parts_retained": True,
         }
 
     @router.post("/sessions/auto-sort")

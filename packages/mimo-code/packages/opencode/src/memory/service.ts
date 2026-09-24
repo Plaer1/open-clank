@@ -289,29 +289,19 @@ export const defaultLayer = Layer.suspend(() =>
 
             const limit = input.limit ?? 10
             const scope = input.sessionID ? memorySessionScope(input.sessionID) : undefined
-            const nativeQueries: Parameters<Interface["search"]>[0][] = input.scope
-              ? [{ ...input, limit }]
-              : scope
-                ? [
-                    { ...input, scope: "global", scope_id: undefined, limit },
-                    {
-                      ...input,
-                      scope: "projects",
-                      scope_id: resolveProjectId(scope.workspacePath),
-                      limit,
-                    },
-                    { ...input, scope: "sessions", scope_id: scope.sessionId, limit },
-                  ]
-                : []
-            const nativeRows = yield* Effect.all(
-              nativeQueries.map((query) => native.search(query)),
-              { concurrency: 3 },
-            ).pipe(Effect.map((pages) => pages.flat()))
+            // Native queries are intentionally not issued in managed mode
+            // (see search below). Kept as a local only for the standalone
+            // branch above; managed callers use the Frankenmemory surface.
+            void scope
             const fmRows = yield* selected.search(input).pipe(
               Effect.catchCause(() => Effect.succeed([] as SearchRow[])),
             )
 
-            return mergeSearchRows(fmRows, nativeRows, limit)
+            // Managed Frankenmemory is the single retrieval/admission surface.
+            // Native rows are a competing owner: disable duplicate native
+            // result merging in managed mode. Standalone (non-frankenmemory)
+            // keeps native search unchanged.
+            return mergeSearchRows(fmRows, [], limit)
           }),
       })
     }),

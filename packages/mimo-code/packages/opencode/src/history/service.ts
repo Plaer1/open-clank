@@ -2,7 +2,7 @@ import { Context, Effect, Layer } from "effect"
 import { and, asc, desc, eq, sql } from "drizzle-orm"
 import { Database } from "../storage"
 import { MessageTable, PartTable } from "../session/session.sql"
-import type { MessageID } from "../session/schema"
+import type { MessageID, PartID } from "../session/schema"
 import { Config } from "../config"
 import { Bus } from "../bus"
 import { Instance } from "../project/instance"
@@ -31,6 +31,26 @@ export type MessagePart = {
   text: string
 }
 
+export type FullPart = {
+  part_id: string
+  message_id: string
+  session_id: string
+  type: string
+  role: "user" | "assistant"
+  tool_name: string | null
+  /** Full canonical body text — never an FTS preview. */
+  text: string
+  has_more: boolean
+  next_offset: number | null
+  attachments: Array<{
+    asset_id: string
+    mime_type: string | null
+    filename: string | null
+    byte_size: number | null
+  }>
+  time_created: number
+}
+
 export type MessageContext = {
   message_id: string
   matched: boolean
@@ -55,6 +75,20 @@ export interface Interface {
     before?: number
     after?: number
   }) => Effect.Effect<{ session_id: string; messages: MessageContext[] }>
+
+  /** Full-part get. Reads the canonical part body, not an FTS preview. */
+  readonly get: (input: {
+    message_id: string
+    part_id: string
+    length?: number
+    offset?: number
+  }) => Effect.Effect<FullPart | null>
+
+  /** Explicit single-attachment locator metadata (owned assets only). */
+  readonly media: (input: {
+    message_id: string
+    part_id: string
+  }) => Effect.Effect<FullPart["attachments"]>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/History") {}
@@ -253,6 +287,77 @@ export const layer = Layer.effect(
       return { session_id: anchor.session_id, messages: out }
     })
 
-    return Service.of({ search, around })
+    // Full-part get: canonical body with UTF-16 paging. Never returns an FTS
+    // preview. Media-safe: attachment bytes are not inlined.
+    const GET_LENGTH_MAX = 8000
+    const get = Effect.fn("History.get")(function* (input: Parameters<Interface["get"]>[0]) {
+      const row = Database.use((db) =>
+        db
+          .select()
+          .from(PartTable)
+          .where(
+            and(
+              eq(PartTable.message_id, input.message_id as MessageID),
+              eq(PartTable.id, input.part_id as PartID),
+            ),
+          )
+          .get(),
+      )
+      if (!row) return null
+      const d = row.data as {
+        type: string
+        text?: string
+        tool?: string
+        state?: { input?: unknown; output?: unknown; error?: string }
+        filename?: string
+        mime?: string
+        url?: string
+        source?: unknown
+      }
+      const raw =
+        d.type === "text" || d.type === "reasoning"
+          ? (d.text ?? "")
+          : d.type === "tool"
+            ? `tool: ${d.tool ?? ""}\ninput: ${JSON.stringify(d.state?.input ?? {})}\n${
+                d.state?.error ? `error: ${d.state.error}` : `output: ${JSON.stringify(d.state?.output ?? "")}`
+              }`
+            : JSON.stringify(d)
+      const budget = Math.min(input.length ?? GET_LENGTH_MAX, GET_LENGTH_MAX)
+      const offset = Math.max(0, input.offset ?? 0)
+      // Python/JS string slicing is code-point safe; surrogate pairs stay whole.
+      const slice = raw.slice(offset, offset + budget)
+      const hasMore = offset + slice.length < raw.length
+      const attachments: FullPart["attachments"] = []
+      if (d.type === "file") {
+        attachments.push({
+          asset_id: row.id,
+          mime_type: d.mime ?? null,
+          filename: d.filename ?? null,
+          byte_size: raw.length,
+        })
+      }
+      const role: FullPart["role"] =
+        (row.data as { role?: "user" | "assistant" })?.role === "user" ? "user" : "assistant"
+      return {
+        part_id: String(row.id),
+        message_id: String(row.message_id),
+        session_id: String(row.session_id),
+        type: d.type,
+        role,
+        tool_name: d.type === "tool" ? (d.tool ?? null) : null,
+        text: slice,
+        has_more: hasMore,
+        next_offset: hasMore ? offset + slice.length : null,
+        attachments,
+        time_created: 0,
+      }
+    })
+
+    const media = Effect.fn("History.media")(function* (input: Parameters<Interface["media"]>[0]) {
+      const part = yield* get({ message_id: input.message_id, part_id: input.part_id })
+      return part?.attachments ?? []
+    })
+
+    return Service.of({ search, around, get, media })
   }),
 )

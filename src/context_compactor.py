@@ -332,14 +332,26 @@ async def maybe_compact(
     headers: Optional[Dict] = None,
     owner: Optional[str] = None,
     root_operation_id: Optional[str] = None,
+    has_persistent_engine: bool = False,
 ) -> tuple:
     """Check context usage and compact if above threshold.
 
     ``headers`` is retained for compatibility but is never used for execution;
     summary generation resolves through the owner's managed ``utility`` route.
 
+    ``has_persistent_engine`` is the actual execution protocol/session binding
+    (ACP managed sessions), not a UI Agent/Chat label. When it is true the
+    single active compactor is the engine-side MiMo compactor and this host
+    pre-dispatch compactor must not run. Finite/plain contexts keep host
+    compaction, which writes an active-context projection instead of replacing
+    source history.
+
     Returns (messages, context_length, was_compacted).
     """
+    if has_persistent_engine:
+        # One active compactor per execution context: MiMo owns ACP sessions.
+        return messages, get_context_length(endpoint_url, model), False
+
     context_length = get_context_length(endpoint_url, model)
     used = estimate_tokens(messages)
     pct = (used / context_length) * 100 if context_length else 0
@@ -436,7 +448,7 @@ async def maybe_compact(
 
 def _update_session_history(session, split_point: int, summary: str,
                             system_msg_count: int = 0):
-    """Update the in-memory session history after compaction.
+    """Write the active-context projection after host finite-context compaction.
 
     `split_point` is the index in `convo_msgs` (system-stripped). The
     in-memory `session.history` includes leading system messages, so the
@@ -444,6 +456,10 @@ def _update_session_history(session, split_point: int, summary: str,
     Prepending `session.history[:system_msg_count]` to the new history
     preserves persona, preset, and RAG system messages that would
     otherwise be dropped.
+
+    This writes an active projection through ``replace_messages``; the
+    canonical source parts were already archived by the session manager and
+    must remain retrievable after every successful or failed compaction.
     """
     if not session or not hasattr(session, "history"):
         return
@@ -460,7 +476,13 @@ def _update_session_history(session, split_point: int, summary: str,
     summary_msg = ChatMessage(
         role="system",
         content=f"[Conversation summary]\n{summary}",
-        metadata={"compacted": True, "summarized_count": split_point},
+        metadata={
+            "compacted": True,
+            "summarized_count": split_point,
+            "compaction_trigger": "automatic",
+            "compaction_actor": "host_finite",
+            "source_boundary_split": effective_split,
+        },
     )
     new_history = system_prefix + [summary_msg] + recent_history
     try:
@@ -469,6 +491,8 @@ def _update_session_history(session, split_point: int, summary: str,
     except Exception:
         manager = None
     if manager and getattr(session, "id", None):
+        # Projection writer: archives source, preserves retained IDs, never
+        # rekeys original history identity.
         if manager.replace_messages(session.id, new_history):
             return
     session.history = new_history

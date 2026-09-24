@@ -545,11 +545,17 @@ async def build_chat_context(
     structured_resources: bool = False,
     root_operation_id: Optional[str] = None,
     provider_grant_id: Optional[str] = None,
+    has_persistent_engine: bool = False,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
     This is the shared logic between /chat and /chat_stream — preset extraction,
     message preprocessing, memory/RAG/web injection, compaction, normalization.
+
+    ``has_persistent_engine`` is the actual execution protocol/session binding
+    (``model_target.transport == "acp"``), not the UI Agent/Chat label. When it
+    is true, host pre-dispatch compaction is skipped so MiMo remains the single
+    active compactor for that ACP session.
     """
     # Preset — owner-resolved so the default persona (R10) is the
     # requester's own, not another user's edit. A persona attached to THIS
@@ -721,9 +727,12 @@ async def build_chat_context(
         except Exception:
             logger.debug("Failed to add current date/time context", exc_info=True)
 
-    # Auto-compact
+    # Auto-compact. One active compactor per execution context: ACP
+    # persistent sessions compact in MiMo (protocol-bound); finite/plain
+    # contexts keep the host projection compactor.
     messages, context_length, was_compacted = await maybe_compact(
         sess, sess.endpoint_url, sess.model, messages, sess.headers, owner=user,
+        has_persistent_engine=has_persistent_engine,
     )
     _before_trim_messages = len(messages)
     _before_trim_tokens = estimate_tokens(messages)

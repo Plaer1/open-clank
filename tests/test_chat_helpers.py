@@ -547,7 +547,7 @@ async def _build_context_owner_probe(
         captured["preface_use_memory"] = kwargs["use_memory"]
         return [], [], []
 
-    async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None):
+    async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None, **kwargs):
         captured["compact_owner"] = owner
         return messages, 8192, False
 

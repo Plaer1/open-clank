@@ -10,6 +10,7 @@ This is the single place that handles:
 
 import hashlib
 import json
+import time
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
@@ -17,13 +18,17 @@ from typing import Dict, Optional
 
 from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal, utcnow_naive
 from .models import Session, ChatMessage
-from src.attachment_refs import persistable_message_content
+from src.attachment_refs import attachment_refs_from_metadata, persistable_message_content
 from src.upload_handler import reserve_message_upload_references
 
 # Re-export singleton accessors from models for convenience
 from .models import set_session_manager_instance, get_session_manager_instance
 
 logger = logging.getLogger(__name__)
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def _message_timestamp_iso(value: Optional[datetime]) -> Optional[str]:
@@ -212,6 +217,121 @@ class SessionManager:
     # Message operations
     # ------------------------------------------------------------------
 
+    def _archive_message_parts(
+        self,
+        session_id: str,
+        message: ChatMessage,
+        *,
+        msg_id: str,
+        revision: int = 1,
+        event_sequence: int = 0,
+        role_override: Optional[str] = None,
+    ) -> None:
+        """Archive one message as ordered source parts (not a text pair).
+
+        History capture is not memory admission. This runs regardless of
+        ``memory_mode`` so the canonical archive stays lossless; memory
+        extraction remains separately gated at ``src.memory_gate``.
+        Incognito callers never reach this path (they use a request-local store).
+        """
+        try:
+            from src.openclank.conversation_archive import SourcePart, get_conversation_archive
+        except Exception:
+            logger.debug("conversation archive unavailable", exc_info=True)
+            return
+
+        try:
+            db = SessionLocal()
+            try:
+                db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+                owner = getattr(db_session, "owner", None) or ""
+                event_workspace = getattr(db_session, "workspace_id", None)
+            finally:
+                db.close()
+        except Exception:
+            owner = ""
+            event_workspace = None
+
+        metadata = dict(getattr(message, "metadata", None) or {})
+        content = getattr(message, "content", None)
+        alias_id = str(metadata.get("_db_id") or msg_id)
+        parts: list[SourcePart] = []
+
+        def _part(part_id: str, part_type: str, body, *, part_seq: int, assets=()) -> SourcePart:
+            return SourcePart(
+                owner=str(owner or ""),
+                chat_id=str(session_id),
+                actor_id=str(metadata.get("actor_id") or "main"),
+                message_id=str(msg_id),
+                part_id=str(part_id),
+                revision=int(revision),
+                runtime_generation=str(metadata.get("runtime_generation") or "0"),
+                event_sequence=int(event_sequence or part_seq),
+                event_workspace=event_workspace,
+                event_project=metadata.get("event_project"),
+                role=str(role_override or getattr(message, "role", "user") or "user"),
+                part_type=part_type,
+                content=body,
+                aliases=(("host_message", alias_id),),
+                assets=tuple(assets),
+                time_created=_now_ms(),
+                time_updated=_now_ms(),
+            )
+
+        seq = 0
+        # Always archive a text (or block) body part so text-pair capture is
+        # never the only durable record of a turn.
+        if content is not None:
+            parts.append(_part("body", "text", content, part_seq=seq))
+            seq += 1
+
+        # Tool calls / tool results / structured blocks ride on content lists
+        # or metadata. Capture each as its own ordered part.
+        if isinstance(content, list):
+            for index, block in enumerate(content):
+                if not isinstance(block, dict):
+                    continue
+                block_type = str(block.get("type") or "block")
+                if block_type in {"text", "image", "file"}:
+                    continue
+                parts.append(_part(f"block:{index}", block_type, block, part_seq=seq))
+                seq += 1
+
+        for index, tool_call in enumerate(metadata.get("tool_calls") or []):
+            if isinstance(tool_call, dict):
+                parts.append(_part(f"tool_call:{index}", "tool_call", tool_call, part_seq=seq))
+                seq += 1
+
+        for index, tool_result in enumerate(metadata.get("tool_results") or []):
+            if isinstance(tool_result, dict):
+                parts.append(_part(f"tool_result:{index}", "tool_result", tool_result, part_seq=seq))
+                seq += 1
+
+        asset_specs = []
+        for ref in attachment_refs_from_metadata(metadata):
+            asset_specs.append({
+                "asset_id": ref.get("attachment_id") or ref.get("id") or "",
+                "content_hash": ref.get("checksum_sha256"),
+                "mime_type": ref.get("mime"),
+                "byte_size": ref.get("size"),
+                "provenance": {"source": "host_upload", "name": ref.get("name")},
+            })
+        if asset_specs and parts:
+            # Attach assets to the body part revision (same dedupe key).
+            from dataclasses import replace as _dc_replace
+            parts[0] = _dc_replace(parts[0], assets=tuple(asset_specs))
+        elif asset_specs:
+            parts.append(_part("assets", "asset_refs", {"assets": asset_specs}, part_seq=seq, assets=asset_specs))
+
+        if not parts:
+            return
+        try:
+            get_conversation_archive().append_parts(parts)
+        except Exception:
+            # Archive delivery failure must not fail live chat persistence.
+            # Outbox/backfill can retry; source is still in chat_messages.
+            logger.warning("conversation archive append failed", exc_info=True)
+
     def add_message(self, session_id: str, message: ChatMessage):
         """
         Add a message to a session and persist to database.
@@ -318,6 +438,17 @@ class SessionManager:
             # Store DB ID on the in-memory message for edit/delete by ID
             message.metadata['_db_id'] = msg_id
 
+            # Full-part source archive (lossless ordered parts + outbox). This
+            # is history capture, not memory admission, and is not gated by
+            # memory_mode. Failure here never blocks live chat persistence.
+            self._archive_message_parts(
+                session_id,
+                message,
+                msg_id=msg_id,
+                revision=1,
+                event_sequence=len(self.sessions.get(session_id).history) if session_id in self.sessions else 0,
+            )
+
             logger.debug(f"Persisted message to session {session_id}")
             return True
 
@@ -371,7 +502,15 @@ class SessionManager:
             db.close()
 
     def replace_messages(self, session_id: str, messages: list) -> bool:
-        """Replace a session's persisted and in-memory history atomically."""
+        """Replace the presentation projection without deleting original history.
+
+        Canonical source parts are archived first (idempotent). Retained
+        messages keep their original durable identity (``_db_id`` /
+        ``persistence_id``) — they are never rekeyed. Dropped projection rows
+        remain retrievable through the conversation archive. This is the
+        host finite-context projection writer; it is not a source-history
+        destroy/rekey operation.
+        """
         session = self.get_session(session_id)
         db = SessionLocal()
         try:
@@ -397,24 +536,96 @@ class SessionManager:
                         f"Referenced upload is no longer available: {missing_upload_id}"
                     )
 
-            db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).delete()
+            # 1) Archive every currently persisted message BEFORE any
+            #    projection mutation. Duplicates are idempotent no-ops.
+            existing_rows = (
+                db.query(DbChatMessage)
+                .filter(DbChatMessage.session_id == session_id)
+                .order_by(DbChatMessage.timestamp, DbChatMessage.id)
+                .all()
+            )
+            self._archive_existing_rows(session_id, existing_rows, owner=getattr(db_session, "owner", None))
+
+            # 2) Classify the incoming projection: retained (stable identity)
+            #    vs new summary/projection rows.
+            retained_ids: list[str] = []
+            for message in messages:
+                if message.metadata is None:
+                    message.metadata = {}
+                existing_id = str(
+                    getattr(message, "persistence_id", None)
+                    or message.metadata.get("_db_id")
+                    or ""
+                ).strip()
+                if existing_id and any(row.id == existing_id for row in existing_rows):
+                    retained_ids.append(existing_id)
+
+            # 3) Projection rewrite. Retained rows keep their original primary
+            #    keys. Only rows not present in the incoming projection are
+            #    removed from the presentation table; their source parts remain
+            #    in the archive and an outbox tombstone records the projection
+            #    drop without pruning source.
             now = datetime.now(timezone.utc)
+            incoming_existing_ids = set(retained_ids)
+            for row in existing_rows:
+                if row.id not in incoming_existing_ids:
+                    db.delete(row)
+                    self._tombstone_projection_drop(
+                        session_id,
+                        row,
+                        owner=getattr(db_session, "owner", None),
+                    )
+            # Flush the projection drops before any insert so the SQL order is
+            # DELETE then INSERT (and a crash mid-rewrite cannot leave both the
+            # dropped row and its replacement visible).
+            db.flush()
+
             for i, message in enumerate(messages):
-                msg_id = str(uuid.uuid4())
-                db_message = DbChatMessage(
-                    id=msg_id,
-                    session_id=session_id,
-                    role=message.role,
-                    # Mirrors _persist_message: keep raw media bytes out of the
-                    # persisted transcript and search index.
-                    content=persistable_message_content(message.content, message.metadata),
-                    meta_data=json.dumps(message.metadata) if message.metadata else None,
-                    timestamp=now + timedelta(microseconds=i),
-                )
-                db.add(db_message)
+                reserved_id = str(
+                    getattr(message, "persistence_id", None)
+                    or (message.metadata or {}).get("_db_id")
+                    or ""
+                ).strip()
+                # Preserve original identity for retained messages. New
+                # projection rows (summaries) receive a fresh id once.
+                msg_id = reserved_id if reserved_id in incoming_existing_ids or reserved_id else str(uuid.uuid4())
+                if reserved_id and reserved_id not in incoming_existing_ids and any(
+                    row.id == reserved_id for row in existing_rows
+                ):
+                    # Claiming an existing id for a rewritten body: keep the id
+                    # so the original history identity is not rekeyed.
+                    msg_id = reserved_id
+                # Mirrors _persist_message: keep raw media bytes out of the
+                # persisted transcript and search index.
+                _content = persistable_message_content(message.content, message.metadata)
+                _meta = json.dumps(message.metadata) if message.metadata else None
+                _ts = now + timedelta(microseconds=i)
+                if any(row.id == msg_id for row in existing_rows):
+                    # Retained row: update in place. Never delete-then-insert
+                    # (that is a rekey risk) and never INSERT (UNIQUE id).
+                    db.query(DbChatMessage).filter(DbChatMessage.id == msg_id).update(
+                        {
+                            DbChatMessage.role: message.role,
+                            DbChatMessage.content: _content,
+                            DbChatMessage.meta_data: _meta,
+                            DbChatMessage.timestamp: _ts,
+                        },
+                        synchronize_session=False,
+                    )
+                else:
+                    db_message = DbChatMessage(
+                        id=msg_id,
+                        session_id=session_id,
+                        role=message.role,
+                        content=_content,
+                        meta_data=_meta,
+                        timestamp=_ts,
+                    )
+                    db.add(db_message)
                 if message.metadata is None:
                     message.metadata = {}
                 message.metadata["_db_id"] = msg_id
+                message.persistence_id = msg_id
 
             db_session.message_count = len(messages)
             db_session.updated_at = now
@@ -422,10 +633,20 @@ class SessionManager:
             db_session.last_message_at = now
 
             db.commit()
+
+            # 4) Record the active compaction projection against the archive.
+            #    Source parts are already archived and remain retrievable.
+            self._record_projection(session_id, messages, owner=getattr(db_session, "owner", None))
+
             session.history = list(messages)
             session._history = session.history
             session.message_count = len(messages)
-            logger.info("Replaced session %s history with %d messages", session_id, len(messages))
+            logger.info(
+                "Replaced session %s projection with %d messages (%d retained ids, source archived)",
+                session_id,
+                len(messages),
+                len(retained_ids),
+            )
             return True
         except Exception as e:
             logger.error("Error replacing session history: %s", e)
@@ -433,6 +654,121 @@ class SessionManager:
             return False
         finally:
             db.close()
+
+    def _archive_existing_rows(self, session_id: str, rows, *, owner=None) -> None:
+        """Archive persisted chat_messages rows as full ordered source parts."""
+        try:
+            from src.openclank.conversation_archive import SourcePart, get_conversation_archive
+        except Exception:
+            logger.debug("conversation archive unavailable", exc_info=True)
+            return
+        parts = []
+        for index, row in enumerate(rows):
+            metadata = {}
+            if row.meta_data:
+                try:
+                    metadata = json.loads(row.meta_data) or {}
+                except (TypeError, ValueError):
+                    metadata = {}
+            event_workspace = getattr(row, "workspace_id", None) or metadata.get("event_workspace")
+            parts.append(
+                SourcePart(
+                    owner=str(owner or ""),
+                    chat_id=str(session_id),
+                    actor_id=str(metadata.get("actor_id") or "main"),
+                    message_id=str(row.id),
+                    part_id="body",
+                    revision=int(metadata.get("source_revision") or 1),
+                    runtime_generation=str(metadata.get("runtime_generation") or "0"),
+                    event_sequence=index,
+                    event_workspace=event_workspace,
+                    event_project=metadata.get("event_project"),
+                    role=str(row.role or "user"),
+                    part_type="text",
+                    content=row.content,
+                    aliases=(("host_message", str(row.id)),),
+                    time_created=_now_ms(),
+                    time_updated=_now_ms(),
+                )
+            )
+            for ref_index, ref in enumerate(attachment_refs_from_metadata(metadata)):
+                parts.append(
+                    SourcePart(
+                        owner=str(owner or ""),
+                        chat_id=str(session_id),
+                        actor_id=str(metadata.get("actor_id") or "main"),
+                        message_id=str(row.id),
+                        part_id=f"asset:{ref_index}",
+                        revision=1,
+                        event_sequence=index * 100 + ref_index,
+                        role=str(row.role or "user"),
+                        part_type="asset_refs",
+                        content=ref,
+                        assets=(
+                            {
+                                "asset_id": ref.get("attachment_id") or ref.get("id") or "",
+                                "content_hash": ref.get("checksum_sha256"),
+                                "mime_type": ref.get("mime"),
+                                "byte_size": ref.get("size"),
+                                "provenance": {"source": "host_upload", "name": ref.get("name")},
+                            },
+                        ),
+                        aliases=(("host_message", str(row.id)),),
+                        time_created=_now_ms(),
+                        time_updated=_now_ms(),
+                    )
+                )
+        if not parts:
+            return
+        try:
+            get_conversation_archive().append_parts(parts)
+        except Exception:
+            logger.warning("conversation archive backfill failed", exc_info=True)
+
+    def _tombstone_projection_drop(self, session_id: str, row, *, owner=None) -> None:
+        """Version a projection drop through the archive; never prune source."""
+        try:
+            from src.openclank.conversation_archive import get_conversation_archive
+            get_conversation_archive().tombstone_part(
+                owner=str(owner or ""),
+                chat_id=str(session_id),
+                actor_id="main",
+                message_id=str(row.id),
+                part_id="body",
+                revision=1,
+                reason="projection_drop",
+            )
+        except Exception:
+            logger.debug("projection drop tombstone failed", exc_info=True)
+
+    def _record_projection(self, session_id: str, messages: list, *, owner=None) -> None:
+        """Record an active-context compaction projection for the archive."""
+        try:
+            from src.openclank.conversation_archive import get_conversation_archive
+            summary_ids = []
+            retained = []
+            for message in messages:
+                metadata = getattr(message, "metadata", None) or {}
+                msg_id = str(metadata.get("_db_id") or getattr(message, "persistence_id", None) or "")
+                if metadata.get("compacted"):
+                    summary_ids.append(msg_id)
+                else:
+                    retained.append(msg_id)
+            if not summary_ids:
+                return
+            get_conversation_archive().record_compaction_projection(
+                owner=str(owner or ""),
+                chat_id=str(session_id),
+                actor_id="main",
+                summary_id=summary_ids[-1] or f"summary-{session_id}",
+                projection_revision=len(summary_ids),
+                summary_text=str(getattr(messages[0], "content", "") or "")[:4000],
+                included_message_ids=[],
+                retained_message_ids=retained,
+                trigger_kind="host_finite_projection",
+            )
+        except Exception:
+            logger.debug("compaction projection record failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Session CRUD

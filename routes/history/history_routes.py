@@ -841,7 +841,13 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             system_summary = ChatMessage(
                 role="system",
                 content=f"[Conversation summary — {len(older)} earlier messages were compacted]\n\n{summary}",
-                metadata={"compacted": True, "hidden": True},
+                metadata={
+                    "compacted": True,
+                    "hidden": True,
+                    "compaction_trigger": "manual",
+                    "compaction_actor": "host_finite",
+                    "source_boundary_split": len(older),
+                },
             )
             # Visible assistant message just shows stats
             summary_msg = ChatMessage(
@@ -850,53 +856,13 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 metadata={"compacted": True, "messages_removed": len(older)},
             )
             new_history = [system_summary, summary_msg] + list(recent)
+            # Projection writer: archives source parts first, preserves
+            # retained message IDs, never rekeys original history identity.
+            if not session_manager.replace_messages(session_id, new_history):
+                raise HTTPException(500, "Failed to save compacted history")
             session.history = new_history
             session.message_count = len(session.history)
             logger.info(f"Compact: session {session_id} history now has {len(session.history)} messages (was {msg_count_before})")
-
-            # Update DB: delete old messages, insert summary
-            db = SessionLocal()
-            try:
-                db_msgs = db.query(DbChatMessage).filter(
-                    DbChatMessage.session_id == session_id
-                ).order_by(DbChatMessage.timestamp).all()
-
-                # Delete all but the last keep_count
-                for m in db_msgs[:-keep_count]:
-                    db.delete(m)
-
-                # Insert system summary (hidden, for AI context) and visible summary
-                import json as _json
-                import uuid
-                from datetime import datetime, timezone
-                now = datetime.now(timezone.utc)
-                db_sys_summary = DbChatMessage(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role="system",
-                    content=system_summary.content,
-                    meta_data=_json.dumps(system_summary.metadata),
-                    timestamp=now,
-                )
-                db.add(db_sys_summary)
-                db_summary = DbChatMessage(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role="assistant",
-                    content=summary_msg.content,
-                    meta_data=_json.dumps(summary_msg.metadata),
-                    timestamp=now,
-                )
-                db.add(db_summary)
-
-                # Update session record
-                db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-                if db_session:
-                    db_session.message_count = len(session.history)
-                    db_session.updated_at = datetime.now(timezone.utc)
-                db.commit()
-            finally:
-                db.close()
 
             session_manager.save_sessions()
 

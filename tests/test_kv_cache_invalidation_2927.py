@@ -72,7 +72,7 @@ def _build_context_harness(monkeypatch, chat_helpers, history):
     def fake_add_user_message(sess, chat_handler, preprocessed, incognito=False):
         sess.messages.append({"role": "user", "content": preprocessed.user_content})
 
-    async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None):
+    async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None, **kwargs):
         return messages, 8192, False
 
     monkeypatch.setattr(chat_helpers, "preprocess", fake_preprocess)
