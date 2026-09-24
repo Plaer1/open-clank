@@ -32,6 +32,7 @@ import {
 
 import { Log } from "../util"
 import { pathToFileURL } from "url"
+import path from "node:path"
 import { Filesystem } from "../util"
 import { Hash } from "@mimo-ai/shared/util/hash"
 import { ACPSessionManager } from "./session"
@@ -177,19 +178,26 @@ export class Agent implements ACPAgent {
     this.startEventSubscription()
   }
 
-  async extMethod(method: string, params: Record<string, unknown>) {
+  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (OpenClankManagedProtocol.isProviderControlMethod(method)) {
-      return this.providerControl.handle(method, params as never)
+      return (await this.providerControl.handle(method, params as never)) as unknown as Record<string, unknown>
     }
     if (method === "_openclank/operations/v1/execute") {
       if (!ManagedProvider.enabled()) {
         throw RequestError.invalidParams("managed operations require Open Clank managed mode")
       }
-      return this.managedOperations.handle(params)
+      return (await this.managedOperations.handle(params)) as unknown as Record<string, unknown>
     }
-    if (method !== "_odysseus/session/release") throw new Error(`Unsupported ACP extension method: ${method}`)
-    const sessionId = String(params.sessionId ?? "")
-    if (!sessionId) throw RequestError.invalidParams("sessionId is required")
+    if (method !== "_odysseus/session/release" && method !== "_odysseus/session/discard") throw new Error(`Unsupported ACP extension method: ${method}`)
+    const sessionId = params.sessionId
+    if (typeof sessionId !== "string" || !sessionId || sessionId !== sessionId.trim()) throw RequestError.invalidParams("sessionId is required")
+    if (method === "_odysseus/session/discard") {
+      if (Object.keys(params).length !== 2 || typeof params.cwd !== "string" || !path.isAbsolute(params.cwd) || path.normalize(params.cwd) !== params.cwd) {
+        throw RequestError.invalidParams("canonical cwd is required for session discard")
+      }
+      await this.sessionManager.discard(sessionId, params.cwd)
+      return { deleted: true } as Record<string, unknown>
+    }
     await this.sessionManager.release(sessionId)
     return {}
   }

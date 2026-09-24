@@ -16,6 +16,7 @@ import { Flag } from "@/flag/flag"
 import { Shell } from "@/shell/shell"
 
 import { SessionCwd } from "./session-cwd"
+import { ManagedProvider } from "@/acp/managed-provider"
 import { BashArity } from "@/permission/arity"
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -846,7 +847,7 @@ export const BashTool = Tool.define(
       const containment: string = invocation.containment
       const network = invocation.network
       const ownership: Truncate.Ownership = {
-        owner: process.env.OPEN_CLANK_OWNER ?? "",
+        owner: ManagedProvider.managedSessionOwner(ctx.sessionID, process.env.OPEN_CLANK_OWNER ?? ""),
         workspace: input.cwd,
         sessionID: ctx.sessionID,
         ...(ctx.callID ? { callID: ctx.callID } : {}),

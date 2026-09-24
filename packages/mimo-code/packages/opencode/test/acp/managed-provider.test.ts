@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { ManagedProvider } from "../../src/acp/managed-provider"
 import { requestManagedCwdForTest } from "../../src/tool/change-directory"
-import { beginManagedSessionTransition, managedSessionBinding, registerMemorySessionScope, unregisterMemorySessionScope } from "../../src/memory/session-scope"
+import { beginManagedSessionTransition, managedSessionBinding, markManagedSessionReconciling, registerMemorySessionScope, unregisterMemorySessionScope } from "../../src/memory/session-scope"
 
 const route = {
   rootOperationID: "root-1",
@@ -558,6 +558,8 @@ test("session cwd accepts exact revisions and preserves explicit rejection", asy
   } as any)
   const accepted = await ManagedProvider.requestSessionCwdChange("engine-cwd", "/work/child", 1, "transition-1")
   expect(accepted.outcome).toBe("accepted")
+  response = { outcome: "accepted", canonicalCwd: "/work/child", workspaceRevision: 3, changed: true, transitionID: "transition-extra", forged: true }
+  await expect(ManagedProvider.requestSessionCwdChange("engine-cwd", "/work/child", 2, "transition-extra")).rejects.toThrow("invalid accepted")
   response = { outcome: "rejected", committed: false, code: "workspace_rejected", transitionID: "transition-2" }
   const rejected = await ManagedProvider.requestSessionCwdChange("engine-cwd", "/work/other", 2, "transition-2")
   expect(rejected.outcome).toBe("rejected")
@@ -687,5 +689,109 @@ test("binding admission rejects authority evidence that regresses map revisions"
   } as any)
   await expect(ManagedProvider.ensureManagedSessionBinding(sessionID)).rejects.toThrow("map evidence regressed")
   expect(managedSessionBinding(sessionID)?.physicalCwd).toBe("/work")
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("managed owner admission ignores a conflicting process environment", () => {
+  const sessionID = "engine-owner-authority"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  process.env.OPEN_CLANK_OWNER = "forged-owner"
+  expect(ManagedProvider.managedSessionOwner(sessionID)).toBe("alice")
+  delete process.env.OPEN_CLANK_OWNER
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("generic admission refuses reconciling state while the explicit retry can settle it", async () => {
+  const sessionID = "engine-binding-reconciling"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  beginManagedSessionTransition(sessionID, "/work/child", "reconcile-1", 1)
+  await expect(ManagedProvider.ensureManagedSessionBinding(sessionID)).rejects.toThrow("in_flight")
+  markManagedSessionReconciling(sessionID, "reconcile-1", 1)
+  await expect(ManagedProvider.ensureManagedSessionBinding(sessionID)).rejects.toThrow("reconciling")
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (!method.endsWith("/binding/read")) throw new Error(`unexpected ${method}`)
+      return {
+        engineSessionID: sessionID,
+        stableChatID: "chat-1",
+        owner: "alice",
+        engineAliases: [],
+        canonicalCwd: "/work/child",
+        memoryWorkspaceID: "global",
+        authorityWorkspaceID: "authority",
+        copalWorkspace: "copal",
+        workspaceRevision: 2,
+        mapRevision: 4,
+        mappingRevision: 2,
+        memoryEnabled: true,
+      }
+    },
+  } as any)
+  await expect(ManagedProvider.admitManagedSessionBinding(sessionID)).rejects.toThrow("reconciling")
+  const settled = await ManagedProvider.admitManagedSessionBinding(sessionID)
+  expect(settled?.physicalCwd).toBe("/work/child")
+  expect(settled?.transition).toBeNull()
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("binding read rejects extra authority fields", async () => {
+  const sessionID = "engine-binding-extra-field"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  ManagedProvider.invalidateManagedSessionBindingMarkerForTest(sessionID)
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (!method.endsWith("/binding/read")) throw new Error(`unexpected ${method}`)
+      return {
+        engineSessionID: sessionID,
+        stableChatID: "chat-1",
+        owner: "alice",
+        engineAliases: [],
+        canonicalCwd: "/work",
+        memoryWorkspaceID: "global",
+        authorityWorkspaceID: "authority",
+        copalWorkspace: "copal",
+        workspaceRevision: 1,
+        mapRevision: 4,
+        mappingRevision: 2,
+        memoryEnabled: true,
+        forged: true,
+      }
+    },
+  } as any)
+  await expect(ManagedProvider.ensureManagedSessionBinding(sessionID)).rejects.toThrow("invalid managed session binding")
+  unregisterMemorySessionScope(sessionID)
+})
+
+test("a pending binding read cannot install after unregister and re-registration", async () => {
+  const sessionID = "engine-binding-generation-race"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  ManagedProvider.invalidateManagedSessionBindingMarkerForTest(sessionID)
+  let release!: (value: unknown) => void
+  const pending = new Promise((resolve) => { release = resolve })
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string) {
+      if (!method.endsWith("/binding/read")) throw new Error(`unexpected ${method}`)
+      return pending
+    },
+  } as any)
+  const admitted = ManagedProvider.ensureManagedSessionBinding(sessionID)
+  unregisterMemorySessionScope(sessionID)
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID, "/work/new")], "/work/new")
+  release({
+    engineSessionID: sessionID,
+    stableChatID: "chat-1",
+    owner: "alice",
+    engineAliases: [],
+    canonicalCwd: "/work",
+    memoryWorkspaceID: "global",
+    authorityWorkspaceID: "authority",
+    copalWorkspace: "copal",
+    workspaceRevision: 1,
+    mapRevision: 4,
+    mappingRevision: 2,
+    memoryEnabled: true,
+  })
+  await expect(admitted).rejects.toThrow("registration changed")
+  expect(managedSessionBinding(sessionID)?.physicalCwd).toBe("/work/new")
   unregisterMemorySessionScope(sessionID)
 })

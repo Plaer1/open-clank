@@ -7,12 +7,49 @@ import { resetManagedSessionAdmission } from "./managed-provider"
 
 const log = Log.create({ service: "acp-session-manager" })
 
+function isMissingSession(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false
+  const value = error as Record<string, unknown>
+  return value.status === 404 || (typeof value.response === "object" && value.response !== null && (value.response as Record<string, unknown>).status === 404)
+}
+
 export class ACPSessionManager {
   private sessions = new Map<string, ACPSessionState>()
   private sdk: OpencodeClient
 
   constructor(sdk: OpencodeClient) {
     this.sdk = sdk
+  }
+
+  private async disconnect(sessionId: string, cwd: string, servers: McpServer[]) {
+    if (!this.sdk.mcp?.disconnect) return
+    await Promise.all(
+      servers.map((server) =>
+        this.sdk.mcp
+          .disconnect({ name: server.name, directory: cwd }, { throwOnError: true })
+          .catch((error) => log.warn("mcp disconnect failed", { name: server.name, error })),
+      ),
+    )
+  }
+
+  /** Delete a failed private candidate; ordinary release remains non-destructive. */
+  async discard(sessionId: string, cwd?: string, servers: McpServer[] = []) {
+    const session = this.sessions.get(sessionId)
+    const resolvedCwd = session?.cwd ?? cwd
+    const resolvedServers = session?.mcpServers ?? servers
+    if (!resolvedCwd) throw new Error("cannot discard an unregistered session without its directory")
+    try {
+      await this.disconnect(sessionId, resolvedCwd, resolvedServers)
+      try {
+        const result = await this.sdk.session.delete({ sessionID: sessionId, directory: resolvedCwd }, { throwOnError: true })
+        if (result.data !== true) throw new Error("discard session delete was not confirmed")
+      } catch (error) {
+        if (!isMissingSession(error)) throw error
+      }
+    } finally {
+      unregisterMemorySessionScope(sessionId)
+      this.sessions.delete(sessionId)
+    }
   }
 
   tryGet(sessionId: string): ACPSessionState | undefined {
@@ -45,7 +82,7 @@ export class ACPSessionManager {
     try {
       registerMemorySessionScope(sessionId, mcpServers, cwd)
     } catch (error) {
-      resetManagedSessionAdmission(sessionId)
+      await this.discard(sessionId, cwd, mcpServers)
       throw error
     }
     this.sessions.set(sessionId, state)
@@ -83,6 +120,7 @@ export class ACPSessionManager {
     try {
       registerMemorySessionScope(sessionId, mcpServers, cwd)
     } catch (error) {
+      unregisterMemorySessionScope(sessionId)
       resetManagedSessionAdmission(sessionId)
       throw error
     }
@@ -104,17 +142,12 @@ export class ACPSessionManager {
 
   async release(sessionId: string) {
     const session = this.sessions.get(sessionId)
-    if (!session) return
-    await Promise.all(
-      session.mcpServers.map((server) =>
-        this.sdk.mcp
-          .disconnect(
-            { name: server.name, directory: session.cwd },
-            { throwOnError: true },
-          )
-          .catch((error) => log.warn("mcp disconnect failed", { name: server.name, error })),
-      ),
-    )
+    if (!session) {
+      unregisterMemorySessionScope(sessionId)
+      resetManagedSessionAdmission(sessionId)
+      return
+    }
+    await this.disconnect(sessionId, session.cwd, session.mcpServers)
     unregisterMemorySessionScope(sessionId)
     resetManagedSessionAdmission(sessionId)
     this.sessions.delete(sessionId)

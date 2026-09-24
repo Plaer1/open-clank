@@ -135,6 +135,10 @@ function decode(schema: any, value: unknown, label: string): any {
   }
 }
 
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  return Object.keys(value).length === expected.length && expected.every((key) => key in value)
+}
+
 function connection(): AgentSideConnection {
   if (!enabled()) throw new ManagedProviderError("Managed provider callbacks are not enabled")
   if (!host) throw new ManagedProviderError("Managed provider host connection is unavailable")
@@ -168,13 +172,13 @@ export async function requestSessionCwdChange(
   }
   const result = raw as Record<string, unknown>
   if (result.outcome === "accepted") {
-    if (typeof result.canonicalCwd !== "string" || !path.isAbsolute(result.canonicalCwd) || path.normalize(result.canonicalCwd) !== result.canonicalCwd || typeof result.workspaceRevision !== "number" || !Number.isSafeInteger(result.workspaceRevision) || result.workspaceRevision !== expectedWorkspaceRevision + (result.changed ? 1 : 0) || typeof result.changed !== "boolean" || result.transitionID !== transitionID) {
+    if (!exactKeys(result, ["outcome", "canonicalCwd", "workspaceRevision", "changed", "transitionID"]) || typeof result.canonicalCwd !== "string" || !path.isAbsolute(result.canonicalCwd) || path.normalize(result.canonicalCwd) !== result.canonicalCwd || typeof result.workspaceRevision !== "number" || !Number.isSafeInteger(result.workspaceRevision) || typeof result.changed !== "boolean" || result.workspaceRevision !== expectedWorkspaceRevision + (result.changed ? 1 : 0) || result.transitionID !== transitionID) {
       throw new ManagedProviderError("Managed provider host returned an invalid accepted session cwd result")
     }
     return result as unknown as OpenClankManagedProtocol.SessionCwdChangeResult
   }
   const rejectionCodes = new Set(["invalid_cwd", "unknown_session", "stale_engine_session", "owner_mismatch", "workspace_rejected", "workspace_revision_conflict", "binding_unavailable"])
-  if (result.outcome !== "rejected" || result.transitionID !== transitionID || result.committed !== false || typeof result.code !== "string" || !rejectionCodes.has(result.code)) {
+  if (!exactKeys(result, ["outcome", "transitionID", "committed", "code"]) || result.outcome !== "rejected" || result.transitionID !== transitionID || result.committed !== false || typeof result.code !== "string" || !rejectionCodes.has(result.code)) {
     throw new ManagedProviderError("Managed provider host returned an invalid session cwd result")
   }
   return result as unknown as OpenClankManagedProtocol.SessionCwdChangeResult
@@ -192,7 +196,7 @@ export async function readManagedSessionBinding(
   const requiredStrings = ["engineSessionID", "stableChatID", "owner", "canonicalCwd", "memoryWorkspaceID", "authorityWorkspaceID", "copalWorkspace"]
   const revisions = ["workspaceRevision", "mapRevision", "mappingRevision"]
   const aliases = result.engineAliases
-  if (result.engineSessionID !== sessionID || requiredStrings.some((key) => typeof result[key] !== "string" || !(result[key] as string).trim() || (result[key] as string) !== (result[key] as string).trim()) || !path.isAbsolute(result.canonicalCwd as string) || path.normalize(result.canonicalCwd as string) !== result.canonicalCwd || revisions.some((key) => typeof result[key] !== "number" || !Number.isSafeInteger(result[key]) || (result[key] as number) < 0) || typeof result.memoryEnabled !== "boolean" || !Array.isArray(aliases) || aliases.length > 16 || aliases.some((item) => typeof item !== "string" || !item.trim() || item !== item.trim()) || new Set(aliases).size !== aliases.length || aliases.includes(result.engineSessionID)) {
+  if (!exactKeys(result, ["engineSessionID", "stableChatID", "owner", "canonicalCwd", "workspaceRevision", "authorityWorkspaceID", "memoryWorkspaceID", "copalWorkspace", "memoryEnabled", "engineAliases", "mapRevision", "mappingRevision"]) || result.engineSessionID !== sessionID || requiredStrings.some((key) => typeof result[key] !== "string" || !(result[key] as string).trim() || (result[key] as string) !== (result[key] as string).trim()) || !path.isAbsolute(result.canonicalCwd as string) || path.normalize(result.canonicalCwd as string) !== result.canonicalCwd || revisions.some((key) => typeof result[key] !== "number" || !Number.isSafeInteger(result[key]) || (result[key] as number) < 0) || typeof result.memoryEnabled !== "boolean" || !Array.isArray(aliases) || aliases.length > 16 || aliases.some((item) => typeof item !== "string" || !item.trim() || item !== item.trim()) || new Set(aliases).size !== aliases.length || aliases.includes(result.engineSessionID)) {
     throw new ManagedProviderError("Managed provider host returned an invalid managed session binding")
   }
   return result as unknown as OpenClankManagedProtocol.SessionBindingReadResult
@@ -200,13 +204,14 @@ export async function readManagedSessionBinding(
 
 const bindingReads = new Map<string, Promise<OpenClankManagedProtocol.SessionBindingReadResult>>()
 
-export async function ensureManagedSessionBinding(sessionID: string) {
+export async function ensureManagedSessionBinding(sessionID: string, options: { allowReconciling?: boolean } = {}) {
   if (!enabled()) return managedSessionBinding(sessionID)
   const initial = managedSessionBinding(sessionID)
-  if (initial?.transition?.phase === "in_flight") {
-    throw new ManagedProviderError("managed session binding is in flight")
+  if (initial?.transition?.phase === "in_flight" || (initial?.transition?.phase === "reconciling" && !options.allowReconciling)) {
+    throw new ManagedProviderError(`managed session binding is ${initial.transition.phase}`)
   }
   if (initial && !initial.transition && markerMatches(sessionID, initial)) return initial
+  const initialToken = initial?.registrationMarker.token
   const initialTransition = initial?.transition ? { ...initial.transition } : undefined
   let pending = bindingReads.get(sessionID)
   if (!pending) {
@@ -216,8 +221,12 @@ export async function ensureManagedSessionBinding(sessionID: string) {
   try {
     const authority = await pending
     const latest = managedSessionBinding(sessionID)
-    if (latest?.transition?.phase === "in_flight") {
+    if (latest?.transition?.phase === "in_flight" || (latest?.transition?.phase === "reconciling" && !options.allowReconciling)) {
       throw new ManagedProviderError("managed session binding changed during reconciliation")
+    }
+    const peerSettled = latest && latest.engineSessionID === authority.engineSessionID && latest.owner === authority.owner && latest.stableChatID === authority.stableChatID && latest.mapRevision === authority.mapRevision && latest.mappingRevision === authority.mappingRevision && latest.bindingRevision === authority.workspaceRevision && latest.physicalCwd === path.normalize(authority.canonicalCwd) && markerMatches(sessionID, latest)
+    if (!peerSettled && ((initialToken && latest?.registrationMarker.token !== initialToken) || (!initialToken && latest))) {
+      throw new ManagedProviderError("managed session registration changed during reconciliation")
     }
     if (initialTransition) {
       if (!latest?.transition || latest.transition.transitionID !== initialTransition.transitionID || latest.transition.phase !== initialTransition.phase) {
@@ -229,7 +238,7 @@ export async function ensureManagedSessionBinding(sessionID: string) {
     if (latest && (authority.owner !== latest.owner || authority.stableChatID !== latest.stableChatID || authority.workspaceRevision < latest.bindingRevision)) {
       throw new ManagedProviderError("managed session binding authority regressed during reconciliation")
     }
-    if (latest && latest.engineSessionID === authority.engineSessionID && latest.owner === authority.owner && latest.stableChatID === authority.stableChatID && latest.mapRevision === authority.mapRevision && latest.mappingRevision === authority.mappingRevision && latest.bindingRevision === authority.workspaceRevision && latest.physicalCwd === path.normalize(authority.canonicalCwd) && markerMatches(sessionID, latest)) {
+    if (peerSettled) {
       return latest
     }
     if (initial && latest && (initial.engineSessionID !== latest.engineSessionID || initial.owner !== latest.owner || initial.stableChatID !== latest.stableChatID || initial.mapRevision !== latest.mapRevision || initial.mappingRevision !== latest.mappingRevision || initial.bindingRevision !== latest.bindingRevision || initial.physicalCwd !== latest.physicalCwd)) {
@@ -255,14 +264,43 @@ export async function ensureManagedSessionBinding(sessionID: string) {
     } as const
     if (latest) replaceManagedSessionBinding(sessionID, replacement, { expectedTransitionID: initialTransition?.transitionID ?? null, expectedWorkspaceRevision: initial?.bindingRevision ?? latest.bindingRevision })
     else installManagedSessionBinding(sessionID, replacement)
-    return managedSessionBinding(sessionID)
+    const admitted = managedSessionBinding(sessionID)
+    if (!admitted || !markerMatches(sessionID, admitted)) throw new ManagedProviderError("managed session binding admission did not settle")
+    return admitted
   } finally {
     if (bindingReads.get(sessionID) === pending) bindingReads.delete(sessionID)
   }
 }
 
+export async function reconcileManagedSessionBinding(sessionID: string) {
+  return ensureManagedSessionBinding(sessionID, { allowReconciling: true })
+}
+
+/** Generic tools may retry a quarantined binding, but never run while it is unsettled. */
+export async function admitManagedSessionBinding(sessionID: string) {
+  const binding = managedSessionBinding(sessionID)
+  if (binding?.transition?.phase === "reconciling") {
+    try {
+      await reconcileManagedSessionBinding(sessionID)
+    } catch {
+      // Keep the transition quarantined; the next admission attempt retries.
+    }
+    throw new ManagedProviderError("managed session binding is reconciling")
+  }
+  return ensureManagedSessionBinding(sessionID)
+}
+
 export function resetManagedSessionAdmission(sessionID: string) {
   bindingReads.delete(sessionID)
+}
+
+export function managedSessionOwner(sessionID: string, fallback = "") {
+  if (!enabled()) return fallback
+  const binding = managedSessionBinding(sessionID)
+  if (!binding || binding.transition || !markerMatches(sessionID, binding)) {
+    throw new ManagedProviderError("managed session binding is unavailable")
+  }
+  return binding.owner
 }
 
 export function invalidateManagedSessionBindingMarkerForTest(sessionID: string) {

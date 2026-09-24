@@ -56,6 +56,12 @@ function tokenFor(sessionID: string): symbol {
   return token
 }
 
+function rotateToken(sessionID: string): symbol {
+  const token = Symbol(`managed-binding:${sessionID}`)
+  markerTokens.set(sessionID, token)
+  return token
+}
+
 function markerFor(sessionID: string, binding: ManagedSessionBindingInput) {
   return {
     engineSessionID: binding.engineSessionID,
@@ -94,7 +100,7 @@ export function registerMemorySessionScope(sessionID: string, servers: McpServer
   const canonicalCwd = path.resolve(cwd)
   const trustedStringKeys = ["FM_OWNER", "FM_WORKSPACE_ID", "SESSION_ID", "OPEN_CLANK_AUTHORITY_WORKSPACE_ID", "COPAL_WORKSPACE", "WORKSPACE"]
   const hasUnnormalizedTrustedString = trustedStringKeys.some((key) => typeof env[key] === "string" && env[key] !== env[key].trim())
-  if (hasUnnormalizedTrustedString || !owner || !workspaceId || !stableChatID || !authorityWorkspaceID || !copalWorkspace || !descriptorCwd || (env.FM_MEMORY_ENABLED !== "0" && env.FM_MEMORY_ENABLED !== "1") || !path.isAbsolute(cwd) || path.normalize(cwd) !== cwd || !path.isAbsolute(descriptorCwd) || path.resolve(descriptorCwd) !== canonicalCwd || !Number.isSafeInteger(bindingRevision) || bindingRevision < 0 || !Number.isSafeInteger(mapRevision) || mapRevision < 0 || !Number.isSafeInteger(mappingRevision) || mappingRevision < 0 || !Array.isArray(aliases) || aliases.length > 16 || aliases.some((item: unknown) => typeof item !== "string" || !item.trim() || item !== item.trim()) || new Set(aliases).size !== aliases.length || aliases.includes(sessionID)) {
+  if (hasUnnormalizedTrustedString || !owner || !workspaceId || !stableChatID || !authorityWorkspaceID || !copalWorkspace || !descriptorCwd || (env.FM_MEMORY_ENABLED !== "0" && env.FM_MEMORY_ENABLED !== "1") || !path.isAbsolute(cwd) || path.normalize(cwd) !== cwd || !path.isAbsolute(descriptorCwd) || path.normalize(descriptorCwd) !== descriptorCwd || path.resolve(descriptorCwd) !== canonicalCwd || !Number.isSafeInteger(bindingRevision) || bindingRevision < 0 || !Number.isSafeInteger(mapRevision) || mapRevision < 0 || !Number.isSafeInteger(mappingRevision) || mappingRevision < 0 || !Array.isArray(aliases) || aliases.length > 16 || aliases.some((item: unknown) => typeof item !== "string" || !item.trim() || item !== item.trim()) || new Set(aliases).size !== aliases.length || aliases.includes(sessionID)) {
     unregisterMemorySessionScope(sessionID)
     throw new Error("managed lifetools descriptor requires owner, stable chat, workspaces, and binding revision")
   }
@@ -113,10 +119,16 @@ export function registerMemorySessionScope(sessionID: string, servers: McpServer
     memoryEnabled: env.FM_MEMORY_ENABLED !== "0",
     transition: null,
   }
+  rotateToken(sessionID)
   bindings.set(sessionID, { ...replacement, registrationMarker: markerFor(sessionID, replacement) })
   // Lifetools also carries trusted project-policy admission. Keep its scoped
   // transport available even when conversational memory is disabled.
-  bindMemorySessionClient(sessionID, server.name, owner, workspaceId)
+  try {
+    bindMemorySessionClient(sessionID, server.name, owner, workspaceId)
+  } catch (error) {
+    unregisterMemorySessionScope(sessionID)
+    throw error
+  }
   if (env.FM_MEMORY_ENABLED === "0") {
     scopes.delete(sessionID)
     return
@@ -163,6 +175,8 @@ export function replaceManagedSessionBinding(sessionID: string, replacement: Man
 }
 
 export function installManagedSessionBinding(sessionID: string, replacement: ManagedSessionBindingInput) {
+  if (bindings.has(sessionID)) throw new Error("managed session binding is already registered")
+  rotateToken(sessionID)
   const next = { ...replacement, engineAliases: [...replacement.engineAliases], transition: replacement.transition && { ...replacement.transition }, registrationMarker: markerFor(sessionID, replacement) }
   validateBinding(sessionID, next)
   bindings.set(sessionID, next)

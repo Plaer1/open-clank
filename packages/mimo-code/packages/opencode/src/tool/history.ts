@@ -6,6 +6,7 @@ import * as Tool from "./tool"
 import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
 import { SessionCwd } from "./session-cwd"
+import { ManagedProvider } from "@/acp/managed-provider"
 
 const KIND = z.enum([
   "user_text",
@@ -136,7 +137,7 @@ export const HistoryTool = Tool.define(
             { maxBytes: AROUND_MAX_BYTES },
             agent,
             {
-              owner: process.env.OPEN_CLANK_OWNER ?? "",
+              owner: ManagedProvider.managedSessionOwner(ctx.sessionID, process.env.OPEN_CLANK_OWNER ?? ""),
               workspace: SessionCwd.get(ctx.sessionID),
               sessionID: ctx.sessionID,
               ...(ctx.callID ? { callID: ctx.callID } : {}),

@@ -112,10 +112,10 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
         }
         return Effect.gen(function* () {
           const managed = yield* Effect.tryPromise({
-            try: () => ManagedProvider.ensureManagedSessionBinding(ctx.sessionID),
+            try: () => ManagedProvider.admitManagedSessionBinding(ctx.sessionID),
             catch: () => new RecoverableError("managed session binding is unavailable or reconciling"),
           })
-          if (managed?.transition) {
+          if (ManagedProvider.enabled() && (!managed || managed.transition)) {
             throw new Error("managed session binding is unavailable or reconciling")
           }
           yield* Effect.try({
@@ -140,7 +140,7 @@ function wrap<Parameters extends z.ZodType, Result extends Metadata>(
           }
           const agent = yield* agents.get(ctx.agent)
           const truncated = yield* truncate.output(result.output, {}, agent, {
-            owner: process.env.OPEN_CLANK_OWNER ?? "",
+            owner: managed?.owner ?? process.env.OPEN_CLANK_OWNER ?? "",
             workspace: SessionCwd.get(ctx.sessionID),
             sessionID: ctx.sessionID,
             ...(ctx.callID ? { callID: ctx.callID } : {}),

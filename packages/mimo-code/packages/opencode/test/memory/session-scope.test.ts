@@ -65,6 +65,25 @@ describe("memory session scope", () => {
     expect(managedSessionBinding(sessionID)).toBeUndefined()
   })
 
+  test("descriptor cwd must already be canonical", () => {
+    const sessionID = "session-scope-canonical-cwd"
+    const noncanonical = descriptor("alice", true, "/workspace/../workspace")
+    expect(() => registerMemorySessionScope(sessionID, [noncanonical], "/workspace")).toThrow()
+    expect(managedSessionBinding(sessionID)).toBeUndefined()
+  })
+
+  test("re-registration rotates the private admission marker", () => {
+    const sessionID = "session-scope-generation"
+    registerMemorySessionScope(sessionID, [descriptor("alice")], "/workspace")
+    const previous = managedSessionBinding(sessionID)!
+    registerMemorySessionScope(sessionID, [descriptor("alice")], "/workspace")
+    const current = managedSessionBinding(sessionID)!
+    expect(current.registrationMarker.token).not.toBe(previous.registrationMarker.token)
+    expect(markerMatches(sessionID, previous)).toBe(false)
+    expect(markerMatches(sessionID, current)).toBe(true)
+    unregisterMemorySessionScope(sessionID)
+  })
+
   test("incomplete re-registration clears the prior tenant binding", async () => {
     const sessionID = "session-scope-incomplete"
     registerMemorySessionScope(sessionID, [descriptor("alice")], "/workspace")

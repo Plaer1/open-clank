@@ -192,11 +192,11 @@ export const layer = Layer.effect(
             execute: (args, toolCtx) =>
               Effect.gen(function* () {
                 const managed = yield* Effect.tryPromise({
-                  try: () => ManagedProvider.ensureManagedSessionBinding(toolCtx.sessionID),
+                  try: () => ManagedProvider.admitManagedSessionBinding(toolCtx.sessionID),
                   catch: () => new RecoverableError("managed session binding is unavailable or reconciling"),
                 }).pipe(Effect.orDie)
-                if (managed?.transition) {
-                  throw new Error("managed session binding is unavailable or reconciling")
+                  if (ManagedProvider.enabled() && (!managed || managed.transition)) {
+                    throw new Error("managed session binding is unavailable or reconciling")
                 }
                 const pluginCtx: PluginToolContext = {
                   ...toolCtx,
@@ -209,7 +209,7 @@ export const layer = Layer.effect(
                 const metadata = typeof result === "string" ? {} : (result.metadata ?? {})
                 const info = yield* agent.get(toolCtx.agent)
                 const out = yield* truncate.output(output, {}, info, {
-                  owner: process.env.OPEN_CLANK_OWNER ?? "",
+                  owner: managed?.owner ?? process.env.OPEN_CLANK_OWNER ?? "",
                   workspace: SessionCwd.get(toolCtx.sessionID),
                   sessionID: toolCtx.sessionID,
                   ...(toolCtx.callID ? { callID: toolCtx.callID } : {}),

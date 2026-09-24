@@ -11,6 +11,7 @@ import { assertWriteAllowed, askEditUnlessMemory } from "./external-directory"
 import { assertProjectFilePolicy } from "./project-policy"
 import { RecoverableError } from "./recoverable"
 import * as Tool from "./tool"
+import { ManagedProvider } from "@/acp/managed-provider"
 
 const Parameters = z.object({
   action: z.enum(["move", "delete", "restore", "list_trash"]),
@@ -39,8 +40,9 @@ function requestedPath(value: string, sessionID: Tool.Context["sessionID"]) {
 }
 
 function trashScope(sessionID: Tool.Context["sessionID"]) {
-  const scopedOwner =
-    process.env.OPEN_CLANK_OWNER?.trim().toLowerCase() || process.env.FM_OWNER?.trim().toLowerCase()
+  const scopedOwner = ManagedProvider.enabled()
+    ? ManagedProvider.managedSessionOwner(sessionID).trim().toLowerCase()
+    : process.env.OPEN_CLANK_OWNER?.trim().toLowerCase() || process.env.FM_OWNER?.trim().toLowerCase()
   if (process.env.OPEN_CLANK_MANAGED === "1" && !scopedOwner) {
     throw new RecoverableError("manage_files: managed sessions require an authenticated owner")
   }

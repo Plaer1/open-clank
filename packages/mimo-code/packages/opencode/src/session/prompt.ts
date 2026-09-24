@@ -110,6 +110,7 @@ import { EffectBridge } from "@/effect"
 import { Team } from "@/team"
 import { ActorRegistry } from "@/actor/registry"
 import { ManagedProvider, type ManagedHostContext } from "@/acp/managed-provider"
+import { SessionCwd } from "@/tool/session-cwd"
 import { Metrics } from "@/metrics"
 import { resolveInvocationStyle, type ToolStyleConfig } from "../tool/invocation-style"
 import { ToolResultError } from "../tool/result-error"
@@ -1126,6 +1127,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   sessionID: input.session.id,
                 })
                 const ctx = context(args, options)
+                const managed = yield* Effect.tryPromise({
+                  try: () => ManagedProvider.admitManagedSessionBinding(ctx.sessionID),
+                  catch: () => new RecoverableError("managed session binding is unavailable or reconciling"),
+                }).pipe(Effect.orDie)
+                if (ManagedProvider.enabled() && (!managed || managed.transition)) {
+                  throw new Error("managed session binding is unavailable or reconciling")
+                }
                 if (whitelist && !whitelist.has(item.id) && item.id !== MCP_TOOL_SEARCH_ID) {
                   const output = rejectionFor(item.id)
                   log.debug("tool execute rejected", {
@@ -1256,6 +1264,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 sessionID: input.session.id,
               })
               const ctx = context(args, opts)
+              const managed = yield* Effect.tryPromise({
+                try: () => ManagedProvider.admitManagedSessionBinding(ctx.sessionID),
+                catch: () => new RecoverableError("managed session binding is unavailable or reconciling"),
+              }).pipe(Effect.orDie)
+              if (ManagedProvider.enabled() && (!managed || managed.transition)) {
+                throw new Error("managed session binding is unavailable or reconciling")
+              }
               if (!useMcpToolSearch && (!available || !input.model.capabilities.toolcall)) {
                 return yield* Effect.fail(
                   new RecoverableError(`The MCP tool "${key}" is unavailable for this request.`),
@@ -1332,8 +1347,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 { outcome: normalized.isError ? "error" : "success" },
                 input.agent,
                 {
-                  owner: process.env.OPEN_CLANK_OWNER ?? "",
-                  workspace: input.session.directory,
+                  owner: managed?.owner ?? process.env.OPEN_CLANK_OWNER ?? "",
+                  workspace: SessionCwd.get(ctx.sessionID),
                   sessionID: input.session.id,
                   ...(ctx.callID ? { callID: ctx.callID } : {}),
                 },
@@ -1473,6 +1488,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const ctx = yield* InstanceState.context
       const promptOps = yield* ops()
       const { actor: actorTool } = yield* registry.named()
+      const managed = yield* Effect.tryPromise({
+        try: () => ManagedProvider.admitManagedSessionBinding(sessionID),
+        catch: () => new RecoverableError("managed session binding is unavailable or reconciling"),
+      }).pipe(Effect.orDie)
+      if (ManagedProvider.enabled() && (!managed || managed.transition)) {
+        throw new Error("managed session binding is unavailable or reconciling")
+      }
       const taskModel = task.model ? yield* getModel(task.model.providerID, task.model.modelID, sessionID) : model
       const assistantMessage: MessageV2.Assistant = yield* sessions.updateMessage({
         id: MessageID.ascending(),
