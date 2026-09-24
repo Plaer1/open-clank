@@ -2,7 +2,7 @@
 
 SCHEMA_ID = 'https://openclank.dev/contracts/managed-provider/v2'
 SCHEMA_VERSION = 2
-SCHEMA_SHA256 = 'e5ef3fef6dec55d7ccb1b356f71029533fc31ca441626d2d160fd7af4218e976'
+SCHEMA_SHA256 = 'e21dac877632b285e84fb84e7921d8c1c084e6002de25e2d59cf5da6f43dbb50'
 PROTOCOL_VERSION = 1
 PROVIDER_STORE_VERSION = 1
 OPERATION_ROUTER_VERSION = 1
@@ -32,6 +32,7 @@ OPERATION_METHODS = (    '_openclank/operations/v1/journal/cas',
     '_openclank/operations/v1/execute',
 )
 SESSION_METHODS = (    '_openclank/session/v1/cwd/change',
+    '_openclank/session/v1/binding/read',
 )
 MANAGED_METHODS = frozenset((    '_openclank/provider-store/v1/account/bind',
     '_openclank/provider-store/v1/account/commit',
@@ -55,6 +56,7 @@ MANAGED_METHODS = frozenset((    '_openclank/provider-store/v1/account/bind',
     '_openclank/operations/v1/executor/invoke',
     '_openclank/operations/v1/execute',
     '_openclank/session/v1/cwd/change',
+    '_openclank/session/v1/binding/read',
 ))
 ENGINE_METHODS = frozenset((    '_openclank/provider-control/v1/catalog',
     '_openclank/provider-control/v1/connection/validate',
@@ -79,6 +81,7 @@ HOST_CALLBACK_METHODS = frozenset((    '_openclank/provider-store/v1/account/bin
     '_openclank/operations/v1/artifact/write',
     '_openclank/operations/v1/executor/invoke',
     '_openclank/session/v1/cwd/change',
+    '_openclank/session/v1/binding/read',
 ))
 MODEL_OPERATIONS = frozenset((    'chat.stream',
     'chat.complete',
@@ -118,7 +121,8 @@ METHOD_DIRECTIONS = {
     '_openclank/operations/v1/artifact/write': 'engine_to_host',
     '_openclank/operations/v1/executor/invoke': 'engine_to_host',
     '_openclank/operations/v1/execute': 'host_to_engine',
-    '_openclank/session/v1/cwd/change': 'engine_to_host'
+    '_openclank/session/v1/cwd/change': 'engine_to_host',
+    '_openclank/session/v1/binding/read': 'engine_to_host'
 }
 METHOD_WIRE_MAPPINGS = {
     '_openclank/provider-control/v1/catalog': ('empty object', '#/$defs/familyCatalogResult'),
@@ -142,5 +146,6 @@ METHOD_WIRE_MAPPINGS = {
     '_openclank/operations/v1/artifact/write': ('#/$defs/artifactWriteRequest', '#/$defs/artifactDescriptor'),
     '_openclank/operations/v1/executor/invoke': ('#/$defs/executorInvokeRequest', '#/$defs/artifactDescriptor'),
     '_openclank/operations/v1/execute': ('#/$defs/operationExecuteRequest', '#/$defs/operationExecuteResult'),
-    '_openclank/session/v1/cwd/change': ('#/$defs/sessionCwdChangeRequest', '#/$defs/sessionCwdChangeResult')
+    '_openclank/session/v1/cwd/change': ('#/$defs/sessionCwdChangeRequest', '#/$defs/sessionCwdChangeResult'),
+    '_openclank/session/v1/binding/read': ('#/$defs/sessionBindingReadRequest', '#/$defs/sessionBindingReadResult')
 }

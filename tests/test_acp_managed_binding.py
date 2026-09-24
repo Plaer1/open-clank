@@ -1,4 +1,5 @@
 import asyncio
+import multiprocessing
 import pytest
 from contextlib import nullcontext
 from pathlib import Path
@@ -800,3 +801,419 @@ def test_stale_cwd_with_auxiliary_binding_axis_change_is_rejected(sqlite_project
     }
     result = asyncio.run(bridge._apply_session_cwd("engine-new", str(tmp_path)))
     assert result["code"] == "stale_engine_session"
+
+
+def test_ordinary_restart_recovers_staged_orphan_without_remap(sqlite_projection, tmp_path):
+    from src.openclank.acp_bridge import ACPBridge
+
+    mapping_path = tmp_path / "session-map.json"
+    mapping = OwnerSessionMap(mapping_path, "alice")
+    mapping.bind("chat-a", "engine-old", expected_current=None, expected_mapping_revision=0)
+    orphan = _binding(engine="engine-candidate", map_revision=1, mapping_revision=2)
+    orphan["engineAliases"] = ["engine-old"]
+    projection.save_managed_binding(
+        "chat-a", orphan, owner="alice", expected_workspace_revision=0,
+        expected_engine_session_id=None, expected_map_revision=0, expected_mapping_revision=0,
+    )
+    discarded = []
+
+    class Client:
+        async def resume_session(self, session_id, *_args, **_kwargs):
+            raise AssertionError("recovery must not resume before repair")
+
+        async def discard_session(self, session_id, cwd):
+            discarded.append((session_id, cwd))
+
+        async def new_session(self, *_args, **_kwargs):
+            raise AssertionError("recovery must not create a session")
+
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._client = Client()
+    bridge._cwd = str(tmp_path.resolve())
+    bridge._owner = "alice"
+    bridge._durable_session_map = mapping
+    bridge._session_map = {"chat-a": "engine-old"}
+    bridge._session_admission_locks = {}
+    bridge._session_context_locks = {}
+    bridge._pending_session_results = {"engine-candidate": {"sessionId": "engine-candidate"}}
+    bridge._session_models = {"engine-candidate": ["stale"]}
+    bridge._session_state = {"engine-candidate": {"stale": True}}
+    bridge._session_context = {"engine-candidate": {"stale": True}}
+    bridge._turns = {"engine-candidate": object()}
+    bridge._queues = {"engine-candidate": object()}
+    bridge.cleanup_session = lambda _session_id: asyncio.sleep(0)
+
+    recovered = asyncio.run(bridge.recover_admission_orphans())
+    assert recovered == ["chat-a"]
+    assert discarded == [("engine-candidate", orphan["physicalCwd"])]
+    # Candidate-only caches are cleaned exactly for the discarded engine.
+    assert bridge._pending_session_results == {}
+    assert bridge._session_models == {}
+    assert bridge._session_state == {}
+    assert bridge._session_context == {}
+    assert bridge._turns == {}
+    assert bridge._queues == {}
+    binding = projection.get_managed_binding("chat-a", owner="alice")
+    assert binding["engineSessionID"] == "engine-old"
+    assert binding["mappingRevision"] == 1
+    assert binding["engineAliases"] == []
+
+
+def test_async_chat_admission_lock_double_cancel_releases_real_filesystem_lock(tmp_path):
+    from src.openclank.session_map import OwnerSessionMap
+
+    mapping = OwnerSessionMap(tmp_path / "session-map.json", "alice")
+
+    async def exercise():
+        entered = asyncio.Event()
+        task = asyncio.create_task(_hold_admission(mapping, entered))
+        await entered.wait()
+        task.cancel()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def _hold_admission(owner_map, entered):
+        async with owner_map.async_chat_admission_lock("chat-a"):
+            entered.set()
+            await asyncio.sleep(60)
+
+    asyncio.run(exercise())
+    # The real filesystem lock must be free: a non-blocking acquire succeeds.
+    with mapping.chat_admission_lock("chat-a"):
+        pass
+
+
+def test_resume_bad_descriptor_does_not_discard_or_delete_mapping(sqlite_projection, tmp_path):
+    from src.openclank.acp_bridge import ACPBridge
+    from src.openclank.acp_client import RPCError
+
+    mapping = OwnerSessionMap(tmp_path / "session-map.json", "alice")
+    mapping.bind("chat-a", "engine-old", expected_current=None, expected_mapping_revision=0)
+    projection.save_managed_binding(
+        "chat-a", _binding(engine="engine-old"), owner="alice",
+        expected_workspace_revision=0, expected_engine_session_id=None,
+        expected_map_revision=0, expected_mapping_revision=0,
+    )
+    discarded = []
+
+    class Client:
+        async def resume_session(self, session_id, *_args, **_kwargs):
+            # Bad descriptor is distinct from OPENCLANK_SESSION_MISSING.
+            raise RPCError(-32602, "malformed session descriptor", {"code": "INVALID_PARAMS"})
+
+        async def discard_session(self, session_id, cwd):
+            discarded.append((session_id, cwd))
+
+        async def new_session(self, *_args, **_kwargs):
+            raise AssertionError("bad descriptor must not silently create")
+
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._client = Client()
+    bridge._cwd = str(tmp_path.resolve())
+    bridge._owner = "alice"
+    bridge._durable_session_map = mapping
+    bridge._session_map = {"chat-a": "engine-old"}
+    bridge._session_admission_locks = {}
+    bridge._session_context_locks = {}
+    bridge._pending_session_results = {}
+    bridge._session_models = {}
+    bridge._session_state = {}
+    bridge._session_context = {}
+    bridge._turns = {}
+    bridge._queues = {}
+    bridge.cleanup_session = lambda _session_id: asyncio.sleep(0)
+
+    with pytest.raises(RPCError):
+        asyncio.run(bridge.ensure_session("chat-a", authority_workspace_id="workspace:chat-a"))
+    assert discarded == []
+    assert mapping.lookup("chat-a")["current"] == "engine-old"
+    assert projection.get_managed_binding("chat-a", owner="alice")["engineSessionID"] == "engine-old"
+
+
+def test_create_failed_discard_never_deletes_winning_mapping(sqlite_projection, tmp_path, monkeypatch):
+    from src.openclank.acp_bridge import ACPBridge
+
+    monkeypatch.setattr("src.openclank.acp_bridge.chat_workspace", lambda: "memory:chat-a")
+    mapping = OwnerSessionMap(tmp_path / "session-map.json", "alice")
+    discarded = []
+
+    class Client:
+        async def new_session(self, *_args, **_kwargs):
+            return {"sessionId": "engine-candidate", "models": {}}
+
+        async def resume_session(self, session_id, *_args, **_kwargs):
+            if session_id == "engine-candidate":
+                raise RuntimeError("create failed after engine session existed")
+            return {"models": {}}
+
+        async def discard_session(self, session_id, cwd):
+            discarded.append((session_id, cwd))
+
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._client = Client()
+    bridge._cwd = str(tmp_path.resolve())
+    bridge._owner = "alice"
+    bridge._durable_session_map = mapping
+    bridge._session_map = {}
+    bridge._session_admission_locks = {}
+    bridge._session_context_locks = {}
+    bridge._pending_session_results = {}
+    bridge._session_models = {}
+    bridge._session_state = {}
+    bridge._session_context = {}
+    bridge._turns = {}
+    bridge._queues = {}
+    bridge._delete_session_callback = None
+    bridge.cleanup_session = lambda _session_id: asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="create failed"):
+        asyncio.run(bridge.ensure_session("chat-a", cwd=str(tmp_path.resolve()), authority_workspace_id="workspace:chat-a"))
+    # Failed create discards only the unexposed candidate.  No winning chat
+    # mapping exists yet, and none may be invented or deleted as a fallback.
+    assert discarded == [("engine-candidate", str(tmp_path.resolve()))]
+    assert mapping.flat_current() == {}
+    assert projection.get_managed_binding("chat-a", owner="alice") == {}
+
+
+def _two_process_ensure_worker(
+    db_path: str,
+    map_path: str,
+    engine_id: str,
+    cwd: str,
+    chat_id: str,
+    barrier: "multiprocessing.synchronize.Barrier",
+    start: "multiprocessing.synchronize.Event",
+    result_queue: "multiprocessing.Queue",
+    discard_queue: "multiprocessing.Queue",
+    missing_old: bool,
+):
+    """Production-path ensure_session race worker (one real OS process).
+
+    Uses the real ``ACPBridge`` constructor and ``ensure_session`` entry
+    point.  Only the engine RPC surface is stubbed, because no live mimo
+    child is available in the test harness.
+    """
+    import asyncio as _asyncio
+    from pathlib import Path as _Path
+
+    from sqlalchemy import create_engine as _create_engine
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+
+    import core.database as _database
+    import src.openclank.acp_bridge as _acp_bridge
+    import src.openclank.transcript_projection as _projection
+    from src.openclank.acp_client import RPCError
+    from src.openclank.acp_bridge import ACPBridge
+
+    engine = _create_engine(f"sqlite:///{db_path}")
+    sessions = _sessionmaker(bind=engine)
+    _database.SessionLocal = sessions
+    _projection.SessionLocal = sessions
+    _acp_bridge.chat_workspace = lambda: "memory:chat-a"
+
+    db = sessions()
+    row = _database.Session(
+        id=chat_id,
+        name=chat_id,
+        endpoint_url="mimo://acp",
+        model="mimo",
+        owner="alice",
+        mimo_state={},
+    )
+    db.add(row)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+    db.close()
+
+    class Client:
+        def __init__(self):
+            self.callbacks = {}
+            self.discarded = []
+
+        def register_callback(self, method, handler):
+            self.callbacks[method] = handler
+
+        def on_session_update(self, *_args):
+            pass
+
+        async def new_session(self, cwd_arg, mcp_servers=None):
+            # True barrier: both processes create an engine session before
+            # either publishes its map binding.
+            barrier.wait(timeout=20)
+            return {"sessionId": engine_id, "models": {"availableModels": []}}
+
+        async def resume_session(self, session_id, cwd_arg, mcp_servers=None):
+            if missing_old and session_id == "engine-old":
+                raise RPCError(404, "missing", {"code": "OPENCLANK_SESSION_MISSING"})
+            return {"models": {"availableModels": []}}
+
+        async def discard_session(self, session_id, cwd_arg):
+            self.discarded.append((session_id, cwd_arg))
+            discard_queue.put((engine_id, session_id, cwd_arg))
+
+        async def set_session_config_option(self, *_args, **_kwargs):
+            return {}
+
+        async def prompt(self, *_args, **_kwargs):
+            return {"stopReason": "end_turn", "usage": {}}
+
+    client = Client()
+    bridge = ACPBridge(
+        client,
+        cwd,
+        owner="alice",
+        session_map_path=_Path(map_path),
+    )
+    start.wait(timeout=20)
+    try:
+        winner = _asyncio.run(
+            bridge.ensure_session(
+                chat_id,
+                cwd=cwd,
+                authority_workspace_id="workspace:chat-a",
+            )
+        )
+        result_queue.put((engine_id, "ok", winner))
+    except Exception as exc:
+        result_queue.put((engine_id, "err", f"{type(exc).__name__}: {exc}"))
+
+
+def test_two_process_ensure_session_fresh_race_has_one_winner(tmp_path):
+    """Two real OS processes race production ensure_session on one chat.
+
+    Helper-only map tests are insufficient: this drives the real
+    ``ACPBridge.ensure_session`` admission path end-to-end across processes.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    db_path = str(tmp_path / "shared.db")
+    map_path = str(tmp_path / "session-map.json")
+    cwd = str(tmp_path.resolve())
+    barrier = ctx.Barrier(2)
+    start = ctx.Event()
+    result_queue = ctx.Queue()
+    discard_queue = ctx.Queue()
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+
+    workers = [
+        ctx.Process(
+            target=_two_process_ensure_worker,
+            args=(db_path, map_path, "engine-c1", cwd, "chat-a", barrier, start, result_queue, discard_queue, False),
+        ),
+        ctx.Process(
+            target=_two_process_ensure_worker,
+            args=(db_path, map_path, "engine-c2", cwd, "chat-a", barrier, start, result_queue, discard_queue, False),
+        ),
+    ]
+    for worker in workers:
+        worker.start()
+    start.set()
+    rows = [result_queue.get(timeout=30) for _ in range(2)]
+    for worker in workers:
+        worker.join(timeout=30)
+        assert worker.exitcode == 0
+
+    assert all(row[1] == "ok" for row in rows), rows
+    winners = {row[2] for row in rows}
+    assert len(winners) == 1, rows
+    winner = winners.pop()
+    assert winner in {"engine-c1", "engine-c2"}
+
+    mapping = OwnerSessionMap(Path(map_path), "alice")
+    assert mapping.lookup("chat-a")["current"] == winner
+
+    # Exactly one candidate is discarded — the loser — and never the winner.
+    discards = []
+    while not discard_queue.empty():
+        discards.append(discard_queue.get_nowait())
+    assert len(discards) == 1, discards
+    discarded_id = discards[0][1]
+    assert discarded_id != winner
+    assert discarded_id in {"engine-c1", "engine-c2"}
+
+
+def test_two_process_ensure_session_missing_remap_race_has_one_winner(tmp_path):
+    """Two real OS processes race the missing-session remap admission path."""
+    ctx = multiprocessing.get_context("spawn")
+    db_path = str(tmp_path / "shared.db")
+    map_path = str(tmp_path / "session-map.json")
+    cwd = str(tmp_path.resolve())
+    barrier = ctx.Barrier(2)
+    start = ctx.Event()
+    result_queue = ctx.Queue()
+    discard_queue = ctx.Queue()
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+
+    mapping = OwnerSessionMap(Path(map_path), "alice")
+    mapping.bind("chat-a", "engine-old", expected_current=None, expected_mapping_revision=0)
+    projection.SessionLocal = sessionmaker(bind=create_engine(f"sqlite:///{db_path}"))
+    # Seed the old binding via the projection helper on the shared database.
+    from core.database import Session as _Session
+
+    db = projection.SessionLocal()
+    if db.get(_Session, "chat-a") is None:
+        db.add(_Session(
+            id="chat-a",
+            name="chat-a",
+            endpoint_url="mimo://acp",
+            model="mimo",
+            owner="alice",
+            mimo_state={},
+        ))
+        db.commit()
+    db.close()
+    projection.save_managed_binding(
+        "chat-a",
+        _binding(engine="engine-old", map_revision=1, mapping_revision=1),
+        owner="alice",
+        expected_workspace_revision=0,
+        expected_engine_session_id=None,
+        expected_map_revision=0,
+        expected_mapping_revision=0,
+    )
+
+    workers = [
+        ctx.Process(
+            target=_two_process_ensure_worker,
+            args=(db_path, map_path, "engine-r1", cwd, "chat-a", barrier, start, result_queue, discard_queue, True),
+        ),
+        ctx.Process(
+            target=_two_process_ensure_worker,
+            args=(db_path, map_path, "engine-r2", cwd, "chat-a", barrier, start, result_queue, discard_queue, True),
+        ),
+    ]
+    for worker in workers:
+        worker.start()
+    start.set()
+    rows = [result_queue.get(timeout=30) for _ in range(2)]
+    for worker in workers:
+        worker.join(timeout=30)
+        assert worker.exitcode == 0
+
+    assert all(row[1] == "ok" for row in rows), rows
+    winners = {row[2] for row in rows}
+    assert len(winners) == 1, rows
+    winner = winners.pop()
+    assert winner in {"engine-r1", "engine-r2"}
+
+    mapping2 = OwnerSessionMap(Path(map_path), "alice")
+    entry = mapping2.lookup("chat-a")
+    assert entry["current"] == winner
+    assert "engine-old" in entry["aliases"]
+
+    discards = []
+    while not discard_queue.empty():
+        discards.append(discard_queue.get_nowait())
+    # The old engine is never the winner of the remap; the loser candidate is
+    # discarded exactly once and the winning mapping is never deleted.
+    discarded_ids = {row[1] for row in discards}
+    assert winner not in discarded_ids
+    assert len(discards) == 1, discards

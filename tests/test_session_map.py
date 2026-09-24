@@ -8,17 +8,19 @@ import pytest
 from src.openclank.session_map import OwnerSessionMap, SessionMapCollision
 
 
-def _admission_lock_process(path, entered, release):
+def _admission_lock_process(path, entered, release, about_to_lock=None):
     mapping = OwnerSessionMap(path, "alice")
+    if about_to_lock is not None:
+        about_to_lock.put("ready")
     with mapping.chat_admission_lock("chat"):
         entered.put("entered")
         release.wait(10)
 
 
-def _bind_process(path, owner, engine, start, result, chat="chat", ready=None):
+def _bind_process(path, owner, engine, start, result, chat="chat", ready=None, use_global_revision=True):
     mapping = OwnerSessionMap(path, owner)
     current = mapping.lookup(chat)
-    expected_map_revision = mapping.map_revision()
+    expected_map_revision = mapping.map_revision() if use_global_revision else None
     expected_current = current["current"] if current else None
     expected_mapping_revision = int(current.get("revision") or 0) if current else 0
     if ready is not None:
@@ -231,8 +233,8 @@ def test_two_real_processes_can_mutate_different_chats_without_global_revision_s
     result = ctx.Queue()
     ready = ctx.Queue()
     workers = [
-        ctx.Process(target=_bind_process, args=(path, "alice", "engine-a", start, result, "chat-a", ready)),
-        ctx.Process(target=_bind_process, args=(path, "alice", "engine-b", start, result, "chat-b", ready)),
+        ctx.Process(target=_bind_process, args=(path, "alice", "engine-a", start, result, "chat-a", ready, False)),
+        ctx.Process(target=_bind_process, args=(path, "alice", "engine-b", start, result, "chat-b", ready, False)),
     ]
     for worker in workers:
         worker.start()
@@ -242,19 +244,43 @@ def test_two_real_processes_can_mutate_different_chats_without_global_revision_s
     for worker in workers:
         worker.join(timeout=10)
         assert worker.exitcode == 0
-    assert sorted(row[1] for row in rows) == ["ValueError", "ok"]
+    # Per-chat create/remap must not fail because another chat's bind bumped
+    # the owner-wide map revision between snapshot and CAS.
+    assert sorted(row[1] for row in rows) == ["ok", "ok"]
     mapping = OwnerSessionMap(path, "alice")
-    loser_chat = "chat-a" if mapping.lookup("chat-a") is None else "chat-b"
-    loser_engine = "engine-a" if loser_chat == "chat-a" else "engine-b"
-    mapping.bind(
-        loser_chat,
-        loser_engine,
-        expected_map_revision=mapping.map_revision(),
-        expected_current=None,
-        expected_mapping_revision=0,
-    )
     assert mapping.lookup("chat-a")["current"] == "engine-a"
     assert mapping.lookup("chat-b")["current"] == "engine-b"
+
+
+def test_multi_chat_create_then_remap_is_deterministic_per_chat_cas(tmp_path):
+    mapping = OwnerSessionMap(tmp_path / "session-map.json", "alice")
+    first = mapping.bind("chat-a", "engine-a1", expected_current=None, expected_mapping_revision=0)
+    second = mapping.bind("chat-b", "engine-b1", expected_current=None, expected_mapping_revision=0)
+    assert first["mapRevision"] == 1
+    assert second["mapRevision"] == 2
+    # Remap of chat-a uses only chat-a evidence even though chat-b already
+    # advanced the owner-wide map revision.
+    remapped = mapping.bind(
+        "chat-a",
+        "engine-a2",
+        expected_current="engine-a1",
+        expected_mapping_revision=first["mappingRevision"],
+    )
+    assert remapped["mappingRevision"] == first["mappingRevision"] + 1
+    assert remapped["mapRevision"] == 3
+    assert mapping.lookup("chat-a")["current"] == "engine-a2"
+    assert mapping.lookup("chat-a")["aliases"] == ["engine-a1"]
+    assert mapping.lookup("chat-b")["current"] == "engine-b1"
+    # A stale whole-map expected revision still fails closed for that caller.
+    with pytest.raises(ValueError, match="map revision conflict"):
+        mapping.bind(
+            "chat-b",
+            "engine-b2",
+            expected_map_revision=second["mapRevision"],
+            expected_current="engine-b1",
+            expected_mapping_revision=second["mappingRevision"],
+        )
+    assert mapping.lookup("chat-b")["current"] == "engine-b1"
 
 
 def test_two_process_admission_lock_serializes_same_chat(tmp_path):
@@ -262,11 +288,31 @@ def test_two_process_admission_lock_serializes_same_chat(tmp_path):
     path = tmp_path / "session-map.json"
     entered = ctx.Queue()
     release = ctx.Event()
+    about_to_lock = ctx.Queue()
     first = ctx.Process(target=_admission_lock_process, args=(path, entered, release))
-    second = ctx.Process(target=_admission_lock_process, args=(path, entered, release))
+    second = ctx.Process(target=_admission_lock_process, args=(path, entered, release, about_to_lock))
     first.start()
     assert entered.get(timeout=10) == "entered"
     second.start()
+    # True barrier: the second worker signals immediately before it attempts
+    # the filesystem lock.  A non-blocking flock probe then proves the lock is
+    # already held, so the second worker cannot have entered yet.
+    assert about_to_lock.get(timeout=10) == "ready"
+    probe_map = OwnerSessionMap(path, "alice")
+    import hashlib
+
+    chat_lock_path = probe_map.path.parent.parent / (
+        f".session-chat-{probe_map.owner_hash}-"
+        f"{hashlib.sha256(b'chat').hexdigest()[:24]}.lock"
+    )
+    import fcntl
+
+    probe_fd = os.open(chat_lock_path, os.O_RDWR)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(probe_fd)
     with pytest.raises(queue.Empty):
         entered.get(timeout=0.25)
     release.set()

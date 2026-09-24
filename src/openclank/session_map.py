@@ -280,6 +280,65 @@ class OwnerSessionMap:
             if cancelled:
                 raise asyncio.CancelledError
 
+    async def async_call(self, fn, /, *args, **kwargs):
+        """Run one sync map operation off the event loop.
+
+        Map mutations take blocking POSIX/Windows file locks.  Calling them
+        directly from an async server path can freeze unrelated chats while
+        another process holds ``session-map.lock``.  Every async caller must
+        route through this helper (or ``asyncio.to_thread``) instead.
+        """
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    async def async_lookup(self, chat: str) -> dict[str, Any] | None:
+        return await self.async_call(self.lookup, chat)
+
+    async def async_bind(
+        self,
+        chat: str,
+        engine: str,
+        *,
+        expected_map_revision: int | None = None,
+        expected_current: str | None | object = _EXPECTED_UNSET,
+        expected_mapping_revision: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.async_call(
+            self.bind,
+            chat,
+            engine,
+            expected_map_revision=expected_map_revision,
+            expected_current=expected_current,
+            expected_mapping_revision=expected_mapping_revision,
+        )
+
+    async def async_forget(
+        self,
+        chat: str,
+        *,
+        expected_map_revision: int | None = None,
+        expected_current: str | None | object = _EXPECTED_UNSET,
+        expected_mapping_revision: int | None = None,
+    ) -> dict[str, int] | None:
+        return await self.async_call(
+            self.forget,
+            chat,
+            expected_map_revision=expected_map_revision,
+            expected_current=expected_current,
+            expected_mapping_revision=expected_mapping_revision,
+        )
+
+    async def async_revisions(self, chat: str) -> tuple[int, int]:
+        return await self.async_call(self.revisions, chat)
+
+    async def async_map_revision(self) -> int:
+        return await self.async_call(self.map_revision)
+
+    async def async_flat_current(self) -> dict[str, str]:
+        return await self.async_call(self.flat_current)
+
+    async def async_fence(self, chat: str) -> None:
+        await self.async_call(self.fence, chat)
+
     def _epoch(self) -> str:
         try:
             return self.epoch_path.read_text(encoding="utf-8")

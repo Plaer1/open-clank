@@ -701,13 +701,37 @@ def test_agent_descriptors_scope_lifetools_and_mark_raw_bridge(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_agent_session_uses_lifetools_as_memory_scope_carrier(tmp_path):
+async def test_agent_session_uses_lifetools_as_memory_scope_carrier(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import core.database as database
+    import src.openclank.transcript_projection as projection
     from src.openclank.acp_bridge import ACPBridge
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'managed-binding.db'}")
+    database.Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", sessions)
+    monkeypatch.setattr(projection, "SessionLocal", sessions)
+    monkeypatch.setattr("src.openclank.acp_bridge.chat_workspace", lambda: "memory:chat-1")
+    db = sessions()
+    db.add(database.Session(
+        id="chat-1",
+        name="chat",
+        endpoint_url="mimo://acp",
+        model="mimo",
+        owner="alice",
+        mimo_state={},
+    ))
+    db.commit()
+    db.close()
 
     class _Client:
         def __init__(self):
             self.new_servers = None
             self.resumed_servers = None
+            self.discarded = []
 
         def on_session_update(self, _callback):
             return None
@@ -723,6 +747,9 @@ async def test_agent_session_uses_lifetools_as_memory_scope_carrier(tmp_path):
             self.resumed_servers = mcp_servers
             return {"sessionId": "mimo-1", "models": {}}
 
+        async def discard_session(self, session_id, cwd):
+            self.discarded.append((session_id, cwd))
+
     client = _Client()
     bridge = ACPBridge(
         client,
@@ -735,12 +762,13 @@ async def test_agent_session_uses_lifetools_as_memory_scope_carrier(tmp_path):
         "chat-1",
         owner="alice",
         with_memory=False,
+        authority_workspace_id="workspace:chat-1",
     )
-    assert any(item["name"].startswith("lifetools_") for item in client.new_servers)
-    assert not any(item["name"].startswith("frankenmemory_") for item in client.new_servers)
+    assert any(item["name"].startswith("lifetools_") for item in client.resumed_servers)
+    assert not any(item["name"].startswith("frankenmemory_") for item in client.resumed_servers)
     life_env = {
         entry["name"]: entry["value"]
-        for item in client.new_servers
+        for item in client.resumed_servers
         if item["name"].startswith("lifetools_")
         for entry in item["env"]
     }
@@ -750,6 +778,7 @@ async def test_agent_session_uses_lifetools_as_memory_scope_carrier(tmp_path):
         "chat-1",
         owner="alice",
         with_memory=True,
+        authority_workspace_id="workspace:chat-1",
     )
     assert not any(item["name"].startswith("frankenmemory_") for item in client.resumed_servers)
     life_env = {
@@ -764,6 +793,7 @@ async def test_agent_session_uses_lifetools_as_memory_scope_carrier(tmp_path):
         "chat-1",
         owner="alice",
         with_memory=False,
+        authority_workspace_id="workspace:chat-1",
     )
     assert not any(item["name"].startswith("frankenmemory_") for item in client.resumed_servers)
     life_env = {

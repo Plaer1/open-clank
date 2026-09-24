@@ -506,7 +506,7 @@ class ACPBridge:
         if permission_handler is not None and hasattr(permission_handler, "on_request"):
             permission_handler.on_request(self._surface_permission)
 
-    def _bind_engine_session(
+    async def _bind_engine_session(
         self,
         chat_id: str,
         engine_id: str,
@@ -514,12 +514,15 @@ class ACPBridge:
         expected_current: Optional[str] = None,
         expected_mapping_revision: Optional[int] = None,
     ) -> dict:
-        expected_map_revision = self._durable_session_map.map_revision()
+        # Per-chat create/remap CAS uses only the chat's own current/mapping
+        # evidence.  A pre-read owner-wide map revision is not a valid expected
+        # axis here: an unrelated chat's bind/remap/forget would otherwise fail
+        # this chat even though its own mapping is unchanged.
         try:
-            item = self._durable_session_map.bind(
+            item = await self._durable_session_map.async_bind(
                 chat_id,
                 engine_id,
-                expected_map_revision=expected_map_revision,
+                expected_map_revision=None,
                 expected_current=expected_current,
                 expected_mapping_revision=expected_mapping_revision,
             )
@@ -528,13 +531,13 @@ class ACPBridge:
             # reported an error. Re-read the authority before treating the
             # admission as lost; this is safe because the expected-current
             # CAS remains the winner test.
-            current = self._durable_session_map.lookup(chat_id)
+            current = await self._durable_session_map.async_lookup(chat_id)
             if not current or current.get("current") != engine_id:
                 raise
-            map_revision, mapping_revision = self._durable_session_map.revisions(chat_id)
+            map_revision, mapping_revision = await self._durable_session_map.async_revisions(chat_id)
             item = dict(current)
             item.update({"mapRevision": map_revision, "mappingRevision": mapping_revision})
-        self._session_map = self._durable_session_map.flat_current()
+        self._session_map = await self._durable_session_map.async_flat_current()
         return item
 
     def _session_admission_lock(self, chat_id: str, owner: str) -> asyncio.Lock:
@@ -1302,6 +1305,84 @@ class ACPBridge:
             logger.exception("unable to persist admission fence for %s (%s)", chat_id, reason)
             raise RuntimeError("managed admission fence could not be persisted") from exc
 
+    async def _recover_orphan_binding(self, odysseus_session: str) -> bool:
+        """Repair one SQLite ↔ session-map crash-seam candidate.
+
+        Projection-first staging can leave a complete candidate binding whose
+        mapping revision is exactly one past the authoritative map row.  That
+        pair is an explicit recoverable fence: discard the unexposed candidate
+        engine and rewrite the binding to the map winner.  Candidate-only
+        caches are cleaned exactly with the discarded engine.
+        """
+        from src.openclank.transcript_projection import get_managed_binding, save_managed_binding
+
+        async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+            target_entry = await self._durable_session_map.async_lookup(odysseus_session)
+            target = target_entry.get("current") if target_entry else None
+            if not target:
+                return False
+            orphan_binding = get_managed_binding(odysseus_session, owner=self._owner or None)
+            current_mapping_revision = int(target_entry.get("revision") or 0)
+            orphan_engine = orphan_binding.get("engineSessionID") if isinstance(orphan_binding, dict) else None
+            orphan_map_revision = orphan_binding.get("mapRevision") if isinstance(orphan_binding, dict) else None
+            orphan_mapping_revision = orphan_binding.get("mappingRevision") if isinstance(orphan_binding, dict) else None
+            if not (
+                isinstance(orphan_engine, str)
+                and orphan_engine
+                and orphan_engine != target
+                and target in (orphan_binding.get("engineAliases") or [])
+                and isinstance(orphan_map_revision, int)
+                and isinstance(orphan_mapping_revision, int)
+                and orphan_mapping_revision == current_mapping_revision + 1
+            ):
+                return False
+            await self._discard_unbound_engine_session(
+                orphan_engine,
+                chat_id=odysseus_session,
+                cwd=orphan_binding.get("physicalCwd"),
+                owner=self._owner,
+            )
+            recovered = dict(orphan_binding)
+            recovered["engineSessionID"] = target
+            recovered["engineAliases"] = [
+                value for value in (orphan_binding.get("engineAliases") or [])
+                if value not in {target, orphan_engine}
+            ]
+            recovered["mapRevision"] = await self._durable_session_map.async_map_revision()
+            recovered["mappingRevision"] = current_mapping_revision
+            recovered["transition"] = None
+            try:
+                save_managed_binding(
+                    odysseus_session,
+                    recovered,
+                    owner=self._owner,
+                    expected_workspace_revision=orphan_binding.get("workspaceRevision"),
+                    expected_engine_session_id=orphan_engine,
+                    expected_map_revision=orphan_map_revision,
+                    expected_mapping_revision=orphan_mapping_revision,
+                )
+            except Exception as exc:
+                self._fence_admission(odysseus_session, "orphan binding recovery")
+                raise RuntimeError("orphan managed binding recovery was not confirmed") from exc
+            return True
+
+    async def recover_admission_orphans(self) -> list[str]:
+        """Ordinary-restart recovery for the SQLite ↔ session-map crash seam.
+
+        Runs without a later remap: every mapped chat with a recoverable
+        candidate fence is repaired before new admission work proceeds.
+        """
+        recovered: list[str] = []
+        for chat_id in list(await self._durable_session_map.async_flat_current()):
+            try:
+                if await self._recover_orphan_binding(chat_id):
+                    recovered.append(chat_id)
+            except Exception:
+                logger.exception("managed admission recovery failed for %s", chat_id)
+                raise
+        self._session_map = await self._durable_session_map.async_flat_current()
+        return recovered
+
     def _compensate_candidate_binding(
         self,
         chat_id: str,
@@ -1558,7 +1639,7 @@ class ACPBridge:
         Also refreshes the available models from mimo so the bridge always
         has the latest model list (covers session reconnect after restart).
         """
-        target_entry = self._durable_session_map.lookup(odysseus_session)
+        target_entry = await self._durable_session_map.async_lookup(odysseus_session)
         target = target_entry.get("current") if target_entry else None
         if target is None:
             effective_owner = owner if owner is not None else self._owner
@@ -1566,7 +1647,7 @@ class ACPBridge:
             expected_candidate_current: Optional[str] | object = None
             expected_candidate_mapping_revision = 0
             async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
-                if self._durable_session_map.lookup(odysseus_session) is not None:
+                if await self._durable_session_map.async_lookup(odysseus_session) is not None:
                     raise RuntimeError("managed session mapping appeared during fresh admission")
                 expected_candidate_current = None
                 expected_candidate_mapping_revision = 0
@@ -1625,7 +1706,7 @@ class ACPBridge:
                         expected_current=expected_candidate_current,
                         expected_mapping_revision=expected_candidate_mapping_revision,
                     )
-                    self._bind_engine_session(
+                    await self._bind_engine_session(
                         odysseus_session,
                         new_id,
                         expected_current=None,
@@ -1687,7 +1768,7 @@ class ACPBridge:
                             current_entry = self._session_map_entry(odysseus_session)
                             self._durable_session_map.forget(
                                 odysseus_session,
-                                expected_map_revision=self._durable_session_map.map_revision(),
+                                expected_map_revision=None,
                                 expected_current=new_id,
                                 expected_mapping_revision=int(current_entry.get("revision") or 0),
                             )
@@ -1714,50 +1795,12 @@ class ACPBridge:
             target = target_entry.get("current") if target_entry else None
             if not target:
                 raise RuntimeError("managed session mapping disappeared during admission")
-            orphan_binding = get_managed_binding(odysseus_session, owner=self._owner or None)
-            current_mapping_revision = int(target_entry.get("revision") or 0)
-            orphan_engine = orphan_binding.get("engineSessionID") if isinstance(orphan_binding, dict) else None
-            orphan_map_revision = orphan_binding.get("mapRevision") if isinstance(orphan_binding, dict) else None
-            orphan_mapping_revision = orphan_binding.get("mappingRevision") if isinstance(orphan_binding, dict) else None
-            if (
-                isinstance(orphan_engine, str)
-                and orphan_engine
-                and orphan_engine != target
-                and target in (orphan_binding.get("engineAliases") or [])
-                and isinstance(orphan_map_revision, int)
-                and isinstance(orphan_mapping_revision, int)
-                and orphan_mapping_revision == current_mapping_revision + 1
-            ):
-                await self._discard_unbound_engine_session(
-                    orphan_engine,
-                    chat_id=odysseus_session,
-                    cwd=orphan_binding.get("physicalCwd"),
-                    owner=self._owner,
-                )
-                from src.openclank.transcript_projection import save_managed_binding
-
-                recovered = dict(orphan_binding)
-                recovered["engineSessionID"] = target
-                recovered["engineAliases"] = [
-                    value for value in (orphan_binding.get("engineAliases") or [])
-                    if value not in {target, orphan_engine}
-                ]
-                recovered["mapRevision"] = self._durable_session_map.map_revision()
-                recovered["mappingRevision"] = current_mapping_revision
-                recovered["transition"] = None
-                try:
-                    save_managed_binding(
-                        odysseus_session,
-                        recovered,
-                        owner=self._owner,
-                        expected_workspace_revision=orphan_binding.get("workspaceRevision"),
-                        expected_engine_session_id=orphan_engine,
-                        expected_map_revision=orphan_map_revision,
-                        expected_mapping_revision=orphan_mapping_revision,
-                    )
-                except Exception as exc:
-                    self._fence_admission(odysseus_session, "orphan binding recovery")
-                    raise RuntimeError("orphan managed binding recovery was not confirmed") from exc
+        if await self._recover_orphan_binding(odysseus_session):
+            async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+                target_entry = self._durable_session_map.lookup(odysseus_session)
+                target = target_entry.get("current") if target_entry else None
+                if not target:
+                    raise RuntimeError("managed session mapping disappeared during admission")
         restored_workspace = self.mapped_session_workspace(odysseus_session)
         persisted_binding = get_managed_binding(odysseus_session, owner=self._owner or None)
         persisted_owner = persisted_binding["owner"]
@@ -1781,7 +1824,7 @@ class ACPBridge:
                 workspace=resume_cwd,
                 authority_workspace_id=persisted_authority,
                 memory_workspace_id=persisted_memory,
-                memory_enabled=persisted_memory_enabled,
+                memory_enabled=bool(with_memory),
                 copal_workspace=persisted_copal,
                 engine_session_aliases=persisted_aliases,
                 binding_revision=persisted_binding_revision,
@@ -1839,7 +1882,7 @@ class ACPBridge:
                         expected_current=expected_candidate_current,
                         expected_mapping_revision=expected_candidate_mapping_revision,
                     )
-                    self._bind_engine_session(
+                    await self._bind_engine_session(
                         odysseus_session,
                         new_id,
                         expected_current=target,
@@ -1903,7 +1946,7 @@ class ACPBridge:
                             self._durable_session_map.bind(
                                 odysseus_session,
                                 target,
-                                expected_map_revision=self._durable_session_map.map_revision(),
+                                expected_map_revision=None,
                                 expected_current=new_id,
                                 expected_mapping_revision=int(current_entry.get("revision") or 0),
                             )
@@ -1998,7 +2041,9 @@ class ACPBridge:
                 workspace=workspace,
                 authority_workspace_id=str(persisted_binding["authorityWorkspaceID"]),
                 memory_workspace_id=str(persisted_binding["memoryWorkspaceID"]),
-                memory_enabled=bool(persisted_binding["memoryEnabled"]),
+                # Conversational memory enablement is a per-call carrier flag.
+                # The managed binding entry itself stays installed either way.
+                memory_enabled=bool(with_memory),
                 copal_workspace=str(persisted_binding["copalWorkspace"]),
                 engine_session_aliases=list(persisted_binding["engineAliases"]),
                 binding_revision=binding_workspace_revision,
@@ -2175,7 +2220,7 @@ class ACPBridge:
         try:
             self._durable_session_map.forget(
                 odysseus_session,
-                expected_map_revision=map_revision,
+                expected_map_revision=None,
                 expected_current=mimo_session,
                 expected_mapping_revision=mapping_revision,
             )

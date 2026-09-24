@@ -37,7 +37,9 @@
     { "$ref": "#/$defs/operationExecuteRequest" },
     { "$ref": "#/$defs/operationExecuteResult" },
     { "$ref": "#/$defs/sessionCwdChangeRequest" },
-    { "$ref": "#/$defs/sessionCwdChangeResult" }
+    { "$ref": "#/$defs/sessionCwdChangeResult" },
+    { "$ref": "#/$defs/sessionBindingReadRequest" },
+    { "$ref": "#/$defs/sessionBindingReadResult" }
   ],
   "$defs": {
     "billingLane": {
@@ -146,7 +148,8 @@
         "_openclank/operations/v1/artifact/write",
         "_openclank/operations/v1/executor/invoke",
         "_openclank/operations/v1/execute",
-        "_openclank/session/v1/cwd/change"
+        "_openclank/session/v1/cwd/change",
+        "_openclank/session/v1/binding/read"
       ]
     },
     "capabilityDeclaration": {
@@ -746,19 +749,64 @@
     },
     "sessionCwdChangeRequest": {
       "type": "object",
-      "required": ["sessionID", "requestedCwd"],
+      "required": ["sessionID", "requestedCwd", "expectedWorkspaceRevision", "transitionID"],
       "properties": {
         "sessionID": { "type": "string", "minLength": 1 },
-        "requestedCwd": { "type": "string", "minLength": 1 }
+        "requestedCwd": { "type": "string", "minLength": 1 },
+        "expectedWorkspaceRevision": { "type": "integer", "minimum": 0 },
+        "transitionID": { "type": "string", "minLength": 1, "maxLength": 128 }
       },
       "additionalProperties": false
     },
     "sessionCwdChangeResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["outcome", "canonicalCwd", "workspaceRevision", "changed", "transitionID"],
+          "properties": {
+            "outcome": { "const": "accepted" },
+            "canonicalCwd": { "type": "string", "minLength": 1 },
+            "workspaceRevision": { "type": "integer", "minimum": 0 },
+            "changed": { "type": "boolean" },
+            "transitionID": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["outcome", "transitionID", "committed", "code"],
+          "properties": {
+            "outcome": { "const": "rejected" },
+            "transitionID": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "committed": { "const": false },
+            "code": { "enum": ["invalid_cwd", "unknown_session", "stale_engine_session", "owner_mismatch", "workspace_rejected", "workspace_revision_conflict", "binding_unavailable"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "sessionBindingReadRequest": {
       "type": "object",
-      "required": ["canonicalCwd"],
+      "required": ["sessionID"],
+      "properties": { "sessionID": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "sessionBindingReadResult": {
+      "type": "object",
+      "required": ["engineSessionID", "stableChatID", "owner", "canonicalCwd", "workspaceRevision", "authorityWorkspaceID", "memoryWorkspaceID", "copalWorkspace", "memoryEnabled", "engineAliases", "mapRevision", "mappingRevision"],
       "properties": {
+        "engineSessionID": { "type": "string", "minLength": 1 },
+        "stableChatID": { "type": "string", "minLength": 1 },
+        "owner": { "type": "string", "minLength": 1 },
         "canonicalCwd": { "type": "string", "minLength": 1 },
-        "workspaceRevision": { "type": "integer", "minimum": 0 }
+        "workspaceRevision": { "type": "integer", "minimum": 0 },
+        "authorityWorkspaceID": { "type": "string", "minLength": 1 },
+        "memoryWorkspaceID": { "type": "string", "minLength": 1 },
+        "copalWorkspace": { "type": "string", "minLength": 1 },
+        "memoryEnabled": { "type": "boolean" },
+        "engineAliases": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "mapRevision": { "type": "integer", "minimum": 0 },
+        "mappingRevision": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },
@@ -1110,6 +1158,11 @@
       "direction": "engine_to_host",
       "request": "#/$defs/sessionCwdChangeRequest",
       "result": "#/$defs/sessionCwdChangeResult"
+    },
+    "_openclank/session/v1/binding/read": {
+      "direction": "engine_to_host",
+      "request": "#/$defs/sessionBindingReadRequest",
+      "result": "#/$defs/sessionBindingReadResult"
     }
   }
 }
