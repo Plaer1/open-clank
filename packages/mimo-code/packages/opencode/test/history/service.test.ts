@@ -363,6 +363,27 @@ describe("History.get", () => {
         expect(emojiPage!.text).toBe("😀")
         expect(emojiPage!.text.codePointAt(0)).toBe(0x1f600)
 
+        // Mid-pair offset + tight budget: next_offset must be the snapped end
+        // index so the following BMP char ("b") is not skipped on the next page.
+        const midPairPage = yield* svc.get({
+          session_id: "ses_a",
+          message_id: "m0",
+          part_id: "p0",
+          offset: 2,
+          length: 2,
+        })
+        expect(midPairPage!.text).toBe("😀")
+        expect(midPairPage!.has_more).toBe(true)
+        expect(midPairPage!.next_offset).toBe(3)
+        const afterSnap = yield* svc.get({
+          session_id: "ses_a",
+          message_id: "m0",
+          part_id: "p0",
+          offset: midPairPage!.next_offset!,
+          length: 2,
+        })
+        expect(afterSnap!.text).toBe("b")
+
         const full = yield* svc.get({
           session_id: "ses_a",
           message_id: "m0",

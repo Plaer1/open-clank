@@ -103,7 +103,7 @@ function pageUtf16(
   raw: string,
   offset: number,
   budget: number,
-): { text: string; consumed: number; hasMore: boolean } {
+): { text: string; end: number; hasMore: boolean } {
   const skip = Math.max(0, offset)
   const limit = Math.max(0, budget)
   let index = 0
@@ -133,13 +133,15 @@ function pageUtf16(
     const size = cp > 0xffff ? 2 : 1
     return {
       text: raw.slice(index, index + size),
-      consumed: size,
+      end: index + size,
       hasMore: index + size < raw.length,
     }
   }
   return {
     text: raw.slice(index, end),
-    consumed: taken,
+    // Absolute snapped end index — not offset+consumed — so a mid-pair
+    // backward snap cannot skip the next BMP character on the following page.
+    end,
     hasMore: end < raw.length,
   }
 }
@@ -416,7 +418,7 @@ export const layer = Layer.effect(
         tool_name: d.type === "tool" ? (d.tool ?? null) : null,
         text: page.text,
         has_more: page.hasMore,
-        next_offset: page.hasMore ? offset + page.consumed : null,
+        next_offset: page.hasMore ? page.end : null,
         attachments,
         time_created: Number(partRow.time_created ?? 0),
       }

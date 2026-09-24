@@ -21,6 +21,20 @@ from .models import Session, ChatMessage
 from src.attachment_refs import attachment_refs_from_metadata, persistable_message_content
 from src.upload_handler import reserve_message_upload_references
 
+# Bound at module scope so archive-import failure paths can raise a real
+# recoverable type instead of NameError (N2).
+try:
+    from src.openclank.conversation_archive import ArchiveUnavailableError
+except Exception:  # pragma: no cover - module present in normal deployments
+    class ArchiveUnavailableError(Exception):
+        """Fallback recoverable type when conversation_archive is unimportable."""
+
+        message: str = "conversation archive unavailable"
+        retry_after_ms: int = 250
+
+        def __str__(self) -> str:
+            return getattr(self, "message", "conversation archive unavailable")
+
 # Re-export singleton accessors from models for convenience
 from .models import set_session_manager_instance, get_session_manager_instance
 
@@ -665,10 +679,6 @@ class SessionManager:
             # False contract (reservation / missing session).
             logger.error("Error replacing session history: %s", e)
             db.rollback()
-            try:
-                from src.openclank.conversation_archive import ArchiveUnavailableError
-            except Exception:
-                return False
             if isinstance(e, ArchiveUnavailableError):
                 raise
             return False
@@ -769,7 +779,7 @@ class SessionManager:
         ``replace_messages`` can refuse to prune projection rows.
         """
         try:
-            from src.openclank.conversation_archive import ArchiveUnavailableError, get_conversation_archive
+            from src.openclank.conversation_archive import get_conversation_archive
         except Exception as exc:
             logger.debug("conversation archive unavailable", exc_info=True)
             raise ArchiveUnavailableError(message=f"archive import failed: {exc}") from exc
@@ -794,7 +804,7 @@ class SessionManager:
         roll back instead of committing an untombstoned drop.
         """
         try:
-            from src.openclank.conversation_archive import ArchiveUnavailableError, get_conversation_archive
+            from src.openclank.conversation_archive import get_conversation_archive
         except Exception as exc:
             raise ArchiveUnavailableError(message=f"archive import failed: {exc}") from exc
         try:
@@ -818,10 +828,48 @@ class SessionManager:
                     revision=part.revision,
                     reason="projection_drop",
                 )
-                if not result.get("ok") and result.get("error") != "not_found":
-                    raise ArchiveUnavailableError(
-                        message=f"projection drop tombstone failed: {result.get('error')}"
+                if result.get("ok"):
+                    continue
+                error = str(result.get("error") or "")
+                if error == "not_found":
+                    # Fail-closed: not_found authorizes the drop only when
+                    # archive state proves the part was never present or is
+                    # already tombstoned (a prior version record exists).
+                    probe = archive.get_part(
+                        owner=str(owner or ""),
+                        chat_id=str(session_id),
+                        actor_id=actor_id,
+                        message_id=str(row.id),
+                        part_id=part.part_id,
                     )
+                    if probe.get("ok") and probe.get("part", {}).get("tombstone"):
+                        continue
+                    if not probe.get("ok"):
+                        listing = archive.get_message_parts(
+                            owner=str(owner or ""),
+                            chat_id=str(session_id),
+                            actor_id=actor_id,
+                            message_id=str(row.id),
+                        )
+                        if listing.get("ok"):
+                            known = {
+                                str(p.get("part_id"))
+                                for p in listing.get("parts") or []
+                            }
+                            if part.part_id not in known:
+                                # Never present in the archive: nothing to version.
+                                continue
+                        # Message-level miss is not proof of never-present
+                        # after a successful append — fail closed.
+                    raise ArchiveUnavailableError(
+                        message=(
+                            "projection drop tombstone not_found without archive "
+                            f"proof for part {part.part_id}"
+                        )
+                    )
+                raise ArchiveUnavailableError(
+                    message=f"projection drop tombstone failed: {result.get('error')}"
+                )
         except ArchiveUnavailableError:
             raise
         except Exception as exc:
