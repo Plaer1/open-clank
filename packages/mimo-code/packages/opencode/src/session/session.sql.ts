@@ -26,6 +26,8 @@ export const SessionTable = sqliteTable(
     slug: text().notNull(),
     directory: text().notNull(),
     title: text().notNull(),
+    title_source: text().$type<"fallback" | "generated" | "user">().notNull().default("user"),
+    title_revision: integer().notNull().default(0),
     version: text().notNull(),
     share_url: text(),
     summary_additions: integer(),
@@ -38,6 +40,8 @@ export const SessionTable = sqliteTable(
     time_compacting: integer(),
     time_archived: integer(),
     last_checkpoint_message_id: text().$type<MessageID>(),
+    // Retain the inert column for older clients sharing this database.
+    auto_worktree_hint_sent: integer({ mode: "boolean" }),
   },
   (table) => [
     index("session_project_idx").on(table.project_id),

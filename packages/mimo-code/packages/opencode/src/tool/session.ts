@@ -724,9 +724,17 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         // standing child (topicOf reads it back from sessions.children).
         if (op.topic) {
           const base = op.title ?? `${op.mode ?? "build"}: ${op.task.slice(0, 40)}`
-          yield* sessions.setTitle({ sessionID: result.sessionID, title: tagTitle(op.topic, base) })
+          yield* sessions.setTitle({
+            sessionID: result.sessionID,
+            title: tagTitle(op.topic, base),
+            expectedRevision: result.titleRevision,
+          })
         } else if (op.title) {
-          yield* sessions.setTitle({ sessionID: result.sessionID, title: op.title })
+          yield* sessions.setTitle({
+            sessionID: result.sessionID,
+            title: op.title,
+            expectedRevision: result.titleRevision,
+          })
         }
         return {
           title: `Session created: ${result.sessionID}`,

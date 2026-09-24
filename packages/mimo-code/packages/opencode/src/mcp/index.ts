@@ -17,6 +17,7 @@ import z from "zod/v4"
 import { Installation } from "../installation"
 import { InstallationVersion } from "../installation/version"
 import { withTimeout } from "@/util/timeout"
+import { childProcessEnv } from "@/util/child-process-env"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { McpOAuthProvider } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
@@ -404,7 +405,8 @@ export const layer = Layer.effect(
         args,
         cwd,
         env: {
-          ...process.env,
+          // childProcessEnv: MCP servers are third-party binaries running as the user.
+          ...childProcessEnv(),
           ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
           ...mcp.environment,
         },

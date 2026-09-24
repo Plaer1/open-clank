@@ -17,6 +17,7 @@ import { Shell } from "@/shell/shell"
 
 import { SessionCwd } from "./session-cwd"
 import { ManagedProvider } from "@/acp/managed-provider"
+import { childProcessEnv } from "@/util/child-process-env"
 import { BashArity } from "@/permission/arity"
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -799,8 +800,9 @@ export const BashTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
+      const inherited = childProcessEnv()
       return shellEnvironment({
-        ...process.env,
+        ...inherited,
         // Python ignores the console code page when stdout is a pipe and falls
         // back to the ANSI code page (GBK on zh-CN), producing mojibake. Force
         // UTF-8 for child Python processes on Windows.

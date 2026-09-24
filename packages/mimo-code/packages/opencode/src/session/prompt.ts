@@ -501,7 +501,12 @@ export const layer = Layer.effect(
       if (stable) {
         if (Session.isDefaultTitle(input.session.title))
           yield* sessions
-            .setTitle({ sessionID: input.session.id, title: stable })
+            .setTitleIfDefault({
+              sessionID: input.session.id,
+              title: stable,
+              expectedRevision: input.session.titleRevision,
+              source: "fallback",
+            })
             .pipe(
               Effect.catchCause((cause) => elog.error("failed to set stable title", { error: Cause.squash(cause) })),
             )
@@ -561,7 +566,11 @@ export const layer = Layer.effect(
       if (!cleaned) return
       const t = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
       yield* sessions
-        .setTitle({ sessionID: input.session.id, title: t })
+        .setGeneratedTitle({
+          sessionID: input.session.id,
+          title: t,
+          expectedRevision: input.session.titleRevision,
+        })
         .pipe(Effect.catchCause((cause) => elog.error("failed to generate title", { error: Cause.squash(cause) })))
     })
 
