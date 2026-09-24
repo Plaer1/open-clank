@@ -147,7 +147,7 @@ def test_rpc_error_preserves_typed_missing_session_signal():
     assert generic.session_missing is False
 
 
-def test_private_discard_sends_canonical_candidate_cwd():
+def test_private_discard_sends_canonical_candidate_cwd(tmp_path):
     from src.openclank.acp_client import ACPClient
 
     client = ACPClient.__new__(ACPClient)
@@ -158,11 +158,28 @@ def test_private_discard_sends_canonical_candidate_cwd():
         return {"deleted": True}
 
     client._send_request = send
-    asyncio.run(client.discard_session("engine-candidate", "/tmp/canonical"))
+    canonical_cwd = str(tmp_path.resolve())
+    asyncio.run(client.discard_session("engine-candidate", canonical_cwd))
     assert calls == [(
         "_odysseus/session/discard",
-        {"sessionId": "engine-candidate", "cwd": "/tmp/canonical"},
+        {"sessionId": "engine-candidate", "cwd": canonical_cwd},
     )]
+
+
+@pytest.mark.parametrize("result", [{}, {"deleted": False}, {"deleted": True, "extra": 1}])
+def test_private_discard_rejects_unconfirmed_result(result, tmp_path):
+    from src.openclank.acp_client import ACPClient
+
+    client = ACPClient.__new__(ACPClient)
+
+    async def send(_method, _params):
+        return result
+
+    client._send_request = send
+    with pytest.raises(RuntimeError):
+        asyncio.run(client.discard_session("engine-candidate", str(tmp_path.resolve())))
+    with pytest.raises(ValueError):
+        asyncio.run(client.discard_session("engine-candidate", str(tmp_path / ".." / tmp_path.name)))
 
 
 def test_candidate_discard_uses_persisted_binding_cwd(sqlite_projection, tmp_path):
@@ -195,6 +212,128 @@ def test_candidate_discard_uses_persisted_binding_cwd(sqlite_projection, tmp_pat
     bridge.cleanup_session = lambda _session_id: asyncio.sleep(0)
     asyncio.run(bridge._discard_unbound_engine_session("engine-a", chat_id="chat-a"))
     assert client.calls == [("engine-a", binding["physicalCwd"])]
+
+
+def test_discard_failure_preserves_binding_and_fences(sqlite_projection, tmp_path):
+    binding = _binding()
+    projection.save_managed_binding(
+        "chat-a", binding, owner="alice", expected_workspace_revision=0,
+        expected_engine_session_id=None, expected_map_revision=0, expected_mapping_revision=0,
+    )
+    from src.openclank.acp_bridge import ACPBridge
+
+    class Client:
+        async def discard_session(self, _session_id, _cwd):
+            raise RuntimeError("ambiguous discard")
+
+    fenced = []
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._client = Client()
+    bridge._owner = "alice"
+    bridge._durable_session_map = type("Map", (), {
+        "fence": lambda _self, chat: fenced.append(chat),
+        "flat_current": lambda _self: {},
+    })()
+    bridge._pending_session_results = {}
+    bridge._session_models = {}
+    bridge._session_state = {}
+    bridge._session_context = {}
+    bridge._turns = {}
+    bridge._queues = {}
+    bridge.cleanup_session = lambda _session_id: asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="discard was not confirmed"):
+        asyncio.run(bridge._discard_unbound_engine_session("engine-a", chat_id="chat-a"))
+    assert fenced == ["chat-a"]
+    assert projection.get_managed_binding("chat-a", owner="alice")["engineSessionID"] == "engine-a"
+
+
+def test_map_absent_forget_cleans_owner_binding_and_projection(sqlite_projection, tmp_path):
+    binding = _binding()
+    projection.save_managed_binding(
+        "chat-a", binding, owner="alice", expected_workspace_revision=0,
+        expected_engine_session_id=None, expected_map_revision=0, expected_mapping_revision=0,
+    )
+    from src.openclank.acp_bridge import ACPBridge
+
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._owner = "alice"
+    bridge._session_map = {"chat-a": "engine-a"}
+    bridge._durable_session_map = type("Map", (), {
+        "lookup": lambda _self, _chat: None,
+        "flat_current": lambda _self: {},
+    })()
+    bridge.forget_session("chat-a")
+    assert projection.get_managed_binding("chat-a", owner="alice") == {}
+
+
+def test_map_forget_failure_restores_binding(sqlite_projection, tmp_path):
+    binding = _binding()
+    projection.save_managed_binding(
+        "chat-a", binding, owner="alice", expected_workspace_revision=0,
+        expected_engine_session_id=None, expected_map_revision=0, expected_mapping_revision=0,
+    )
+    from src.openclank.acp_bridge import ACPBridge
+
+    class Map:
+        def lookup(self, _chat):
+            return {"current": "engine-a", "revision": 1}
+
+        def revisions(self, _chat):
+            return (1, 1)
+
+        def forget(self, *_args, **_kwargs):
+            raise RuntimeError("map commit failed")
+
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._owner = "alice"
+    bridge._session_map = {"chat-a": "engine-a"}
+    bridge._durable_session_map = Map()
+    with pytest.raises(RuntimeError, match="map commit failed"):
+        bridge.forget_session("chat-a")
+    assert projection.get_managed_binding("chat-a", owner="alice")["engineSessionID"] == "engine-a"
+
+
+def test_mapped_sessions_refreshes_durable_authority():
+    from src.openclank.acp_bridge import ACPBridge
+
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._owner = "alice"
+    bridge._session_map = {"chat-a": "engine-old"}
+    bridge._durable_session_map = type("Map", (), {
+        "flat_current": lambda _self: {"chat-a": "engine-new"},
+    })()
+    assert bridge.mapped_sessions() == {"chat-a": "engine-new"}
+    assert bridge._session_map == {"chat-a": "engine-new"}
+
+
+def test_resume_rejects_stale_engine_id_before_rpc(sqlite_projection, tmp_path):
+    from src.openclank.acp_bridge import ACPBridge
+
+    mapping = OwnerSessionMap(tmp_path / "session-map.json", "alice")
+    mapping.bind("chat-a", "engine-new", expected_current=None, expected_mapping_revision=0)
+    projection.save_managed_binding(
+        "chat-a", _binding(engine="engine-new"), owner="alice",
+        expected_workspace_revision=0, expected_engine_session_id=None,
+        expected_map_revision=0, expected_mapping_revision=0,
+    )
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._owner = "alice"
+    bridge._durable_session_map = mapping
+    bridge._session_map = {"chat-a": "engine-new"}
+    bridge._client = type("Client", (), {"resume_session": lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale RPC"))})()
+    with pytest.raises(RuntimeError, match="durable current mapping"):
+        asyncio.run(bridge.resume_session("chat-a", "engine-old"))
+
+
+def test_fence_persistence_failure_is_surfaceable():
+    from src.openclank.acp_bridge import ACPBridge
+
+    bridge = ACPBridge.__new__(ACPBridge)
+    bridge._durable_session_map = type("Map", (), {
+        "fence": lambda *_args: (_ for _ in ()).throw(OSError("fence fsync failed")),
+    })()
+    with pytest.raises(RuntimeError, match="fence could not be persisted"):
+        bridge._fence_admission("chat-a", "test")
 
 
 def test_candidate_binding_uses_per_chat_axes_after_unrelated_map_mutation(sqlite_projection, tmp_path):

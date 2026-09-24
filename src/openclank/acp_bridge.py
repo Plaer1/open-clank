@@ -1240,6 +1240,7 @@ class ACPBridge:
         *,
         chat_id: Optional[str] = None,
         cwd: Optional[str] = None,
+        owner: Optional[str] = None,
     ) -> None:
         """Destructively discard a privately created engine session.
 
@@ -1249,11 +1250,12 @@ class ACPBridge:
         failure window.
         """
         candidate_cwd = None
+        binding_owner = owner if owner is not None else self._owner
         if chat_id:
             try:
                 from src.openclank.transcript_projection import get_managed_binding
 
-                binding = get_managed_binding(chat_id, owner=self._owner)
+                binding = get_managed_binding(chat_id, owner=binding_owner)
                 if binding.get("engineSessionID") == session_id:
                     value = binding.get("physicalCwd")
                     if isinstance(value, str) and value and os.path.isabs(value) and str(Path(value).resolve(strict=False)) == value:
@@ -1563,6 +1565,7 @@ class ACPBridge:
                     await self._discard_unbound_engine_session(
                         str(previous_binding["engineSessionID"]),
                         chat_id=odysseus_session,
+                        owner=effective_owner,
                     )
                     delete_managed_binding(
                         odysseus_session,
@@ -1631,7 +1634,7 @@ class ACPBridge:
                 try:
                     winner = self._session_map_entry(odysseus_session).get("current")
                     if winner and winner != new_id:
-                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=cwd or self._cwd)
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=cwd or self._cwd, owner=effective_owner)
                         candidate_discarded = True
                         self._session_map = self._durable_session_map.flat_current()
                         await self.resume_session(
@@ -1679,7 +1682,7 @@ class ACPBridge:
                         )
                 finally:
                     if not preserve_candidate and not candidate_discarded:
-                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=cwd or self._cwd)
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=cwd or self._cwd, owner=effective_owner)
                 raise
             return new_id
         from src.openclank.transcript_projection import get_managed_binding
@@ -1701,6 +1704,7 @@ class ACPBridge:
                 orphan_engine,
                 chat_id=odysseus_session,
                 cwd=orphan_binding.get("physicalCwd"),
+                owner=self._owner,
             )
             from src.openclank.transcript_projection import save_managed_binding
 
@@ -1835,7 +1839,7 @@ class ACPBridge:
                 try:
                     winner = self._session_map_entry(odysseus_session).get("current")
                     if winner and winner != new_id:
-                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=resume_cwd)
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=resume_cwd, owner=owner if owner is not None else self._owner)
                         candidate_discarded = True
                         self._session_map = self._durable_session_map.flat_current()
                         await self.resume_session(
@@ -1889,7 +1893,7 @@ class ACPBridge:
                         )
                 finally:
                     if not preserve_candidate and not candidate_discarded:
-                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=resume_cwd)
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=resume_cwd, owner=owner if owner is not None else self._owner)
                 raise
             return new_id
 

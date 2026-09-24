@@ -128,11 +128,13 @@ class ACPClient:
         resumable engine state. Candidate admission uses this separate,
         destructive extension so an unexposed engine cannot remain durable.
         """
+        if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute() or str(Path(cwd).resolve(strict=False)) != cwd:
+            raise ValueError("private session discard requires a canonical absolute cwd")
         result = await self._send_request(
             "_odysseus/session/discard",
             {"sessionId": session_id, "cwd": cwd},
         )
-        if not isinstance(result, dict) or result.get("deleted") is not True:
+        if result != {"deleted": True}:
             raise RuntimeError("engine did not confirm private session discard")
 
     async def managed_engine_call(self, method: str, params: dict) -> dict:
