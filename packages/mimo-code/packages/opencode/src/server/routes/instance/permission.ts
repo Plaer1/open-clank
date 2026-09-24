@@ -126,7 +126,7 @@ export const PermissionRoutes = lazy(() =>
       describeRoute({
         summary: "Get auto-approve-delete state",
         description:
-          "Whether irreversible deletes skip the extra bash_delete confirmation. Instance-scoped; defaults to the MIMOCODE_AUTO_APPROVE_DELETE env var.",
+          "Whether irreversible deletes skip the extra bash_delete confirmation. Instance-scoped; defaults to the MIMOCODE_AUTO_APPROVE_DELETE env var. Does not cover bash_destructive or other forced-ask classes.",
         operationId: "permission.autoApproveDelete",
         responses: {
           200: {
@@ -150,7 +150,7 @@ export const PermissionRoutes = lazy(() =>
       describeRoute({
         summary: "Set auto-approve-delete state",
         description:
-          "Trust the model with irreversible deletes, skipping the extra bash_delete confirmation. Distinct from skip-all, which deliberately does NOT cover forced-ask permissions. Applies instance-wide (this directory only, so other directories served by the same process are unaffected) and subagents inherit it. Explicit `bash: deny` rules still block. Already-pending delete asks are left for a human — the command they guard is irreversible.",
+          "Trust the model with irreversible deletes, skipping the extra bash_delete confirmation. Distinct from skip-all, which deliberately does NOT cover forced-ask permissions. Does not cover bash_destructive or other forced-ask classes — those stay human-only. Applies instance-wide (this directory only, so other directories served by the same process are unaffected) and subagents inherit it. Explicit `bash: deny` rules still block. Already-pending delete asks are left for a human — the command they guard is irreversible.",
         operationId: "permission.setAutoApproveDelete",
         responses: {
           200: {

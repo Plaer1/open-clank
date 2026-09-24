@@ -184,9 +184,10 @@ interface State {
   // instead. Explicit "deny" rules still win (they return before this check).
   // Runtime-only, instance-scoped: subagents in the same project inherit it.
   skipAll: boolean
-  // When true, forced-ask delete confirmations may auto-allow after explicit
-  // deny has had its say. Instance-scoped like skipAll. Defaults to the
-  // dedicated delete opt-out or dangerous startup mode.
+  // When true, named delete-class forced-ask confirmations (bash_delete) may
+  // auto-allow after explicit deny has had its say. Does NOT cover
+  // bash_destructive or any other FORCED_ASK class. Instance-scoped like
+  // skipAll. Defaults to the dedicated delete opt-out or dangerous startup mode.
   autoApproveDelete: boolean
   // Timeout in ms for permission asks that require human confirmation.
   // null = no timeout. Orthogonal to skipAll.
@@ -206,6 +207,14 @@ export function evaluate(permission: string, pattern: string, ...rulesets: Rules
 // (e.g. MIMOCODE_AUTO_APPROVE_DESTRUCTIVE for bash_destructive) is the only bypass.
 // bash_delete remains forced-ask for older clients and stored requests.
 const FORCED_ASK = new Set(["bash_destructive", "bash_delete"])
+
+// Delete-class subset of FORCED_ASK that `autoApproveDelete` may auto-approve.
+// Intentionally narrower than FORCED_ASK: bash_destructive stays human-only
+// under this toggle (its tool-side env opt-out is MIMOCODE_AUTO_APPROVE_DESTRUCTIVE).
+// Matches the route copy: "skipping the extra bash_delete confirmation". No
+// temp-file path classifier sits at the permission layer — bash_delete is the
+// sole named delete case (legacy clients / stored requests).
+const DELETE_FORCED_ASK = new Set(["bash_delete"])
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Permission") {}
 
@@ -282,8 +291,10 @@ export const layer = Layer.effect(
 
       // Dangerous startup mode and the dedicated delete exemption may bypass
       // the human confirmation, but only after every explicit deny above has
-      // had a chance to reject the request.
-      if (needsAsk && forced && s.autoApproveDelete) {
+      // had a chance to reject the request. Scope is the named delete case
+      // only — bash_destructive and any other FORCED_ASK class stay human-only
+      // under this toggle (see DELETE_FORCED_ASK).
+      if (needsAsk && forced && s.autoApproveDelete && DELETE_FORCED_ASK.has(request.permission)) {
         log.info("auto-approve-delete active, auto-allowing", {
           permission: request.permission,
           patterns: request.patterns,
