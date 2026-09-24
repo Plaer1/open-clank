@@ -7,8 +7,14 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from starlette.datastructures import URL
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 import routes.mimo_provider_routes as routes
+import core.database as database
+import src.openclank.transcript_projection as projection
+from core.database import Base, MimoProjection, Session
+from src.openclank.session_map import OwnerSessionMap
 
 
 class Supervisor:
@@ -234,6 +240,111 @@ async def test_session_delete_uses_supervisor_internal_client():
         ("delete", "/session/mimo%2Fsession"),
         ("forget", "odysseus-session"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_http_uses_persisted_binding_over_conflicting_projection(
+    tmp_path,
+    monkeypatch,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'authority.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", sessions)
+    monkeypatch.setattr(projection, "SessionLocal", sessions)
+    db = sessions()
+    db.add(Session(
+        id="chat-a",
+        name="chat",
+        endpoint_url="http://example.test",
+        model="model",
+        owner="alice",
+        mimo_state={},
+    ))
+    db.flush()
+    db.add(MimoProjection(
+        odysseus_session_id="chat-a",
+        owner="alice",
+        mimo_session_id="projection-engine",
+        workspace="/projection-must-not-win",
+        endpoint_url="http://example.test",
+        model="model",
+        transcript_revision=0,
+        covered_message_ids="[]",
+        canonical_digest="digest",
+        lifecycle_state="active",
+        active_turn_id="turn-1",
+    ))
+    db.commit()
+    db.close()
+    bound_cwd = str(tmp_path / "managed")
+    (tmp_path / "managed").mkdir()
+    binding = {
+        "owner": "alice", "stableChatID": "chat-a", "engineSessionID": "engine-a",
+        "engineAliases": [], "memoryWorkspaceID": "memory:chat-a",
+        "authorityWorkspaceID": "workspace:chat-a", "copalWorkspace": "default",
+        "physicalCwd": bound_cwd, "workspaceRevision": 0,
+        "mapRevision": 1, "mappingRevision": 1, "memoryEnabled": True,
+        "transition": None,
+    }
+    projection.save_managed_binding(
+        "chat-a", binding, owner="alice", expected_workspace_revision=0,
+        expected_engine_session_id=None, expected_map_revision=0,
+        expected_mapping_revision=0,
+    )
+    map_path = tmp_path / "session-map.json"
+    mapping = OwnerSessionMap(map_path, "alice")
+    mapping.bind("chat-a", "engine-a", expected_map_revision=0, expected_current=None, expected_mapping_revision=0)
+
+    from src.openclank.mimo_supervisor import MimoSupervisor
+
+    class ScriptedACPClient:
+        def register_callback(self, method, callback):
+            self.callbacks = getattr(self, "callbacks", {})
+            self.callbacks[method] = callback
+
+        def on_session_update(self, callback):
+            self.session_update = callback
+
+    from src.openclank.acp_bridge import ACPBridge
+
+    bridge = ACPBridge(
+        ScriptedACPClient(),
+        cwd=bound_cwd,
+        owner="alice",
+        session_map_path=map_path,
+    )
+
+    calls = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            return SimpleNamespace(status_code=200)
+
+    worker = MimoSupervisor("alice", partitioned=True)
+    worker._bridge = bridge
+    worker._proc = SimpleNamespace(returncode=None)
+    worker.internal_http_client = lambda *, timeout: Client()
+    await worker.session_http_request("chat-a", "GET", "status", owner="alice")
+    assert calls[0][2]["params"]["directory"] == bound_cwd
+    assert calls[0][2]["params"]["directory"] != "/projection-must-not-win"
+    projection.save_managed_binding(
+        "chat-a",
+        {**binding, "engineSessionID": "forged-engine", "mapRevision": 2, "mappingRevision": 2},
+        owner="alice", expected_workspace_revision=0,
+        expected_engine_session_id="engine-a", expected_map_revision=1,
+        expected_mapping_revision=1,
+    )
+    with pytest.raises(RuntimeError, match="binding is stale"):
+        await worker.session_http_request("chat-a", "GET", "status", owner="alice")
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio

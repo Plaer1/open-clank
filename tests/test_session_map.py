@@ -1,8 +1,46 @@
 import json
+import multiprocessing
+import os
 
 import pytest
 
 from src.openclank.session_map import OwnerSessionMap, SessionMapCollision
+
+
+def _bind_process(path, owner, engine, start, result, chat="chat", ready=None):
+    mapping = OwnerSessionMap(path, owner)
+    current = mapping.lookup(chat)
+    expected_map_revision = mapping.map_revision()
+    expected_current = current["current"] if current else None
+    expected_mapping_revision = int(current.get("revision") or 0) if current else 0
+    if ready is not None:
+        ready.put(engine)
+    start.wait(10)
+    try:
+        result.put((engine, "ok", mapping.bind(
+            chat,
+            engine,
+            expected_map_revision=expected_map_revision,
+            expected_current=expected_current,
+            expected_mapping_revision=expected_mapping_revision,
+        )))
+    except Exception as exc:  # pragma: no cover - asserted by parent
+        result.put((engine, type(exc).__name__, str(exc)))
+
+
+def _forget_process(path, owner, expected_engine, start, result):
+    start.wait(10)
+    mapping = OwnerSessionMap(path, owner)
+    try:
+        entry = mapping.lookup("chat")
+        result.put(("forget", "ok", mapping.forget(
+            "chat",
+            expected_map_revision=mapping.map_revision(),
+            expected_current=expected_engine,
+            expected_mapping_revision=int(entry.get("revision") or 0) if entry else 0,
+        )))
+    except Exception as exc:  # pragma: no cover - asserted by parent
+        result.put(("forget", type(exc).__name__, str(exc)))
 
 
 def test_v1_upgrade_alias_bound_and_atomic_owner_map(tmp_path):
@@ -115,3 +153,127 @@ def test_post_replace_directory_fsync_ambiguity_reconciles_exact_candidate(tmp_p
     )
     assert result["current"] == "engine-1"
     assert mapping.lookup("chat")["current"] == "engine-1"
+
+
+def test_empty_v1_map_upgrades_on_first_mutation(tmp_path):
+    path = tmp_path / "session-map.json"
+    path.write_text("{}")
+    mapping = OwnerSessionMap(path, "alice")
+    assert mapping.flat_current() == {}
+    mapping.bind("chat", "engine-1", expected_map_revision=0, expected_current=None, expected_mapping_revision=0)
+    assert json.loads(path.read_text())["version"] == 2
+
+
+def test_two_real_processes_have_one_fresh_bind_winner(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    path = tmp_path / "session-map.json"
+    start = ctx.Event()
+    result = ctx.Queue()
+    ready = ctx.Queue()
+    workers = [ctx.Process(target=_bind_process, args=(path, "alice", engine, start, result, "chat", ready))
+               for engine in ("engine-a", "engine-b")]
+    for worker in workers:
+        worker.start()
+    [ready.get(timeout=10) for _ in workers]
+    start.set()
+    rows = [result.get(timeout=10) for _ in workers]
+    for worker in workers:
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+    assert sorted(row[1] for row in rows) == ["ValueError", "ok"]
+    assert OwnerSessionMap(path, "alice").lookup("chat")["current"] in {"engine-a", "engine-b"}
+
+
+def test_two_real_processes_have_one_remap_winner_and_stale_forget_loses(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    path = tmp_path / "session-map.json"
+    mapping = OwnerSessionMap(path, "alice")
+    mapping.bind("chat", "engine-0", expected_map_revision=0, expected_current=None, expected_mapping_revision=0)
+    start = ctx.Event()
+    result = ctx.Queue()
+    ready = ctx.Queue()
+    workers = [ctx.Process(target=_bind_process, args=(path, "alice", engine, start, result, "chat", ready))
+               for engine in ("engine-a", "engine-b")]
+    for worker in workers:
+        worker.start()
+    [ready.get(timeout=10) for _ in workers]
+    start.set()
+    rows = [result.get(timeout=10) for _ in workers]
+    for worker in workers:
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+    assert sorted(row[1] for row in rows) == ["ValueError", "ok"]
+    winner = OwnerSessionMap(path, "alice").lookup("chat")["current"]
+    stale_start = ctx.Event()
+    stale_result = ctx.Queue()
+    stale = ctx.Process(target=_forget_process, args=(path, "alice", "engine-0", stale_start, stale_result))
+    stale.start()
+    stale_start.set()
+    row = stale_result.get(timeout=10)
+    stale.join(timeout=10)
+    assert stale.exitcode == 0
+    assert row[1] == "ValueError"
+    assert OwnerSessionMap(path, "alice").lookup("chat")["current"] == winner
+
+
+def test_two_real_processes_can_mutate_different_chats_without_global_revision_staleness(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    path = tmp_path / "session-map.json"
+    start = ctx.Event()
+    result = ctx.Queue()
+    ready = ctx.Queue()
+    workers = [
+        ctx.Process(target=_bind_process, args=(path, "alice", "engine-a", start, result, "chat-a", ready)),
+        ctx.Process(target=_bind_process, args=(path, "alice", "engine-b", start, result, "chat-b", ready)),
+    ]
+    for worker in workers:
+        worker.start()
+    [ready.get(timeout=10) for _ in workers]
+    start.set()
+    rows = [result.get(timeout=10) for _ in workers]
+    for worker in workers:
+        worker.join(timeout=10)
+        assert worker.exitcode == 0
+    assert sorted(row[1] for row in rows) == ["ValueError", "ok"]
+    mapping = OwnerSessionMap(path, "alice")
+    loser_chat = "chat-a" if mapping.lookup("chat-a") is None else "chat-b"
+    loser_engine = "engine-a" if loser_chat == "chat-a" else "engine-b"
+    mapping.bind(
+        loser_chat,
+        loser_engine,
+        expected_map_revision=mapping.map_revision(),
+        expected_current=None,
+        expected_mapping_revision=0,
+    )
+    assert mapping.lookup("chat-a")["current"] == "engine-a"
+    assert mapping.lookup("chat-b")["current"] == "engine-b"
+
+
+def test_post_replace_directory_fsync_ambiguity_does_not_accept_different_candidate(tmp_path, monkeypatch):
+    mapping = OwnerSessionMap(tmp_path / "session-map.json", "alice")
+    original_write = mapping._write
+
+    def replace_different_then_report_failure(data):
+        changed = dict(data)
+        changed["chats"] = {}
+        changed["chats"]["other"] = {
+            "owner": "alice", "current": "different", "aliases": [], "revision": 1,
+        }
+        changed["mapRevision"] = int(data.get("mapRevision") or 0) + 1
+        original_write(changed)
+        raise OSError("directory fsync outcome is ambiguous")
+
+    monkeypatch.setattr(mapping, "_write", replace_different_then_report_failure)
+    with pytest.raises(OSError):
+        mapping.bind("chat", "engine-1", expected_map_revision=0, expected_current=None, expected_mapping_revision=0)
+    assert mapping.lookup("chat") is None
+    assert mapping.lookup("other")["current"] == "different"
+
+
+def test_lock_rejects_symlink(tmp_path):
+    mapping = OwnerSessionMap(tmp_path / "session-map.json", "alice")
+    target = tmp_path / "target.lock"
+    target.write_text("")
+    mapping.lock_path.symlink_to(target)
+    with pytest.raises(OSError):
+        mapping.read()

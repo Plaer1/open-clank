@@ -91,7 +91,10 @@ class OwnerSessionMap:
                     "revision": revision,
                 }
             return out
-        if isinstance(raw, dict) and raw and "version" not in raw:
+        # The original v1 format was a flat chat -> engine object.  An empty
+        # object is therefore a valid empty v1 map and must be upgraded on the
+        # first mutation just like a non-empty legacy map.
+        if isinstance(raw, dict) and "version" not in raw:
             out = self._empty()
             for chat, current in raw.items():
                 if not isinstance(chat, str) or not chat or not isinstance(current, str) or not current.strip():
@@ -332,3 +335,21 @@ class OwnerSessionMap:
 
     def map_revision(self) -> int:
         return int(self.read().get("mapRevision") or 0)
+
+    def fence(self, chat: str) -> None:
+        """Quarantine a chat after an unconfirmed cross-store compensation.
+
+        The row remains available for forensic recovery, but lookup/routing is
+        fail-closed until an operator or a deterministic reconciler clears the
+        fence under the same map lock.
+        """
+        def mutate(data):
+            quarantine = list(data.get("quarantine") or [])
+            if chat in quarantine:
+                return None, False
+            quarantine.append(str(chat))
+            data["quarantine"] = sorted(set(quarantine))
+            data["mapRevision"] = int(data.get("mapRevision") or 0) + 1
+            return None, True
+
+        self._mutate(mutate)
