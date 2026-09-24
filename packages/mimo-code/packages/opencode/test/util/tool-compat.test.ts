@@ -5,7 +5,6 @@ import {
   normalizeInput,
   parseToolInput,
   repairToolCall,
-  resolveName,
 } from "../../src/util/tool-compat"
 
 describe("util.tool-compat", () => {
@@ -18,25 +17,6 @@ describe("util.tool-compat", () => {
       expect(canonical("ApplyPatch")).toBe("applypatch")
       expect(canonical("read")).toBe("read")
       expect(canonical("Read")).toBe("read")
-    })
-  })
-
-  describe("resolveName", () => {
-    const tools = ["read", "write", "apply_patch", "multi_edit"] as const
-
-    test("returns exact matches unchanged", () => {
-      expect(resolveName("read", tools)).toBe("read")
-      expect(resolveName("apply_patch", tools)).toBe("apply_patch")
-    })
-
-    test("matches PascalCase and camelCase tool names", () => {
-      expect(resolveName("Read", tools)).toBe("read")
-      expect(resolveName("ApplyPatch", tools)).toBe("apply_patch")
-      expect(resolveName("MultiEdit", tools)).toBe("multi_edit")
-    })
-
-    test("returns undefined for unknown tools", () => {
-      expect(resolveName("grep", tools)).toBeUndefined()
     })
   })
 
@@ -162,9 +142,9 @@ describe("util.tool-compat", () => {
       },
     } satisfies JSONSchema7
 
-    test("repairs tool name and input keys together", async () => {
+    test("repairs input keys when the tool name already matches", async () => {
       const repaired = await repairToolCall({
-        toolName: "Read",
+        toolName: "read",
         input: JSON.stringify({ filePath: "/tmp/a.ts" }),
         toolNames: ["read", "write"],
         getSchema: () => readSchema,
@@ -176,10 +156,65 @@ describe("util.tool-compat", () => {
       })
     })
 
+    test("does not repair a tool name that is not registered exactly", async () => {
+      const schema = {
+        type: "object",
+        properties: {
+          file_path: { type: "string" },
+          replace_all: { type: "boolean" },
+        },
+      } satisfies JSONSchema7
+
+      for (const toolName of ["Edit", "apply-patch", "mcp__feishu-mcp-pro__doc_read"]) {
+        const repaired = await repairToolCall({
+          toolName,
+          input: JSON.stringify({ filePath: "/tmp/a.ts", replace_all: true }),
+          toolNames: ["edit", "apply_patch", "feishu-mcp-pro_doc_read"],
+          getSchema: () => schema,
+        })
+        expect(repaired).toBeUndefined()
+      }
+    })
+
     test("returns undefined when nothing changed", async () => {
       const repaired = await repairToolCall({
         toolName: "read",
         input: JSON.stringify({ file_path: "/tmp/a.ts" }),
+        toolNames: ["read"],
+        getSchema: () => readSchema,
+      })
+
+      expect(repaired).toBeUndefined()
+    })
+
+    test("wraps raw exec source in the code argument object", async () => {
+      const execSchema = {
+        type: "object",
+        properties: {
+          code: { type: "string" },
+          max_tool_calls: { type: "number" },
+        },
+        required: ["code"],
+      } satisfies JSONSchema7
+      const source = 'const result = await tools.exec_command({ cmd: "pwd" }); return result.output'
+
+      const repaired = await repairToolCall({
+        toolName: "exec",
+        input: source,
+        toolNames: ["exec"],
+        getSchema: () => execSchema,
+      })
+
+      expect(repaired).toEqual({
+        toolName: "exec",
+        input: JSON.stringify({ code: source }),
+      })
+    })
+
+    test("does not wrap raw input for other object tools", async () => {
+      const repaired = await repairToolCall({
+        toolName: "read",
+        input: "/tmp/a.ts",
         toolNames: ["read"],
         getSchema: () => readSchema,
       })

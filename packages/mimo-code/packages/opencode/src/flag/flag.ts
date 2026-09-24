@@ -73,6 +73,17 @@ const copy = process.env["MIMOCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
 const MIMOCODE_SERVER_PASSWORD =
   consumeInheritedServerPassword() ?? process.env["MIMOCODE_SERVER_PASSWORD"]
 
+let generatedServerPassword: string | undefined
+
+export function generateServerPassword() {
+  if (process.env["MIMOCODE_SERVER_PASSWORD"]) return
+  generatedServerPassword ??= Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")
+}
+
+export function clearGeneratedServerPassword() {
+  generatedServerPassword = undefined
+}
+
 export const Flag = {
   OTEL_EXPORTER_OTLP_ENDPOINT: process.env["OTEL_EXPORTER_OTLP_ENDPOINT"],
   OTEL_EXPORTER_OTLP_HEADERS: process.env["OTEL_EXPORTER_OTLP_HEADERS"],

@@ -1,5 +1,6 @@
 import { PNG } from "pngjs"
 import jpeg from "jpeg-js"
+import { Flag } from "@/flag/flag"
 
 // Provider hard limit is 5 MiB (Bedrock/Anthropic reject a single image whose
 // decoded base64 exceeds 5242880 bytes with a non-retryable 400). We compress
@@ -150,4 +151,10 @@ export function compressImage(
     }
   }
   return undefined
+}
+
+export function shrinkAttachment(mime: string, bytes: Buffer): { mime: string; base64: string } | undefined {
+  if (!mime.startsWith("image/")) return undefined
+  const shrunk = compressImage(mime, bytes, Flag.MIMOCODE_MAX_ATTACHMENT_SIZE)
+  return shrunk ? { mime: shrunk.mediaType, base64: shrunk.data } : undefined
 }

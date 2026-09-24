@@ -42,6 +42,9 @@ import { Heap } from "./cli/heap"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { ensureProcessMetadata } from "./util/mimo-process"
 import { OpenClankDriverCommand, runOpenClankDriver } from "./cli/cmd/openclank-driver"
+import { UpgradeCommand } from "./cli/cmd/upgrade"
+import { LlmServerCommand } from "./cli/cmd/llm-server"
+import { ModelsDev } from "./provider/models"
 
 const processMetadata = ensureProcessMetadata("main")
 
@@ -82,14 +85,16 @@ if (args[0] === "openclank-driver") {
   process.exit(0)
 }
 
+ModelsDev.startRefresh()
+
 function show(out: string) {
   const text = out.trimStart()
   if (!text.startsWith("mimo ")) {
     process.stderr.write(UI.logo() + EOL + EOL)
-    process.stderr.write(text)
+    process.stderr.write(UI.withTrailingEOL(text))
     return
   }
-  process.stderr.write(out)
+  process.stderr.write(UI.withTrailingEOL(out))
 }
 
 const cli = yargs(args)
@@ -228,6 +233,8 @@ const cli = yargs(args)
   .command(SessionCommand)
   .command(PluginCommand)
   .command(DbCommand)
+  .command(UpgradeCommand)
+  .command(LlmServerCommand)
   .fail((msg, err) => {
     if (
       msg?.startsWith("Unknown argument") ||
