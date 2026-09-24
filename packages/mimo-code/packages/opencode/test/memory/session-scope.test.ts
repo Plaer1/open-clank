@@ -5,6 +5,7 @@ import {
   managedSessionBinding,
   markerMatches,
   registerMemorySessionScope,
+  registrationGeneration,
   uniqueMemorySessionScope,
   unregisterMemorySessionScope,
 } from "../../src/memory/session-scope"
@@ -76,12 +77,17 @@ describe("memory session scope", () => {
     const sessionID = "session-scope-generation"
     registerMemorySessionScope(sessionID, [descriptor("alice")], "/workspace")
     const previous = managedSessionBinding(sessionID)!
+    const previousGeneration = registrationGeneration(sessionID)
     registerMemorySessionScope(sessionID, [descriptor("alice")], "/workspace")
     const current = managedSessionBinding(sessionID)!
+    const currentGeneration = registrationGeneration(sessionID)
     expect(current.registrationMarker.token).not.toBe(previous.registrationMarker.token)
     expect(markerMatches(sessionID, previous)).toBe(false)
     expect(markerMatches(sessionID, current)).toBe(true)
+    expect(currentGeneration).not.toBe(previousGeneration)
     unregisterMemorySessionScope(sessionID)
+    // Unregister clears the generation; the next admission starts at bootstrap.
+    expect(registrationGeneration(sessionID)).toBe("bootstrap")
   })
 
   test("incomplete re-registration clears the prior tenant binding", async () => {

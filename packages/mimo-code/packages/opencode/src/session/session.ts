@@ -187,6 +187,7 @@ export type GlobalInfo = z.output<typeof GlobalInfo>
 
 export const CreateInput = z
   .object({
+    id: SessionID.zod.optional(),
     parentID: SessionID.zod.optional(),
     contextFrom: SessionID.zod.optional(),
     contextWatermark: MessageID.zod.optional(),
@@ -372,6 +373,7 @@ export class BusyError extends Error {
 
 export interface Interface {
   readonly create: (input?: {
+    id?: SessionID
     parentID?: SessionID
     contextFrom?: SessionID
     contextWatermark?: MessageID
@@ -616,6 +618,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
     })
 
     const create = Effect.fn("Session.create")(function* (input?: {
+      id?: SessionID
       parentID?: SessionID
       contextFrom?: SessionID
       contextWatermark?: MessageID
@@ -631,6 +634,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       const directory = input?.directory ?? (yield* InstanceState.directory)
       const workspace = yield* InstanceState.workspaceID
       return yield* createNext({
+        id: input?.id,
         parentID: input?.parentID,
         contextFrom: input?.contextFrom,
         contextWatermark: input?.contextWatermark,

@@ -10,6 +10,7 @@ import {
   managedSessionBinding,
   markerMatches,
   registerManagedSessionAdmissionReset,
+  registrationGeneration,
   resetManagedSessionScopesForTest,
   replaceManagedSessionBinding,
 } from "@/memory/session-scope"
@@ -204,6 +205,10 @@ export async function readManagedSessionBinding(
 
 const bindingReads = new Map<string, Promise<OpenClankManagedProtocol.SessionBindingReadResult>>()
 
+function admissionReadKey(sessionID: string): string {
+  return `${sessionID}::${registrationGeneration(sessionID)}`
+}
+
 export async function ensureManagedSessionBinding(sessionID: string, options: { allowReconciling?: boolean } = {}) {
   if (!enabled()) return managedSessionBinding(sessionID)
   const initial = managedSessionBinding(sessionID)
@@ -213,10 +218,11 @@ export async function ensureManagedSessionBinding(sessionID: string, options: { 
   if (initial && !initial.transition && markerMatches(sessionID, initial)) return initial
   const initialToken = initial?.registrationMarker.token
   const initialTransition = initial?.transition ? { ...initial.transition } : undefined
-  let pending = bindingReads.get(sessionID)
+  const readKey = admissionReadKey(sessionID)
+  let pending = bindingReads.get(readKey)
   if (!pending) {
     pending = readManagedSessionBinding(sessionID)
-    bindingReads.set(sessionID, pending)
+    bindingReads.set(readKey, pending)
   }
   try {
     const authority = await pending
@@ -268,7 +274,7 @@ export async function ensureManagedSessionBinding(sessionID: string, options: { 
     if (!admitted || !markerMatches(sessionID, admitted)) throw new ManagedProviderError("managed session binding admission did not settle")
     return admitted
   } finally {
-    if (bindingReads.get(sessionID) === pending) bindingReads.delete(sessionID)
+    if (bindingReads.get(readKey) === pending) bindingReads.delete(readKey)
   }
 }
 
@@ -291,7 +297,9 @@ export async function admitManagedSessionBinding(sessionID: string) {
 }
 
 export function resetManagedSessionAdmission(sessionID: string) {
-  bindingReads.delete(sessionID)
+  for (const key of [...bindingReads.keys()]) {
+    if (key.startsWith(`${sessionID}::`)) bindingReads.delete(key)
+  }
 }
 
 export function managedSessionOwner(sessionID: string, fallback = "") {

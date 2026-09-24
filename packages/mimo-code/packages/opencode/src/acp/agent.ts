@@ -35,8 +35,9 @@ import { pathToFileURL } from "url"
 import path from "node:path"
 import { Filesystem } from "../util"
 import { Hash } from "@mimo-ai/shared/util/hash"
-import { ACPSessionManager } from "./session"
+import { ACPSessionManager, reserveProvisionalSessionID } from "./session"
 import type { ACPConfig } from "./types"
+import type { SessionID } from "@/session/schema"
 import { Provider } from "../provider"
 import { ModelID, ProviderID } from "../provider/schema"
 import { Agent as AgentModule } from "../agent/agent"
@@ -188,6 +189,14 @@ export class Agent implements ACPAgent {
       }
       return (await this.managedOperations.handle(params)) as unknown as Record<string, unknown>
     }
+    if (method === "_odysseus/session/reserve") {
+      // Reserve-without-create: mint a provisional engine `ses_…` and create
+      // nothing. The host persists its projection-first candidate against this
+      // ID, then create-and-publishes it through newSession/_meta or Session.create.
+      if (Object.keys(params).length !== 0) throw RequestError.invalidParams("session reserve takes no parameters")
+      const provisionalID = reserveProvisionalSessionID()
+      return { sessionID: provisionalID, provisional: true } as Record<string, unknown>
+    }
     if (method !== "_odysseus/session/release" && method !== "_odysseus/session/discard") throw new Error(`Unsupported ACP extension method: ${method}`)
     const sessionId = params.sessionId
     if (typeof sessionId !== "string" || !sessionId || sessionId !== sessionId.trim()) throw RequestError.invalidParams("sessionId is required")
@@ -195,8 +204,8 @@ export class Agent implements ACPAgent {
       if (Object.keys(params).length !== 2 || typeof params.cwd !== "string" || !path.isAbsolute(params.cwd) || path.normalize(params.cwd) !== params.cwd) {
         throw RequestError.invalidParams("canonical cwd is required for session discard")
       }
-      await this.sessionManager.discard(sessionId, params.cwd)
-      return { deleted: true } as Record<string, unknown>
+      const ack = await this.sessionManager.discard(sessionId, params.cwd, [], "explicit")
+      return { ...ack } as Record<string, unknown>
     }
     await this.sessionManager.release(sessionId)
     return {}
@@ -776,9 +785,17 @@ export class Agent implements ACPAgent {
     const directory = params.cwd
     try {
       const model = await defaultModel(this.config, directory)
+      const meta = (params._meta ?? {}) as Record<string, unknown>
+      const rawProvisional = meta.provisionalSessionID
+      const provisionalID =
+        typeof rawProvisional === "string" && rawProvisional.startsWith("ses_") && rawProvisional === rawProvisional.trim()
+          ? (rawProvisional as SessionID)
+          : undefined
 
-      // Store ACP session state
-      const state = await this.sessionManager.create(params.cwd, params.mcpServers, model)
+      // Create-and-publish under one owner lifecycle lease. A provisional ID
+      // reserved earlier is reused so the host's projection-first candidate
+      // keeps one identity across the interrupt window.
+      const state = await this.sessionManager.create(params.cwd, params.mcpServers, model, { provisionalID })
       const sessionId = state.id
 
       log.info("creating_session", { sessionId, mcpServers: params.mcpServers.length })

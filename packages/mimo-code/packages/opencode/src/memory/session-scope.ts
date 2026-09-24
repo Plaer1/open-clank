@@ -39,6 +39,8 @@ export type ManagedSessionBinding = {
 const scopes = new Map<string, MemorySessionScope>()
 const bindings = new Map<string, ManagedSessionBinding>()
 const markerTokens = new Map<string, symbol>()
+const markerGenerations = new Map<string, number>()
+let generationCounter = 0
 let resetAdmission: ((sessionID: string) => void) | undefined
 
 export function registerManagedSessionAdmissionReset(reset: (sessionID: string) => void) {
@@ -52,13 +54,25 @@ function tokenFor(sessionID: string): symbol {
   if (!token) {
     token = Symbol(`managed-binding:${sessionID}`)
     markerTokens.set(sessionID, token)
+    generationCounter += 1
+    markerGenerations.set(sessionID, generationCounter)
   }
   return token
+}
+
+/** Generation key for the current registration. A re-registration rotates the
+ * token and the generation counter, so singleflight and admission callers can
+ * key on generation rather than session ID alone. */
+export function registrationGeneration(sessionID: string): string {
+  const generation = markerGenerations.get(sessionID)
+  return generation === undefined ? "bootstrap" : String(generation)
 }
 
 function rotateToken(sessionID: string): symbol {
   const token = Symbol(`managed-binding:${sessionID}`)
   markerTokens.set(sessionID, token)
+  generationCounter += 1
+  markerGenerations.set(sessionID, generationCounter)
   return token
 }
 
@@ -224,12 +238,14 @@ export function unregisterMemorySessionScope(sessionID: string) {
   scopes.delete(sessionID)
   bindings.delete(sessionID)
   markerTokens.delete(sessionID)
+  markerGenerations.delete(sessionID)
   resetAdmission?.(sessionID)
   unbindMemorySessionClient(sessionID)
 }
 
 export function invalidateManagedSessionMarkerForTest(sessionID: string) {
   markerTokens.delete(sessionID)
+  markerGenerations.delete(sessionID)
 }
 
 export function resetManagedSessionScopesForTest() {
@@ -237,4 +253,5 @@ export function resetManagedSessionScopesForTest() {
   scopes.clear()
   bindings.clear()
   markerTokens.clear()
+  markerGenerations.clear()
 }

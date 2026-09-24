@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import type { McpServer } from "@agentclientprotocol/sdk"
 import type { OpencodeClient } from "@mimo-ai/sdk/v2"
-import { ACPSessionManager } from "../../src/acp/session"
+import { ACPSessionManager, reserveProvisionalSessionID } from "../../src/acp/session"
 import { memorySessionScope, registerMemorySessionScope, unregisterMemorySessionScope } from "../../src/memory/session-scope"
 
 const created: string[] = []
 const deleted: string[] = []
 const sdk = {
   session: {
-    create: async () => {
-      const id = `ses_acp_${created.length + 1}`
+    create: async (input?: { id?: string }) => {
+      const id = input?.id ?? `ses_acp_${created.length + 1}`
       created.push(id)
       return { data: { id, directory: "/workspace", time: { created: Date.now() } } }
     },
@@ -123,6 +123,60 @@ describe("ACPSessionManager memory scope registration", () => {
       },
     } as unknown as OpencodeClient
     const manager = new ACPSessionManager(missingSDK)
-    await expect(manager.discard("already-gone", "/workspace")).resolves.toBeUndefined()
+    await expect(manager.discard("already-gone", "/workspace")).resolves.toEqual({
+      deleted: true,
+      sessionID: "already-gone",
+      cwd: "/workspace",
+      reason: "explicit",
+    })
+  })
+
+  test("reserveProvisionalSessionID mints a ses_ id without creating a session", () => {
+    const provisionalID = reserveProvisionalSessionID()
+    expect(provisionalID.startsWith("ses_")).toBe(true)
+    expect(created).toEqual([])
+    expect(deleted).toEqual([])
+  })
+
+  test("create-and-publish accepts a provisional ID and returns an explicit discard ack on create-failed", async () => {
+    const manager = new ACPSessionManager(sdk)
+    const provisionalID = reserveProvisionalSessionID()
+    const failingDescriptor = [lifetools([{ name: "FM_WORKSPACE_ID", value: "" }])]
+    await expect(manager.create("/workspace", failingDescriptor, undefined, { provisionalID })).rejects.toThrow(
+      "requires owner, stable chat, workspaces",
+    )
+    // create-failed: the exact provisional identity is destructive-discarded.
+    expect(created.at(-1)).toBe(provisionalID)
+    expect(deleted).toEqual([provisionalID])
+  })
+
+  test("resume-bad-descriptor never deletes durable history", async () => {
+    const manager = new ACPSessionManager(sdk)
+    await expect(manager.load("existing-durable", "/workspace", [lifetools([{ name: "FM_WORKSPACE_ID", value: "" }])])).rejects.toThrow(
+      "requires owner, stable chat, workspaces",
+    )
+    expect(deleted).toEqual([])
+    expect(memorySessionScope("existing-durable")).toBeUndefined()
+  })
+
+  test("create interruption after an engine row names the exact orphan", async () => {
+    const orphaningSDK = {
+      ...sdk,
+      session: {
+        ...sdk.session,
+        delete: async ({ sessionID }: { sessionID: string }) => {
+          deleted.push(sessionID)
+          return { data: false }
+        },
+      },
+    } as unknown as OpencodeClient
+    const manager = new ACPSessionManager(orphaningSDK)
+    const provisionalID = reserveProvisionalSessionID()
+    await expect(
+      manager.create("/workspace", [lifetools([{ name: "FM_WORKSPACE_ID", value: "" }])], undefined, { provisionalID }),
+    ).rejects.toThrow(/create-and-publish interrupted and discard failed for ses_/)
+    expect(String(provisionalID).startsWith("ses_")).toBe(true)
+    // The unconfirmed delete is named in the error; no DB scan or guessed cleanup.
+    expect(deleted).toEqual([provisionalID])
   })
 })

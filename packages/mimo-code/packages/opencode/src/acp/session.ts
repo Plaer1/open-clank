@@ -2,6 +2,8 @@ import { RequestError, type McpServer } from "@agentclientprotocol/sdk"
 import type { ACPSessionState } from "./types"
 import { Log } from "@/util"
 import type { OpencodeClient } from "@mimo-ai/sdk/v2"
+import path from "node:path"
+import { SessionID } from "@/session/schema"
 import { registerMemorySessionScope, unregisterMemorySessionScope } from "@/memory/session-scope"
 import { resetManagedSessionAdmission } from "./managed-provider"
 
@@ -11,6 +13,28 @@ function isMissingSession(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false
   const value = error as Record<string, unknown>
   return value.status === 404 || (typeof value.response === "object" && value.response !== null && (value.response as Record<string, unknown>).status === 404)
+}
+
+/** Reserve a provisional engine `ses_…` without creating a session row.
+ * The caller may later pass this ID to `create` so create-and-publish keeps one
+ * identity across the host's projection-first candidate record. */
+export function reserveProvisionalSessionID(): SessionID {
+  return SessionID.descending()
+}
+
+export type DiscardReason = "create-failed" | "explicit"
+export type DiscardAck = { deleted: true; sessionID: string; cwd: string; reason: DiscardReason }
+
+/** Thrown when create-and-publish is interrupted after an engine session row
+ * exists. `orphan` names that exact private candidate; callers delete only that
+ * ID+cwd and never scan or guess other sessions. */
+export class SessionCreateInterruption extends Error {
+  readonly orphan: { sessionID: string; cwd: string }
+  constructor(message: string, orphan: { sessionID: string; cwd: string }) {
+    super(message)
+    this.name = "SessionCreateInterruption"
+    this.orphan = orphan
+  }
 }
 
 export class ACPSessionManager {
@@ -32,16 +56,25 @@ export class ACPSessionManager {
     )
   }
 
-  /** Delete a failed private candidate; ordinary release remains non-destructive. */
-  async discard(sessionId: string, cwd?: string, servers: McpServer[] = []) {
+  /** Delete a failed private candidate; ordinary release remains non-destructive.
+   * Returns an explicit deletion acknowledgement. Never claims success when the
+   * SDK delete is unconfirmed. Callers pass the private session ID and canonical
+   * cwd; this path never falls back to deleting chat mappings. */
+  async discard(
+    sessionId: string,
+    cwd?: string,
+    servers: McpServer[] = [],
+    reason: DiscardReason = "explicit",
+  ): Promise<DiscardAck> {
     const session = this.sessions.get(sessionId)
     const resolvedCwd = session?.cwd ?? cwd
     const resolvedServers = session?.mcpServers ?? servers
     if (!resolvedCwd) throw new Error("cannot discard an unregistered session without its directory")
+    const canonicalCwd = path.resolve(resolvedCwd)
     try {
-      await this.disconnect(sessionId, resolvedCwd, resolvedServers)
+      await this.disconnect(sessionId, canonicalCwd, resolvedServers)
       try {
-        const result = await this.sdk.session.delete({ sessionID: sessionId, directory: resolvedCwd }, { throwOnError: true })
+        const result = await this.sdk.session.delete({ sessionID: sessionId, directory: canonicalCwd }, { throwOnError: true })
         if (result.data !== true) throw new Error("discard session delete was not confirmed")
       } catch (error) {
         if (!isMissingSession(error)) throw error
@@ -50,56 +83,92 @@ export class ACPSessionManager {
       unregisterMemorySessionScope(sessionId)
       this.sessions.delete(sessionId)
     }
+    return { deleted: true, sessionID: sessionId, cwd: canonicalCwd, reason }
   }
 
   tryGet(sessionId: string): ACPSessionState | undefined {
     return this.sessions.get(sessionId)
   }
 
-  async create(cwd: string, mcpServers: McpServer[], model?: ACPSessionState["model"]): Promise<ACPSessionState> {
-    const session = await this.sdk.session
-      .create(
-        {
-          directory: cwd,
-        },
-        { throwOnError: true },
-      )
-      .then((x) => x.data!)
+  /** Create-and-publish under one owner lifecycle lease. A provisional ID from
+   * `reserveProvisionalSessionID` is accepted so the host can persist its
+   * projection-first candidate before this call. Interruptions before the SDK
+   * create returns delete nothing and name no orphan; interruptions after an
+   * engine row exists name that exact private session ID + canonical cwd. */
+  async create(
+    cwd: string,
+    mcpServers: McpServer[],
+    model?: ACPSessionState["model"],
+    options?: { provisionalID?: SessionID },
+  ): Promise<ACPSessionState> {
+    const canonicalCwd = path.resolve(cwd)
+    let createdSessionID: string | undefined
+    let session: { id: string; time?: { created?: number | string | Date } }
+    try {
+      session = await this.sdk.session
+        .create(
+          {
+            directory: canonicalCwd,
+            // Reserved identity is create-and-publish only; the public SDK
+            // types have not been regenerated for `id` yet (S01/S09).
+            ...(options?.provisionalID ? { id: options.provisionalID } : {}),
+          } as { directory: string; id?: string },
+          { throwOnError: true },
+        )
+        .then((x) => x.data!)
+      createdSessionID = session.id
+    } catch (error) {
+      // Nothing was created: delete nothing and name no orphan. No DB scan.
+      throw error
+    }
 
-    const sessionId = session.id
+    const sessionId = createdSessionID!
     const resolvedModel = model
 
     const state: ACPSessionState = {
       id: sessionId,
-      cwd,
+      cwd: canonicalCwd,
       mcpServers,
       createdAt: new Date(),
       model: resolvedModel,
     }
     log.info("creating_session", { state })
 
-    // Register first: a throwing registration must not leave a stale entry.
+    // Register first: a throwing registration is create-failed and may
+    // destructive-discard this exact private candidate.
     try {
-      registerMemorySessionScope(sessionId, mcpServers, cwd)
+      registerMemorySessionScope(sessionId, mcpServers, canonicalCwd)
     } catch (error) {
-      await this.discard(sessionId, cwd, mcpServers)
+      try {
+        await this.discard(sessionId, canonicalCwd, mcpServers, "create-failed")
+      } catch (discardError) {
+        // Deletion was not confirmed: name the exact orphan, never guess.
+        throw new SessionCreateInterruption(
+          `create-and-publish interrupted and discard failed for ${sessionId} at ${canonicalCwd}: ${String(discardError)}`,
+          { sessionID: sessionId, cwd: canonicalCwd },
+        )
+      }
       throw error
     }
     this.sessions.set(sessionId, state)
     return state
   }
 
+  /** Resume an existing durable session. A bad descriptor is
+   * resume-bad-descriptor: local scope is cleared and the durable row is left
+   * intact. This path never destructive-discards. */
   async load(
     sessionId: string,
     cwd: string,
     mcpServers: McpServer[],
     model?: ACPSessionState["model"],
   ): Promise<ACPSessionState> {
+    const canonicalCwd = path.resolve(cwd)
     const session = await this.sdk.session
       .get(
         {
           sessionID: sessionId,
-          directory: cwd,
+          directory: canonicalCwd,
         },
         { throwOnError: true },
       )
@@ -109,16 +178,16 @@ export class ACPSessionManager {
 
     const state: ACPSessionState = {
       id: sessionId,
-      cwd,
+      cwd: canonicalCwd,
       mcpServers,
       createdAt: new Date(session.time.created),
       model: resolvedModel,
     }
     log.info("loading_session", { state })
 
-    // Register first: a throwing registration must not leave a stale entry.
+    // resume-bad-descriptor: clear local scope only; never delete durable history.
     try {
-      registerMemorySessionScope(sessionId, mcpServers, cwd)
+      registerMemorySessionScope(sessionId, mcpServers, canonicalCwd)
     } catch (error) {
       unregisterMemorySessionScope(sessionId)
       resetManagedSessionAdmission(sessionId)
