@@ -941,7 +941,7 @@ class MimoSupervisor:
             response = await client.delete(f"/session/{quote(mimo_session, safe='')}")
         if response.status_code != 404:
             response.raise_for_status()
-        self._bridge.forget_session(odysseus_session)
+        await self._bridge.forget_session_async(odysseus_session)
 
     def is_alive(self, owner: str | None = None) -> bool:
         return self._proc is not None and self._proc.returncode is None

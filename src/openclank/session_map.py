@@ -249,27 +249,36 @@ class OwnerSessionMap:
         holding the guard.  The same descriptor remains held across the
         await; other processes still observe one serialized authority.
         """
+        async def drain(task: asyncio.Task) -> bool:
+            """Wait for a lock worker despite repeated task cancellation."""
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(task)
+                    return cancelled
+                except asyncio.CancelledError:
+                    cancelled = True
+
         guard = self.chat_admission_lock(chat)
         acquire = asyncio.create_task(asyncio.to_thread(guard.__enter__))
-        try:
-            await asyncio.shield(acquire)
-        except asyncio.CancelledError:
+        cancelled = await drain(acquire)
+        if cancelled:
             # Do not strand a descriptor if cancellation arrives while a
             # contended process lock is still waiting in the worker thread.
-            await acquire
-            await asyncio.to_thread(guard.__exit__, None, None, None)
-            raise
+            release = asyncio.create_task(
+                asyncio.to_thread(guard.__exit__, None, None, None)
+            )
+            await drain(release)
+            raise asyncio.CancelledError
         try:
             yield
         finally:
             release = asyncio.create_task(
                 asyncio.to_thread(guard.__exit__, None, None, None)
             )
-            try:
-                await asyncio.shield(release)
-            except asyncio.CancelledError:
-                await release
-                raise
+            cancelled = await drain(release)
+            if cancelled:
+                raise asyncio.CancelledError
 
     def _epoch(self) -> str:
         try:

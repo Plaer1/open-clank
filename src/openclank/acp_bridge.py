@@ -1611,7 +1611,7 @@ class ACPBridge:
                 publish_handshake=False,
             )
             try:
-                with self._durable_session_map.chat_admission_lock(odysseus_session):
+                async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
                     self._stage_candidate_binding(
                         odysseus_session,
                         new_id,
@@ -1825,7 +1825,7 @@ class ACPBridge:
                 publish_handshake=False,
             )
             try:
-                with self._durable_session_map.chat_admission_lock(odysseus_session):
+                async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
                     self._stage_candidate_binding(
                         odysseus_session,
                         new_id,
@@ -2099,6 +2099,11 @@ class ACPBridge:
         # a concurrent candidate cannot stage or publish between our map CAS
         # and binding/projection cleanup.
         with self._durable_session_map.chat_admission_lock(odysseus_session):
+            self._forget_session_locked(odysseus_session)
+
+    async def forget_session_async(self, odysseus_session: str) -> None:
+        """Forget authority without blocking the event loop on flock."""
+        async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
             self._forget_session_locked(odysseus_session)
 
     def _forget_session_locked(self, odysseus_session: str) -> None:

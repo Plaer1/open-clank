@@ -337,6 +337,7 @@ def test_async_chat_admission_lock_cancellation_releases_waiter(tmp_path):
         while not entered.is_set():
             await asyncio.sleep(0.001)
         task.cancel()
+        task.cancel()
         allow.set()
         with pytest.raises(asyncio.CancelledError):
             await task

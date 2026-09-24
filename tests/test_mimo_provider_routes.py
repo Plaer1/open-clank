@@ -203,7 +203,7 @@ async def test_session_delete_uses_supervisor_internal_client():
         def mapped_session_id(self, _session_id):
             return "mimo/session"
 
-        def forget_session(self, session_id):
+        async def forget_session_async(self, session_id):
             calls.append(("forget", session_id))
 
     class Response:
