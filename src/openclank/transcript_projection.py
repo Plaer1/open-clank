@@ -184,14 +184,14 @@ def delete_projection(session_id: str, owner: Optional[str] = None) -> None:
         raise ValueError("projection deletes require an owner")
     db = SessionLocal()
     try:
-        try:
-            query = db.query(MimoProjection).filter(MimoProjection.odysseus_session_id == session_id)
-            if owner is not None:
-                query = query.filter(MimoProjection.owner == owner)
-            query.delete(synchronize_session=False)
-            db.commit()
-        except OperationalError:
-            db.rollback()
+        query = db.query(MimoProjection).filter(MimoProjection.odysseus_session_id == session_id)
+        if owner is not None:
+            query = query.filter(MimoProjection.owner == owner)
+        query.delete(synchronize_session=False)
+        db.commit()
+    except OperationalError:
+        db.rollback()
+        raise RuntimeError("managed projection deletion was not confirmed")
     finally:
         db.close()
 
@@ -284,14 +284,28 @@ def save_managed_binding(
         "owner", "stableChatID", "engineSessionID", "memoryWorkspaceID",
         "authorityWorkspaceID", "copalWorkspace", "physicalCwd",
     )
-    if any(not isinstance(binding.get(key), str) or not binding[key].strip() for key in required_strings):
+    if any(
+        not isinstance(binding.get(key), str)
+        or not binding[key]
+        or binding[key] != binding[key].strip()
+        for key in required_strings
+    ):
         raise ValueError("managed binding is incomplete")
     if binding.get("owner") != owner or binding.get("stableChatID") != session_id or not os.path.isabs(binding["physicalCwd"]):
         raise ValueError("managed binding owner or cwd is invalid")
     if str(os.path.realpath(binding["physicalCwd"])) != binding["physicalCwd"]:
         raise ValueError("managed binding cwd is not canonical")
     aliases = binding.get("engineAliases")
-    if not isinstance(aliases, list) or len(aliases) > 16 or any(not isinstance(value, str) or not value.strip() for value in aliases):
+    if (
+        not isinstance(aliases, list)
+        or len(aliases) > 16
+        or any(
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            for value in aliases
+        )
+    ):
         raise ValueError("managed binding aliases are invalid")
     if len(set(aliases)) != len(aliases) or binding["engineSessionID"] in aliases:
         raise ValueError("managed binding aliases are not unique")

@@ -28,6 +28,12 @@ class SessionMapCorrupt(ValueError):
 _EXPECTED_UNSET = object()
 
 
+def _strict_identifier(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"managed session map {label} must be a nonempty canonical string")
+    return value
+
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows only
@@ -38,7 +44,12 @@ except ImportError:  # pragma: no cover - Windows only
 class OwnerSessionMap:
     def __init__(self, path: Path, owner: str, *, lifecycle_epoch: str | None = None):
         self.path = Path(path)
-        self.owner = str(owner or "").strip()
+        if owner is None:
+            self.owner = ""
+        else:
+            if not isinstance(owner, str) or owner != owner.strip():
+                raise ValueError("managed session map owner must be a canonical string")
+            self.owner = owner
         self.lock_path = self.path.parent / "session-map.lock"
         self.lifecycle_lock_path = self.path.parent.parent / f".session-map-{self.owner_hash}.lock"
         self.epoch_path = self.path.parent.parent / f".session-map-{self.owner_hash}.epoch"
@@ -61,11 +72,17 @@ class OwnerSessionMap:
                 raise SessionMapCorrupt("managed session map revision is malformed")
             out["mapRevision"] = map_revision
             quarantine = raw.get("quarantine", [])
-            if not isinstance(quarantine, list) or any(not isinstance(value, str) or not value for value in quarantine):
+            if not isinstance(quarantine, list):
                 raise SessionMapCorrupt("managed session map quarantine is malformed")
-            out["quarantine"] = list(dict.fromkeys(quarantine))
+            try:
+                normalized_quarantine = [_strict_identifier(value, "quarantine chat") for value in quarantine]
+            except ValueError as exc:
+                raise SessionMapCorrupt("managed session map quarantine is malformed") from exc
+            if len(set(normalized_quarantine)) != len(normalized_quarantine):
+                raise SessionMapCorrupt("managed session map quarantine is duplicated")
+            out["quarantine"] = normalized_quarantine
             for chat, item in raw["chats"].items():
-                if not isinstance(chat, str) or not isinstance(item, dict):
+                if not isinstance(chat, str) or not chat or chat != chat.strip() or not isinstance(item, dict):
                     raise SessionMapCorrupt("managed session map contains a malformed chat entry")
                 owner = item.get("owner")
                 current = item.get("current")
@@ -97,11 +114,11 @@ class OwnerSessionMap:
         if isinstance(raw, dict) and "version" not in raw:
             out = self._empty()
             for chat, current in raw.items():
-                if not isinstance(chat, str) or not chat or not isinstance(current, str) or not current.strip():
+                if not isinstance(chat, str) or not chat or chat != chat.strip() or not isinstance(current, str) or not current or current != current.strip():
                     raise SessionMapCorrupt("legacy managed session map contains a malformed entry")
                 out["chats"][chat] = {
                     "owner": self.owner,
-                    "current": current.strip(),
+                    "current": current,
                     "aliases": [],
                     "revision": 0,
                 }
@@ -233,6 +250,7 @@ class OwnerSessionMap:
                 return result
 
     def lookup(self, chat: str) -> dict[str, Any] | None:
+        chat = _strict_identifier(chat, "chat")
         data = self.read()
         if chat in self.quarantined:
             raise SessionMapCollision("chat is quarantined due to an engine-session collision")
@@ -248,8 +266,9 @@ class OwnerSessionMap:
         expected_current: str | None | object = _EXPECTED_UNSET,
         expected_mapping_revision: int | None = None,
     ) -> dict[str, Any]:
-        chat, engine = str(chat or "").strip(), str(engine or "").strip()
-        if not chat or not engine or not self.owner:
+        chat = _strict_identifier(chat, "chat")
+        engine = _strict_identifier(engine, "engine session")
+        if not self.owner:
             raise ValueError("owner, stable chat and engine session are required")
 
         def mutate(data):
@@ -303,6 +322,8 @@ class OwnerSessionMap:
         expected_current: str | None | object = _EXPECTED_UNSET,
         expected_mapping_revision: int | None = None,
     ) -> dict[str, int] | None:
+        chat = _strict_identifier(chat, "chat")
+
         def mutate(data):
             if expected_map_revision is not None and int(data.get("mapRevision") or 0) != int(expected_map_revision):
                 raise ValueError("session map revision conflict")
@@ -327,6 +348,7 @@ class OwnerSessionMap:
         return {chat: item["current"] for chat, item in data["chats"].items() if item.get("current") and chat not in self.quarantined}
 
     def revisions(self, chat: str) -> tuple[int, int]:
+        chat = _strict_identifier(chat, "chat")
         data = self.read()
         item = data["chats"].get(chat)
         if item is None or chat in self.quarantined:
@@ -343,11 +365,12 @@ class OwnerSessionMap:
         fail-closed until an operator or a deterministic reconciler clears the
         fence under the same map lock.
         """
+        chat = _strict_identifier(chat, "chat")
         def mutate(data):
             quarantine = list(data.get("quarantine") or [])
             if chat in quarantine:
                 return None, False
-            quarantine.append(str(chat))
+            quarantine.append(chat)
             data["quarantine"] = sorted(set(quarantine))
             data["mapRevision"] = int(data.get("mapRevision") or 0) + 1
             return None, True

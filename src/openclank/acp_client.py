@@ -121,6 +121,20 @@ class ACPClient:
             {"sessionId": session_id},
         )
 
+    async def discard_session(self, session_id: str, cwd: str) -> None:
+        """Delete a privately admitted engine session after a failed host CAS.
+
+        Ordinary release only unloads the ACP/MCP scope and deliberately keeps
+        resumable engine state. Candidate admission uses this separate,
+        destructive extension so an unexposed engine cannot remain durable.
+        """
+        result = await self._send_request(
+            "_odysseus/session/discard",
+            {"sessionId": session_id, "cwd": cwd},
+        )
+        if not isinstance(result, dict) or result.get("deleted") is not True:
+            raise RuntimeError("engine did not confirm private session discard")
+
     async def managed_engine_call(self, method: str, params: dict) -> dict:
         """Call one pinned host-to-engine extension with exact wire checks."""
 
@@ -243,7 +257,13 @@ class ACPClient:
             if fut and not fut.done():
                 if "error" in msg:
                     err = msg["error"]
-                    fut.set_exception(RPCError(err.get("code", -1), err.get("message", "unknown")))
+                    fut.set_exception(
+                        RPCError(
+                            err.get("code", -1),
+                            err.get("message", "unknown"),
+                            err.get("data"),
+                        )
+                    )
                 else:
                     fut.set_result(msg.get("result", {}))
 
@@ -300,6 +320,11 @@ class TransportError(Exception):
 
 
 class RPCError(Exception):
-    def __init__(self, code: int, message: str) -> None:
+    def __init__(self, code: int, message: str, data: Any = None) -> None:
         super().__init__(message)
         self.code = code
+        self.data = data
+        self.session_missing = (
+            isinstance(data, dict)
+            and data.get("code") == "OPENCLANK_SESSION_MISSING"
+        )

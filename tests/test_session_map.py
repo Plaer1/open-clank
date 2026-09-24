@@ -277,3 +277,24 @@ def test_lock_rejects_symlink(tmp_path):
     mapping.lock_path.symlink_to(target)
     with pytest.raises(OSError):
         mapping.read()
+
+
+@pytest.mark.parametrize("chat", ["", " chat", "chat ", 7, None])
+def test_public_identity_operations_reject_noncanonical_chat_ids(tmp_path, chat):
+    mapping = OwnerSessionMap(tmp_path / "session-map.json", "alice")
+    with pytest.raises(ValueError):
+        mapping.lookup(chat)
+    with pytest.raises(ValueError):
+        mapping.revisions(chat)
+    with pytest.raises(ValueError):
+        mapping.fence(chat)
+
+
+def test_quarantine_rejects_whitespace_and_duplicate_identity_entries(tmp_path):
+    path = tmp_path / "session-map.json"
+    path.write_text(json.dumps({"version": 2, "mapRevision": 0, "quarantine": [" chat"], "chats": {}}))
+    with pytest.raises(ValueError):
+        OwnerSessionMap(path, "alice").read()
+    path.write_text(json.dumps({"version": 2, "mapRevision": 0, "quarantine": ["chat", "chat"], "chats": {}}))
+    with pytest.raises(ValueError):
+        OwnerSessionMap(path, "alice").read()
