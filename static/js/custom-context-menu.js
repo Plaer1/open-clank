@@ -11,7 +11,7 @@ const adapters = new WeakMap();
 const OBJECT_COMMANDS = Object.freeze({
   image:[['Open image', 'open-image'], ['Copy image address', 'copy-image-address'], ['Copy image', 'copy-image-bytes']],
   link:[['Open link in new tab', 'open-link'], ['Copy link address', 'copy-link-address']],
-  file:[['Open in Editor', 'open-in-editor'], ['Select all files', 'select-all-files'], ['Copy file path', 'copy-file-path'], ['Reveal in Files', 'reveal-file'], ['Rename', 'rename-file'], ['Move', 'move-files'], ['Copy', 'copy-files'], ['Move to trash', 'trash-file'], ['Restore', 'restore-file']],
+  file:[['Open in Editor', 'open-in-editor'], ['Open right', 'open-in-editor-split-right'], ['Open below', 'open-in-editor-split-below'], ['Select all files', 'select-all-files'], ['Copy file path', 'copy-file-path'], ['Reveal in Files', 'reveal-file'], ['Rename', 'rename-file'], ['Move', 'move-files'], ['Copy', 'copy-files'], ['Move to trash', 'trash-file'], ['Restore', 'restore-file']],
   task:[['Toggle task', 'toggle-task'], ['Open task note', 'open-task']],
   event:[['Edit event', 'edit-event']],
   track:[['Edit track', 'edit-track']],
@@ -281,7 +281,7 @@ function renderMenu(request) {
     if (command === 'open-link' && request.link) continue;
     if (request.objectKind === 'file') {
       const capabilities = fileCapabilities(request.objectTarget);
-      const required = { 'open-file':'open', 'open-in-editor':'open', 'reveal-file':'reveal', 'rename-file':'rename', 'move-file':'move', 'move-files':'transfer-move', 'copy-files':'transfer-copy', 'trash-file':'trash', 'restore-file':'restore' }[command];
+      const required = { 'open-file':'open', 'open-in-editor':'open', 'open-in-editor-split-right':'open', 'open-in-editor-split-below':'open', 'reveal-file':'reveal', 'rename-file':'rename', 'move-file':'move', 'move-files':'transfer-move', 'copy-files':'transfer-copy', 'trash-file':'trash', 'restore-file':'restore' }[command];
       if (required && !['transfer-move', 'transfer-copy'].includes(required) && capabilities && !capabilities.has(required)) continue;
       if (required === 'transfer-move' && typeof window.__openClankFilesContextCapabilities === 'function'
         && !window.__openClankFilesContextCapabilities(request.objectTarget, request).move) continue;
@@ -290,7 +290,8 @@ function renderMenu(request) {
       // Editor handoff is offered only for a resource explicitly authorized
       // as textual by the Files provider. Images and opaque managed records
       // may expose `open` while still lacking an Editor target.
-      if (command === 'open-in-editor' && request.objectTarget?.dataset?.fileOpenEditor !== 'true') continue;
+      if (['open-in-editor', 'open-in-editor-split-right', 'open-in-editor-split-below'].includes(command)
+        && request.objectTarget?.dataset?.fileOpenEditor !== 'true') continue;
       // A sealed resource reference is authority data and must never enter a
       // generic clipboard lane. Only compatibility rows with a real host path
       // expose this command.
@@ -421,15 +422,22 @@ export function createCodeMirrorContextAdapter(editor, identity = {}) {
     return typeof value === 'function' ? value() : value ?? fallback;
   };
   return {
-    commands: () => [
-      { id:'select-next-match', label:'Select next match' },
-      { id:'select-all-matches', label:'Select all matches' },
-      { id:'duplicate-line', label:'Duplicate line' },
-      { id:'indent', label:'Indent selection' },
-      { id:'format-bold', label:'Bold selection' },
-      { id:'format-italic', label:'Italic selection' },
-      { id:'format-code', label:'Inline code selection' },
-    ],
+    commands: (request) => {
+      // Selection-only match/transform actions are disabled with an empty
+      // selection; line/cursor commands (duplicate, indent) stay usable.
+      const hasSelection = !!selectedText(request);
+      return [
+        { id:'select-next-match', label:'Select next match', disabled:!hasSelection },
+        { id:'select-all-matches', label:'Select all matches', disabled:!hasSelection },
+        { id:'duplicate-line', label:'Duplicate line' },
+        { id:'indent', label:'Indent selection' },
+        { id:'format-bold', label:'Bold selection', disabled:!hasSelection },
+        { id:'format-italic', label:'Italic selection', disabled:!hasSelection },
+        { id:'format-code', label:'Inline code selection', disabled:!hasSelection },
+        { id:'insert-template', label:'Insert template' },
+        { id:'new-from-template', label:'New from template' },
+      ];
+    },
     capture: () => {
       const selection = editor.getSelection?.() || { ranges:[{ anchor:editor.view.state.selection.main.anchor, head:editor.view.state.selection.main.head }], mainIndex:0 };
       const ranges = selection.ranges.map((range) => ({ anchor:range.anchor, head:range.head }));
@@ -494,6 +502,14 @@ export function createCodeMirrorContextAdapter(editor, identity = {}) {
         return;
       }
       if (command === 'open-link' && request.link) { window.open(request.link, '_blank', 'noopener,noreferrer'); return; }
+      // Template actions are workspace commands. The Editor owner registers a
+      // handler through the adapter identity so the menu never reaches into
+      // another window's singleton.
+      if (command === 'insert-template' || command === 'new-from-template') {
+        const handler = identity.onCommand;
+        if (typeof handler === 'function') return Boolean(await handler(command, request));
+        return false;
+      }
       // Object commands belong to the owner of the captured rendered node
       // (for example an image or link decoration inside this editor).
       return false;

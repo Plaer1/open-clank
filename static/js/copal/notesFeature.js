@@ -8,6 +8,7 @@ import {
   findWorkspaceLeaf,
   groupForLeaf,
   moveWorkspaceLeaf,
+  navigationIntentFromEvent,
   normalizeNotesSettings,
   normalizeNotesWorkspace,
   noteViewType,
@@ -339,6 +340,7 @@ export function createNotesFeature({
       name:payload.name || input.name || handle.locator.displayName,
       text:payload.text ?? payload.content ?? '',
       parent_resource_ref:payload.parent_resource_ref || input.parentResourceRef || null,
+      ...(input.intent ? { intent:input.intent } : {}),
     });
   };
 
@@ -800,7 +802,7 @@ export function createNotesFeature({
     if (existing && existingDirty) {
       // A second Files open refreshes focus only. Preserve the dirty envelope,
       // selections, and CAS base until the existing buffer is explicitly saved.
-      open(id, { reuse:true });
+      open(id, payload.intent ? { intent:payload.intent } : { reuse:true });
       return id;
     }
     const representation = handle.representation;
@@ -849,7 +851,7 @@ export function createNotesFeature({
     // render revision so the shell cannot reuse an editable view after the
     // resource has become a read-only Files projection.
     if (current) current.noteRenderVersion = (current.noteRenderVersion || 0) + 1;
-    open(id, { reuse:true });
+    open(id, payload.intent ? { intent:payload.intent } : { reuse:true });
     return id;
   }
 
@@ -1486,9 +1488,7 @@ export function createNotesFeature({
       buttons = ranked.map(({ doc }) => {
         const button = h('button', { class:'copal-doc-row', role:'option', type:'button', onclick:(event) => {
           if (choose) choose(doc, event);
-          else if (event.altKey) { const group = activeGroup(); if (group) splitWorkspaceGroup(ensureWorkspace(), group.id, doc, 'vertical'); persist(true); render(); }
-          else if (event.shiftKey) { const group = activeGroup(); if (group) splitWorkspaceGroup(ensureWorkspace(), group.id, doc, 'horizontal'); persist(true); render(); }
-          else open(doc.id, { reuse:!(event.ctrlKey || event.metaKey) });
+          else open(doc.id, { intent:navigationIntentFromEvent(event) });
           dialog.close();
         } },
           h('span', { text:doc.name }), h('small', { text:noteViewType(doc) }));
@@ -1522,7 +1522,7 @@ export function createNotesFeature({
     const relations = databaseRelations(content, state.docs);
     const result = await api('/documents', { method:'POST', body:JSON.stringify({ name, kind:'note', content, properties, relations }) });
     await loadDocuments(false);
-    open(result.doc.id, { reuse:false });
+    open(result.doc.id, { intent:'newTab' });
     return result.doc;
   }
 
@@ -2046,7 +2046,7 @@ export function createNotesFeature({
         const group = groupForLeaf(workspace, leaf.id);
         if (group) { setActive(group.id, leaf.id); return; }
       }
-      open(id, { reuse:false });
+      open(id, { intent:'newTab' });
       return;
     }
     persist(true); render();
@@ -2162,7 +2162,9 @@ export function createNotesFeature({
         if (!doc.readOnly) openButton.addEventListener('dragstart', (event) => event.dataTransfer.setData('text/x-copal-document', doc.id));
         const menuItems = [
           ...(doc.readOnly ? [] : [commandButton('Rename or move', () => renameWithForm(doc))]),
-          commandButton('Open in new tab', () => open(doc.id, { reuse:false })),
+          commandButton('Open in new tab', () => open(doc.id, { intent:'newTab' })),
+          commandButton('Open right', () => open(doc.id, { intent:'splitRight' })),
+          commandButton('Open below', () => open(doc.id, { intent:'splitBelow' })),
           commandButton('Reveal path', () => { revealInExplorer(doc, workspace); persist(true); render(); }),
           ...(doc.readOnly ? [] : [commandButton('Trash', () => deleteDocument(doc), { class:'copal-btn danger' })]),
         ];
@@ -2490,7 +2492,21 @@ export function createNotesFeature({
       });
       tablist.append(tab);
     }
+    const otherGroups = () => workspaceGroups(workspace).filter((candidate) => candidate.id !== group.id);
+    const moveToGroupItems = (leafId) => otherGroups().map((target, index) => commandButton(
+      `Move to group ${index + 1}`,
+      () => { if (moveWorkspaceLeaf(workspace, leafId, target.id)) { persist(true); render(); } },
+    ));
     const groupMenu = wirePopover(h('details', { class:'copal-leaf-menu copal-group-menu' }, h('summary', { text:'⋯', title:'Tab group actions', 'aria-label':'Tab group actions' }), h('div', { class:'copal-popover-menu' },
+      ...((() => {
+        const activeId = group.activeLeafId;
+        const activeLeaf = group.tabs.find((leaf) => leaf.id === activeId);
+        return activeLeaf ? [
+          commandButton('Split right', () => { const doc = workspaceDocuments().find((item) => item.id === activeLeaf.docId); if (doc && splitWorkspaceGroup(workspace, group.id, doc, 'horizontal')) { persist(true); render(); } }),
+          commandButton('Split below', () => { const doc = workspaceDocuments().find((item) => item.id === activeLeaf.docId); if (doc && splitWorkspaceGroup(workspace, group.id, doc, 'vertical')) { persist(true); render(); } }),
+          ...moveToGroupItems(activeId),
+        ] : [];
+      })()),
       commandButton('Close other tabs', async () => {
         const activeId = group.activeLeafId; const candidates = group.tabs.filter((leaf) => leaf.id !== activeId && !leaf.pinned);
         const results = await Promise.all(candidates.map((leaf) => saveDraft(leaf.docId)));
@@ -2506,7 +2522,7 @@ export function createNotesFeature({
         syncSelectionToModel(workspace); persist(true); render(); focusEmptyWorkspaceIfIdle();
       }))));
     const controls = h('div', { class:'copal-tab-group-controls' },
-      commandButton('+', () => showChooser({ title:'Open note in this group', choose:(doc) => { openWorkspaceDocument(workspace, doc, { groupId:group.id, reuse:false }); persist(true); render(); } }), { title:'Open note', 'aria-label':'Open note' }),
+      commandButton('+', () => showChooser({ title:'Open note in this group', choose:(doc) => { openWorkspaceDocument(workspace, doc, { groupId:group.id, intent:'newTab' }); persist(true); render(); } }), { title:'Open note', 'aria-label':'Open note' }),
       commandButton('↔', () => showChooser({ title:'Split right', choose:(doc) => { splitWorkspaceGroup(workspace, group.id, doc, 'horizontal'); persist(true); render(); }, allowCreate:false }), { title:'Split right', 'aria-label':'Split right' }),
       commandButton('↕', () => showChooser({ title:'Split below', choose:(doc) => { splitWorkspaceGroup(workspace, group.id, doc, 'vertical'); persist(true); render(); }, allowCreate:false }), { title:'Split below', 'aria-label':'Split below' }),
       groupMenu);
@@ -2573,8 +2589,12 @@ export function createNotesFeature({
       const resourceReadOnly = !!doc.resourceRef;
       const menu = wirePopover(h('details', { class:'copal-leaf-menu' }, h('summary', { text:'⋯', title:'Knowledge note actions', 'aria-label':'Knowledge note actions' }), h('div', { class:'copal-popover-menu' },
         ...(resourceReadOnly ? [commandButton('Show in Files', () => { void showResourceInFiles(doc.resourceRef); })] : [commandButton('History', () => showHistory(doc))]),
-        commandButton('Split right', () => showChooser({ title:'Split right', choose:(item) => { splitWorkspaceGroup(workspace, group.id, item, 'horizontal'); persist(true); render(); }, allowCreate:false })),
-        commandButton('Split below', () => showChooser({ title:'Split below', choose:(item) => { splitWorkspaceGroup(workspace, group.id, item, 'vertical'); persist(true); render(); }, allowCreate:false })),
+        commandButton('Split right', () => { if (splitWorkspaceGroup(workspace, group.id, doc, 'horizontal')) { persist(true); render(); } }),
+        commandButton('Split below', () => { if (splitWorkspaceGroup(workspace, group.id, doc, 'vertical')) { persist(true); render(); } }),
+        ...workspaceGroups(workspace).filter((target) => target.id !== group.id).map((target, index) => commandButton(
+          `Move to group ${index + 1}`,
+          () => { if (moveWorkspaceLeaf(workspace, leaf.id, target.id)) { persist(true); render(); } },
+        )),
         commandButton(workspace.bookmarks?.includes(doc.id) ? 'Remove bookmark' : 'Add bookmark', () => toggleBookmark(doc.id)),
         commandButton('Reveal in Editor', () => { workspace.left.open = true; workspace.left.tab = 'files'; revealInExplorer(doc, workspace); persist(true); render(); }))));
       cache.header.replaceChildren(breadcrumb, h('strong', { class:'copal-inline-title', text:displayName(doc) }), h('span', { class:'copal-leaf-mode', text:resourceReadOnly ? 'Files resource · read only' : 'Built-in knowledge · read only' }), menu);
@@ -2601,10 +2621,14 @@ export function createNotesFeature({
       ...(doc.savePolicy === 'explicit' ? [commandButton('Save', () => void saveDraft(doc.id))] : []),
       commandButton('Find and replace', () => cache.editor && showFindReplace(cache.editor)),
       commandButton('History', () => showHistory(doc)),
-      commandButton('Split right', () => showChooser({ title:'Split right', choose:(item) => { splitWorkspaceGroup(workspace, group.id, item, 'horizontal'); persist(true); render(); }, allowCreate:false })),
-      commandButton('Split below', () => showChooser({ title:'Split below', choose:(item) => { splitWorkspaceGroup(workspace, group.id, item, 'vertical'); persist(true); render(); }, allowCreate:false })),
+      commandButton('Split right', () => { if (splitWorkspaceGroup(workspace, group.id, doc, 'horizontal')) { persist(true); render(); } }),
+      commandButton('Split below', () => { if (splitWorkspaceGroup(workspace, group.id, doc, 'vertical')) { persist(true); render(); } }),
       commandButton('Move tab left', () => { const index = group.tabs.findIndex((item) => item.id === leaf.id); if (index > 0 && moveWorkspaceLeaf(workspace, leaf.id, group.id, index - 1)) { persist(true); render(); } }),
       commandButton('Move tab right', () => { const index = group.tabs.findIndex((item) => item.id === leaf.id); if (index >= 0 && index < group.tabs.length - 1 && moveWorkspaceLeaf(workspace, leaf.id, group.id, index + 1)) { persist(true); render(); } }),
+      ...workspaceGroups(workspace).filter((target) => target.id !== group.id).map((target, index) => commandButton(
+        `Move to group ${index + 1}`,
+        () => { if (moveWorkspaceLeaf(workspace, leaf.id, target.id)) { persist(true); render(); } },
+      )),
       commandButton(workspace.bookmarks?.includes(doc.id) ? 'Remove bookmark' : 'Add bookmark', () => toggleBookmark(doc.id)),
       ...(doc.resourceRef ? [commandButton('Show in Files', () => { void showResourceInFiles(doc.resourceRef); })] : []),
       commandButton('Reveal in Editor', () => { workspace.left.open = true; workspace.left.tab = 'files'; revealInExplorer(doc, workspace); persist(true); render(); }),
@@ -2713,6 +2737,11 @@ export function createNotesFeature({
       bufferIdentity:() => `${cache.doc?.id || ''}:${JSON.stringify(cache.doc?.resource?.key || cache.doc?.resourceKey || {})}`,
       revision:() => cache.doc?.head || cache.doc?.resource?.revision?.value || '',
       scope:() => `${state.accountId || ''}:${state.workspace || ''}:${state.contextEpoch || 0}`,
+      onCommand:async (command) => {
+        if (command === 'insert-template') { insertTemplate(); return true; }
+        if (command === 'new-from-template') { createFromTemplate(); return true; }
+        return false;
+      },
     }));
   }
 

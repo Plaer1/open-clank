@@ -9,6 +9,7 @@ import {
   closeWorkspaceOtherLeaves,
   findWorkspaceLeaf,
   moveWorkspaceLeaf,
+  navigationIntentFromEvent,
   normalizeNotesSettings,
   normalizeNotesWorkspace,
   noteViewType,
@@ -299,6 +300,67 @@ assert(setWorkspacePanelPlacement(panelWs, 'outline', { side:'left' }));
 const leftPanels = workspacePanelsForSide(panelWs, 'left');
 assert.ok(leftPanels.includes('outline'));
 assert.ok(!workspacePanelsForSide(panelWs, 'right').includes('outline'));
+
+// ── S15: navigation intent (current / newTab / splitRight / splitBelow) ──
+{
+  const ws = normalizeNotesWorkspace({}, docs, 'a');
+  const group = workspaceGroups(ws)[0];
+  const originalLeaf = findWorkspaceLeaf(ws);
+  assert.equal(originalLeaf.docId, 'a');
+
+  // intent:'current' replaces the active tab's document in place.
+  const replaced = openWorkspaceDocument(ws, docs[1], { intent:'current' });
+  assert.equal(replaced.id, originalLeaf.id, 'current intent keeps the leaf id');
+  assert.equal(replaced.docId, 'b');
+  assert.equal(workspaceLeaves(ws).length, 1, 'current intent does not add a tab');
+  assert.equal(findWorkspaceLeaf(ws)?.docId, 'b');
+
+  // intent:'newTab' always creates a new tab even for the same document.
+  const second = openWorkspaceDocument(ws, docs[1], { intent:'newTab' });
+  assert.notEqual(second.id, replaced.id);
+  assert.equal(second.docId, 'b');
+  assert.equal(workspaceLeaves(ws).length, 2, 'newTab intent adds a tab');
+  // Multiple views of one resource are allowed; they share its save owner.
+
+  // intent:'splitRight' creates a sibling group oriented horizontally.
+  const splitRightLeaf = openWorkspaceDocument(ws, docs[0], { intent:'splitRight' });
+  assert.equal(splitRightLeaf.docId, 'a');
+  assert.equal(workspaceGroups(ws).length, 2);
+  const splits = [];
+  const collect = (node) => { if (node.type === 'split') splits.push(node); else for (const child of node.children || []) collect(child); };
+  collect(ws.root);
+  assert.equal(splits.length, 1);
+  assert.equal(splits[0].orientation, 'horizontal');
+
+  // intent:'splitBelow' creates a vertical sibling split.
+  const ws2 = normalizeNotesWorkspace({}, docs, 'a');
+  const splitBelowLeaf = openWorkspaceDocument(ws2, docs[2], { intent:'splitBelow' });
+  assert.equal(splitBelowLeaf.docId, 'c');
+  assert.equal(workspaceGroups(ws2).length, 2);
+  const splits2 = [];
+  const collect2 = (node) => { if (node.type === 'split') splits2.push(node); else for (const child of node.children || []) collect2(child); };
+  collect2(ws2.root);
+  assert.equal(splits2[0].orientation, 'vertical');
+
+  // Legacy reuse:false is newTab; reuse:true keeps find-or-create.
+  const ws3 = normalizeNotesWorkspace({}, docs, 'a');
+  const legacyNew = openWorkspaceDocument(ws3, docs[0], { reuse:false });
+  assert.notEqual(legacyNew.id, findWorkspaceLeaf(ws3, legacyNew.id)?.id === legacyNew.id ? null : legacyNew.id);
+  assert.equal(workspaceLeaves(ws3).length, 2);
+}
+
+// ── S15: navigationIntentFromEvent modifier mapping ──
+{
+  assert.equal(navigationIntentFromEvent(null), 'current');
+  assert.equal(navigationIntentFromEvent({}), 'current');
+  assert.equal(navigationIntentFromEvent({ ctrlKey:true }, { mac:false }), 'newTab');
+  assert.equal(navigationIntentFromEvent({ metaKey:true }, { mac:true }), 'newTab');
+  assert.equal(navigationIntentFromEvent({ metaKey:true }, { mac:false }), 'current', 'Cmd on non-Mac is not newTab');
+  assert.equal(navigationIntentFromEvent({ shiftKey:true }), 'splitRight');
+  assert.equal(navigationIntentFromEvent({ altKey:true }), 'splitBelow');
+  // Alt wins over Shift when both are held.
+  assert.equal(navigationIntentFromEvent({ altKey:true, shiftKey:true }), 'splitBelow');
+}
 
 console.log('copal notes workspace tests passed');
 

@@ -356,14 +356,58 @@ export function activateWorkspaceLeaf(workspace, groupId, leafId) {
   return true;
 }
 
+// Explicit navigation intent for document opens. `current` replaces the
+// active tab's document (retaining the leaf id so buffer bindings survive);
+// `newTab` always creates a tab; split intents create a sibling group.
+export const NAVIGATION_INTENTS = Object.freeze(['current', 'newTab', 'splitRight', 'splitBelow']);
+
+/** Derive navigation intent from a click/keyboard event's modifiers. */
+export function navigationIntentFromEvent(event = null, { mac = undefined } = {}) {
+  if (!event) return 'current';
+  const isMac = mac ?? (typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || ''));
+  // Ctrl on Windows/Linux and Command on macOS open a new tab. Shift splits
+  // right and Alt splits below, matching the quick-switcher chooser.
+  if (event.altKey) return 'splitBelow';
+  if (event.shiftKey) return 'splitRight';
+  if (isMac ? event.metaKey : event.ctrlKey) return 'newTab';
+  return 'current';
+}
+
+function normalizeNavigationIntent(options = {}) {
+  if (typeof options.intent === 'string' && NAVIGATION_INTENTS.includes(options.intent)) return options.intent;
+  // Legacy `reuse:false` is newTab; `reuse:true`/absent keeps find-or-create.
+  return options.intent === 'current' ? 'current' : options.reuse === false ? 'newTab' : null;
+}
+
 export function openWorkspaceDocument(workspace, doc, options = {}) {
+  const intent = normalizeNavigationIntent(options);
   let group = findWorkspaceGroup(workspace, options.groupId);
   if (!group) group = groupForLeaf(workspace, workspace.activeLeafId) || workspaceGroups(workspace)[0];
   if (!group) {
     group = makeGroup();
     workspace.root = group;
   }
-  let leaf = options.reuse === false ? null : group.tabs.find((item) => item.docId === doc.id);
+  if (intent === 'splitRight' || intent === 'splitBelow') {
+    return splitWorkspaceGroup(workspace, group.id, doc, intent === 'splitBelow' ? 'vertical' : 'horizontal');
+  }
+  if (intent === 'current') {
+    const active = group.tabs.find((item) => item.id === group.activeLeafId) || group.tabs[0] || null;
+    if (active) {
+      // Replace the active tab's document in place. The leaf id is retained
+      // so note-buffer and editor-view bindings keyed by leaf stay coherent;
+      // per-document dirty buffers live on the doc id and are not discarded.
+      active.docId = doc.id;
+      active.view = noteViewType(doc);
+      active.mode = active.view === 'note' ? 'live' : MODES.has(options.mode) ? options.mode : 'live';
+      active.selection = null;
+      active.scrollTop = 0;
+      active.rawSource = false;
+      activateWorkspaceLeaf(workspace, group.id, active.id);
+      return active;
+    }
+    // Empty group: fall through and create the first tab.
+  }
+  let leaf = intent === 'newTab' ? null : group.tabs.find((item) => item.docId === doc.id);
   if (!leaf) {
     leaf = makeLeaf(doc, { mode:options.mode });
     group.tabs.push(leaf);

@@ -53,6 +53,12 @@ export function findReferenceToken(source) {
 export function resolveReference(reference, { documents, origin = null } = {}) {
   const raw = reference.target.trim();
   if (/^(?:https?:\/\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(raw)) return { status:'external', url:raw, reference };
+  // App destination links are handled by the shared registry, never by the
+  // general chat-command interpreter.
+  if (/^clank:\/\//i.test(raw)) {
+    const destination = raw.replace(/^clank:\/\//i, '').replace(/\/+$/, '');
+    return destination ? { status:'app', destination, reference } : { status:'missing', reference };
+  }
   if (/^[a-z][a-z\d+.-]*:/i.test(raw) || raw.startsWith('//')) return { status:'unsupported', reference };
   const hash = raw.indexOf('#');
   const path = decode(hash < 0 ? raw : raw.slice(0, hash));
@@ -119,15 +125,22 @@ export function mediaKind(target, url = '') {
   return 'asset';
 }
 
-export function createReferenceRenderer({ h, documents, assetUrl, openTarget, renderDocument, maxDepth = 8 }) {
+export function createReferenceRenderer({ h, documents, assetUrl, openTarget, openAppDestination = null, renderDocument, maxDepth = 8 }) {
   const diagnostic = (status, reference) => h('span', { class:'copal-reference-error', 'data-reference-status':status, text:`${status === 'ambiguous' ? 'Ambiguous' : status === 'unsupported' ? 'Unsupported' : 'Missing'}: ${reference.target}` });
   return function renderReference(reference, { origin = null, seen = new Set() } = {}) {
     const resolved = resolveReference(reference, { documents:documents(), origin });
+    if (resolved.status === 'app') {
+      const invoke = (event) => {
+        if (typeof openAppDestination === 'function') openAppDestination(resolved.destination, event);
+        else openTarget?.(resolved.destination, null, event);
+      };
+      return h('button', { class:'copal-chip copal-app-link', type:'button', 'data-app-destination':resolved.destination, text:reference.label || reference.target, onclick:invoke });
+    }
     if (!['resolved', 'external'].includes(resolved.status)) return diagnostic(resolved.status, reference);
     const { target, fragment } = resolved;
     if (!reference.embed) return resolved.url
       ? h('a', { href:resolved.url, target:'_blank', rel:'noopener noreferrer', text:reference.label || reference.target })
-      : h('button', { class:'copal-chip', type:'button', text:reference.label || reference.target, onclick:() => openTarget(target, fragment) });
+      : h('button', { class:'copal-chip', type:'button', text:reference.label || reference.target, onclick:(event) => openTarget(target, fragment, event) });
     if (resolved.url || target?.kind === 'asset') {
       const url = resolved.url || assetUrl(target);
       if (!url) return diagnostic('unsupported', reference);
@@ -152,6 +165,6 @@ export function createReferenceRenderer({ h, documents, assetUrl, openTarget, re
     if (seen.size >= maxDepth) return h('span', { class:'copal-reference-error', 'data-reference-status':'depth', text:`Embed depth limit: ${target.name}` });
     const section = extractReferenceSection(target.text, fragment);
     if (section.status !== 'resolved') return diagnostic(section.status, reference);
-    return h('span', { class:'copal-transclusion', 'data-reference-status':'resolved' }, h('button', { class:'copal-chip', type:'button', text:reference.label || target.name, onclick:() => openTarget(target, fragment) }), renderDocument(section.text, new Set([...seen, target.id]), target));
+    return h('span', { class:'copal-transclusion', 'data-reference-status':'resolved' }, h('button', { class:'copal-chip', type:'button', text:reference.label || target.name, onclick:(event) => openTarget(target, fragment, event) }), renderDocument(section.text, new Set([...seen, target.id]), target));
   };
 }

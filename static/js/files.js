@@ -4330,13 +4330,14 @@ window.__openClankFilesContextCommand = async (command, node, request = null) =>
     setStatus(`${model.selectedKeys().length}${state.nextCursor ? '+' : ''} items selected`);
     return true;
   }
-  if (command === 'open-in-editor') {
+  if (command === 'open-in-editor' || command === 'open-in-editor-split-right' || command === 'open-in-editor-split-below') {
     if (!capabilities.has('open') || !entry.resource_ref || isDirectory(entry) || !isTextualEntry(entry)) {
       setStatus(`${entry.name || 'This item'} cannot be opened in Editor.`, true);
       return true;
     }
+    const intent = command === 'open-in-editor-split-right' ? 'splitRight' : command === 'open-in-editor-split-below' ? 'splitBelow' : undefined;
     const opener = window.__openClankOpenResourceHandle;
-    if (typeof opener === 'function') await opener({ resourceRef: entry.resource_ref, resourceKey: entrySelectionKey(entry), name: entry.name });
+    if (typeof opener === 'function') await opener({ resourceRef: entry.resource_ref, resourceKey: entrySelectionKey(entry), name: entry.name, ...(intent ? { intent } : {}) });
     else await openManagedEntry(entry);
     return true;
   }
