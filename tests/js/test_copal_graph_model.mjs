@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection } from '../../static/js/copal/graphModel.js';
+import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, isOfficialDocument, documentFolder, facetCacheKey } from '../../static/js/copal/graphModel.js';
 
 const docs = [
   { id:'a', name:'A', kind:'markdown', links:['B'], relations:[{ targetDocumentId:'b', kind:'embed' }, { targetDocumentId:'missing', kind:'link' }] },
@@ -59,4 +59,85 @@ assert.match(renameHeading(adversarial, 4, 'Renamed'), /```md\n# Fake\n```/);
 assert.equal(changeHeadingLevel(adversarial, 6, 3), adversarial, 'fake fenced heading cannot be transformed');
 assert.equal(deleteHeadingSection(adversarial, 6), adversarial, 'fake fenced heading cannot be deleted');
 assert.equal(reparentHeadingSection('# A\n```md\n# fake\n```\n# B\n', 1, 5), '# B\n## A\n```md\n# fake\n```\n', 'reparent keeps fenced bytes and order');
+
+// S20: Mind joins Graph. Legacy `mind` saved state projects onto structure
+// mode and there is no separate Mind identity in the mode vocabulary.
+assert.deepEqual(GRAPH_MODES, ['documents', 'structure', 'galaxy'], 'Graph carries both views plus Galaxy; Mind is not a mode');
+const legacyMindState = normalizeGraphState({ mode:'mind', modes:{ mind:{ camera:{ x:12, y:34, w:800, h:520 }, navigation:{ docId:'doc-7', selectedLine:4 }, filters:{ search:'old' } } } });
+assert.equal(legacyMindState.mode, 'structure', 'legacy Mind identity maps to Graph structure mode');
+assert.equal(legacyMindState.modes.structure.camera.x, 12);
+assert.equal(legacyMindState.modes.structure.navigation.docId, 'doc-7');
+assert.equal(legacyMindState.modes.structure.navigation.selectedLine, 4);
+assert.equal(legacyMindState.modes.structure.filters.search, 'old');
+assert.equal(legacyMindState.modes.mind, undefined, 'no standalone Mind mode state is created');
+
+// S20: structure entries cover nested bullets beside headings, excluding
+// code fences, frontmatter/properties and literal (indented) code.
+const mixed = '---\ntitle: props\n---\n# Root\n- top item\n  - nested item\n    - deep item\n1. ordered\n```md\n- fake bullet\n# fake heading\n```\n    - literal indented\n## Child\n* star bullet\nPlain prose\n';
+const structure = structureEntries(mixed);
+assert.deepEqual(structure.map((entry) => [entry.kind, entry.text]), [
+  ['heading', 'Root'], ['bullet', 'top item'], ['bullet', 'nested item'], ['bullet', 'deep item'],
+  ['bullet', 'ordered'], ['heading', 'Child'], ['bullet', 'star bullet'],
+], 'structure shows headings and nested bullets, not fences/frontmatter/literals');
+const structureMap = structureTree(structure);
+assert.deepEqual(structureMap.map((node) => node.text), ['Root'], 'one root heading holds the document structure');
+assert.deepEqual(structureMap[0].children.map((node) => node.text), ['top item', 'ordered', 'Child'], 'top-level bullets and child headings share one tree under the root');
+assert.deepEqual(structureMap[0].children[0].children.map((node) => node.text), ['nested item'], 'indented bullet nests under its parent bullet');
+assert.deepEqual(structureMap[0].children[0].children[0].children.map((node) => node.text), ['deep item'], 'deeply indented bullets keep nesting');
+assert.deepEqual(structureMap[0].children[2].children.map((node) => node.text), ['star bullet'], 'bullets nest under their enclosing child heading');
+const noStructure = structureEntries('Just a paragraph.\nAnother line.\n');
+assert.equal(noStructure.length, 0, 'a source without headings or bullets yields a useful empty structure');
+
+// S20: facets are derived from real scoped metadata, folders and values.
+const corpus = [
+  { id:'n1', name:'Notes/Alpha.md', kind:'note', tags:['alpha', 'shared'], properties:{ status:'open', owner:'sam' }, text:'Alpha body' },
+  { id:'n2', name:'Notes/Beta.md', kind:'note', tags:['beta'], properties:{ status:'done', owner:'kim' }, text:'Beta body' },
+  { id:'w1', name:'Notes/Guide.md', kind:'wiki', tags:['shared'], properties:{ status:'open' }, text:'Guide body' },
+  { id:'e1', name:'.events/Standup.md', kind:'note', tags:['calendar'], properties:{}, text:'Standup' },
+  { id:'o1', name:'OpenClank/Start Here', kind:'note', tags:['builtin'], properties:{ product:'open-clank', builtin:true }, builtin:true, text:'Official' },
+];
+assert.equal(documentFolder('Notes/Alpha.md'), 'Notes');
+assert.equal(documentFolder('Alpha.md'), '');
+assert.ok(isOfficialDocument(corpus[4]), 'provisioned doc is recognized by identity metadata');
+assert.ok(!isOfficialDocument(corpus[0]), 'personal note is not official');
+assert.ok(!isOfficialDocument(corpus[3]), 'dot-folder personal event is not official documentation');
+assert.equal(officialDocsRoot(corpus), 'OpenClank', 'official root derives from provisioned identities, not a hardcoded English name');
+const facets = deriveFacets(corpus, { generation:'gen-1' });
+assert.equal(facets.generation, 'gen-1');
+assert.equal(facets.officialRoot, 'OpenClank');
+assert.deepEqual(facets.kinds.map((item) => item.value).sort(), ['note', 'wiki']);
+assert.deepEqual(facets.folders.map((item) => item.value).sort(), ['.events', 'Notes', 'OpenClank']);
+assert.deepEqual(facets.tags.map((item) => item.value).sort(), ['alpha', 'beta', 'builtin', 'calendar', 'shared']);
+assert.deepEqual(facets.properties.status.map((item) => item.value).sort(), ['done', 'open']);
+assert.deepEqual(facets.properties.owner.map((item) => item.value).sort(), ['kim', 'sam']);
+assert.equal(facets.tags.find((item) => item.value === 'shared').count, 2, 'facet counts reflect real usage');
+
+// Official docs are excluded by default through the folder filter and can be
+// explicitly included; dot-folder personal content stays governed by ordinary
+// filters rather than being silently dropped.
+const defaultVisible = filterDocuments(corpus, {}, facets);
+assert.ok(!defaultVisible.some((doc) => doc.id === 'o1'), 'official docs hidden by default');
+assert.ok(defaultVisible.some((doc) => doc.id === 'e1'), 'personal dot-folder event remains filterable');
+const withOfficial = filterDocuments(corpus, { includeOfficial:true }, facets);
+assert.ok(withOfficial.some((doc) => doc.id === 'o1'), 'official docs are explicitly includable');
+assert.ok(matchesFilters(corpus[3], { tags:['calendar'] }, facets), 'dot-folder content responds to ordinary tag filters');
+assert.ok(!matchesFilters(corpus[0], { folders:['.events'] }, facets), 'folder filter applies to real folder paths');
+assert.ok(matchesFilters(corpus[0], { properties:{ status:['open'] } }, facets), 'property facet filter matches real metadata values');
+assert.ok(!matchesFilters(corpus[1], { properties:{ status:['open'] } }, facets), 'property filter excludes non-matching values');
+
+// Saved filters reconcile renamed/deleted values without imaginary hardcoding.
+const stale = reconcileFilters({ search:'keep', kinds:['note','gone-kind'], folders:['Notes','Deleted'], tags:['alpha','missing-tag'], properties:{ status:['open','ghost'], vanished:['x'] }, includeOfficial:true }, facets);
+assert.equal(stale.search, 'keep', 'search text is preserved');
+assert.deepEqual(stale.kinds, ['note'], 'unknown kind values are dropped against live facets');
+assert.deepEqual(stale.folders, ['Notes'], 'deleted folders recover without hardcoding');
+assert.deepEqual(stale.tags, ['alpha'], 'renamed tags recover against live facets');
+assert.deepEqual(stale.properties, { status:['open'] }, 'unknown property keys/values are reconciled away');
+assert.equal(stale.includeOfficial, true, 'explicit official inclusion survives reconciliation');
+assert.deepEqual(reconcileFilters({ kinds:['anything'] }, null).kinds, ['anything'], 'a missing snapshot leaves saved intent untouched');
+
+// Facet caches are scoped by account/workspace/index generation.
+assert.notEqual(facetCacheKey('a', 'w', 'g1'), facetCacheKey('a', 'w', 'g2'));
+assert.notEqual(facetCacheKey('a', 'w', 'g1'), facetCacheKey('b', 'w', 'g1'));
+assert.equal(facetCacheKey('', 'w', 'g1'), null);
+
 console.log('Copal Graph/Galaxy projection and state tests passed');

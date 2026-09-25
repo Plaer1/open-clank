@@ -2161,6 +2161,139 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         result["docs"] = documents
         return result
 
+    @router.get("/graph/facets")
+    async def graph_facets(
+        request: Request,
+        workspace: str | None = None,
+        category: str = Query("all", pattern="^(all|kinds|folders|tags|properties)$"),
+        query: str = Query("", max_length=256),
+        offset: int = Query(0, ge=0),
+        limit: int = Query(200, ge=1, le=1000),
+    ):
+        """Derived Graph filter facets over real scoped metadata and folders.
+
+        Facet values come from the scoped corpus itself — kinds, folders, tags
+        and property values are discovered rather than hardcoded.  Values are
+        paginated so a mounted page size is not corpus size; a value outside the
+        first page stays discoverable through `query`.  The `generation` field
+        is a cache key component scoped to owner/workspace plus content
+        revision, so the browser can cache a snapshot per account, workspace
+        and index generation.
+        """
+        scope = _scope(request, workspace)
+        result = await _call(request, "index", {**scope, "query": "", "kind": None, "corpus": "all"})
+        documents = [_resource_view(request, scope, document) for document in result.get("docs") or []]
+        documents = [
+            document
+            for document in documents
+            if not _is_compatibility_kind(document.get("kind")) and document.get("kind") != _OPERATION_KIND
+        ]
+
+        def _folder(name: str) -> str:
+            text = str(name or "")
+            cut = text.rfind("/")
+            return text[:cut] if cut > 0 else ""
+
+        def _is_official(document: dict[str, Any]) -> bool:
+            if document.get("builtin") is True:
+                return True
+            properties = document.get("properties") if isinstance(document.get("properties"), dict) else {}
+            product = str(properties.get("product", document.get("product", ""))).strip().casefold()
+            return product == "open-clank" or properties.get("builtin") is True
+
+        root_counts: dict[str, int] = {}
+        for document in documents:
+            if not _is_official(document):
+                continue
+            top = _folder(document.get("name", "")).split("/")[0]
+            if top:
+                root_counts[top] = root_counts.get(top, 0) + 1
+        official_root = None
+        if root_counts:
+            official_root = sorted(root_counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+        def _document_kind(document: dict[str, Any]) -> str:
+            kind = str(document.get("kind") or "")
+            return "wiki" if kind == "wiki" else "base" if kind == "base" else "event" if kind == "copal-event" else "note"
+
+        buckets: dict[str, dict[str, int]] = {"kinds": {}, "folders": {}, "tags": {}}
+        properties: dict[str, dict[str, int]] = {}
+        for document in documents:
+            kind = _document_kind(document)
+            buckets["kinds"][kind] = buckets["kinds"].get(kind, 0) + 1
+            folder = _folder(document.get("name", ""))
+            buckets["folders"][folder] = buckets["folders"].get(folder, 0) + 1
+            for tag in document.get("tags") or []:
+                text = str(tag).strip()
+                if text:
+                    buckets["tags"][text] = buckets["tags"].get(text, 0) + 1
+            props = document.get("properties") if isinstance(document.get("properties"), dict) else {}
+            for key, value in props.items():
+                property_key = str(key).strip()
+                if not property_key:
+                    continue
+                values = value if isinstance(value, list) else [value]
+                target = properties.setdefault(property_key, {})
+                for item in values:
+                    if item is None or item == "" or isinstance(item, (dict, list)):
+                        continue
+                    text = str(item)
+                    target[text] = target.get(text, 0) + 1
+
+        def _sorted(counts: dict[str, int]) -> list[dict[str, Any]]:
+            return [
+                {"value": value, "count": count}
+                for value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+            ]
+
+        def _paginate(values: list[dict[str, Any]]) -> dict[str, Any]:
+            needle = query.strip().casefold()
+            matched = values if not needle else [item for item in values if needle in item["value"].casefold()]
+            window = matched[offset:offset + limit]
+            return {
+                "values": window,
+                "total": len(matched),
+                "offset": offset,
+                "limit": limit,
+                "hasMore": offset + len(window) < len(matched),
+            }
+
+        facets: dict[str, Any] = {}
+        if category in ("all", "kinds"):
+            facets["kinds"] = _paginate(_sorted(buckets["kinds"]))
+        if category in ("all", "folders"):
+            facets["folders"] = _paginate(_sorted(buckets["folders"]))
+        if category in ("all", "tags"):
+            facets["tags"] = _paginate(_sorted(buckets["tags"]))
+        if category in ("all", "properties"):
+            facets["properties"] = {
+                key: _paginate(_sorted(counts)) for key, counts in sorted(properties.items())
+            }
+
+        # Generation covers owner/workspace identity and a cheap content
+        # fingerprint so the snapshot is invalidated when the corpus changes.
+        revision_material = json.dumps(
+            [
+                sorted((document.get("id"), document.get("head")) for document in documents),
+                official_root,
+            ],
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        generation = hashlib.sha256(revision_material.encode("utf-8")).hexdigest()[:16]
+
+        return {
+            "version": 1,
+            "generation": generation,
+            "officialRoot": official_root,
+            "totalDocuments": len(documents),
+            "facets": facets,
+            "owner": scope["owner"],
+            "workspace": scope["workspace_id"],
+        }
+
     @router.get("/planning")
     async def get_planning_projection(request: Request, workspace: str | None = None):
         scope = _scope(request, workspace)

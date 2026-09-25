@@ -42357,8 +42357,10 @@ body.theme-frosted .modal {
 .copal-day { min-height: 130px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); padding: 6px; }
 .copal-day > strong { font-size: 10px; }
 .copal-day-event { display: block; margin-top: 5px; padding: 4px; border-left: 2px solid var(--accent, var(--red)); background: var(--bg); font-size: 8px; }
-.copal-graph-wrap { position: relative; }
-.copal-graph { width: 100%; min-height: 620px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); touch-action: none; }
+/* The graph viewport is sized by its applet/container. A fixed world canvas
+   must not force internal scrollbars that swallow pointer input. */
+.copal-graph-wrap { position: relative; display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.copal-graph { width: 100%; flex: 1 1 auto; min-height: 0; height: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); touch-action: none; overflow: hidden; }
 /* B1: edge types — solid=link, dashed=embed, dotted=relation */
 .copal-graph-edge { stroke: color-mix(in srgb, var(--fg) 28%, transparent); stroke-width: 1; }
 .copal-graph-edge.edge-link { stroke-dasharray: none; }
@@ -42377,7 +42379,12 @@ body.theme-frosted .modal {
 .copal-graph-toolbar { display: flex; gap: 8px; align-items: center; padding: 6px 8px; flex-wrap: wrap; }
 .copal-graph-search { flex: 1; min-width: 120px; max-width: 260px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--fg); font: 12px var(--font-family, sans-serif); }
 .copal-graph-search::placeholder { opacity: .5; }
-.copal-graph-filters { display: flex; gap: 6px; align-items: center; font-size: 10px; }
+.copal-graph-filters { display: flex; gap: 6px; align-items: center; font-size: 10px; flex-wrap: wrap; }
+.copal-graph-facet-group { display: flex; align-items: center; gap: 4px; padding: 1px 5px; border: 1px solid var(--border); border-radius: 5px; }
+.copal-graph-facet-title { font-size: 9px; opacity: .65; text-transform: uppercase; letter-spacing: .04em; }
+.copal-graph-facet-values { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+.copal-graph-facet-more { font-size: 9px; padding: 1px 5px; }
+.copal-graph-official { opacity: .8; border: 1px dashed var(--border); border-radius: 5px; padding: 1px 5px; }
 .copal-graph-filter-label { display: flex; align-items: center; gap: 3px; cursor: pointer; opacity: .7; }
 .copal-graph-filter-label:hover { opacity: 1; }
 .copal-graph-filter-label input { width: 12px; height: 12px; accent-color: var(--accent, var(--red)); }
@@ -42415,7 +42422,13 @@ body.theme-frosted .modal {
   .copal-graph circle { transition: none; }
   .copal-graph-node { transition: none; }
 }
-.copal-mind { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); height: 100%; gap: 0; }
+/* Structure mode is a compact source chooser beside the tree. The chooser is
+   not a dominant document list in a narrow column; grid placement keeps each
+   pane in its own column so the tree is never pushed into a narrow slot. */
+.copal-mind { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: 100%; gap: 0; }
+.copal-mind > .copal-timeline-toolbar { grid-column: 1 / -1; grid-row: 1; }
+.copal-mind-picker { grid-column: 1; grid-row: 2; min-height: 0; }
+.copal-mind-tree { grid-column: 2; grid-row: 2; min-height: 0; }
 .copal-mind-picker { border-right: 1px solid var(--border); padding: 8px; overflow-y: auto; background: var(--panel); }
 .copal-mind-picker h3 { font-size: 11px; margin: 0 0 6px; color: var(--accent, var(--red)); }
 .copal-mind-doc-list { list-style: none; margin: 0; padding: 0; }
@@ -42437,6 +42450,9 @@ body.theme-frosted .modal {
 .copal-mind-tree-toggle { background: none; border: none; color: var(--fg); font-size: 8px; width: 14px; text-align: center; cursor: pointer; padding: 0; vertical-align: middle; }
 .copal-mind-tree-toggle:hover { color: var(--accent, var(--red)); }
 .copal-mind-tree-label { font-size: 11px; padding: 1px 4px; border-radius: 3px; cursor: text; vertical-align: middle; }
+.copal-mind-tree-node.kind-bullet > .copal-mind-tree-label { opacity: .82; font-style: italic; }
+.copal-mind-tree-node.kind-bullet > .copal-mind-tree-label::before { content: '\2022\00a0'; opacity: .55; font-style: normal; }
+.copal-mind-tree-node.kind-heading > .copal-mind-tree-label { font-weight: 600; }
 .copal-mind-tree-label:hover { background: var(--accent-bg, rgba(255,0,0,0.06)); }
 .copal-mind-tree-input { font-size: 11px; padding: 1px 4px; border: 1px solid var(--accent, var(--red)); border-radius: 3px; background: var(--bg); color: var(--fg); width: 200px; }
 .copal-mind-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; opacity: .6; text-align: center; padding: 20px; }

@@ -12,7 +12,7 @@ import { filesFacadeClient } from './filesFacadeClient.js';
 import { saveResourceSnapshot } from './codeEditor.js';
 import { prepareDocumentSave, commitDocumentSave, sameSaveScope } from './copal/documentSave.js';
 import { cloneEnvelope, normalizeResourceHandle, sameResourceKey, snapshotEnvelope } from './copal/resourceModel.js';
-import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, moveHeadingSection as moveGraphHeadingSection } from './copal/graphModel.js';
+import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, moveHeadingSection as moveGraphHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, facetCacheKey } from './copal/graphModel.js';
 import { canHandleInput } from './copal/inputContext.js';
 import { extractReferenceSection } from './copal/markdownResources.js';
 import { createMarkdownRenderer, registerAppDestination } from './copal/markdownRenderer.js';
@@ -23,7 +23,9 @@ import { registerAdapter, createCodeMirrorContextAdapter } from './custom-contex
 import { styledConfirm, styledPrompt } from './ui.js';
 
 const VIEWS = ['notes', 'wiki', 'timeline', 'graph', 'treehouse', 'todo'];
-const LABELS = { notes: 'Editor', wiki: 'Wiki', timeline: 'Timeline', galaxy: 'Galaxy', graph: 'Graph', mind: 'Mind', bases: 'Bases', treehouse: 'TreeHouse', todo: 'Meatbag Tasks' };
+// Mind is not a separate destination.  Its label is kept only as the legacy
+// deep-link alias text; Graph owns both views and Mind opens structure mode.
+const LABELS = { notes: 'Editor', wiki: 'Wiki', timeline: 'Timeline', galaxy: 'Galaxy', graph: 'Graph', mind: 'Graph', bases: 'Bases', treehouse: 'TreeHouse', todo: 'Meatbag Tasks' };
 // Code and Notes remain accepted route/DOM aliases, but only the canonical
 // Editor destination participates in visible Copal launcher preferences.
 const COPAL_LAUNCHER_IDS = [...VIEWS.filter((view) => view !== 'notes'), 'notes', 'files'];
@@ -336,6 +338,7 @@ function openDocument(id, view = state.view, push = true, options = {}) {
   // this owner without a second window registry.
   if (wikiOwned && notesFeature && doc) {
     const context = ensureViewWindow('notes');
+    context.selected = id;
     activateView('notes');
     context.window.show(document.activeElement);
     notesFeature.open(id, options);
@@ -1043,7 +1046,8 @@ function persistGraphView(view = getGraphView()) {
 }
 
 function mindModeState() {
-  const mode = getGraphView().modes.mind;
+  // Legacy name kept for call sites; Graph structure mode owns this state.
+  const mode = getGraphView().modes.structure;
   mode.navigation ||= { docId:null, collapsed:[], selectedLine:null, editingLine:null, draggingLine:null };
   if (!(mode.navigation.collapsed instanceof Set)) mode.navigation.collapsed = new Set(mode.navigation.collapsed || []);
   return mode.navigation;
@@ -1054,14 +1058,15 @@ function resolveView(view, mode = null) {
   // Bases is an Editor leaf now. Keep the old URL as a compatibility alias so
   // bookmarks open the selected Base in the shared Editor workspace.
   if (view === 'bases') view = 'notes';
-  // Mind is the legacy deep-link alias for the headings mode of the shared
-  // Graph family. Keep the alias readable while sharing its window/state.
+  // Mind is a legacy deep-link alias for the document-structure mode of the
+  // shared Graph family. It opens Graph's structure view, never a separate Mind
+  // surface, so saved Mind entrypoints resolve into the Graph page.
   if (view === 'mind') {
-    getGraphView().mode = 'mind';
+    getGraphView().mode = 'structure';
     persistGraphView();
     return 'graph';
   }
-  if (view === 'galaxy' || view === 'graph' && ['documents', 'galaxy', 'mind'].includes(mode)) {
+  if (view === 'galaxy' || (view === 'graph' && GRAPH_MODES.includes(mode))) {
     getGraphView().mode = view === 'galaxy' ? 'galaxy' : mode;
     persistGraphView();
   }
@@ -1092,17 +1097,37 @@ function graphSourceEnvelope(doc) {
   };
 }
 
-function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode) {
+function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = null) {
   const root = h('div', { class: 'copal-graph-wrap' });
   const view = getGraphView();
   const modeState = view.modes[mode];
-  const graphState = { searchQuery:modeState.filters.search, activeKinds:new Set(modeState.filters.kinds), selectedNodeId:modeState.selection?.nodeId || null };
+  // Real facet state derived from server-scoped metadata/folders/values. The
+  // saved filter set is reconciled against the loaded snapshot so renamed or
+  // deleted values recover instead of silently hiding the graph.
+  const reconciled = reconcileFilters(modeState.filters, facets);
+  modeState.filters = reconciled;
+  const graphState = {
+    searchQuery:reconciled.search,
+    activeKinds:new Set(reconciled.kinds),
+    activeFolders:new Set(reconciled.folders),
+    activeTags:new Set(reconciled.tags),
+    activeProperties:Object.fromEntries(Object.entries(reconciled.properties || {}).map(([key, values]) => [key, new Set(values)])),
+    includeOfficial:reconciled.includeOfficial === true,
+    selectedNodeId:modeState.selection?.nodeId || null,
+  };
   const vb = { ...modeState.camera };
   const MIN_VIEW = 20, MAX_VIEW = 80000, MAX_MOUNTED = 300;
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const persist = () => {
     modeState.camera = { ...vb };
-    modeState.filters = { search:graphState.searchQuery, kinds:[...graphState.activeKinds] };
+    modeState.filters = {
+      search:graphState.searchQuery,
+      kinds:[...graphState.activeKinds],
+      folders:[...graphState.activeFolders],
+      tags:[...graphState.activeTags],
+      properties:Object.fromEntries(Object.entries(graphState.activeProperties).map(([key, values]) => [key, [...values]])),
+      includeOfficial:graphState.includeOfficial,
+    };
     const selected = nodesById.get(graphState.selectedNodeId);
     modeState.selection = selected ? { ...selected.selection, nodeId:selected.id } : null;
     persistGraphView(view);
@@ -1131,14 +1156,6 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode) {
   const positions = new Map();
   nodes.forEach((node, index) => { const angle = index / Math.max(1, nodes.length) * Math.PI * 2; const ring = 190 + (index % 3) * 45; positions.set(node.id, { x: 500 + Math.cos(angle) * ring, y: 325 + Math.sin(angle) * ring }); });
 
-  // B2: filter visibility
-  const query = graphState.searchQuery.toLowerCase();
-  const visibleNodeIds = new Set();
-  for (const node of nodes) {
-    if (!graphState.activeKinds.has(node.kind || 'note')) continue;
-    if (query && !String(node.label || '').toLowerCase().includes(query)) continue;
-    visibleNodeIds.add(node.id);
-  }
   let edgeEls = [];
   let nodeEls = [];
 
@@ -1255,15 +1272,47 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode) {
   }
   svgEl.addEventListener('click', (e) => { if (e.target === svgEl || e.target.tagName === 'line') deselectNode(); });
 
-  // Zoom controls
+  // Zoom controls. Zoom keeps the pointer anchor fixed so wheel/pinch feels
+  // natural, while the buttons remain secondary helpers.
   const zoomAroundCenter = (factor) => {
     const width = Math.max(MIN_VIEW, Math.min(MAX_VIEW, vb.w * factor));
     const height = Math.max(MIN_VIEW * 650 / 1000, Math.min(MAX_VIEW * 650 / 1000, vb.h * (width / vb.w)));
     vb.x += (vb.w - width) / 2; vb.y += (vb.h - height) / 2; vb.w = width; vb.h = height; applyCamera();
   };
+  // Zoom around a screen point so the world coordinate under the pointer stays
+  // put. Used by wheel and pinch gestures.
+  const zoomAroundPoint = (factor, clientX, clientY) => {
+    const transform = svgEl.getScreenCTM();
+    if (!transform) { zoomAroundCenter(factor); return; }
+    const inverse = transform.inverse();
+    const anchor = new DOMPoint(clientX, clientY).matrixTransform(inverse);
+    const width = Math.max(MIN_VIEW, Math.min(MAX_VIEW, vb.w * factor));
+    const height = Math.max(MIN_VIEW * 650 / 1000, Math.min(MAX_VIEW * 650 / 1000, vb.h * (width / vb.w)));
+    // Keep the anchor's relative position inside the viewBox stable.
+    const ratioX = (anchor.x - vb.x) / vb.w;
+    const ratioY = (anchor.y - vb.y) / vb.h;
+    vb.w = width; vb.h = height;
+    vb.x = anchor.x - ratioX * width;
+    vb.y = anchor.y - ratioY * height;
+    applyCamera();
+  };
   const zoomIn = h('button', { class:'copal-graph-ctrl', text:'Zoom in', title:'Zoom in', 'aria-label':'Zoom in', onclick:() => { if (vb.w > MIN_VIEW) zoomAroundCenter(0.8); } });
   const zoomOut = h('button', { class:'copal-graph-ctrl', text:'Zoom out', title:'Zoom out', 'aria-label':'Zoom out', onclick:() => { if (vb.w < MAX_VIEW) zoomAroundCenter(1.25); } });
   const reset = h('button', { class:'copal-graph-ctrl', text:'Reset view', title:'Reset view', 'aria-label':'Reset view', onclick:() => { Object.assign(vb, { x:0, y:0, w:1000, h:650 }); applyCamera(); } });
+  // Fit frames the mounted graph content in the viewport without relying on
+  // button zoom as the primary navigation mechanism.
+  const fit = h('button', { class:'copal-graph-ctrl', text:'Fit', title:'Fit graph', 'aria-label':'Fit graph to view', onclick:() => {
+    const points = [...positions.values()].filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+    if (!points.length) { Object.assign(vb, { x:0, y:0, w:1000, h:650 }); applyCamera(); return; }
+    const minX = Math.min(...points.map((point) => point.x)) - 80;
+    const maxX = Math.max(...points.map((point) => point.x)) + 80;
+    const minY = Math.min(...points.map((point) => point.y)) - 60;
+    const maxY = Math.max(...points.map((point) => point.y)) + 60;
+    const width = Math.max(MIN_VIEW, Math.min(MAX_VIEW, maxX - minX));
+    const height = Math.max(MIN_VIEW * 650 / 1000, Math.min(MAX_VIEW * 650 / 1000, maxY - minY));
+    Object.assign(vb, { x:minX, y:minY, w:width, h:height });
+    applyCamera();
+  } });
   const updateZoomBounds = () => { zoomIn.disabled = vb.w <= MIN_VIEW; zoomOut.disabled = vb.w >= MAX_VIEW; };
 
   // B1: Legend with actual node/edge types
@@ -1284,34 +1333,108 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode) {
     legendItems.push(h('span', { class:'copal-graph-legend-item' }, svg('line', { x1:0, y1:6, x2:18, y2:6, class:`copal-graph-edge edge-${type}` }), h('span', { text:edgeLabels[type] || type })));
   }
   const legend = h('div', { class: 'copal-graph-legend' }, ...legendItems);
-  const controls = h('div', { class: 'copal-graph-controls' }, zoomIn, zoomOut, reset, legend);
+  const controls = h('div', { class: 'copal-graph-controls' }, zoomIn, zoomOut, fit, reset, legend);
 
-  // B2: search + filter toolbar
+  // B2: search + filter toolbar driven by real scoped facets. Values come
+  // from the server-derived snapshot rather than a fixed category allowlist.
   const searchInput = h('input', { class: 'copal-graph-search', type: 'search', placeholder: 'Search nodes…', 'aria-label': 'Search graph nodes', value: graphState.searchQuery });
   const filters = h('div', { class: 'copal-graph-filters' });
-  const kindCheckboxes = [];
-  for (const kind of kindOrder) {
-    if (!presentKinds.has(kind)) continue;
-    const cb = h('label', { class: 'copal-graph-filter-label' });
-    const input = h('input', { type: 'checkbox', checked: graphState.activeKinds.has(kind) || undefined });
-    input.addEventListener('change', () => { if (input.checked) graphState.activeKinds.add(kind); else graphState.activeKinds.delete(kind); rebuildGraph(); });
-    cb.append(input, h('span', { text: kindLabels[kind] }));
-    filters.append(cb);
-    kindCheckboxes.push({ kind, input });
+  const facetRows = [];
+  const FACET_PAGE = 8;
+  const addFacetGroup = (title, values, selectedSet, onChange) => {
+    if (!Array.isArray(values) || !values.length) return;
+    const group = h('div', { class: 'copal-graph-facet-group', 'data-facet-group': title });
+    group.append(h('span', { class: 'copal-graph-facet-title', text: title }));
+    let shown = 0;
+    const row = h('div', { class: 'copal-graph-facet-values' });
+    const renderValues = () => {
+      row.replaceChildren();
+      const window = values.slice(shown, shown + FACET_PAGE);
+      for (const item of window) {
+        const value = typeof item === 'string' ? item : item.value;
+        const label = value === '' ? '(root)' : value;
+        const cb = h('label', { class: 'copal-graph-filter-label' });
+        const input = h('input', { type: 'checkbox', checked: selectedSet.has(value) || undefined });
+        input.addEventListener('change', () => { if (input.checked) selectedSet.add(value); else selectedSet.delete(value); onChange(); });
+        cb.append(input, h('span', { text: label, title: `${label} · ${item.count ?? ''}`.trim() }));
+        row.append(cb);
+      }
+      const more = shown + FACET_PAGE < values.length;
+      const loadMore = h('button', { class:'copal-btn copal-graph-facet-more', type:'button', text: `Show ${Math.min(FACET_PAGE, values.length - shown - FACET_PAGE)} more…`, 'aria-label':`Show more ${title} filter values` });
+      loadMore.addEventListener('click', () => { shown += FACET_PAGE; renderValues(); });
+      if (more) row.append(loadMore);
+    };
+    renderValues();
+    group.append(row);
+    filters.append(group);
+    facetRows.push({ group, renderValues });
+    return group;
+  };
+  // Facet kinds fall back to kinds present in the mounted projection when a
+  // snapshot has not loaded yet, so the graph stays filterable offline.
+  const kindValues = facets?.kinds?.length ? facets.kinds : [...presentKinds].map((kind) => ({ value:kind, count:nodes.filter((node) => (node.kind || 'note') === kind).length }));
+  addFacetGroup('Kind', kindValues, graphState.activeKinds, rebuildGraph);
+  addFacetGroup('Folder', facets?.folders, graphState.activeFolders, rebuildGraph);
+  addFacetGroup('Tag', facets?.tags, graphState.activeTags, rebuildGraph);
+  if (facets?.properties && typeof facets.properties === 'object') {
+    for (const [key, values] of Object.entries(facets.properties)) {
+      const selected = graphState.activeProperties[key] || (graphState.activeProperties[key] = new Set());
+      addFacetGroup(key, values, selected, rebuildGraph);
+    }
   }
+  // Official docs are excluded by default through the general folder filter
+  // and become selectable like any other value.
+  const officialToggle = h('label', { class: 'copal-graph-filter-label copal-graph-official' });
+  const officialInput = h('input', { type: 'checkbox', checked: graphState.includeOfficial || undefined, 'aria-label': 'Include official documentation' });
+  officialInput.addEventListener('change', () => { graphState.includeOfficial = officialInput.checked; rebuildGraph(); });
+  officialToggle.append(officialInput, h('span', { text: 'Official docs' }));
+  filters.append(officialToggle);
   const toolbar = h('div', { class: 'copal-graph-toolbar' }, searchInput, filters);
 
   searchInput.addEventListener('input', () => { graphState.searchQuery = searchInput.value; rebuildGraph(); });
 
   // B4: screen-reader summary
-  const resetFilters = h('button', { class:'copal-btn', text:'Reset filters', title:'Reset graph search and kind filters', 'aria-label':'Reset graph filters', onclick:() => { graphState.searchQuery = ''; graphState.activeKinds = new Set(presentKinds); searchInput.value = ''; for (const item of kindCheckboxes) item.input.checked = true; rebuildGraph(); } });
+  const resetFilters = h('button', { class:'copal-btn', text:'Reset filters', title:'Reset graph search and facet filters', 'aria-label':'Reset graph filters', onclick:() => {
+    graphState.searchQuery = '';
+    // Mutate in place: facet groups keep a reference to these collections.
+    graphState.activeKinds.clear();
+    for (const item of kindValues) graphState.activeKinds.add(item.value);
+    graphState.activeFolders.clear();
+    graphState.activeTags.clear();
+    for (const values of Object.values(graphState.activeProperties)) values.clear();
+    graphState.includeOfficial = false;
+    searchInput.value = '';
+    officialInput.checked = false;
+    for (const row of facetRows) row.renderValues();
+    rebuildGraph();
+  } });
   toolbar.append(resetFilters);
   const info = h('div', { class: 'copal-graph-info', role: 'status', 'aria-live': 'polite' }, h('span', { text: `Graph showing ${nodes.length} nodes and ${edges.length} edges` }));
 
-  // Rebuild on filter/search change
+  // Rebuild on filter/search change. Facet filters are AND-ed across
+  // dimensions and OR-ed within one dimension, matching the model predicate.
   function rebuildGraph() {
-    const q = graphState.searchQuery.toLowerCase();
-    const visibleIds = new Set(nodes.filter((node) => graphState.activeKinds.has(node.kind || 'note') && (!q || String(node.label || '').toLowerCase().includes(q))).map((node) => node.id));
+    const activeFilters = {
+      search:graphState.searchQuery,
+      kinds:[...graphState.activeKinds],
+      folders:[...graphState.activeFolders],
+      tags:[...graphState.activeTags],
+      properties:Object.fromEntries(Object.entries(graphState.activeProperties).map(([key, values]) => [key, [...values]])),
+      includeOfficial:graphState.includeOfficial,
+    };
+    const visibleIds = new Set();
+    for (const node of nodes) {
+      const doc = node.doc;
+      if (doc) {
+        // Documents are filtered through the real facet predicate so folder,
+        // tag and property values govern visibility, not just node kind.
+        if (!matchesFilters(doc, activeFilters, facets)) continue;
+      } else if (!graphState.activeKinds.has(node.kind || 'note')) {
+        continue;
+      }
+      if (activeFilters.search && !String(node.label || '').toLowerCase().includes(activeFilters.search.toLowerCase())) continue;
+      visibleIds.add(node.id);
+    }
     mountGraph(visibleIds);
     const visibleEdges = edges.filter((edge) => visibleIds.has(edge.from) && visibleIds.has(edge.to)).length;
     info.textContent = visibleIds.size ? `Graph showing ${visibleIds.size} nodes and ${visibleEdges} edges${visibleIds.size > MAX_MOUNTED ? ` · showing first ${MAX_MOUNTED}; search to navigate` : ''}` : 'No graph results. Reset filters or search again.';
@@ -1340,7 +1463,41 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode) {
     vb.x -= after.x - before.x; vb.y -= after.y - before.y;
     lastX = e.clientX; lastY = e.clientY; applyCamera();
   });
-  for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) svgEl.addEventListener(type, () => { dragging = false; });
+  // Wheel and pinch zoom around the pointer so the anchored content stays put.
+  const activeTouches = new Map();
+  let pinch = null;
+  svgEl.addEventListener('wheel', (e) => {
+    if (!canHandleInput(e)) return;
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 1.12 : 0.89;
+    zoomAroundPoint(factor, e.clientX, e.clientY);
+  }, { passive:false });
+  svgEl.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+      activeTouches.set(e.pointerId, { x:e.clientX, y:e.clientY });
+      if (activeTouches.size === 2) {
+        dragging = false;
+        const [a, b] = [...activeTouches.values()];
+        pinch = { distance:Math.hypot(a.x - b.x, a.y - b.y) };
+      }
+    }
+  });
+  svgEl.addEventListener('pointermove', (e) => {
+    if (!activeTouches.has(e.pointerId)) return;
+    activeTouches.set(e.pointerId, { x:e.clientX, y:e.clientY });
+    if (activeTouches.size === 2 && pinch) {
+      const [a, b] = [...activeTouches.values()];
+      const distance = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinch.distance > 0 && distance > 0) zoomAroundPoint(pinch.distance / distance, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      pinch = { distance };
+    }
+  });
+  const endPointer = (e) => {
+    dragging = false;
+    activeTouches.delete(e.pointerId);
+    if (activeTouches.size < 2) pinch = null;
+  };
+  for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) svgEl.addEventListener(type, endPointer);
   root._copalDestroy = () => {
     destroyed = true;
     if (cameraFrame) { cameraFrameCancel?.(cameraFrame); clearTimeout(cameraFrame); cameraFrame = 0; cameraFrameCancel = null; }
@@ -1351,6 +1508,44 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode) {
 function renderGalaxy() {
   resolveView('galaxy');
   renderGraph();
+}
+
+// Lazy live facets: cached by account/workspace/index generation. The
+// mounted page size is never treated as corpus size; values outside the first
+// page stay discoverable through the facet query, and a new generation
+// refetches so renamed/deleted values reconcile.
+const graphFacetCache = new Map();
+async function loadGraphFacets({ force = false } = {}) {
+  const account = state.accountId || '';
+  const workspace = state.workspace || '';
+  if (!account || !workspace) return null;
+  try {
+    const response = await api('/graph/facets?limit=200', {}, workspace);
+    const generation = String(response?.generation ?? '');
+    const key = facetCacheKey(account, workspace, generation);
+    if (!key) return null;
+    if (!force && graphFacetCache.has(key)) return graphFacetCache.get(key);
+    const snapshot = {
+      generation,
+      officialRoot: response?.officialRoot ?? null,
+      totalDocuments: response?.totalDocuments ?? 0,
+      kinds: response?.facets?.kinds?.values ?? response?.facets?.kinds ?? [],
+      folders: response?.facets?.folders?.values ?? response?.facets?.folders ?? [],
+      tags: response?.facets?.tags?.values ?? response?.facets?.tags ?? [],
+      properties: Object.fromEntries(Object.entries(response?.facets?.properties ?? {}).map(([key2, page]) => [key2, page?.values ?? page ?? []])),
+    };
+    // Keep one snapshot per account/workspace/generation; drop other
+    // generations so stale values cannot leak across cache identities.
+    for (const cachedKey of [...graphFacetCache.keys()]) {
+      if (cachedKey !== key && cachedKey.includes(`:${encodeURIComponent(account)}:${encodeURIComponent(workspace)}:`)) graphFacetCache.delete(cachedKey);
+    }
+    graphFacetCache.set(key, snapshot);
+    return snapshot;
+  } catch (_) {
+    // Facets are an enhancement over mounted kinds; an unavailable endpoint
+    // must not block the ordinary graph fallback.
+    return null;
+  }
 }
 
 function renderGraph() {
@@ -1369,30 +1564,62 @@ function renderGraph() {
 
   const scope = saveScope();
   const view = getGraphView();
-  if (view.mode === 'mind') { renderMind(); return; }
+  if (view.mode === 'structure') { renderMind(); return; }
   const projection = view.mode === 'galaxy' ? galaxyGraph(planningData().tracks || [], allPlanningTasks(planningData())) : documentGraph(docs, findByName);
-  const modeOptions = [h('option', { value:'documents', text:'Documents · links' }), h('option', { value:'galaxy', text:'Galaxy · tracks and events' }), h('option', { value:'mind', text:'Mind · headings' })];
+  // Mind is not offered as a Graph view. Both linked-document and
+  // document-structure modes live here; Galaxy keeps its own projection.
+  const modeOptions = [h('option', { value:'documents', text:'Documents · links' }), h('option', { value:'structure', text:'Structure · headings and bullets' }), h('option', { value:'galaxy', text:'Galaxy · tracks and events' })];
   const mode = h('select', { 'aria-label':'Graph view', 'data-graph-mode':true }, modeOptions);
   mode.value = view.mode;
   mode.addEventListener('change', () => { view.mode = mode.value; persistGraphView(view); renderGraph(); updateRoute('graph', true); state.body.querySelector('[data-graph-mode]')?.focus(); });
   const focusedId = state.body.contains(document.activeElement) ? document.activeElement?.getAttribute('data-graph-id') : null;
-  const graph = graphSvg(projection.nodes, projection.edges, (node) => {
+  const openNode = (node) => {
     if (!sameSaveScope(scope, saveScope())) return;
     if (node.task) editPlanningTask(node.task.primaryTrackId, node.task.id);
     else if (node.track) planningFeature.openTrackEditor(node.track.id);
     else if (node.doc) openDocument(node.doc.id, node.kind === 'wiki' ? 'wiki' : 'notes');
-  }, view.mode);
-  state.body.querySelector('.copal-graph-wrap')?._copalDestroy?.();
-  state.body.replaceChildren(h('div', { class:'copal-timeline-toolbar' }, h('label', {}, 'Graph view ', mode)), graph);
-  if (focusedId) graph.querySelector(`[data-graph-id="${CSS.escape(focusedId)}"]`)?.focus({ preventScroll:true });
+  };
+  const mount = (facets) => {
+    const graph = graphSvg(projection.nodes, projection.edges, openNode, view.mode, facets);
+    state.body.querySelector('.copal-graph-wrap')?._copalDestroy?.();
+    state.body.replaceChildren(h('div', { class:'copal-timeline-toolbar' }, h('label', {}, 'Graph view ', mode)), graph);
+    if (focusedId) graph.querySelector(`[data-graph-id="${CSS.escape(focusedId)}"]`)?.focus({ preventScroll:true });
+  };
+  // Mount immediately with locally derived facets, then refine with the lazy
+  // server snapshot so the graph stays responsive while values stream in.
+  // Galaxy's facet vocabulary comes from tracks/events, not document metadata,
+  // so its kinds are never reconciled against document-derived facets.
+  if (view.mode === 'galaxy') {
+    const galaxyFacets = {
+      generation:'local',
+      officialRoot:null,
+      totalDocuments:projection.nodes.length,
+      kinds:[...new Set(projection.nodes.map((node) => node.kind || 'note'))].map((value) => ({ value, count:projection.nodes.filter((node) => (node.kind || 'note') === value).length })),
+      folders:[],
+      tags:[],
+      properties:{},
+    };
+    mount(galaxyFacets);
+    return;
+  }
+  const localFacets = deriveFacets(docs, { officialRoot:officialDocsRoot(docs) });
+  mount(localFacets);
+  loadGraphFacets().then((snapshot) => {
+    if (!snapshot || !state.body.isConnected) return;
+    if (!sameSaveScope(scope, saveScope())) return;
+    if (getGraphView().mode !== view.mode) return;
+    mount(snapshot);
+  }).catch(() => {});
 }
 
 function mindOutlineEntries(text) {
-  return headingEntries(text);
+  // Document structure covers headings and nested bullets. Heading mutations
+  // still target heading lines; bullets are navigable structure nodes.
+  return structureEntries(text);
 }
 
 function buildMindTree(entries) {
-  return headingTree(entries);
+  return structureTree(entries);
 }
 
 function mindDragPayload(doc, node, entries) {
@@ -1486,12 +1713,19 @@ function renderMindTree(nodes, doc, entries, depth = 0, allNodes = nodes) {
       input.addEventListener('blur', () => {
         const next = input.value.trim();
         if (next && next !== node.text) {
-          const source = wikiText(doc);
-          const lines = source.split('\n');
-          const lineIdx = node.line - 1;
-          const hashes = '#'.repeat(node.level);
-          lines[lineIdx] = `${hashes} ${next}`;
-          notesFeature?.applyDocumentTransaction?.(doc, (source) => renameHeading(source, node.line, next), { origin:'heading-rename' });
+          if (node.kind === 'bullet') {
+            // Bullet text is rewritten in place, keeping its marker and indent.
+            notesFeature?.applyDocumentTransaction?.(doc, (source) => {
+              const parts = String(source ?? '').split(/\r\n|\n|\r/);
+              const index = node.line - 1;
+              const line = parts[index] ?? '';
+              const rewritten = line.replace(/^(\s*(?:[-*+]|\d{1,9}[.)])\s+)(.*)$/, (_match, prefix) => `${prefix}${next}`);
+              if (rewritten !== line) parts[index] = rewritten;
+              return parts.join(source.match(/\r\n|\n|\r/)?.[0] || '\n');
+            }, { origin:'bullet-rename' });
+          } else {
+            notesFeature?.applyDocumentTransaction?.(doc, (source) => renameHeading(source, node.line, next), { origin:'heading-rename' });
+          }
         }
           navigation.editingLine = null;
         renderMind();
@@ -1506,19 +1740,22 @@ function renderMindTree(nodes, doc, entries, depth = 0, allNodes = nodes) {
     const toggle = h('button', { class: 'copal-mind-tree-toggle', text: hasChildren ? (isCollapsed ? '\u25B6' : '\u25BC') : '\u00A0' });
     toggle.addEventListener('click', (e) => { e.stopPropagation(); if (hasChildren) { if (navigation.collapsed.has(node.line)) navigation.collapsed.delete(node.line); else { navigation.collapsed.add(node.line); if (flattenMindTree(node.children).some((child) => child.line === navigation.selectedLine)) navigation.selectedLine = node.line; } persistGraphView(); renderMind(); } });
 
-    const nodeEl = h('li', { class: `copal-mind-tree-node${isSelected ? ' selected' : ''}`, tabindex: '0', 'data-line': String(node.line) }, toggle, label);
+    // Bullets are navigable structure nodes; heading transactions stay bound
+    // to heading lines only so source semantics and revisions are preserved.
+    const isHeading = node.kind !== 'bullet';
+    const nodeEl = h('li', { class: `copal-mind-tree-node kind-${isHeading ? 'heading' : 'bullet'}${isSelected ? ' selected' : ''}`, tabindex: '0', 'data-line': String(node.line), 'data-structure-kind': isHeading ? 'heading' : 'bullet' }, toggle, label);
 
     nodeEl.addEventListener('click', (e) => { e.stopPropagation(); navigation.selectedLine = node.line; persistGraphView(); renderMind(); });
     nodeEl.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); navigation.editingLine = node.line; renderMind(); });
     nodeEl.addEventListener('keydown', (e) => {
       if (isEditing) return;
       if (e.key === 'Enter' || e.key === 'F2') { e.preventDefault(); navigation.editingLine = node.line; renderMind(); return; }
-      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); mindMindDeleteHeading(doc, node); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); if (isHeading) mindMindDeleteHeading(doc, node); return; }
       if (e.key === 'ArrowDown') { e.preventDefault(); mindSelectNext(node, entries); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); mindSelectPrev(node, entries); return; }
       if (e.key === 'ArrowRight') { e.preventDefault(); if (hasChildren && isCollapsed) { navigation.collapsed.delete(node.line); persistGraphView(); renderMind(); } else if (hasChildren) { const next = node.children[0]; navigation.selectedLine = next.line; persistGraphView(); renderMind(); } return; }
       if (e.key === 'ArrowLeft') { e.preventDefault(); if (hasChildren && !isCollapsed) { navigation.collapsed.add(node.line); if (flattenMindTree(node.children).some((child) => child.line === navigation.selectedLine)) navigation.selectedLine = node.line; persistGraphView(); renderMind(); } else { const parent = findMindParent(node, allNodes); if (parent) { navigation.selectedLine = parent.line; persistGraphView(); renderMind(); } } return; }
-      if (e.key === 'Tab') { e.preventDefault(); const newLv = Math.max(1, Math.min(6, node.level + (e.shiftKey ? -1 : 1))); mindMindRenameHeading(doc, node, newLv); return; }
+      if (e.key === 'Tab') { e.preventDefault(); if (!isHeading) return; const newLv = Math.max(1, Math.min(6, node.level + (e.shiftKey ? -1 : 1))); mindMindRenameHeading(doc, node, newLv); return; }
       if (e.key === ' ') { e.preventDefault(); if (hasChildren) { if (navigation.collapsed.has(node.line)) navigation.collapsed.delete(node.line); else navigation.collapsed.add(node.line); persistGraphView(); renderMind(); } return; }
     });
 
@@ -1526,7 +1763,7 @@ function renderMindTree(nodes, doc, entries, depth = 0, allNodes = nodes) {
     // Read-only/recovery sources must not advertise a reparent affordance.
     // Keep the handlers installed for defensive synthetic events, while the
     // browser never offers a native drag from an unavailable source.
-    nodeEl.draggable = !(doc.readOnly === true || doc.builtin === true || doc.note_error || doc.rawPreserved === true);
+    nodeEl.draggable = isHeading && !(doc.readOnly === true || doc.builtin === true || doc.note_error || doc.rawPreserved === true);
     nodeEl.addEventListener('dragstart', (e) => {
       const payload = mindDragPayload(doc, node, entries);
       navigation.draggingPayload = payload;
@@ -1687,18 +1924,18 @@ function renderMind() {
   const mindEl = h('div', { class: 'copal-mind' });
 
   const familyMode = h('select', { class:'copal-mind-mode', 'aria-label':'Graph family mode', 'data-graph-mode':true },
-    h('option', { value:'documents', text:'Documents' }),
-    h('option', { value:'galaxy', text:'Galaxy' }),
-    h('option', { value:'mind', text:'Mind · headings' }));
-  familyMode.value = 'mind';
+    h('option', { value:'documents', text:'Documents · links' }),
+    h('option', { value:'structure', text:'Structure · headings and bullets' }),
+    h('option', { value:'galaxy', text:'Galaxy · tracks and events' }));
+  familyMode.value = 'structure';
   familyMode.addEventListener('change', () => {
     const next = familyMode.value;
     getGraphView().mode = next;
     persistGraphView();
-    if (next === 'mind') renderMind(); else renderGraph();
+    if (next === 'structure') renderMind(); else renderGraph();
     updateRoute('graph', true);
   });
-  mindEl.append(h('div', { class:'copal-timeline-toolbar' }, h('label', {}, 'Graph family ', familyMode)));
+  mindEl.append(h('div', { class: 'copal-timeline-toolbar' }, h('label', {}, 'Graph view ', familyMode)));
 
   // Document picker
   const picker = h('div', { class: 'copal-mind-picker' }, h('h3', { text: 'Documents' }));
@@ -1724,7 +1961,7 @@ function renderMind() {
   // Tree
   const treePane = h('div', { class: 'copal-mind-tree' });
   if (!treeNodes.length) {
-    treePane.append(h('div', { class: 'copal-mind-empty-tree' }, h('p', { text: 'No headings found in this source.' }), h('button', { class:'copal-btn', text:'Open source', onclick:() => openDocument(doc.id, doc.kind === 'wiki' ? 'wiki' : 'notes') })));
+    treePane.append(h('div', { class: 'copal-mind-empty-tree' }, h('p', { text: 'No headings or bullets found in this source.' }), h('button', { class:'copal-btn', text:'Open source', onclick:() => openDocument(doc.id, doc.kind === 'wiki' ? 'wiki' : 'notes') })));
   } else {
     // Toolbar
     const toolbar = h('div', { class: 'copal-mind-toolbar' },
@@ -1733,7 +1970,7 @@ function renderMind() {
       h('button', { class: 'copal-btn', text: '\u2191', title: 'Move up', 'aria-label':'Move heading up', onclick: () => { if (navigation.selectedLine && mindMutationAllowed(doc)) { const original = entries.find((entry) => entry.line === navigation.selectedLine) || { text:'' }; const result = notesFeature?.applyDocumentTransaction?.(doc, (current) => moveGraphHeadingSection(current, navigation.selectedLine, -1), { origin:'heading-move' }); remapMindSelection(result, original, navigation.selectedLine); if (result?.outcome === 'queued') renderMind(); } } }),
       h('button', { class: 'copal-btn', text: '\u2193', title: 'Move down', 'aria-label':'Move heading down', onclick: () => { if (navigation.selectedLine && mindMutationAllowed(doc)) { const original = entries.find((entry) => entry.line === navigation.selectedLine) || { text:'' }; const result = notesFeature?.applyDocumentTransaction?.(doc, (current) => moveGraphHeadingSection(current, navigation.selectedLine, 1), { origin:'heading-move' }); remapMindSelection(result, original, navigation.selectedLine); if (result?.outcome === 'queued') renderMind(); } } }),
       h('span', { class: 'copal-mind-doc-name', text: doc.name }),
-      h('span', { class: 'copal-mind-headings-count', text: `${entries.length} headings` }),
+      h('span', { class: 'copal-mind-headings-count', text: `${entries.filter((entry) => entry.kind !== 'bullet').length} headings · ${entries.filter((entry) => entry.kind === 'bullet').length} bullets` }),
     );
     treePane.append(toolbar);
     const treeList = renderMindTree(treeNodes, doc, entries);
