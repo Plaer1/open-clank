@@ -44,7 +44,10 @@ bcrypt
 # Secret Service.  The CLI deliberately falls back to process memory when the
 # operating system exposes no usable keyring backend.
 keyring>=25,<26
-mcp
+# MCP low-level server/client API (plan work 7: reconcile under `<2`).
+# src/openclank/mcp_tool_server.py carries a 1.x/2.x decorator shim so the
+# pin is satisfiable either way.
+mcp<2
 pyotp
 qrcode[pil]
 # Pre-alpha Memory photo admission/metadata normalization (JPEG/PNG/WebP).

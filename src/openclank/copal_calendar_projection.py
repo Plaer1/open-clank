@@ -136,7 +136,7 @@ def build_projection(
             base_desc_parts.extend([
                 f"Copal track: {track_name}",
                 f"Status: {status}",
-                f"Source: /copal/timeline?doc={planning_document_id}",
+                f"Source: /timeline?doc={planning_document_id}",
             ])
             if tags:
                 base_desc_parts.append(f"Tags: {', '.join(tags)}")
@@ -186,7 +186,7 @@ def build_projection(
         description_parts.extend([
             f"Copal track: {track_name}",
             f"Status: {status}",
-            f"Source: /copal/timeline?doc={planning_document_id}",
+            f"Source: /timeline?doc={planning_document_id}",
         ])
         if tags:
             description_parts.append(f"Tags: {', '.join(tags)}")

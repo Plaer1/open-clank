@@ -4,6 +4,8 @@
 // editor bodies or filesystem paths, so opening a lesson cannot change the
 // selected resource or accidentally attach private content to the assistant.
 
+import { appletPath } from './appletRoutes.js';
+
 const HELP_EVENT = 'openclank:contextual-help';
 const ASSISTANT_EVENT = 'openclank:assistant-context';
 
@@ -194,7 +196,8 @@ function activeContext(surface = null, root = null) {
 function lessonHref(context) {
   const params = new URLSearchParams({ lesson: context.lessonId });
   if (context.workspace) params.set('workspace', context.workspace);
-  return `/copal/treehouse?${params.toString()}`;
+  // Canonical registry address — never a /copal/ link emitter.
+  return appletPath('treehouse', { search: params });
 }
 
 function clearContextState() {

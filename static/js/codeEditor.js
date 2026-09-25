@@ -1,5 +1,6 @@
 import { filesFacadeClient } from './filesFacadeClient.js';
 import { createOpenClankWindow } from './copal/windows.js';
+import { appletPath } from './appletRoutes.js';
 import workspaceModule from './workspace.js';
 import { styledConfirm, styledPrompt } from './ui.js';
 import { createResizablePane } from './editor/resizablePane.js';
@@ -1948,7 +1949,9 @@ export async function openResource(resourceRef) {
   if (!state.shell) createShell();
   state.nativeWindow.show(document.activeElement);
   markLauncherActive(true);
-  if (location.pathname !== '/copal/editor') history.pushState({}, '', '/copal/editor');
+  // Canonical registry address — never a /copal/ history write.
+  const editorPath = appletPath('editor');
+  if (location.pathname !== editorPath) history.pushState({}, '', editorPath);
   setStatus('Opening in Editor…');
   state.resourceOpenController?.abort?.();
   const controller = new AbortController();

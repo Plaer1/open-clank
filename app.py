@@ -1393,6 +1393,11 @@ async def serve_copal_alias(request: Request, view: str = "notes"):
     query = dict(request.query_params)
     if (view or "").lower() in ("mind", "galaxy") and "mode" not in query:
         query["mode"] = view.lower()
+    # `/bases` resolves the Bases leaf intent via the client registry; the
+    # legacy `/copal/bases` alias must preserve it the same way or bookmarks
+    # lose the leaf. Symmetric with SEGMENTS.bases.openBases.
+    if (view or "").lower() == "bases" and "open" not in query:
+        query["open"] = "bases"
     suffix = ("?" + urlencode(query)) if query else ""
     return RedirectResponse(url=f"{target}{suffix}", status_code=302)
 

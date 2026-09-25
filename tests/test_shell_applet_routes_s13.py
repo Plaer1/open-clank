@@ -65,6 +65,8 @@ def _client_results():
         add(path, path)
     add("/copal/graph?doc=abc&mode=mind", "/copal/graph?doc=abc&mode=mind")
     add("/copal/mind", "/copal/mind")
+    add("/copal/bases?doc=d1", "/copal/bases?doc=d1")
+    add("/copal/bases", "/copal/bases")
     add("/no-such-applet", "/no-such-applet")
     add("/api/no-such-route-s13", "/api/no-such-route-s13")
 
@@ -137,6 +139,19 @@ def test_copal_mind_alias_supplies_graph_mode(client_results):
     assert result["location"] == "/graph?mode=mind"
 
 
+def test_copal_bases_alias_preserves_open_bases(client_results):
+    """`/bases` keeps the Bases leaf intent; the legacy `/copal/bases` alias
+    must be symmetric and not drop it."""
+    focused = client_results["/copal/bases?doc=d1"]
+    assert focused["status"] == 302
+    assert focused["location"].startswith("/editor?")
+    assert "open=bases" in focused["location"]
+    assert "doc=d1" in focused["location"]
+    bare = client_results["/copal/bases"]
+    assert bare["status"] == 302
+    assert bare["location"] == "/editor?open=bases"
+
+
 def test_unknown_url_is_not_blanket_shell_catchall(client_results):
     result = client_results["/no-such-applet"]
     assert result["status"] == 404
@@ -205,9 +220,55 @@ def test_resolve_rejects_unknown_and_root():
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
-def test_treehouse_share_token_is_stripped():
+def test_treehouse_share_token_is_stripped_from_new_addresses():
+    """appletPath builds fresh destinations; a one-shot share token never
+    rides along to an unrelated navigation."""
     path = _node_eval("appletPath('treehouse', { search: 'treehouseShare=tok&doc=d' })")
     assert path == "/treehouse?doc=d"
+    assert "treehouseShare" not in _node_eval("appletPath('editor', { search: 'treehouseShare=tok' })")
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_treehouse_share_token_survives_resolve_until_consumed():
+    """Consume-then-strip: shell normalization must keep the live token so
+    copal/treehouse.js can accept it and only then rewrite the URL. Covers the
+    new-address and legacy-alias deep links."""
+    new_address = _node_eval("resolveAppletLocation('/treehouse', '?treehouseShare=TOK&doc=d')")
+    assert new_address["canonicalPath"].startswith("/treehouse?")
+    assert "treehouseShare=TOK" in new_address["canonicalPath"]
+    assert "doc=d" in new_address["canonicalPath"]
+    legacy_alias = _node_eval("resolveAppletLocation('/copal/treehouse', '?treehouseShare=TOK')")
+    assert legacy_alias["legacy"] is True
+    assert "treehouseShare=TOK" in legacy_alias["canonicalPath"]
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_treehouse_share_consumer_strips_only_its_token():
+    """TreeHouse is the sole consumer: it removes just `treehouseShare` and
+    leaves other query state in the address."""
+    treehouse = (ROOT / "static" / "js" / "copal" / "treehouse.js").read_text(encoding="utf-8")
+    assert "treehouseShare" in treehouse
+    assert "searchParams.delete('treehouseShare')" in treehouse
+    # The consumer reads the live URL, not a pre-normalized copy.
+    assert "window.location.search" in treehouse
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_bases_open_intent_is_symmetric_across_aliases():
+    """`/bases` and `/copal/bases` both carry the Bases leaf intent; a refresh
+    of the canonical `/editor?open=bases` form must honor it too."""
+    assert _node_eval("appletPath('bases')") == "/editor?open=bases"
+    assert _node_eval("appletPath('bases', { doc: 'd1' })") == "/editor?doc=d1&open=bases"
+    from_bases = _node_eval("resolveAppletLocation('/bases', '')")
+    assert from_bases["openBases"] is True
+    assert "open=bases" in from_bases["canonicalPath"]
+    from_alias = _node_eval("resolveAppletLocation('/copal/bases', '?doc=d1')")
+    assert from_alias["openBases"] is True
+    assert "open=bases" in from_alias["canonicalPath"]
+    assert "doc=d1" in from_alias["canonicalPath"]
+    from_canonical = _node_eval("resolveAppletLocation('/editor', '?open=bases&doc=d1')")
+    assert from_canonical["openBases"] is True
+    assert "open=bases" in from_canonical["canonicalPath"]
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
@@ -334,3 +395,52 @@ def test_copal_js_addresses_use_registry_not_copal_prefix():
     assert "resolveAppletLocation" in copal
     # No remaining literal browser history writes of /copal/ addresses.
     assert not re.search(r"""history\.(?:push|replace)State\([^)]*'/copal/""", copal)
+
+
+def test_stray_copal_emitters_go_through_registry():
+    """Registry uniqueness: every browser history write and link generator in
+    the shell modules resolves through appletRoutes, never a literal /copal/
+    destination. Legacy /copal/* stays redirect-only (server 302 + resolve)."""
+    # Match a quoted /copal/ path literal — not './copal/...' module paths
+    # and not comments that merely name the alias space.
+    literal_copal = re.compile(r"""['"`]/copal/""")
+    code_editor = (ROOT / "static" / "js" / "codeEditor.js").read_text(encoding="utf-8")
+    assert "appletPath(" in code_editor
+    assert "from './appletRoutes.js'" in code_editor
+    assert not re.search(r"""history\.(?:push|replace)State\([^)]*['"`]/copal/""", code_editor)
+    assert not literal_copal.search(code_editor)
+    help_module = (ROOT / "static" / "js" / "contextualHelp.js").read_text(encoding="utf-8")
+    assert "appletPath(" in help_module
+    assert "from './appletRoutes.js'" in help_module
+    assert not literal_copal.search(help_module)
+    # Sweep: no shell module emits a /copal/ history write or href.
+    for js in (ROOT / "static" / "js").rglob("*.js"):
+        source = js.read_text(encoding="utf-8")
+        if js.name == "appletRoutes.js":
+            continue  # owns alias input handling
+        assert not re.search(r"""history\.(?:push|replace)State\([^)]*['"`]/copal/""", source), js
+        assert not re.search(r"""href\s*[:=]\s*['"`]/copal/""", source), js
+
+
+def test_python_url_emitters_use_canonical_not_copal():
+    """Tool envelopes and generated links never emit /copal/* destinations."""
+    literal_copal = re.compile(r"""['"`]/copal/""")
+    manage = (ROOT / "src" / "openclank" / "copal_manage.py").read_text(encoding="utf-8")
+    tools = (ROOT / "src" / "openclank" / "copal_tools.py").read_text(encoding="utf-8")
+    field_guide = (ROOT / "src" / "openclank" / "treehouse_field_guide.py").read_text(encoding="utf-8")
+    projection = (ROOT / "src" / "openclank" / "copal_calendar_projection.py").read_text(encoding="utf-8")
+    assert "canonical_open_url(" in manage
+    assert "canonical_open_url(" in tools
+    assert not literal_copal.search(manage)
+    assert not literal_copal.search(tools)
+    assert not literal_copal.search(field_guide)
+    assert not literal_copal.search(projection)
+    urls = (ROOT / "src" / "openclank" / "copal_urls.py").read_text(encoding="utf-8")
+    assert "canonical_open_url" in urls
+    assert '"/editor?open=bases"' in urls
+
+
+def test_mcp_pin_records_plan_work_7_slice():
+    """Cheap dependency slice of plan work 7: MCP stays under `<2`."""
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert re.search(r"^mcp<2\s*$", requirements, re.M)

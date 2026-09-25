@@ -89,13 +89,12 @@ const VIEW_PATH = Object.freeze({
 });
 
 function normalizeSearch(search) {
-  const params = search instanceof URLSearchParams
+  // Copy only. TreeHouse share tokens are one-shot and must survive shell
+  // normalization until the consumer (copal/treehouse.js) accepts them and
+  // strips just that parameter; stripping here would eat a deep link.
+  return search instanceof URLSearchParams
     ? new URLSearchParams(search)
     : new URLSearchParams(search || '');
-  // TreeHouse share acceptance consumes only its token parameter; other
-  // query/hash state stays in the address.
-  params.delete('treehouseShare');
-  return params;
 }
 
 function withQuery(path, params) {
@@ -123,7 +122,11 @@ export function appletPath(name, opts = {}) {
     path = DIRECT[seg.target] || '/';
   }
   const params = normalizeSearch(opts.search);
+  // A newly built address never inherits a one-shot TreeHouse share token;
+  // only the live URL keeps it until TreeHouse consumes it.
+  params.delete('treehouseShare');
   if (opts.doc) params.set('doc', String(opts.doc));
+  if (seg.openBases) params.set('open', 'bases');
   const mode = opts.mode || seg.mode;
   if (mode && seg.view === 'graph') params.set('mode', String(mode));
   return withQuery(path, params);
@@ -164,15 +167,19 @@ export function resolveAppletLocation(pathname, search) {
   const params = normalizeSearch(search);
   const mode = params.get('mode') || seg.mode || null;
   const doc = params.get('doc');
+  // `open=bases` on an editor address is the Bases leaf intent (bookmark or
+  // refresh of the canonical /editor?open=bases form). Symmetric with
+  // SEGMENTS.bases.openBases and appletPath so aliases cannot drop it.
+  const openBases = !!seg.openBases
+    || (seg.target === 'editor' && (params.get('open') || '').toLowerCase() === 'bases');
 
   let canonicalPath;
   if (seg.target === 'editor') {
     const view = seg.view || 'notes';
     const q = new URLSearchParams(params);
-    if (seg.openBases) q.set('open', 'bases');
+    if (openBases) q.set('open', 'bases');
     if (doc) q.set('doc', doc);
     if (mode && view === 'graph') q.set('mode', mode);
-    q.delete('treehouseShare');
     canonicalPath = withQuery(VIEW_PATH[view] || '/editor', q);
   } else if (seg.target === 'settings') {
     canonicalPath = settingsPanel ? `/settings/${encodeURIComponent(settingsPanel)}` : '/settings';
@@ -186,7 +193,7 @@ export function resolveAppletLocation(pathname, search) {
     mode,
     doc,
     panel: settingsPanel,
-    openBases: !!seg.openBases,
+    openBases,
     legacy,
     canonicalPath,
   };

@@ -39,19 +39,21 @@ _COURSES = (
 # These locators are the shipped entry points, rather than prose labels.  A
 # lesson may describe an optional provider-backed action, but it must still
 # land on a real surface where the disposable exercise can be inspected.
+# href values are canonical registry addresses; legacy /copal/* stays
+# redirect-only and is never emitted here.
 _SURFACE_DETAILS = {
-    "fg-orientation": {"key": "treehouse", "label": "TreeHouse", "href": "/copal/treehouse", "locator": "[data-copal-view=treehouse]"},
+    "fg-orientation": {"key": "treehouse", "label": "TreeHouse", "href": "/treehouse", "locator": "[data-copal-view=treehouse]"},
     "fg-assistant": {"key": "assistant", "label": "Assistant", "href": "/", "locator": "#message"},
-    "fg-editor": {"key": "editor", "label": "Editor", "href": "/copal/editor", "locator": "[data-copal-view=notes]"},
+    "fg-editor": {"key": "editor", "label": "Editor", "href": "/editor", "locator": "[data-copal-view=notes]"},
     "fg-files": {"key": "files", "label": "Files", "href": "/files", "locator": "[data-files-launcher]"},
-    "fg-wiki": {"key": "wiki", "label": "Wiki", "href": "/copal/wiki", "locator": "[data-copal-view=wiki]"},
-    "fg-bases": {"key": "bases", "label": "Bases in Editor", "href": "/copal/bases", "locator": "[data-copal-view=notes]"},
-    "fg-timeline": {"key": "timeline", "label": "Timeline", "href": "/copal/timeline", "locator": "[data-copal-view=timeline]"},
-    "fg-connections": {"key": "graph", "label": "Graph and Mind", "href": "/copal/graph", "locator": "[data-copal-view=graph]"},
-    "fg-tasks": {"key": "tasks", "label": "Meatbag Tasks", "href": "/copal/todo", "locator": "[data-copal-view=todo]"},
+    "fg-wiki": {"key": "wiki", "label": "Wiki", "href": "/wiki", "locator": "[data-copal-view=wiki]"},
+    "fg-bases": {"key": "bases", "label": "Bases in Editor", "href": "/editor?open=bases", "locator": "[data-copal-view=notes]"},
+    "fg-timeline": {"key": "timeline", "label": "Timeline", "href": "/timeline", "locator": "[data-copal-view=timeline]"},
+    "fg-connections": {"key": "graph", "label": "Graph and Mind", "href": "/graph", "locator": "[data-copal-view=graph]"},
+    "fg-tasks": {"key": "tasks", "label": "Meatbag Tasks", "href": "/todo", "locator": "[data-copal-view=todo]"},
     "fg-settings": {"key": "settings", "label": "Settings", "href": "/settings", "locator": "#rail-settings"},
     "fg-continuity": {"key": "continuity", "label": "Memory and history", "href": "/", "locator": "#memory-mode-select"},
-    "fg-teaching": {"key": "teaching", "label": "TreeHouse Admin", "href": "/copal/treehouse", "locator": "[data-copal-view=treehouse]"},
+    "fg-teaching": {"key": "teaching", "label": "TreeHouse Admin", "href": "/treehouse", "locator": "[data-copal-view=treehouse]"},
     "fg-models": {"key": "models", "label": "Models and Compare", "href": "/settings", "locator": "#rail-settings"},
     "fg-automation": {"key": "automation", "label": "Clanker Tasks", "href": "/", "locator": "#tool-tasks-btn"},
     "fg-research-media": {"key": "research", "label": "Research and Gallery", "href": "/", "locator": "#rail-research"},

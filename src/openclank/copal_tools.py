@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from src.openclank.copal_bridge import CopalBridge
+from src.openclank.copal_urls import canonical_open_url
 from src.openclank.copal_planning import (
     EVENT_KIND,
     TRACKS_KIND,
@@ -179,9 +180,20 @@ def _page(items: list[Any], action: str, workspace: str, offset: int, limit: int
 
 def _envelope(action: str, workspace: str, data: Any, *, kind: str | None = None, resource: dict[str, Any] | None = None, page: dict[str, Any] | None = None, projection: bool = False, sources: list[str] | None = None) -> dict[str, Any]:
     resource = resource or {}
-    result = {"ok": True, "action": action, "workspace": workspace, "view": action.split(".", 1)[0], "resourceKind": kind or resource.get("kind"), "resourceId": resource.get("id"), "head": resource.get("head"), "data": data, "page": page or {"nextCursor": None, "truncated": False}, "openUrl": f"/copal/{action.split('.', 1)[0]}"}
-    if resource.get("id"):
-        result["openUrl"] += f"?doc={resource['id']}"
+    view = action.split(".", 1)[0]
+    # Canonical registry address — legacy /copal/* stays redirect-only.
+    result = {
+        "ok": True,
+        "action": action,
+        "workspace": workspace,
+        "view": view,
+        "resourceKind": kind or resource.get("kind"),
+        "resourceId": resource.get("id"),
+        "head": resource.get("head"),
+        "data": data,
+        "page": page or {"nextCursor": None, "truncated": False},
+        "openUrl": canonical_open_url(view, resource.get("id") or None),
+    }
     if projection:
         result["projection"] = True
         result["sources"] = sources or []

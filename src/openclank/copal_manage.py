@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from src.openclank.copal_bridge import CopalBridge
+from src.openclank.copal_urls import canonical_open_url
 from src.openclank.copal_bases import BaseDefinitionError, dump_base_definition, parse_base_definition, set_frontmatter_property
 from src.openclank.copal_calendar_projection import reconcile_projection
 from src.openclank.copal_planning import (
@@ -401,7 +402,9 @@ def _base_doc(docs: list[dict[str, Any]], document_id: str) -> dict[str, Any]:
 
 
 def _result(action: str, workspace: str, *, doc: dict[str, Any] | None = None, saved: bool = True, data: Any = None, warnings: list[str] | None = None, **extra: Any) -> dict[str, Any]:
-    return {"ok": True, "action": action, "workspace": workspace, "saved": saved, "resourceKind": doc.get("kind") if doc else None, "resourceId": doc.get("id") if doc else None, "head": doc.get("head") if doc else None, "openUrl": f"/copal/{action.split('.', 1)[0]}" + (f"?doc={doc['id']}" if doc and doc.get("id") else ""), "warnings": warnings or [], "data": data, **extra}
+    # Canonical registry address — legacy /copal/* stays redirect-only.
+    open_url = canonical_open_url(action.split('.', 1)[0], doc.get("id") if doc else None)
+    return {"ok": True, "action": action, "workspace": workspace, "saved": saved, "resourceKind": doc.get("kind") if doc else None, "resourceId": doc.get("id") if doc else None, "head": doc.get("head") if doc else None, "openUrl": open_url, "warnings": warnings or [], "data": data, **extra}
 
 
 async def _preview(bridge: Any, action: str, args: dict[str, Any], owner: str, workspace: str, data: Any) -> dict[str, Any]:
