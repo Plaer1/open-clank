@@ -4374,10 +4374,37 @@ export function isEditorOpen() {
   return state.editorOpen;
 }
 
+// Exact-open entry for Files/Imps. Resolves an opaque Files resource ref to a
+// preview URL and loads it into the editor. The retired Gallery applet is not
+// involved — legacy gallery links resolve here through the Files `imps` open
+// target.
+export async function openResource(resourceRef) {
+  const { filesFacadeClient } = await import('./filesFacadeClient.js');
+  const response = await filesFacadeClient.openResource(resourceRef);
+  const app = response?.target?.app;
+  if ((app !== 'imps' && app !== 'gallery') || !response?.resource?.ref) {
+    throw new Error('Imps resource response is invalid');
+  }
+  const currentRef = String(response.resource.ref);
+  const payload = response.payload || {};
+  const exactName = String(response.resource.name || payload.filename || payload.name || 'image');
+  const previewUrl = filesFacadeClient.contentUrl(currentRef, { purpose: 'preview' });
+  openEditor(previewUrl, null, null, exactName);
+  // Preserve the Files resource ref so Save can resolve the writable original.
+  state.imageRef = currentRef;
+  return Object.freeze({
+    resourceRef: currentRef,
+    name: exactName,
+    previewUrl,
+    readOnly: !!payload.read_only,
+  });
+}
+
 const galleryEditorModule = {
   openEditor,
   closeEditor,
   isEditorOpen,
+  openResource,
   exportPNG,
   exportToGallery,
   downloadPNG,

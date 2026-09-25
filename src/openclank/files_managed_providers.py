@@ -26,7 +26,6 @@ from core.database import (
     Document,
     ChatMessage,
     EditorDraft,
-    GalleryAlbum,
     GalleryImage,
     PublishedFile,
     Session as DbSession,
@@ -1211,10 +1210,19 @@ class CopalFilesProvider:
 
 
 class GalleryFilesProvider:
+    """Files-managed Gallery image location.
+
+    Gallery is a provisioned Files folder with ordinary subfolders. The
+    standalone Gallery applet and the album organization system are retired:
+    there is no ``Albums`` view and ``album:`` rows no longer surface as
+    browseable resources. Images and editable projects open in Imps (the Image
+    Processing Suite). Legacy Gallery links resolve through this provider to
+    their Files/Imps owner.
+    """
+
     name = "gallery"
     _ROOT_SORTS = ("name",)
     _MEDIA_SORTS = SORT_KEYS
-    _ALBUM_SORTS = ("name", "modified")
     _DRAFT_SORTS = ("name", "modified")
 
     def __init__(
@@ -1229,12 +1237,11 @@ class GalleryFilesProvider:
     def supported_sort_keys(self, *, parent_origin_id: str) -> tuple[str, ...]:
         if parent_origin_id == "root":
             return self._ROOT_SORTS
-        if parent_origin_id in {"photos", "favorites"} or parent_origin_id.startswith("album:"):
+        if parent_origin_id in {"photos", "favorites"}:
             return self._MEDIA_SORTS
-        if parent_origin_id == "albums":
-            return self._ALBUM_SORTS
         if parent_origin_id == "drafts":
             return self._DRAFT_SORTS
+        # Albums retired: no album view, no album child listing.
         raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
 
     async def roots(self, context: ProviderContext):
@@ -1244,7 +1251,7 @@ class GalleryFilesProvider:
             "provider_root",
             ("children", "stat", "search"),
             provenance={"domain": "gallery"},
-            open_target={"app": "gallery"},
+            open_target={"app": "imps"},
             child_sort_keys=self._ROOT_SORTS,
         )]
 
@@ -1253,7 +1260,6 @@ class GalleryFilesProvider:
         child_sort_keys = {
             "photos": GalleryFilesProvider._MEDIA_SORTS,
             "favorites": GalleryFilesProvider._MEDIA_SORTS,
-            "albums": GalleryFilesProvider._ALBUM_SORTS,
             "drafts": GalleryFilesProvider._DRAFT_SORTS,
         }[origin_id]
         return ProviderResource(
@@ -1278,7 +1284,7 @@ class GalleryFilesProvider:
         sort: Mapping[str, Any],
     ) -> ProviderPage:
         pages = []
-        for parent in ("photos", "albums", "drafts"):
+        for parent in ("photos", "drafts"):
             pages.append(await self.children(
                 context,
                 parent_origin_id=parent,
@@ -1304,17 +1310,18 @@ class GalleryFilesProvider:
         if parent_origin_id == "root":
             if cursor or snapshot:
                 raise FilesFacadeError("provider cursor is stale", code="stale_cursor")
+            # Albums retired — Gallery is a Files folder with ordinary
+            # subfolders (Photos/Favorites/Saved Projects), not an album system.
             rows = tuple(self._folder(origin, label) for origin, label in (
                 ("photos", "Photos"),
                 ("favorites", "Favorites"),
-                ("albums", "Albums"),
                 ("drafts", "Saved Projects"),
             ))
             rows = _sort_resources(rows, sort)
-            return ProviderPage(rows, total=len(rows), snapshot="gallery-folders-v1")
+            return ProviderPage(rows, total=len(rows), snapshot="gallery-folders-v2")
         db = self.session_factory()
         try:
-            if parent_origin_id in {"photos", "favorites"} or parent_origin_id.startswith("album:"):
+            if parent_origin_id in {"photos", "favorites"}:
                 query_obj = db.query(
                     GalleryImage.id,
                     GalleryImage.filename,
@@ -1329,15 +1336,6 @@ class GalleryFilesProvider:
                 )
                 if parent_origin_id == "favorites":
                     query_obj = query_obj.filter(GalleryImage.favorite == True)
-                if parent_origin_id.startswith("album:"):
-                    album_id = parent_origin_id.split(":", 1)[1]
-                    owned = db.query(GalleryAlbum.id).filter(
-                        GalleryAlbum.id == album_id,
-                        GalleryAlbum.owner == context.owner_username,
-                    ).first()
-                    if not owned:
-                        raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
-                    query_obj = query_obj.filter(GalleryImage.album_id == album_id)
                 if query:
                     term = f"%{query}%"
                     query_obj = query_obj.filter(or_(
@@ -1370,41 +1368,6 @@ class GalleryFilesProvider:
                     order = field.desc() if sort["direction"] == "desc" else field.asc()
                     rows = query_obj.order_by(order, GalleryImage.id.asc()).offset(_offset(cursor)).limit(limit).all()
                     entries = tuple(self._image(row, parent_origin_id) for row in rows)
-            elif parent_origin_id == "albums":
-                query_obj = db.query(
-                    GalleryAlbum.id,
-                    GalleryAlbum.name,
-                    GalleryAlbum.description,
-                    GalleryAlbum.updated_at,
-                    GalleryAlbum.created_at,
-                ).filter(GalleryAlbum.owner == context.owner_username)
-                if query:
-                    query_obj = query_obj.filter(GalleryAlbum.name.ilike(f"%{query}%"))
-                total, latest = query_obj.with_entities(
-                    func.count(GalleryAlbum.id), func.max(GalleryAlbum.updated_at)
-                ).one()
-                current_snapshot = _snapshot([parent_origin_id, total, latest])
-                _check_snapshot(snapshot, current_snapshot)
-                field = {
-                    "name": func.lower(GalleryAlbum.name),
-                    "kind": literal("album"),
-                    "size": literal(0),
-                    "modified": GalleryAlbum.updated_at,
-                }[sort["key"]]
-                order = field.desc() if sort["direction"] == "desc" else field.asc()
-                rows = query_obj.order_by(order, GalleryAlbum.id.asc()).offset(_offset(cursor)).limit(limit).all()
-                entries = tuple(ProviderResource(
-                    f"album:{row.id}",
-                    row.name,
-                    "album",
-                    ("children", "stat", "open"),
-                    parent_origin_id="albums",
-                    modified_unix_ms=_millis(row.updated_at),
-                    created_unix_ms=_millis(row.created_at),
-                    provenance={"domain": "gallery", "description": row.description or ""},
-                    open_target={"app": "gallery"},
-                    child_sort_keys=self._MEDIA_SORTS,
-                ) for row in rows)
             elif parent_origin_id == "drafts":
                 query_obj = db.query(
                     EditorDraft.id,
@@ -1439,7 +1402,7 @@ class GalleryFilesProvider:
                     modified_unix_ms=_millis(row.updated_at),
                     created_unix_ms=_millis(row.created_at),
                     provenance={"domain": "gallery", "draft": True},
-                    open_target={"app": "gallery"},
+                    open_target={"app": "imps"},
                 ) for row in rows)
             else:
                 raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
@@ -1471,7 +1434,7 @@ class GalleryFilesProvider:
             modified_unix_ms=_millis(row.updated_at),
             created_unix_ms=_millis(row.created_at),
             provenance={"domain": "gallery", "favorite": bool(row.favorite), "album_id": row.album_id},
-            open_target={"app": "gallery"},
+            open_target={"app": "imps"},
             download_name=display_name if stored_name is not None else None,
             preview_kind=preview_kind if stored_name is not None else None,
             sort_kind=preview_kind or mime_type or ("image" if preview_kind == "image" else "file"),
@@ -1480,7 +1443,7 @@ class GalleryFilesProvider:
     async def stat(self, context: ProviderContext, *, origin_id: str) -> ProviderResource:
         if origin_id == "root":
             return (await self.roots(context))[0]
-        if origin_id in {"photos", "favorites", "albums", "drafts"}:
+        if origin_id in {"photos", "favorites", "drafts"}:
             return self._folder(origin_id, origin_id.replace("-", " ").title())
         return await asyncio.to_thread(self._stat_sync, context, origin_id)
 
@@ -1504,29 +1467,18 @@ class GalleryFilesProvider:
                 if row:
                     return self._image(row, "photos")
             if origin_id.startswith("album:"):
-                row = db.query(
-                    GalleryAlbum.id,
-                    GalleryAlbum.name,
-                    GalleryAlbum.description,
-                    GalleryAlbum.updated_at,
-                    GalleryAlbum.created_at,
-                ).filter(
-                    GalleryAlbum.id == origin_id.split(":", 1)[1],
-                    GalleryAlbum.owner == context.owner_username,
-                ).first()
-                if row:
-                    return ProviderResource(
-                        origin_id,
-                        row.name,
-                        "album",
-                        ("children", "stat", "open"),
-                        parent_origin_id="albums",
-                        modified_unix_ms=_millis(row.updated_at),
-                        created_unix_ms=_millis(row.created_at),
-                        provenance={"domain": "gallery", "description": row.description or ""},
-                        open_target={"app": "gallery"},
-                        child_sort_keys=self._MEDIA_SORTS,
-                    )
+                # Albums are retired. A legacy album link resolves to the
+                # folder its images now live in (Photos) rather than a hard
+                # 404, so persisted references keep landing somewhere useful.
+                return ProviderResource(
+                    "photos",
+                    "Photos",
+                    "virtual_folder",
+                    ("children", "stat", "search"),
+                    parent_origin_id="root",
+                    provenance={"domain": "gallery", "view": "photos", "retired_alias": "album"},
+                    child_sort_keys=self._MEDIA_SORTS,
+                )
             if origin_id.startswith("draft:"):
                 row = db.query(
                     EditorDraft.id,
@@ -1548,7 +1500,7 @@ class GalleryFilesProvider:
                         modified_unix_ms=_millis(row.updated_at),
                         created_unix_ms=_millis(row.created_at),
                         provenance={"domain": "gallery", "draft": True},
-                        open_target={"app": "gallery"},
+                        open_target={"app": "imps"},
                     )
             raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
         finally:

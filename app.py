@@ -1167,6 +1167,10 @@ app.include_router(setup_gallery_routes())
 from routes.editor_draft_routes import setup_editor_draft_routes
 app.include_router(setup_editor_draft_routes())
 
+# Imps managed image projects (editable state + Lore-backed Save)
+from routes.image_project_routes import setup_image_project_routes
+app.include_router(setup_image_project_routes())
+
 # Scheduled tasks + event bus
 from src.task_scheduler import TaskScheduler
 task_scheduler = TaskScheduler(session_manager, auth_manager=auth_manager)

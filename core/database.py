@@ -1071,6 +1071,43 @@ class EditorDraft(TimestampMixin, Base):
     )
 
 
+class ManagedImageProject(TimestampMixin, Base):
+    """Versioned managed Imps project bound to a stable Files image resource.
+
+    This is the recovery source for editable layer/mask/text state. It is
+    keyed by owner plus a stable image resource identity (provider +
+    resource_id), never by a raw database row id, so a resource move keeps its
+    project association. ``expected_image_revision`` records the image revision
+    the editable state was built against; ``project_revision`` is the
+    optimistic-concurrency counter for state commits.
+
+    Explicit portable export is a separate, caller-chosen artifact — no
+    companion sidecar file is written beside the image.
+    """
+    __tablename__ = "managed_image_projects"
+
+    id                    = Column(String, primary_key=True, index=True)
+    owner                 = Column(String, nullable=False, index=True)
+    # Stable image resource identity — the durable key across moves/renames.
+    image_provider        = Column(String, nullable=False, default="gallery")
+    image_resource_id     = Column(String, nullable=False, index=True)
+    # Image revision the current editable state was built against.
+    expected_image_revision = Column(String, nullable=True)
+    # Optimistic-concurrency counter for state commits.
+    project_revision      = Column(Integer, nullable=False, default=1)
+    name                  = Column(String, nullable=False, default="Untitled")
+    width                 = Column(Integer, nullable=True)
+    height                = Column(Integer, nullable=True)
+    # Editable layer/mask/text state document (JSON).
+    state                 = Column(Text, nullable=False, default="{}")
+    is_active             = Column(Boolean, default=True)
+
+    __table_args__ = (
+        Index('ix_managed_image_projects_owner_updated', 'owner', 'is_active', 'updated_at'),
+        Index('ix_managed_image_projects_image', 'image_provider', 'image_resource_id'),
+    )
+
+
 class TaskRun(Base):
     """Record of a single execution of a ScheduledTask."""
     __tablename__ = "task_runs"

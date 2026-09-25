@@ -4041,6 +4041,23 @@ async function launchManagedSourceApp(app, { resourceRef = '', exact = false } =
     launcher.click();
     return;
   }
+  if (target === 'imps') {
+    // Imps (Image Processing Suite) owns image open after the Gallery
+    // retirement. Open the editor directly rather than the retired Gallery
+    // applet; legacy gallery callers resolve here too.
+    const editor = window.galleryEditorModule || await import('./galleryEditor.js');
+    if (exact && resourceRef) {
+      if (typeof editor?.openResource === 'function') {
+        await editor.openResource(resourceRef);
+        return;
+      }
+    }
+    if (typeof editor?.openEditor === 'function') {
+      await editor.openEditor(null, null, null, 'Imps');
+      return;
+    }
+    throw new Error('Imps is unavailable');
+  }
   if (target === 'gallery') {
     if (exact && resourceRef) {
       const module = window.galleryModule || await import('./gallery.js');

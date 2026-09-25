@@ -48,6 +48,7 @@ OPEN_TARGET_APPS = frozenset(
         "document_editor",
         "editor",
         "gallery",
+        "imps",
         "library",
         "research",
     }
@@ -2081,7 +2082,9 @@ class FilesFacade:
         return (
             (app == "copal_notes" and entry.kind in {"document", "note", "wiki"})
             or (app == "editor" and entry.kind == "file")
-            or (app == "gallery" and entry.kind == "image" and entry.preview_kind == "image")
+            # Imps is the retired Gallery's replacement owner for images;
+            # `gallery` stays for any not-yet-repointed legacy provider.
+            or (app in {"gallery", "imps"} and entry.kind == "image" and entry.preview_kind == "image")
             or (app == "document_editor" and entry.kind == "document")
             or (app == "chat" and entry.kind == "chat")
             or (app == "research" and entry.kind == "research")
@@ -3003,6 +3006,11 @@ class FilesFacade:
                 "title", "language", "content", "version", "session_ref", "archived", "read_only",
             },
             "gallery": {
+                "filename", "prompt", "caption", "model", "size", "quality", "tags", "ai_tags",
+                "favorite", "taken_at", "created_at", "updated_at", "camera", "width", "height",
+                "file_size", "media_type", "read_only",
+            },
+            "imps": {
                 "filename", "prompt", "caption", "model", "size", "quality", "tags", "ai_tags",
                 "favorite", "taken_at", "created_at", "updated_at", "camera", "width", "height",
                 "file_size", "media_type", "read_only",

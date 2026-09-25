@@ -595,13 +595,14 @@ async def test_gallery_provider_pages_all_owned_sections_without_cross_owner_row
     root = (await facade.roots(_context()))["entries"][0]
     folders = await facade.children(_context(), parent_ref=root["ref"])
     by_name = {row["name"]: row for row in folders["entries"]}
+    # Albums are retired — Gallery is a Files folder with ordinary subfolders.
+    assert "Albums" not in by_name
+    assert set(by_name) == {"Photos", "Favorites", "Saved Projects"}
     photos = await facade.children(_context(), parent_ref=by_name["Photos"]["ref"])
     favorites = await facade.children(_context(), parent_ref=by_name["Favorites"]["ref"])
-    albums = await facade.children(_context(), parent_ref=by_name["Albums"]["ref"])
     drafts = await facade.children(_context(), parent_ref=by_name["Saved Projects"]["ref"])
     assert [row["name"] for row in photos["entries"]] == ["alice.png"]
     assert [row["name"] for row in favorites["entries"]] == ["alice.png"]
-    assert [row["name"] for row in albums["entries"]] == ["Alice album"]
     assert [row["name"] for row in drafts["entries"]] == ["Alice project"]
 
 
@@ -654,15 +655,13 @@ async def test_gallery_favorite_action_is_idempotent_owner_scoped_and_refreshes_
 
 
 @pytest.mark.asyncio
-async def test_gallery_album_and_draft_sort_contract_honors_modified(tmp_path):
+async def test_gallery_draft_sort_contract_honors_modified(tmp_path):
     factory = _gallery_session_factory(tmp_path)
     older = datetime.fromisoformat("2025-01-01T00:00:00")
     newer = datetime.fromisoformat("2026-01-01T00:00:00")
     db = factory()
     try:
         db.add_all([
-            GalleryAlbum(id="album-old", name="A old", owner="alice", updated_at=older),
-            GalleryAlbum(id="album-new", name="Z new", owner="alice", updated_at=newer),
             EditorDraft(id="draft-old", owner="alice", name="A old", payload="{}", is_active=True, updated_at=older),
             EditorDraft(id="draft-new", owner="alice", name="Z new", payload="{}", is_active=True, updated_at=newer),
         ])
@@ -676,10 +675,10 @@ async def test_gallery_album_and_draft_sort_contract_honors_modified(tmp_path):
         row["name"]: row
         for row in (await facade.children(_context(), parent_ref=root["ref"]))["entries"]
     }
+    # Albums are retired; only the Saved Projects folder sorts by modified.
+    assert "Albums" not in folders
     spec = {"key": "modified", "direction": "desc", "directories_first": True}
-    albums = await facade.children(_context(), parent_ref=folders["Albums"]["ref"], sort=spec)
     drafts = await facade.children(_context(), parent_ref=folders["Saved Projects"]["ref"], sort=spec)
-    assert [row["name"] for row in albums["entries"]] == ["Z new", "A old"]
     assert [row["name"] for row in drafts["entries"]] == ["Z new", "A old"]
 
 
@@ -711,17 +710,17 @@ async def test_gallery_advertises_only_truthful_sorts_and_pages_every_mode(tmp_p
         row["name"]: row
         for row in (await facade.children(_context(), parent_ref=root["ref"]))["entries"]
     }
+    # Albums retired — no Albums folder, so only Photos + Saved Projects here.
+    assert "Albums" not in folders
     await _assert_advertised_folder_sorts(facade, folders["Photos"], ("name", "kind", "modified", "size"))
-    await _assert_advertised_folder_sorts(facade, folders["Albums"], ("name", "modified"))
     await _assert_advertised_folder_sorts(facade, folders["Saved Projects"], ("name", "modified"))
 
-    for folder_name in ("Albums", "Saved Projects"):
-        for key in ("kind", "size"):
-            with pytest.raises(FilesFacadeError) as unsupported:
-                await facade.children(
-                    _context(), parent_ref=folders[folder_name]["ref"], sort={"key": key},
-                )
-            assert unsupported.value.code == "unsupported_sort"
+    for key in ("kind", "size"):
+        with pytest.raises(FilesFacadeError) as unsupported:
+            await facade.children(
+                _context(), parent_ref=folders["Saved Projects"]["ref"], sort={"key": key},
+            )
+        assert unsupported.value.code == "unsupported_sort"
 
 
 @pytest.mark.asyncio
@@ -840,6 +839,49 @@ async def test_gallery_content_is_owner_scoped_and_uses_private_file_descriptor(
 
 
 @pytest.mark.asyncio
+async def test_gallery_retires_albums_and_resolves_legacy_album_links(tmp_path):
+    """Empty-Gallery retirement: albums are gone, legacy links still resolve.
+
+    The Gallery applet/album model is retired and images open in Imps. A
+    persisted album reference must land on the folder its images now live in
+    (Photos) rather than a hard 404, and no Albums view is browsable.
+    """
+    factory = _gallery_session_factory(tmp_path)
+    db = factory()
+    try:
+        db.add_all([
+            GalleryAlbum(id="album-a", name="Alice album", owner="alice"),
+            GalleryImage(id="alice-image", filename="alice.png", owner="alice", prompt="", is_active=True, album_id="album-a", file_size=12),
+        ])
+        db.commit()
+    finally:
+        db.close()
+
+    facade = FilesFacade([GalleryFilesProvider(factory)])
+    root = (await facade.roots(_context()))["entries"][0]
+    folders = await facade.children(_context(), parent_ref=root["ref"])
+    names = {row["name"] for row in folders["entries"]}
+    assert "Albums" not in names
+
+    # Images open in Imps, not the retired Gallery applet.
+    photos = next(row for row in folders["entries"] if row["name"] == "Photos")
+    image = (await facade.children(_context(), parent_ref=photos["ref"]))["entries"][0]
+    opened = await facade.open(_context(), resource_ref=image["ref"])
+    assert opened["target"] == {"app": "imps"}
+
+    # A legacy album origin resolves to the Photos folder (its images' owner).
+    provider = GalleryFilesProvider(factory)
+    resolved = await provider.stat(_context(), origin_id="album:album-a")
+    assert resolved.origin_id == "photos"
+    assert resolved.provenance.get("retired_alias") == "album"
+
+    # Album rows do not surface as browseable children anywhere.
+    with pytest.raises(FilesFacadeError) as gone:
+        await provider.children(_context(), parent_origin_id="albums", cursor=None, snapshot=None, limit=10, sort={"key": "name", "direction": "asc"}, query="")
+    assert gone.value.code == "resource_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_gallery_exact_open_is_read_only_opaque_and_owner_scoped(tmp_path):
     factory = _gallery_session_factory(tmp_path)
     image_path = tmp_path / "exact.png"
@@ -886,11 +928,11 @@ async def test_gallery_exact_open_is_read_only_opaque_and_owner_scoped(tmp_path)
     )
     image = (await facade.children(_context(), parent_ref=photos["ref"]))["entries"][0]
     opened = await facade.open(_context(), resource_ref=image["ref"])
-    assert opened["target"] == {"app": "gallery"}
+    assert opened["target"] == {"app": "imps"}
     assert opened["exact"] is True
 
     exact = await facade.open_payload(_context(), resource_ref=opened["resource"]["ref"])
-    assert exact["target"] == {"app": "gallery"}
+    assert exact["target"] == {"app": "imps"}
     assert exact["payload"]["prompt"] == "A quiet lake"
     assert exact["payload"]["filename"] == "exact.png"
     assert exact["payload"]["width"] == 640
