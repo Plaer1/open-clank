@@ -21,6 +21,20 @@ from src.task_action_policy import (
 logger = logging.getLogger(__name__)
 
 
+class TaskWaiting(BaseException):
+    """Raised when a task run ends while a durable wait request is pending.
+
+    The run stays in ``waiting`` status so the persisted request can be
+    answered and the run resumed. Not an error — the wait is resumable pending
+    work.
+    """
+
+    def __init__(self, run_id: str, wait_id: str | None = None):
+        super().__init__(f"Task run {run_id} is waiting for user answer")
+        self.run_id = run_id
+        self.wait_id = wait_id
+
+
 def _utcnow() -> datetime:
     """Return naive UTC for task DB fields without using deprecated APIs."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1288,6 +1302,158 @@ class TaskScheduler:
             logger.debug("Task abort marker failed for %s", task_id, exc_info=True)
             return False
 
+    # ------------------------------------------------------------------ #
+    # S12 durable wait requests (question / permission)                   #
+    # ------------------------------------------------------------------ #
+
+    def _persist_wait_request(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        session_id: str,
+        owner: str,
+        kind: str,
+        payload: dict,
+        workspace_id: str | None = None,
+        continuation_revision: int = 0,
+        actor_generation: str | None = None,
+    ) -> str | None:
+        """Persist a waiting interaction and flip the run to ``waiting``.
+
+        Returns the wait-request id, or ``None`` if persistence failed. The
+        caller keeps consuming the stream: the bridge's QuestionHandler blocks
+        until the answer arrives, so pause/resume is the natural async pause.
+        """
+        import json as _json
+        import uuid as _uuid
+        try:
+            from core.database import SessionLocal, TaskRun, TaskWaitRequest
+            wait_id = f"wait_{_uuid.uuid4().hex}"
+            db = SessionLocal()
+            try:
+                run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if run and run.status in ("queued", "running"):
+                    run.status = "waiting"
+                    run.result = "Waiting for user answer…"
+                    db.commit()
+                row = TaskWaitRequest(
+                    id=wait_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    session_id=session_id,
+                    owner=owner or "",
+                    kind=kind,
+                    payload=_json.dumps(payload, default=str),
+                    state="waiting",
+                    workspace_id=workspace_id,
+                    continuation_revision=continuation_revision or 0,
+                    actor_generation=actor_generation,
+                )
+                db.add(row)
+                db.commit()
+                return wait_id
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("Failed to persist task wait request for %s/%s", task_id, run_id)
+            return None
+
+    def _consume_wait_request(
+        self,
+        wait_id: str,
+        *,
+        owner: str,
+        session_id: str | None = None,
+    ) -> bool:
+        """CAS-consume a waiting request exactly once.
+
+        Rejects wrong-owner, already-consumed, cancelled, or session-mismatched
+        answers without consuming the valid request.
+        """
+        try:
+            from core.database import SessionLocal, TaskWaitRequest
+            db = SessionLocal()
+            try:
+                row = db.query(TaskWaitRequest).filter(TaskWaitRequest.id == wait_id).first()
+                if row is None:
+                    return False
+                if row.state != "waiting":
+                    return False
+                if owner is not None and row.owner != owner:
+                    return False
+                if session_id is not None and row.session_id != session_id:
+                    return False
+                # CAS: only transition waiting -> consumed.
+                updated = (
+                    db.query(TaskWaitRequest)
+                    .filter(TaskWaitRequest.id == wait_id, TaskWaitRequest.state == "waiting")
+                    .update({"state": "consumed", "consumed_at": _utcnow()}, synchronize_session=False)
+                )
+                db.commit()
+                return bool(updated)
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("Failed to consume task wait request %s", wait_id)
+            return False
+
+    def _cancel_wait_requests_for_run(self, run_id: str) -> int:
+        """Invalidate all waiting requests for a run (cancel/revoke)."""
+        try:
+            from core.database import SessionLocal, TaskWaitRequest
+            db = SessionLocal()
+            try:
+                updated = (
+                    db.query(TaskWaitRequest)
+                    .filter(TaskWaitRequest.run_id == run_id, TaskWaitRequest.state == "waiting")
+                    .update({"state": "cancelled", "consumed_at": _utcnow()}, synchronize_session=False)
+                )
+                db.commit()
+                return int(updated or 0)
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("Failed to cancel wait requests for run %s", run_id, exc_info=True)
+            return 0
+
+    def _waiting_run_ids(self, task_id: str) -> list[str]:
+        try:
+            from core.database import SessionLocal, TaskRun
+            db = SessionLocal()
+            try:
+                rows = (
+                    db.query(TaskRun.id)
+                    .filter(TaskRun.task_id == task_id, TaskRun.status == "waiting")
+                    .all()
+                )
+                return [r[0] for r in rows]
+            finally:
+                db.close()
+        except Exception:
+            return []
+
+    def _has_waiting_run(self, task_id: str) -> bool:
+        return bool(self._waiting_run_ids(task_id))
+
+    def _mark_run_resuming(self, run_id: str) -> bool:
+        try:
+            from core.database import SessionLocal, TaskRun
+            db = SessionLocal()
+            try:
+                run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if not run or run.status != "waiting":
+                    return False
+                run.status = "resuming"
+                run.result = "Resuming…"
+                db.commit()
+                return True
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("Failed to mark run %s resuming", run_id, exc_info=True)
+            return False
+
     def add_notification(
         self,
         task_name: str,
@@ -1296,12 +1462,15 @@ class TaskScheduler:
         owner: str = None,
         body: str = None,
         kind: str = "task",
+        session_id: str = None,
     ) -> bool:
         """Store a notification about a completed task run. Tagged with the
         task's owner so `pop_notifications` can return only that user's
         notifications and prevent cross-tenant drain. `body` is the result
         text — populated when output_target='notification' so the client can
-        show a rich browser Notification, not just a toast."""
+        show a rich browser Notification, not just a toast. `session_id` is
+        the task's durable chat so the toast/badge can open the ORIGINAL
+        task chat (S12)."""
         normalized_owner = str(owner or "").strip().lower()
         if normalized_owner and self._owner_lifecycle_fenced(normalized_owner):
             return False
@@ -1312,6 +1481,7 @@ class TaskScheduler:
             "owner": normalized_owner or owner,
             "body": (body[:500] + "…") if body and len(body) > 500 else body,
             "kind": kind,
+            "session_id": session_id,
             "timestamp": _utcnow().isoformat() + "Z",
         })
         # Cap at 50 to avoid unbounded growth
@@ -1380,6 +1550,42 @@ class TaskScheduler:
                 db.close()
         except Exception as e:
             logger.warning(f"Could not clear stale task_runs on startup: {e}")
+
+        # S12: reconstruct durable wait requests from previous run. Waiting
+        # runs survive restart; surface their pending questions so the
+        # toast/badge opens the original task chat and the user can answer.
+        try:
+            from core.database import SessionLocal as _SL, TaskWaitRequest as _TWR, TaskRun as _TR, ScheduledTask as _ST
+            db = _SL()
+            try:
+                pending = (
+                    db.query(_TWR, _TR, _ST)
+                    .join(_TR, _TWR.run_id == _TR.id)
+                    .join(_ST, _TWR.task_id == _ST.id)
+                    .filter(_TWR.state == "waiting", _TR.status == "waiting")
+                    .all()
+                )
+                for wait, run, task in pending:
+                    import json as _json
+                    try:
+                        payload = _json.loads(wait.payload or "{}")
+                    except Exception:
+                        payload = {}
+                    self.add_notification(
+                        task_name=task.name,
+                        status="waiting",
+                        task_id=task.id,
+                        owner=wait.owner,
+                        body=payload.get("question") or "Task needs your answer",
+                        kind="task_question",
+                        session_id=wait.session_id,
+                    )
+                if pending:
+                    logger.info("Reconstructed %d task wait requests on startup", len(pending))
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Could not reconstruct task wait requests on startup: {e}")
 
         # Advance next_run for active tasks whose next_run is already in the
         # past. Without this, a restart hits _check_due_tasks() with an empty
@@ -1691,6 +1897,17 @@ class TaskScheduler:
             # Never self-cancel from the registration helper: that bypassed the
             # orderly early-return path and leaked CancelledError to callers.
             self._register_task_handle(task_id, current)
+        # S12: prevent overlapping recurrence from replacing a waiting run.
+        # If a previous run is waiting for a user answer, queue this trigger
+        # behind it rather than starting a competing run.
+        if self._has_waiting_run(task_id):
+            logger.info("Task %s has a waiting run; skipping overlapping trigger", task_id)
+            if current:
+                self._unregister_task_handle(task_id, current)
+            if release_executing:
+                async with self._executing_lock:
+                    self._executing.discard(task_id)
+            return
         run_id = str(uuid.uuid4())
         _q_db = SessionLocal()
         try:
@@ -1936,6 +2153,16 @@ class TaskScheduler:
                     db.delete(run_obj)
                 task.next_run = when
                 db.commit()
+                return
+            except TaskWaiting as waiting:
+                # S12: run ended while a durable wait request is pending.
+                # Leave the run in "waiting" status — the persisted request
+                # will be answered through the original task chat and the run
+                # resumed. Do not mark terminal or deliver a result.
+                logger.info(
+                    "Task '%s' run %s waiting for user answer",
+                    task.name, waiting.run_id,
+                )
                 return
             except asyncio.CancelledError:
                 msg = (
@@ -3011,6 +3238,7 @@ class TaskScheduler:
         tool_results = []
         terminal = False
         stream_error = None
+        had_wait = False
 
         # Honor per-task max_steps (defense against runaway agent loops).
         # Falls back to 20 if not set — the historical default.
@@ -3047,7 +3275,7 @@ class TaskScheduler:
         turn_envelope = {
             "durable_id": f"task:{task.id}",
             "root_operation_id": root_operation_id,
-            "interaction_policy": "fail_on_interaction",
+            "interaction_policy": "pause_on_interaction",
             "allowed_tools": sorted(allowed_tools),
             # ``workspace`` is a server-derived physical cwd retained for the
             # current worker contract. ``authority_workspace_id`` is the
@@ -3096,11 +3324,55 @@ class TaskScheduler:
                     stream_error = data
                     continue
                 if data.get("type") in {"permission_request", "question", "interaction_required"}:
-                    stream_error = {
-                        "code": "INTERACTION_REQUIRED",
-                        "error": "Headless task requested user interaction",
-                    }
+                    # S12: persist the wait and surface it to the task chat.
+                    # The bridge's QuestionHandler blocks the worker until the
+                    # answer arrives, so this async pause IS the resume point.
+                    # No invented answers; completed tool side effects stay
+                    # committed in the transcript.
+                    _kind = "permission" if data.get("type") == "permission_request" else "question"
+                    _payload = data.get("data") or data.get("request") or data
+                    self._persist_wait_request(
+                        task_id=task.id,
+                        run_id=run_id,
+                        session_id=session_id,
+                        owner=task.owner or "",
+                        kind=_kind,
+                        payload=_payload if isinstance(_payload, dict) else {"raw": str(_payload)},
+                        workspace_id=getattr(task, "workspace_id", None),
+                        continuation_revision=int(data.get("revision") or 0),
+                        actor_generation=data.get("turn_id") or None,
+                    )
+                    self.add_notification(
+                        task_name=task.name,
+                        status="waiting",
+                        task_id=task.id,
+                        owner=task.owner,
+                        body=(
+                            _payload.get("question")
+                            if isinstance(_payload, dict) and _payload.get("question")
+                            else "Task needs your answer"
+                        ),
+                        kind="task_question",
+                        session_id=session_id,
+                    )
+                    had_wait = True
                     continue
+                if had_wait:
+                    # Stream continued after a wait: the question was answered.
+                    # Transition run back to running.
+                    had_wait = False
+                    try:
+                        from core.database import SessionLocal, TaskRun as _TR
+                        _db = SessionLocal()
+                        try:
+                            _run = _db.query(_TR).filter(_TR.id == run_id).first()
+                            if _run and _run.status == "waiting":
+                                _run.status = "running"
+                                _db.commit()
+                        finally:
+                            _db.close()
+                    except Exception:
+                        pass
                 if isinstance(data.get("delta"), str) and not data.get("thinking"):
                     full_text += data["delta"]
                 if data.get("type") == "tool_output":
@@ -3113,6 +3385,11 @@ class TaskScheduler:
             detail = stream_error.get("error") or stream_error.get("detail") or "Agent stream failed"
             raise RuntimeError(f"{code}: {detail}")
         if not terminal:
+            if had_wait:
+                # Stream ended while a wait was pending (worker crash / restart).
+                # Leave the run in "waiting" so the persisted request can be
+                # answered and the run resumed. Do not overwrite with an error.
+                raise TaskWaiting(run_id=run_id)
             raise RuntimeError("IN_FLIGHT_INTERRUPTED: Agent stream ended without a terminal event")
 
         # A no-tools auxiliary may summarize real completed tool results. It
@@ -3386,6 +3663,77 @@ class TaskScheduler:
                 )
         except Exception as e:
             logger.error(f"Task {task.id} MCP delivery failed: {e}")
+
+    async def resume_task_from_wait(
+        self,
+        *,
+        task_id: str,
+        run_id: str,
+        wait_id: str,
+        owner: str,
+        session_id: str,
+        answer_payload: dict | None = None,
+    ) -> bool:
+        """Resume a waiting task run after its question is answered.
+
+        Consumes the wait request exactly once (CAS). If the in-memory
+        QuestionHandler still holds the request (in-process pause), resolve it
+        so the blocked worker continues. Otherwise (restart), re-execute the
+        task with the same run_id and session so the durable chat continues.
+        """
+        if not self._consume_wait_request(wait_id, owner=owner, session_id=session_id):
+            return False
+        self._mark_run_resuming(run_id)
+
+        # Try in-process resolve first: if the QuestionHandler still has this
+        # request, the blocked worker will continue on its own.
+        try:
+            sup = getattr(self, "_mimo_supervisor", None)
+            handler = None
+            if sup and hasattr(sup, "question_handler_for"):
+                handler = sup.question_handler_for(owner, request_id=wait_id)
+            if handler and hasattr(handler, "resolve"):
+                if handler.resolve(
+                    wait_id,
+                    owner=owner,
+                    session_id=session_id,
+                    answers=(answer_payload or {}).get("answers"),
+                    rejected=bool((answer_payload or {}).get("rejected")),
+                ):
+                    return True
+        except Exception:
+            logger.debug("In-process wait resolve failed for %s", wait_id, exc_info=True)
+
+        # Restart path: the worker is gone. Re-execute the task with the same
+        # run_id. The agent loop starts a fresh turn on the same durable session.
+        try:
+            from core.database import SessionLocal, TaskRun
+            db = SessionLocal()
+            try:
+                run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if not run or run.status != "resuming":
+                    return False
+                run.status = "running"
+                run.result = "Resuming after answer…"
+                db.commit()
+            finally:
+                db.close()
+            # Resume the SAME run_id so the durable task chat continues.
+            async def _resume_locked():
+                task_run_locks = getattr(self, "_task_run_locks", None)
+                if task_run_locks is None:
+                    task_run_locks = self._task_run_locks = {}
+                lock = task_run_locks.setdefault(task_id, asyncio.Lock())
+                async with lock:
+                    await self._execute_task_locked(
+                        task_id, run_id,
+                        release_executing=False, gate_foreground=False,
+                    )
+            asyncio.create_task(_resume_locked())
+            return True
+        except Exception:
+            logger.exception("Failed to resume task %s from wait %s", task_id, wait_id)
+            return False
 
     async def run_task_now(self, task_id: str, *, force: bool = False):
         """Manually trigger a task execution."""

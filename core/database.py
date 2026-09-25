@@ -1089,6 +1089,39 @@ class TaskRun(Base):
     )
 
 
+class TaskWaitRequest(Base):
+    """Persisted waiting question or permission for a task run (S12).
+
+    One row per pending interaction. The run transitions
+    running -> waiting -> resuming -> running/terminal. Answers are consumed
+    once via CAS on ``state``. Survives host/worker restart so the wait can be
+    reconstructed and answered through the original task chat.
+    """
+    __tablename__ = "task_wait_requests"
+
+    id           = Column(String, primary_key=True, index=True)
+    task_id      = Column(String, ForeignKey("scheduled_tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id       = Column(String, ForeignKey("task_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id   = Column(String, nullable=False, index=True)
+    owner        = Column(String, nullable=False, index=True)
+    kind         = Column(String, nullable=False, default="question")  # "question" | "permission"
+    payload      = Column(Text, nullable=False, default="{}")          # JSON: questions / permission card
+    state        = Column(String, nullable=False, default="waiting")   # "waiting" | "consumed" | "cancelled"
+    workspace_id = Column(String, nullable=True)
+    continuation_revision = Column(Integer, nullable=False, default=0)
+    actor_generation = Column(String, nullable=True)
+    created_at   = Column(DateTime, nullable=False, default=utcnow_naive)
+    consumed_at  = Column(DateTime, nullable=True)
+
+    task  = relationship("ScheduledTask", backref=backref("wait_requests", cascade="all, delete-orphan"))
+    run   = relationship("TaskRun", backref=backref("wait_requests", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        Index('ix_task_wait_requests_state', 'state', 'created_at'),
+        Index('ix_task_wait_requests_run', 'run_id', 'state'),
+    )
+
+
 class Memory(Base):
     """
     SQLAlchemy model for Memory table.

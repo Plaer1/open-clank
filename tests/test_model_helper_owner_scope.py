@@ -14,7 +14,7 @@ def _function_source(path: str, name: str) -> str:
 
 
 def test_document_ai_tidy_resolves_with_owner_scope():
-    body = _function_source("routes/document_routes.py", "ai_tidy_documents")
+    body = _function_source("routes/document/document_routes.py", "ai_tidy_documents")
     assert 'owner=user or "local-installation"' in body
     assert 'purpose="utility"' in body
     assert "complete_text" in body
@@ -31,7 +31,7 @@ def test_calendar_quick_parse_resolves_with_owner_scope():
 
 
 def test_task_parse_uses_owner_scoped_managed_tasks_route():
-    body = _function_source("routes/task_routes.py", "parse_task")
+    body = _function_source("routes/task/task_routes.py", "parse_task")
     assert "user = _owner(request)" in body
     assert 'owner=user or "local-installation"' in body
     assert 'purpose="tasks"' in body

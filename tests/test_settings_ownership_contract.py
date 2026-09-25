@@ -330,7 +330,7 @@ def test_provider_sharing_is_granular_safe_and_named_user_only():
 def test_settings_mutations_use_checked_responses_and_mcp_list_is_secret_free():
     settings = (ROOT / "static/js/settings.js").read_text(encoding="utf-8")
     admin = (ROOT / "static/js/admin.js").read_text(encoding="utf-8")
-    mcp_routes = (ROOT / "routes/mcp_routes.py").read_text(encoding="utf-8")
+    mcp_routes = (ROOT / "routes/mcp/mcp_routes.py").read_text(encoding="utf-8")
     assert "await fetch(" not in settings
     assert "await fetch(" not in admin
     assert '"env": json.loads(srv.env)' not in mcp_routes

@@ -19,7 +19,7 @@ def test_registered_manual_compaction_uses_session_owner_for_managed_utility_rou
 
 
 def test_task_name_generation_uses_owner_scoped_managed_route():
-    src = _src("routes/task_routes.py")
+    src = _src("routes/task/task_routes.py")
 
     assert "async def _generate_task_name(prompt: str, owner: Optional[str] = None)" in src
     assert "q = q.filter(DbSession.owner == owner)" in src

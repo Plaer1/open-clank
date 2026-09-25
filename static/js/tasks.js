@@ -3120,9 +3120,36 @@ export function isTasksOpen() { return _open; }
 // ---- Task run notifications polling ----
 
 let _notifInterval = null;
+let _questionPending = false;
+
+function _setQuestionPending(flag) {
+  _questionPending = !!flag;
+  // Persistent badge on the Tasks entry point.
+  try {
+    const badge = document.getElementById('tasks-question-badge');
+    if (badge) badge.style.display = _questionPending ? '' : 'none';
+  } catch (_) {}
+}
+
+function _openTaskChat(sessionId) {
+  // Open the ORIGINAL task chat (durable session). Never inject the question
+  // into a foreground chat; never substitute a copy-result-to-new-chat action.
+  if (window.sessionModule && window.sessionModule.selectSession && sessionId) {
+    window.sessionModule.selectSession(sessionId);
+  }
+}
 
 async function _pollTaskNotifications() {
   try {
+    // S12: check durable wait requests for the persistent badge.
+    try {
+      const waitsRes = await fetch(`${API_BASE}/api/tasks/waits`, { credentials: 'same-origin' });
+      if (waitsRes.ok) {
+        const waitsData = await waitsRes.json();
+        _setQuestionPending((waitsData.waits || []).length > 0);
+      }
+    } catch (_) {}
+
     const res = await fetch(`${API_BASE}/api/tasks/notifications`, { credentials: 'same-origin' });
     if (!res.ok) return;
     const data = await res.json();
@@ -3133,6 +3160,35 @@ async function _pollTaskNotifications() {
         if (uiModule) {
           uiModule.showToast(n.body || 'A shared model was removed.', { duration: 7000 });
         }
+        continue;
+      }
+      if (n.kind === 'task_question') {
+        // S12: clickable nonmodal toast + persistent badge opens the
+        // ORIGINAL task chat. Answering there resumes the waiting task.
+        _setQuestionPending(true);
+        const qTitle = n.task_name || 'Task';
+        const qBody = n.body || 'Task needs your answer';
+        if (uiModule && uiModule.showToast) {
+          uiModule.showToast(`${qTitle}: ${qBody}`, {
+            duration: 12000,
+            action: {
+              label: 'Open',
+              onClick: () => _openTaskChat(n.session_id),
+            },
+          });
+        }
+        // Also fire a browser Notification when permitted; clicking it
+        // opens the same original task chat.
+        try {
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            const ntf = new Notification(qTitle, {
+              body: qBody,
+              tag: 'task-question-' + (n.task_id || qTitle),
+              icon: '/static/favicon.ico',
+            });
+            ntf.onclick = () => { window.focus(); _openTaskChat(n.session_id); };
+          }
+        } catch (_) {}
         continue;
       }
       const ok = n.status === 'success';
