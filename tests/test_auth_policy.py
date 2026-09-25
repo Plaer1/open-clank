@@ -63,7 +63,11 @@ def test_policy_returns_reserved_usernames(tmp_path):
     assert "system" in policy["reserved_usernames"]
     assert "shared" in policy["reserved_usernames"]
     assert "local" in policy["reserved_usernames"]
-    assert policy["reserved_username_prefixes"] == ["user:", "deleted:"]
+    # Owner-identity mapping names are refused as stored human identities.
+    assert "default" in policy["reserved_usernames"]
+    assert "__odysseus_local__" in policy["reserved_usernames"]
+    assert "local-installation" in policy["reserved_usernames"]
+    assert policy["reserved_username_prefixes"] == ["agent:", "deleted:", "user:"]
     assert isinstance(policy["reserved_usernames"], list)
 
 

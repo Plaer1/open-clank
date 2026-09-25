@@ -53,6 +53,11 @@ ADMIN_PRIVILEGES["allowed_models_restricted"] = False
 ADMIN_PRIVILEGES["block_all_models"] = False
 
 from src.constants import AUTH_FILE, PASSWORD_MIN_LENGTH
+from src.owner_identity import (
+    FORBIDDEN_STORED_IDENTITIES,
+    FORBIDDEN_STORED_PREFIXES,
+    is_reserved_stored_identity,
+)
 DEFAULT_AUTH_PATH = AUTH_FILE
 TOKEN_TTL = 60 * 60 * 24 * 7  # 7 days (sliding window, renewed by activity)
 # Sliding expiration: a validated request extends the session, but the
@@ -94,6 +99,11 @@ def is_reserved_username(username: str | None) -> bool:
         key in RESERVED_USERNAMES
         or key in COPAL_RESERVED_USERNAMES
         or key.startswith(RESERVED_USERNAME_PREFIXES)
+        # Owner-identity mapping names (Default/Local/__odysseus_local__ and the
+        # local-installation partition key) must never become a stored human
+        # account either. This is the seam every create/rename path already
+        # calls, so wiring the predicate here makes the refusal real.
+        or is_reserved_stored_identity(username)
     )
 
 
@@ -274,7 +284,13 @@ class AuthManager:
             key = str(username or "").strip().lower()
             if not key:
                 continue
-            if key in RESERVED_USERNAMES:
+            # Copal sentinels and namespaced legacy rows stay loadable: they
+            # resolve to safe namespaced owners (see
+            # test_legacy_copal_sentinel_accounts_are_kept_but_resolve_to_safe_owners).
+            kept = key in COPAL_RESERVED_USERNAMES or key.startswith(
+                ("user:", "deleted:")
+            )
+            if not kept and is_reserved_username(key):
                 removed.append(key)
                 continue
             normalized[key] = data
@@ -345,8 +361,12 @@ class AuthManager:
         """Return public auth policy constants for the frontend."""
         return {
             "password_min_length": PASSWORD_MIN_LENGTH,
-            "reserved_usernames": sorted(RESERVED_USERNAMES | COPAL_RESERVED_USERNAMES),
-            "reserved_username_prefixes": list(RESERVED_USERNAME_PREFIXES),
+            "reserved_usernames": sorted(
+                RESERVED_USERNAMES | COPAL_RESERVED_USERNAMES | FORBIDDEN_STORED_IDENTITIES
+            ),
+            "reserved_username_prefixes": sorted(
+                set(RESERVED_USERNAME_PREFIXES) | set(FORBIDDEN_STORED_PREFIXES)
+            ),
             "signup_enabled": self.signup_enabled,
             "session_days": TOKEN_TTL // 86400,
         }

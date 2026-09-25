@@ -17,6 +17,47 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+# Full symbol set the route/task modules import from `core.auth`. The real
+# module is preferred above (and is what the test venv loads); this fallback
+# exists only for dependency-free environments. Supplying every name — not
+# just AuthManager — is what keeps the import landmine from coming back.
+import enum as _enum
+
+
+class _FallbackSetAdminResult(_enum.Enum):
+    OK = "ok"
+    USER_NOT_FOUND = "user_not_found"
+    NOT_AUTHORIZED = "not_authorized"
+    LAST_ADMIN = "last_admin"
+
+
+_CORE_AUTH_FALLBACK = {
+    "AuthManager": MagicMock(),
+    "SetAdminResult": _FallbackSetAdminResult,
+    "TOKEN_TTL": 60 * 60 * 24 * 7,
+    "RESERVED_USERNAMES": frozenset({"internal-tool", "api", "demo", "system"}),
+    "is_reserved_username": lambda username: str(username or "").strip().lower()
+    in frozenset({"internal-tool", "api", "demo", "system", "shared", "local"}),
+    "normalize_known_username": lambda users, username: (
+        str(username or "").strip().lower()
+        if str(username or "").strip().lower() in (users or {})
+        else None
+    ),
+    "ADMIN_PRIVILEGES": {
+        "can_use_agent": True,
+        "can_use_browser": True,
+        "can_use_bash": True,
+        "can_use_documents": True,
+        "can_use_research": True,
+        "can_generate_images": True,
+        "can_manage_memory": True,
+        "max_messages_per_day": 0,
+        "allowed_models": [],
+        "allowed_models_restricted": False,
+        "block_all_models": False,
+    },
+}
+
 # Stub `core.database` / `core.auth` before the route modules import them
 # *only when the real modules cannot load*. Route modules import real symbols
 # (SetAdminResult, TOKEN_TTL, is_reserved_username, RESERVED_USERNAMES), so an
@@ -100,7 +141,7 @@ def _auth_regressions_stubs(monkeypatch):
         GalleryImage=MagicMock(), GalleryAlbum=MagicMock(), Note=MagicMock(),
         McpServer=MagicMock(),
     )
-    auth = _ensure_stub("core.auth", AuthManager=MagicMock())
+    auth = _ensure_stub("core.auth", **_CORE_AUTH_FALLBACK)
     ep = _ensure_stub("src.endpoint_resolver",
         resolve_endpoint=MagicMock(return_value=("", "", {})),
         normalize_base=MagicMock(),

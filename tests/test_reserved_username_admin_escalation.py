@@ -34,6 +34,7 @@ def _fresh_auth_manager(tmp_path):
         "internal-tool", "api", "demo", "system", "shared", "local",
         "__copal_unclaimed_owner__", "__copal_unclaimed_workspace__",
         "user:alice", "deleted:alice", "INTERNAL-TOOL", " Local ", "Api", "SYSTEM",
+        "default", "Default", "__odysseus_local__", "local-installation",
     ],
 )
 def test_create_user_rejects_reserved_usernames(tmp_path, name):
@@ -63,6 +64,51 @@ def test_rename_into_reserved_username_is_blocked(tmp_path):
     assert mgr.rename_user("bob", "internal-tool", "admin") is False
     assert "internal-tool" not in mgr.users
     assert "bob" in mgr.users
+
+
+@pytest.mark.parametrize("name", ["default", "__odysseus_local__", "local-installation"])
+def test_create_default_and_local_identities_are_refused(tmp_path, name):
+    """O01: Default/Local/__odysseus_local__ must never become stored accounts.
+
+    `src.owner_identity.is_reserved_stored_identity` is wired into
+    `core.auth.is_reserved_username`, which is the seam create_user,
+    setup, and rename_user all call. Before this wiring the predicate had
+    zero production callers and the refusal was a test pin only.
+    """
+    mgr = _fresh_auth_manager(tmp_path)
+    assert mgr.create_user(name, "pw-123456") is False
+    assert name not in mgr.users
+    assert mgr.setup(name, "pw-123456") is False
+    assert mgr.is_configured is False
+
+
+@pytest.mark.parametrize("name", ["default", "__odysseus_local__", "local-installation"])
+def test_rename_into_default_or_local_identity_is_blocked(tmp_path, name):
+    mgr = _fresh_auth_manager(tmp_path)
+    assert mgr.create_user("admin", "pw-123456", is_admin=True) is True
+    assert mgr.create_user("bob", "pw-123456") is True
+    assert mgr.rename_user("bob", name, "admin") is False
+    assert name not in mgr.users
+    assert "bob" in mgr.users
+
+
+def test_legacy_default_and_local_identity_rows_are_dropped_on_load(tmp_path):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        '{"users": {"default": {"password_hash": "unused", "is_admin": false}, '
+        '"__odysseus_local__": {"password_hash": "unused", "is_admin": false}, '
+        '"local-installation": {"password_hash": "unused", "is_admin": false}, '
+        '"admin": {"password_hash": "unused", "is_admin": true}}}',
+        encoding="utf-8",
+    )
+    mgr = _fresh_auth_manager(tmp_path)
+
+    assert set(mgr.users) == {"admin"}
+    # The dropped rows must be gone from the persisted config too.
+    body = auth_path.read_text(encoding="utf-8")
+    assert '"default"' not in body
+    assert '"__odysseus_local__"' not in body
+    assert '"local-installation"' not in body
 
 
 def test_legacy_copal_sentinel_accounts_are_kept_but_resolve_to_safe_owners(tmp_path):
