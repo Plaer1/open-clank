@@ -1222,8 +1222,17 @@ export function createNotesFeature({
     for (const cache of context()?.noteLeafViews?.values() || []) {
       if (cache.docId !== docId || cache.editor === source) continue;
       cache.editor?.setValue(value);
-      if (cache.reading?.isConnected) { cache.reading.replaceChildren(renderMarkdown(value, new Set([docId]))); applyCompletedVisibility(cache.reading); }
-      if (cache.preview && !cache.preview.hidden) { cache.preview.replaceChildren(renderMarkdown(value, new Set([docId]))); applyCompletedVisibility(cache.preview); }
+      const liveDoc = workspaceDocuments().find((doc) => doc.id === docId) || null;
+      if (cache.reading?.isConnected) {
+        cache.reading.replaceChildren(renderMarkdown(value, new Set([docId])));
+        applyCompletedVisibility(cache.reading);
+        if (liveDoc) wireInteractiveTables(cache.reading, value, liveDoc, cache);
+      }
+      if (cache.preview && !cache.preview.hidden) {
+        cache.preview.replaceChildren(renderMarkdown(value, new Set([docId])));
+        applyCompletedVisibility(cache.preview);
+        if (liveDoc) wireInteractiveTables(cache.preview, value, liveDoc, cache);
+      }
     }
   }
 
@@ -1908,6 +1917,7 @@ export function createNotesFeature({
       { category:'Text', title:'Horizontal rule', source:'---' },
       { category:'Tasks', title:'Task list', source:'- [ ] Incomplete task\n- [x] Completed task\n- [ ] Another task' },
       { category:'Tables', title:'Table', source:'| Name | Status | Value |\n| :--- | :---: | ---: |\n| Alpha | open | 42 |\n| Beta | done | 7 |' },
+      { category:'Tables', title:'Typed table (dates, currency, totals)', source:'<!-- clank-table v=1 id=tbl-demo\ncolumn id=col-when type=date format=locale\ncolumn id=col-item type=text format=auto\ncolumn id=col-amount type=currency format=locale\ncolumn id=col-qty type=number format=locale\n-->\n| When | Item | Amount | Qty |\n| :--- | :--- | ---: | ---: |\n| 2026-09-22 | Hosting | USD 12.50 | 2 |\n| 2026-10-01 | Stickers | USD 4.00 | 5 |\n| 2026-10-15 | Lunch | USD 9.25 | 1 |\n| | Total | =SUM(C1:C3) | =SUM(D1:D3) |' },
       { category:'Math', title:'Inline math', source:'The equation $a^2 + b^2 = c^2$ is Pythagoras.' },
       { category:'Math', title:'Block math', source:'$$\nE = mc^2\n$$' },
       { category:'Structure', title:'Callout', source:'> [!info] Info callout\n> This is an informational callout.' },
@@ -3220,7 +3230,9 @@ export function createNotesFeature({
         // The live CodeMirror surface must use the same resolver and origin
         // semantics as the rendered Notes/Wiki view. Tests and alternate
         // hosts may still inject a specialized preview callback.
-        renderPreview:renderPreview || ((source) => renderMarkdown(source, new Set([doc.id]), doc)),
+        renderPreview: renderPreview
+          ? (source) => wireRichCommentTables(renderPreview(source), source, doc, cache)
+          : (source) => wireRichCommentTables(renderMarkdown(source, new Set([doc.id]), doc), source, doc, cache),
         onSeeSource:(range) => {
           cache.editor?.revealCommentSource?.(range.from, range.to);
           context()?.window?.setStatus('Showing comment source.');
@@ -3250,15 +3262,69 @@ export function createNotesFeature({
     if (!cache.preview) return;
     cache.preview.replaceChildren(renderMarkdown(value, new Set([doc.id])));
     applyCompletedVisibility(cache.preview);
-    wireInteractiveTables(cache.preview, value, doc);
+    wireInteractiveTables(cache.preview, value, doc, cache);
   }
 
-  function wireInteractiveTables(container, source, doc) {
-    // Find all table blocks in the source
-    const sourceLines = source.split('\n');
+  function tableEditable(doc) {
+    return !(doc?.readOnly === true || doc?.builtin === true);
+  }
+
+  function wireRichCommentTables(root, commentSource, doc, cache) {
+    // Rich-comment previews edit tables through the same shared source
+    // transactions; offsets are resolved from the comment widget at edit time
+    // so native envelopes and comment wrappers remain valid.
+    if (!root || typeof root.querySelectorAll !== 'function') return root;
+    wireInteractiveTables(root, String(commentSource || ''), doc, cache, {
+      editable: tableEditable(doc),
+      liveText: () => {
+        const host = root.closest?.('.cm-rich-comment-widget');
+        const from = Number(host?.dataset?.commentSourceFrom ?? 0);
+        const to = Number(host?.dataset?.commentSourceTo ?? 0);
+        return sourceValue(doc).slice(from, to);
+      },
+      baseOffset: () => {
+        const host = root.closest?.('.cm-rich-comment-widget');
+        return Number(host?.dataset?.commentSourceFrom ?? 0);
+      },
+    });
+    return root;
+  }
+
+  function collectTableBlocks(source) {
+    // Table blocks include an optional leading `clank-table` metadata comment.
+    const sourceLines = String(source || '').split('\n');
     const sourceTables = [];
     let i = 0;
     while (i < sourceLines.length) {
+      const trimmed = sourceLines[i].trim();
+      if (trimmed.includes('<!-- clank-table')) {
+        // Consume the metadata comment (single- or multi-line).
+        let j = i;
+        if (!trimmed.includes('-->')) {
+          j = i + 1;
+          while (j < sourceLines.length && !sourceLines[j].includes('-->')) j++;
+        }
+        const commentEnd = j;
+        let k = j + 1;
+        while (k < sourceLines.length && !sourceLines[k].trim()) k++;
+        if (k < sourceLines.length && sourceLines[k].includes('|') && k + 1 < sourceLines.length) {
+          const sepLine = sourceLines[k + 1] || '';
+          if (/^\|?\s*:?-{3,}/.test(sepLine.trim())) {
+            const blockStart = i;
+            const block = sourceLines.slice(blockStart, k + 1);
+            let m = k + 2;
+            while (m < sourceLines.length && sourceLines[m].includes('|') && sourceLines[m].trim()) {
+              block.push(sourceLines[m]);
+              m++;
+            }
+            sourceTables.push({ text: block.join('\n'), startLine: blockStart });
+            i = m;
+            continue;
+          }
+        }
+        i = commentEnd + 1;
+        continue;
+      }
       if (sourceLines[i].includes('|') && sourceLines[i].trim() && i + 1 < sourceLines.length) {
         // Check if next line is a separator
         const sepLine = sourceLines[i + 1] || '';
@@ -3276,6 +3342,17 @@ export function createNotesFeature({
       }
       i++;
     }
+    return sourceTables;
+  }
+
+  function wireInteractiveTables(container, source, doc, cache = null, options = {}) {
+    // Find all table blocks in the source (including adjacent metadata).
+    const sourceTables = collectTableBlocks(source);
+    const editable = options.editable ?? tableEditable(doc);
+    const resolveBaseOffset = typeof options.baseOffset === 'function'
+      ? options.baseOffset
+      : () => options.baseOffset || 0;
+    const liveText = options.liveText || (() => sourceValue(doc));
     // Replace static tables with interactive widgets
     const staticTables = container.querySelectorAll('.copal-markdown-table');
     let tableIdx = 0;
@@ -3292,20 +3369,54 @@ export function createNotesFeature({
         st.replaceWith(wrapper);
         continue;
       }
+      const capturedHeader = model.rows[0]?.sourceText || '';
       const onEdit = (edit) => {
-        const result = applyTableEdit(source, model, edit);
+        // Protected docs allow selection/source inspection but no mutation.
+        if (!tableEditable(doc)) {
+          context()?.window?.setStatus('This document is read-only. Table structure and cells cannot be changed.', true);
+          return;
+        }
+        // A stale/background editor selection must not mutate the wrong text.
+        if (cache?.docId && cache.docId !== doc.id) {
+          context()?.window?.setStatus('This table belongs to a background document. Activate it to edit.', true);
+          return;
+        }
+        const live = String(liveText() || '');
+        const liveLines = live.split('\n');
+        const liveBlock = liveLines.slice(model.blockRange.from, model.blockRange.to + 1).join('\n');
+        const liveModel = parseTable(liveBlock, model.blockRange.from);
+        if (!liveModel.valid || (liveModel.rows[0]?.sourceText || '') !== capturedHeader) {
+          context()?.window?.setStatus('This table changed in the source. The preview will refresh before editing.', true);
+          updatePreview(cache, doc);
+          return;
+        }
+        const result = applyTableEdit(live, liveModel, edit);
         if (result.changes.length) {
+          // One logical operation = one change transaction = one undo step.
+          // Rich-comment tables are relative to the comment body; offset them
+          // into the document so wrappers/native envelopes stay valid.
+          const base = resolveBaseOffset();
+          const changes = result.changes.map((change) => ({
+            from: change.from + base,
+            to: change.to + base,
+            insert: change.insert,
+          }));
           // Try CodeMirror dispatch for atomic undo, fall back to setValue
-          if (cache.editor?.view?.dispatch) {
-            cache.editor.view.dispatch({ changes: result.changes });
-          } else if (cache.editor?.dispatch) {
-            cache.editor.dispatch({ changes: result.changes });
-          } else if (cache.editor?.setValue) {
+          if (cache?.editor?.view?.dispatch) {
+            cache.editor.view.dispatch({ changes });
+          } else if (cache?.editor?.dispatch) {
+            cache.editor.dispatch({ changes });
+          } else if (cache?.editor?.setValue) {
             cache.editor.setValue(result.newText);
           }
         }
       };
-      const widget = createTableWidget(model, onEdit);
+      const widget = createTableWidget(model, onEdit, {
+        editable,
+        onStatus: (message, isError) => {
+          if (message) context()?.window?.setStatus(message, !!isError);
+        },
+      });
       st.replaceWith(widget);
     }
   }
@@ -3334,6 +3445,8 @@ export function createNotesFeature({
       cache.reading ||= h('article', { class:'copal-note-reading' });
       cache.reading.replaceChildren(renderMarkdown(sourceValue(doc), new Set([doc.id])));
       applyCompletedVisibility(cache.reading);
+      // Reading view exposes the same table operations as live preview.
+      wireInteractiveTables(cache.reading, sourceValue(doc), doc, cache);
       cache.body.replaceChildren(cache.reading);
       return;
     }

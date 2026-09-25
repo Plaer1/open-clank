@@ -368,3 +368,398 @@ test('changes have from, to, insert structure', () => {
     assert.ok(typeof change.insert === 'string');
   }
 });
+
+// ─── S18: typed columns (text/number/date/currency) ─────────────────────────
+
+import {
+  parseTypedCell, formatTypedCell, compareTyped, sortBodyRows,
+} from '../../static/js/copal/tableTypes.js';
+
+import {
+  tableBlockToSource, evaluateCell, parseTableMetadata, serializeTableMetadata,
+} from '../../static/js/copal/tableModel.js';
+
+test('parseTypedCell classifies text blanks and values', () => {
+  assert.equal(parseTypedCell('', 'text').status, 'blank');
+  assert.equal(parseTypedCell('  ', 'text').status, 'blank');
+  assert.equal(parseTypedCell('hello', 'text').status, 'valid');
+});
+
+test('parseTypedCell classifies numbers including negatives and decimals', () => {
+  assert.equal(parseTypedCell('42', 'number').status, 'valid');
+  assert.equal(parseTypedCell('-4.5', 'number').status, 'valid');
+  assert.equal(parseTypedCell('1.5e3', 'number').status, 'valid');
+  assert.equal(parseTypedCell('abc', 'number').status, 'invalid');
+  assert.equal(parseTypedCell('', 'number').status, 'blank');
+  assert.equal(parseTypedCell('12.50', 'number').number, 12.5);
+});
+
+test('parseTypedCell classifies ISO calendar dates and rejects opaque or invalid ones', () => {
+  assert.equal(parseTypedCell('2026-09-22', 'date').status, 'valid');
+  assert.equal(parseTypedCell('2026-09-22', 'date').date, '2026-09-22');
+  assert.equal(parseTypedCell('2026-02-30', 'date').status, 'invalid');
+  assert.equal(parseTypedCell('2026-13-01', 'date').status, 'invalid');
+  assert.equal(parseTypedCell('09/22/2026', 'date').status, 'invalid');
+  assert.equal(parseTypedCell('45922', 'date').status, 'invalid');
+});
+
+test('parseTypedCell classifies currency with explicit code/value', () => {
+  const money = parseTypedCell('USD 12.50', 'currency');
+  assert.equal(money.status, 'valid');
+  assert.deepEqual({ code: money.currency.code, value: money.currency.value }, { code: 'USD', value: 12.5 });
+  assert.equal(parseTypedCell('12.50', 'currency').status, 'invalid');
+  assert.equal(parseTypedCell('USD abc', 'currency').status, 'invalid');
+  assert.equal(parseTypedCell('US 12.50', 'currency').status, 'invalid');
+});
+
+test('formatTypedCell keeps ISO date source but can display locale', () => {
+  assert.equal(formatTypedCell('2026-09-22', 'date', 'iso'), '2026-09-22');
+  const localeDisplay = formatTypedCell('2026-09-22', 'date', 'locale', 'en-US');
+  assert.equal(typeof localeDisplay, 'string');
+  assert.ok(localeDisplay.includes('2026') || localeDisplay.includes('26'));
+  assert.ok(!localeDisplay.includes('T00:00'));
+});
+
+test('formatTypedCell shows currency code or locale money without changing source', () => {
+  assert.equal(formatTypedCell('USD 12.50', 'currency', 'code'), 'USD 12.5');
+  const localeMoney = formatTypedCell('USD 12.50', 'currency', 'locale', 'en-US');
+  assert.ok(localeMoney.includes('12.5'));
+  assert.ok(localeMoney.includes('$') || localeMoney.includes('USD'));
+});
+
+test('compareTyped sorts ISO dates chronologically', () => {
+  assert.ok(compareTyped('2026-01-05', '2026-09-22', 'date') < 0);
+  assert.ok(compareTyped('2026-09-22', '2025-12-31', 'date') > 0);
+  assert.ok(compareTyped('2026-09-22', '2026-09-22', 'date') === 0);
+});
+
+test('compareTyped puts blanks and invalids after valid values', () => {
+  assert.ok(compareTyped('', '5', 'number') > 0);
+  assert.ok(compareTyped('5', '', 'number') < 0);
+  assert.ok(compareTyped('abc', '5', 'number') > 0);
+  assert.ok(compareTyped('abc', '', 'number') < 0);
+});
+
+test('compareTyped sorts currency by code then value', () => {
+  assert.ok(compareTyped('EUR 1.00', 'USD 9.00', 'currency') < 0);
+  assert.ok(compareTyped('USD 1.00', 'USD 9.00', 'currency') < 0);
+});
+
+test('compareTyped on untyped columns keeps number-or-text and leaves dates as text', () => {
+  assert.ok(compareTyped('9', '10', '') < 0);
+  assert.ok(compareTyped('apple', 'banana', '') < 0);
+  assert.ok(compareTyped('2026-09-22', '2026-09-03', '') > 0);
+});
+
+test('sortBodyRows is stable for ties and keeps blanks last in both directions', () => {
+  const rows = [
+    { cells: ['h'], isHeader: true },
+    { cells: ['b'], isHeader: false },
+    { cells: ['a'], isHeader: false },
+    { cells: [''], isHeader: false },
+    { cells: ['a'], isHeader: false },
+    { cells: ['c'], isHeader: false },
+  ];
+  const asc = sortBodyRows(rows, 0, 'text', 'asc').slice(1).map((r) => r.cells[0]);
+  assert.deepEqual(asc, ['a', 'a', 'b', 'c', '']);
+  const desc = sortBodyRows(rows, 0, 'text', 'desc').slice(1).map((r) => r.cells[0]);
+  assert.deepEqual(desc, ['c', 'b', 'a', 'a', '']);
+});
+
+test('sortBodyRows keeps invalid and blank typed cells below valid values', () => {
+  const rows = [
+    { cells: ['n'], isHeader: true },
+    { cells: ['2'], isHeader: false },
+    { cells: ['bad'], isHeader: false },
+    { cells: ['10'], isHeader: false },
+    { cells: [''], isHeader: false },
+    { cells: ['-3'], isHeader: false },
+  ];
+  const asc = sortBodyRows(rows, 0, 'number', 'asc').slice(1).map((r) => r.cells[0]);
+  assert.deepEqual(asc, ['-3', '2', '10', 'bad', '']);
+  const desc = sortBodyRows(rows, 0, 'number', 'desc').slice(1).map((r) => r.cells[0]);
+  assert.deepEqual(desc, ['10', '2', '-3', 'bad', '']);
+});
+
+test('sortBodyRows typed date sort is chronological', () => {
+  const rows = [
+    { cells: ['d'], isHeader: true },
+    { cells: ['2026-09-22'], isHeader: false },
+    { cells: ['2026-01-05'], isHeader: false },
+    { cells: ['2026-12-31'], isHeader: false },
+  ];
+  const asc = sortBodyRows(rows, 0, 'date', 'asc').slice(1).map((r) => r.cells[0]);
+  assert.deepEqual(asc, ['2026-01-05', '2026-09-22', '2026-12-31']);
+});
+
+// ─── S18: clank-table metadata ──────────────────────────────────────────────
+
+test('parseTable discovers adjacent clank-table metadata', () => {
+  const doc = `<!-- clank-table v=1 id=tbl-9
+column id=col-a type=date format=iso
+column id=col-b type=currency format=code
+-->
+| When | Amount |
+| :--- | ---: |
+| 2026-09-22 | USD 12.50 |`;
+  const model = parseTable(doc);
+  assert.equal(model.valid, true);
+  assert.ok(model.metadata, 'metadata attached');
+  assert.equal(model.metadata.tableId, 'tbl-9');
+  assert.equal(model.metadata.columns[0].type, 'date');
+  assert.equal(model.metadata.columns[1].type, 'currency');
+  assert.equal(model.blockRange.from, 0);
+  assert.equal(model.sourceRange.from, 4);
+});
+
+test('parseTable preserves tables with no metadata and unknown metadata fields', () => {
+  const plain = parseTable(SIMPLE_TABLE);
+  assert.equal(plain.metadata, null);
+  assert.equal(plain.blockRange.from, plain.sourceRange.from);
+
+  const future = `<!-- clank-table v=2 id=tbl-x future-key=keep-me
+column id=col-a type=date format=iso future-col=yes
+-->
+| When |
+| :--- |
+| 2026-09-22 |`;
+  const model = parseTable(future);
+  assert.equal(model.valid, true);
+  assert.equal(model.metadata.version, 2);
+  assert.ok(model.metadata.extras.includes('future-key=keep-me'));
+  assert.ok(model.metadata.columns[0].extras.includes('future-col=yes'));
+  const roundTrip = serializeTableMetadata(model.metadata);
+  assert.ok(roundTrip.includes('future-key=keep-me'));
+  assert.ok(roundTrip.includes('future-col=yes'));
+});
+
+test('tableBlockToSource keeps metadata adjacent to the table', () => {
+  const doc = `<!-- clank-table v=1 id=tbl-1
+column id=col-a type=date format=iso
+-->
+| When |
+| :--- |
+| 2026-09-22 |`;
+  const model = parseTable(doc);
+  const block = tableBlockToSource(model);
+  assert.ok(block.startsWith('<!-- clank-table'));
+  assert.ok(block.includes('When'));
+  assert.ok(block.includes('2026-09-22'));
+  const reparsed = parseTable(block);
+  assert.equal(reparsed.valid, true);
+  assert.equal(reparsed.metadata.columns[0].type, 'date');
+});
+
+test('setColumnType writes metadata without touching unrelated source', () => {
+  const doc = `Intro paragraph.
+
+| Name | Qty |
+| :--- | ---: |
+| A | 1 |
+| B | 2 |
+
+Outro paragraph.`;
+  // Parse just the table block at its absolute document start line.
+  const block = doc.split('\n').slice(2, 6).join('\n');
+  const model = parseTable(block, 2);
+  const { newText, newModel } = applyTableEdit(doc, model, { type: 'setColumnType', col: 1, columnType: 'number' });
+  assert.ok(newText.includes('Intro paragraph.'));
+  assert.ok(newText.includes('Outro paragraph.'));
+  assert.equal(newModel.metadata.columns[1].type, 'number');
+  assert.ok(newText.includes('column'));
+});
+
+test('column insert/delete/move rewrites metadata column identity', () => {
+  const doc = `<!-- clank-table v=1 id=tbl-1
+column id=col-a type=date format=iso
+column id=col-b type=currency format=code
+-->
+| When | Amount |
+| :--- | ---: |
+| 2026-09-22 | USD 12.50 |`;
+  const model = parseTable(doc);
+  const afterInsert = applyTableEdit(doc, model, { type: 'insertColumn', afterCol: 0 });
+  assert.equal(afterInsert.newModel.columns, 3);
+  assert.equal(afterInsert.newModel.metadata.columns.length, 3);
+  assert.equal(afterInsert.newModel.metadata.columns[1].type, '');
+  assert.equal(afterInsert.newModel.metadata.columns[2].type, 'currency');
+
+  const afterDelete = applyTableEdit(doc, model, { type: 'deleteColumn', col: 0 });
+  assert.equal(afterDelete.newModel.metadata.columns[0].type, 'currency');
+});
+
+// ─── S18: recursive formulas, cycles, and explicit errors ───────────────────
+
+test('evaluateFormula evaluates referenced formula cells recursively', () => {
+  const doc = `| Item | Qty | Total |
+| :--- | ---: | ---: |
+| A | 10 | =B1*2 |
+| B | 20 | =B2*2 |
+| Sum | | =SUM(C1:C2) |`;
+  const model = parseTable(doc);
+  assert.equal(evaluateCell(model, 1, 2).value, '20');
+  assert.equal(evaluateCell(model, 2, 2).value, '40');
+  const sum = evaluateFormula('=SUM(C1:C2)', model);
+  assert.equal(sum.value, '60');
+});
+
+test('evaluateFormula reports cycles instead of hanging', () => {
+  const doc = `| A | B |
+| :--- | ---: |
+| =B1 | =A1 |`;
+  const model = parseTable(doc);
+  const result = evaluateFormula('=A1', model);
+  assert.equal(result.error, '#CYCLE!');
+  assert.equal(result.code, 'CYCLE');
+});
+
+test('evaluateFormula distinguishes missing references from numeric zero', () => {
+  const doc = `| A | B |
+| :--- | ---: |
+| 0 | =A1 |`;
+  const model = parseTable(doc);
+  const zero = evaluateFormula('=A1', model);
+  assert.equal(zero.error, undefined);
+  assert.equal(zero.value, '0');
+
+  const missing = evaluateFormula('=Z9', model);
+  assert.equal(missing.error, '#REF!');
+  assert.equal(missing.code, 'REF');
+  assert.notEqual(missing.value, '0');
+});
+
+test('evaluateFormula division by zero is not a legitimate zero', () => {
+  const doc = `| A |
+| :--- |
+| 5 |`;
+  const model = parseTable(doc);
+  const result = evaluateFormula('=A1/0', model);
+  assert.equal(result.error, '#DIV/0!');
+  assert.notEqual(result.value, '0');
+});
+
+test('evaluateFormula propagates errors through dependent formulas', () => {
+  const doc = `| A | B |
+| :--- | ---: |
+| =Z1 | =A1+1 |`;
+  const model = parseTable(doc);
+  const dependent = evaluateFormula('=B1', model);
+  assert.equal(dependent.error, '#REF!');
+});
+
+// ─── S18: reference repair on structural edits and sort ─────────────────────
+
+test('insertColumn shifts formula references', () => {
+  const doc = `| A | B | C |
+| :--- | ---: | ---: |
+| 1 | 2 | =B1*2 |`;
+  const model = parseTable(doc);
+  const { newModel } = applyTableEdit(doc, model, { type: 'insertColumn', afterCol: 0 });
+  assert.equal(newModel.rows[1].cells[3], '=C1*2');
+});
+
+test('deleteColumn rewrites references to the removed column as #REF!', () => {
+  const doc = `| A | B | C |
+| :--- | ---: | ---: |
+| 1 | 2 | =B1*2 |`;
+  const model = parseTable(doc);
+  const { newModel } = applyTableEdit(doc, model, { type: 'deleteColumn', col: 1 });
+  assert.equal(newModel.rows[1].cells[1], '=#REF!*2');
+});
+
+test('insertRow and deleteRow rewrite row references', () => {
+  const doc = `| A | B |
+| :--- | ---: |
+| 1 | =A2+1 |
+| 2 | =A1+1 |`;
+  const model = parseTable(doc);
+  const inserted = applyTableEdit(doc, model, { type: 'insertRow', afterRow: 1 });
+  // New empty row lands at index 2; old row 2 becomes index 3 (A2 → A3).
+  assert.equal(inserted.newModel.rows[1].cells[1], '=A3+1');
+  assert.equal(inserted.newModel.rows[3].cells[1], '=A1+1');
+
+  const deleted = applyTableEdit(doc, model, { type: 'deleteRow', row: 1 });
+  // Row 1 is removed; the formula that referenced A1 is now a missing reference.
+  assert.equal(deleted.newModel.rows[1].cells[1], '=#REF!+1');
+});
+
+test('sort rewrites single-cell references to follow their data rows', () => {
+  const doc = `| Name | Qty | Doubled |
+| :--- | ---: | ---: |
+| Bob | 2 | =B1*2 |
+| Alice | 1 | =B2*2 |`;
+  const model = parseTable(doc);
+  const { newModel } = applyTableEdit(doc, model, { type: 'sort', col: 0, direction: 'asc' });
+  // Alice moves to row 1, Bob to row 2; formulas follow their own rows.
+  assert.equal(newModel.rows[1].cells[0], 'Alice');
+  assert.equal(newModel.rows[1].cells[2], '=B1*2');
+  assert.equal(newModel.rows[2].cells[0], 'Bob');
+  assert.equal(newModel.rows[2].cells[2], '=B2*2');
+});
+
+test('sort keeps range references positional over the sorted body', () => {
+  const doc = `| Name | Qty |
+| :--- | ---: |
+| Bob | 2 |
+| Alice | 1 |
+| Total | =SUM(B1:B2) |`;
+  const model = parseTable(doc);
+  const { newModel } = applyTableEdit(doc, model, { type: 'sort', col: 0, direction: 'asc' });
+  const totalRow = newModel.rows.find((row) => row.cells[0] === 'Total');
+  assert.equal(totalRow.cells[1], '=SUM(B1:B2)');
+});
+
+test('moveColumn rewrites formula references consistently', () => {
+  const doc = `| A | B | C |
+| :--- | ---: | ---: |
+| 1 | 2 | =B1*2 |`;
+  const model = parseTable(doc);
+  const { newModel } = applyTableEdit(doc, model, { type: 'moveColumn', fromCol: 1, toCol: 2 });
+  // B moves after C, so the old B1 is now C1 and the formula travels with its cell.
+  assert.equal(newModel.rows[0].cells.join(','), 'A,C,B');
+  assert.equal(newModel.rows[1].cells[1], '=C1*2');
+});
+
+test('each structural edit is one change transaction for one-step undo', () => {
+  const doc = `| A | B |
+| :--- | ---: |
+| 1 | =A1+1 |
+| 2 | =A2+1 |`;
+  const model = parseTable(doc);
+  const { changes } = applyTableEdit(doc, model, { type: 'insertRow', afterRow: 1 });
+  assert.equal(changes.length, 1);
+});
+
+test('CRLF and escaped pipes round-trip through structural edits', () => {
+  const doc = '| A | B |\r\n| :--- | ---: |\r\n| x \\| y | 1 |';
+  const model = parseTable(doc);
+  assert.equal(model.valid, true);
+  assert.equal(model.rows[1].cells[0], 'x | y');
+  const { newModel } = applyTableEdit(doc, model, { type: 'insertRow', afterRow: 1 });
+  assert.equal(newModel.valid, true);
+  assert.equal(newModel.rows[1].cells[0], 'x | y');
+});
+
+test('demo typed table computes totals', () => {
+  const doc = `<!-- clank-table v=1 id=tbl-demo
+column id=col-when type=date format=locale
+column id=col-item type=text format=auto
+column id=col-amount type=currency format=locale
+column id=col-qty type=number format=locale
+-->
+| When | Item | Amount | Qty |
+| :--- | :--- | ---: | ---: |
+| 2026-09-22 | Hosting | USD 12.50 | 2 |
+| 2026-10-01 | Stickers | USD 4.00 | 5 |
+| 2026-10-15 | Lunch | USD 9.25 | 1 |
+| | Total | =SUM(C1:C3) | =SUM(D1:D3) |`;
+  const model = parseTable(doc);
+  assert.equal(model.valid, true);
+  assert.equal(model.metadata.columns[0].type, 'date');
+  const amountTotal = evaluateFormula('=SUM(C1:C3)', model);
+  assert.equal(amountTotal.value, '25.75');
+  const qtyTotal = evaluateFormula('=SUM(D1:D3)', model);
+  assert.equal(qtyTotal.value, '8');
+  const sorted = sortBodyRows(model.rows, 0, 'date', 'asc');
+  assert.equal(sorted[1].cells[0], '2026-09-22');
+});
