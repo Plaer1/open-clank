@@ -64,6 +64,60 @@ const ADMIN_ONLY_TABS = new Set(
     .map(([name]) => name),
 );
 
+/** Every settings panel id, including History and File Access. */
+export const SETTINGS_PANEL_IDS = Object.freeze(Object.keys(SETTINGS_OWNERSHIP));
+
+// Aliases so the finder and direct navigation accept either the panel id or a
+// human name ("permissions" -> file-access, "theme" -> appearance).
+const PANEL_ALIASES = Object.freeze({
+  permissions: 'file-access',
+  'file access': 'file-access',
+  fileaccess: 'file-access',
+  filesystem: 'file-access',
+  locations: 'file-access',
+  lore: 'history',
+  retention: 'history',
+  'history usage': 'history',
+  theme: 'appearance',
+  themes: 'appearance',
+  models: 'services',
+  providers: 'services',
+  'added models': 'added-models',
+  persona: 'ai',
+  'ai defaults': 'ai',
+  mail: 'email',
+  accounts: 'account',
+  users: 'users',
+  admin: 'system',
+  system: 'system',
+});
+
+export function normalizeSettingsPanel(name) {
+  const key = String(name || '').trim().toLowerCase();
+  if (!key) return null;
+  if (SETTINGS_OWNERSHIP[key]) return key;
+  return PANEL_ALIASES[key] || null;
+}
+
+// Lazy activation runs once per panel per page load so finder, deep-link and
+// nav clicks cannot double-init a panel's data hooks.
+const _activatedPanels = new Set();
+function activatePanel(tab) {
+  if (!tab) return;
+  modalEl?.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
+  modalEl?.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
+  document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
+  syncAppearanceOpacity(tab === 'appearance');
+  if (_activatedPanels.has(tab)) return;
+  _activatedPanels.add(tab);
+  if (tab === 'appearance') syncCopalNotesSettings();
+  if (tab === 'ai') activateAiSettings();
+  if (tab === 'file-access') { loadFilesystemRoots(); loadPermissionGrants(); initPermissionResetControls(); }
+  if (MODEL_MANAGEMENT_TABS.has(tab)) {
+    providerControl.load({ view: tab });
+  }
+}
+
 function applyControlOwnership(root) {
   const controls = root.matches?.('button, input, select, textarea')
     ? [root]
@@ -108,20 +162,39 @@ function initTabs() {
         window.adminModule.open(tab);
         return;
       }
-      modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
-      modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
-      // Mark when the Appearance tab is open so the modal can go
-      // semi-transparent — lets the user see the rest of the UI react as
-      // they flip toggles instead of having to close + reopen the modal.
-      document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
-      syncAppearanceOpacity(tab === 'appearance');
-      if (tab === 'appearance') syncCopalNotesSettings();
-      if (tab === 'ai') activateAiSettings();
-      if (tab === 'file-access') { loadFilesystemRoots(); loadPermissionGrants(); initPermissionResetControls(); }
-      if (MODEL_MANAGEMENT_TABS.has(tab)) {
-        providerControl.load({ view: tab });
-      }
+      // One activation path shared with open()/finder/deep-link.
+      activatePanel(tab);
     });
+  });
+}
+
+/* ── Settings finder ── */
+function initSettingsFinder() {
+  const input = el('settings-finder');
+  if (!input) return;
+  const applyFilter = () => {
+    const q = input.value.trim().toLowerCase();
+    const items = modalEl.querySelectorAll('[data-settings-tab]');
+    items.forEach((btn) => {
+      const tab = btn.dataset.settingsTab;
+      const label = (btn.textContent || '').toLowerCase();
+      const owner = SETTINGS_OWNERSHIP[tab] || {};
+      const hay = `${tab} ${label} ${owner.consumer || ''} ${owner.scope || ''}`.toLowerCase();
+      const match = !q || hay.includes(q);
+      btn.classList.toggle('settings-finder-hidden', !match);
+    });
+    // Hide divider/label chrome while filtering so the list stays readable.
+    modalEl.querySelectorAll('.settings-sidebar-divider, .settings-sidebar-label').forEach((node) => {
+      node.classList.toggle('settings-finder-hidden', !!q);
+    });
+  };
+  input.addEventListener('input', applyFilter);
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    // Enter activates the first visible match (finder -> activation, once).
+    const first = modalEl.querySelector('[data-settings-tab]:not(.settings-finder-hidden)');
+    if (first) first.click();
   });
 }
 
@@ -2669,6 +2742,7 @@ function initAll() {
     }
   }).observe(modalEl, { childList: true, subtree: true });
   initTabs();
+  initSettingsFinder();
   providerControl.init({
     onCatalogChanged: async () => {
       if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
@@ -7075,26 +7149,16 @@ export function open(tab) {
   }
   modalEl.classList.remove('hidden');
   syncAdminVisibility();
-  const content = modalEl.querySelector('.settings-modal-content');
   if (tab) {
     if (ADMIN_ONLY_TABS.has(tab) && !window._isAdmin) tab = 'ai';
-    modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
-    modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
   }
   // Auto-init admin data if showing an admin tab
   let activeTab = tab || (modalEl.querySelector('[data-settings-tab].active') || {}).dataset?.settingsTab || 'services';
   if (ADMIN_ONLY_TABS.has(activeTab) && !window._isAdmin) {
     activeTab = 'ai';
-    modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === activeTab));
-    modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== activeTab));
   }
-  document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
-  syncAppearanceOpacity(activeTab === 'appearance');
-  if (activeTab === 'ai') activateAiSettings();
-  if (activeTab === 'file-access') { loadFilesystemRoots(); loadPermissionGrants(); initPermissionResetControls(); }
-  if (MODEL_MANAGEMENT_TABS.has(activeTab)) {
-    providerControl.load({ view: activeTab });
-  }
+  // One activation path shared with nav clicks / finder / deep-link.
+  activatePanel(activeTab);
   if (ADMIN_MODULE_TABS.has(activeTab) && window._isAdmin && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }
@@ -7171,7 +7235,33 @@ export function close() {
   _tryOpen();
 })();
 
-const settingsModule = { open, close, openFileLocationWizard, setCopalModule, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
+// Direct navigation: ?settings=<panel> opens Settings to that panel once.
+// /settings/<panel> is handled by the shell applet registry (app.js).
+(function _handleSettingsDeepLink() {
+  const sp = new URLSearchParams(window.location.search);
+  const raw = sp.get('settings');
+  if (!raw) return;
+  const panel = normalizeSettingsPanel(raw);
+  if (!panel) return;
+  sp.delete('settings');
+  const q = sp.toString();
+  const clean = window.location.pathname + (q ? `?${q}` : '') + window.location.hash;
+  window.history.replaceState(null, '', clean);
+  function _tryOpen() {
+    if (window.settingsModule && typeof window.settingsModule.open === 'function') {
+      window.settingsModule.open(panel);
+    } else {
+      setTimeout(_tryOpen, 100);
+    }
+  }
+  _tryOpen();
+})();
+
+const settingsModule = {
+  open, close, openFileLocationWizard, setCopalModule, initIntegrations, initUnifiedIntegrations,
+  syncAdminVisibility, refreshAiModelEndpoints,
+  panelIds: SETTINGS_PANEL_IDS, normalizePanel: normalizeSettingsPanel,
+};
 
 
 export default settingsModule;

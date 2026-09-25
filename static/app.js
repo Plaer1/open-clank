@@ -30,6 +30,7 @@ import settingsModule from './js/settings.js';
 import copalModule from './js/copal.js';
 import codeEditorModule from './js/codeEditor.js';
 import filesModule from './js/files.js';
+import { appletPath, resolveAppletLocation } from './js/appletRoutes.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -1117,20 +1118,20 @@ function initializeEventListeners() {
   if (toolNotesBtn) {
     toolNotesBtn.addEventListener('click', (event) => {
       event.preventDefault();
-      history.pushState({}, '', '/copal/editor');
+      history.pushState({}, '', appletPath('editor'));
       copalModule.open('notes');
     });
   }
   const toolCodeBtn = el('tool-code-btn');
   if (toolCodeBtn) toolCodeBtn.addEventListener('click', (event) => {
     event.preventDefault();
-    history.pushState({}, '', '/copal/editor');
+    history.pushState({}, '', appletPath('editor'));
     copalModule.open('notes');
   });
   const toolFilesBtn = el('tool-files-btn');
   if (toolFilesBtn) toolFilesBtn.addEventListener('click', (event) => {
     event.preventDefault();
-    history.pushState({}, '', '/files');
+    history.pushState({}, '', appletPath('files'));
     filesModule.open();
   });
   // Refresh notes due-reminder badge on load and every 5 minutes
@@ -1140,8 +1141,8 @@ function initializeEventListeners() {
   }
 
   // URL-based panel routing — bookmark /calendar, /notes, /cookbook etc
-  // and the matching tool opens automatically on page load.
-  const urlPath = window.location.pathname;
+  // and the matching tool opens automatically on page load. Resolved
+  // through the shared applet registry below.
   // Current width of the always-visible icon rail. The rail is resizable
   // and hides on narrow viewports, so read it live each call rather than
   // baking 48px in. Returns 0 when the rail isn't rendered.
@@ -1201,43 +1202,25 @@ function initializeEventListeners() {
       }).observe(sb, { attributes: true, attributeFilter: ['class'] });
     }
   }
-  const _routeOpen = {
-    '/code': () => {
-      history.replaceState({}, '', '/copal/editor');
-      copalModule.open('notes');
+  // One browser-target registry (appletRoutes.js) shared by sidebar links,
+  // rich app links, initial loading and Back/Forward. Direct literal paths
+  // (Files, Editor, Graph, TreeHouse, timeline/todo, calendar, settings) are
+  // canonical; /copal/* and Notes/Code/Bases, Mind/Galaxy stay as aliases.
+  const _targetOpen = {
+    editor: (resolved) => {
+      const view = resolved.openBases ? 'bases'
+        : resolved.mode === 'mind' ? 'mind'
+        : resolved.mode === 'galaxy' ? 'galaxy'
+        : (resolved.view || 'notes');
+      copalModule.open(view, false);
     },
-    '/files': () => {
-      filesModule.open();
+    files: () => filesModule.open(),
+    calendar: () => calendarModule && calendarModule.openCalendar(),
+    settings: (resolved) => {
+      settingsModule.open(resolved.panel || undefined);
     },
-    '/notes':    () => {
-      history.replaceState({}, '', '/copal/editor');
-      copalModule.open('notes');
-      return;
-      // Promote to fullscreen-with-rail-visible. The pane wires up its own
-      // fullscreen toggle (#notes-fullscreen-toggle); piggyback on that
-      // path so the button icon flips and overflow:hidden gets applied
-      // alongside. Retry on rAF in case the panel mounts a tick later.
-      const _go = () => {
-        const btn = document.getElementById('notes-fullscreen-toggle');
-        const pane = document.querySelector('.notes-pane');
-        if (!pane) return false;
-        if (!pane.classList.contains('notes-pane-fullscreen') && btn) btn.click();
-        return true;
-      };
-      if (!_go()) {
-        requestAnimationFrame(_go);
-        setTimeout(_go, 50);
-        setTimeout(_go, 200);
-      }
-    },
-    '/copal/notes': () => {
-      history.replaceState({}, '', '/copal/editor');
-      copalModule.open('notes');
-    },
-    '/calendar': () => calendarModule && calendarModule.openCalendar(),
-    '/cookbook': () => document.getElementById('tool-cookbook-btn')?.click(),
-    '/email':    () => {
-      // Collapse the wide sidebar → icon rail (48px) so the user keeps
+    email: () => {
+      // Collapse the wide sidebar to the icon rail so the user keeps
       // navigation visible alongside the fullscreen email view.
       _collapseSidebarToRail();
       // Spawn a fresh chat first so a reply (or any AI work the user
@@ -1254,10 +1237,7 @@ function initializeEventListeners() {
       // The modal is built synchronously inside openEmailLibrary, so a
       // single frame later it's in the DOM and ready to be flagged.
       // Fullscreen leaves the icon-rail visible on the left so navigation
-      // stays one click away (per #93). Width = viewport minus rail.
-      // Just add the class — the CSS rule for .email-lib-fullscreen .modal-content
-      // owns all the positioning (with !important so it beats openEmailLibrary's
-      // post-mount centering rAF) and reads the rail width from --icon-rail-w.
+      // stays one click away (per #93).
       const _goFullscreen = () => {
         const modal = document.getElementById('email-lib-modal');
         if (!modal) return false;
@@ -1269,18 +1249,41 @@ function initializeEventListeners() {
       setTimeout(_goFullscreen, 50);
       setTimeout(_goFullscreen, 200);
     },
-    '/memory':   () => document.getElementById('tool-memory-btn')?.click(),
-    '/gallery':  () => document.getElementById('tool-gallery-btn')?.click(),
-    '/tasks':    () => document.getElementById('tool-tasks-btn')?.click(),
-    '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
+    memory:   () => document.getElementById('tool-memory-btn')?.click(),
+    gallery:  () => document.getElementById('tool-gallery-btn')?.click(),
+    tasks:    () => document.getElementById('tool-tasks-btn')?.click(),
+    library:  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
+    cookbook: () => document.getElementById('tool-cookbook-btn')?.click(),
   };
-  const _opener = _routeOpen[urlPath];
+  const _openResolvedTarget = (resolved) => {
+    if (!resolved) return false;
+    // Normalize legacy /copal/* and alias addresses onto the canonical
+    // direct path without adding a history entry.
+    const current = window.location.pathname + window.location.search;
+    if (resolved.canonicalPath && resolved.canonicalPath !== current) {
+      history.replaceState({}, '', resolved.canonicalPath);
+    }
+    const open = _targetOpen[resolved.target];
+    if (open) open(resolved);
+    return true;
+  };
+  const _resolved = resolveAppletLocation(window.location.pathname, window.location.search);
+  const _opener = _resolved ? () => _openResolvedTarget(_resolved) : null;
   // Defer the opener — at this point in init, the modules whose handlers
   // we trigger (#rail-new-session click handler, the email-section header
   // click handler in emailInbox, sessionModule's loaded session list) are
   // still being wired up further down in this same function. Stash the
   // opener so it runs from sessionModule.loadSessions().finally() below.
   if (_opener) window._odysseusRouteOpener = _opener;
+
+  // Back/Forward across direct applet addresses. Copal-family views also
+  // listen for popstate (draft/window state); both run and the registry
+  // normalizes the address so the two stay consistent.
+  window.addEventListener('popstate', () => {
+    const resolved = resolveAppletLocation(window.location.pathname, window.location.search);
+    if (!resolved) return;
+    _openResolvedTarget(resolved);
+  });
 
   // Archive browser tool button
   const toolLibraryBtn = el('tool-library-btn');
@@ -1325,9 +1328,9 @@ function initializeEventListeners() {
 
   const toolThemeBtn = el('tool-theme-btn');
   if (toolThemeBtn) {
+    // Theme lives in Settings -> Appearance (S13 removed the sidebar entry).
     toolThemeBtn.addEventListener('click', () => {
-      const tm = document.getElementById('theme-modal');
-      if (tm) tm.classList.remove('hidden');
+      if (settingsModule && settingsModule.open) settingsModule.open('appearance');
     });
   }
 

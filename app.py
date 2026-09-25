@@ -1324,52 +1324,77 @@ async def serve_index(request: Request):
     # bundled-template routes instead of mislabelling the fault as a 404.
     return serve_html_with_nonce(request, abs_join(BASE_DIR, "index.html"))
 
-@app.get("/notes")
-async def serve_notes(request: Request):
+# One browser-target registry (static/js/appletRoutes.js) owns canonical
+# applet addresses. These literal shell routes serve the SPA for every direct
+# applet path so deep links and refresh work; /copal/* stays as a compatibility
+# alias that redirects to the canonical direct path. Unknown URLs and API
+# routes are intentionally NOT caught here — they keep meaningful errors.
+_SHELL_APPLET_PATHS = (
+    "/notes",       # legacy alias -> Editor
+    "/code",        # legacy alias -> Editor
+    "/bases",       # legacy alias -> Editor (Base leaf)
+    "/editor",
+    "/wiki",        # Wiki page type inside Editor; never a separate applet
+    "/timeline",
+    "/todo",
+    "/graph",
+    "/mind",        # legacy alias -> Graph (mind mode)
+    "/galaxy",      # legacy alias -> Graph (galaxy mode)
+    "/treehouse",
+    "/files",
+    "/calendar",
+    "/cookbook",
+    "/email",
+    "/memory",
+    "/gallery",
+    "/tasks",
+    "/library",
+)
+for _shell_path in _SHELL_APPLET_PATHS:
+    app.add_api_route(
+        _shell_path, serve_index, methods=["GET"], include_in_schema=False,
+        name=f"serve_shell{_shell_path.replace('/', '_')}",
+    )
+
+@app.get("/settings", include_in_schema=False)
+@app.get("/settings/{panel}", include_in_schema=False)
+async def serve_settings(request: Request, panel: str | None = None):
+    # Settings panels (including History and File Access) are reachable by
+    # direct navigation; the client opens the named panel once.
     return await serve_index(request)
 
-@app.get("/calendar")
-async def serve_calendar(request: Request):
-    return await serve_index(request)
+# Legacy /copal/* addresses redirect to the canonical direct applet path,
+# preserving query state (doc/mode). They are aliases, not destinations.
+_COPAL_VIEW_TO_PATH = {
+    "notes": "/editor",
+    "editor": "/editor",
+    "code": "/editor",
+    "bases": "/editor",
+    "wiki": "/wiki",
+    "timeline": "/timeline",
+    "todo": "/todo",
+    "graph": "/graph",
+    "mind": "/graph",
+    "galaxy": "/graph",
+    "treehouse": "/treehouse",
+    "files": "/files",
+    "calendar": "/calendar",
+}
 
-# Per-tool deep-link routes — all serve the same SPA, the JS auto-opens
-# the matching modal based on window.location.pathname. Each route also
-# gets a unique favicon + page title via inline script in index.html so
-# bookmarks render with tool-specific icons.
-@app.get("/cookbook")
-async def serve_cookbook(request: Request):
-    return await serve_index(request)
-
-@app.get("/email")
-async def serve_email(request: Request):
-    return await serve_index(request)
-
-@app.get("/memory")
-async def serve_memory(request: Request):
-    return await serve_index(request)
-
-@app.get("/gallery")
-async def serve_gallery(request: Request):
-    return await serve_index(request)
-
-@app.get("/tasks")
-async def serve_tasks(request: Request):
-    return await serve_index(request)
-
-@app.get("/library")
-async def serve_library(request: Request):
-    return await serve_index(request)
-
-@app.get("/code")
-async def serve_code(request: Request):
-    return await serve_index(request)
-
-@app.get("/copal")
-@app.get("/copal/{view}")
-async def serve_copal(request: Request, view: str = "notes"):
-    if view == "calendar":
-        return RedirectResponse(url="/calendar", status_code=302)
-    return await serve_index(request)
+@app.get("/copal", include_in_schema=False)
+@app.get("/copal/{view}", include_in_schema=False)
+async def serve_copal_alias(request: Request, view: str = "notes"):
+    from urllib.parse import urlencode
+    target = _COPAL_VIEW_TO_PATH.get((view or "notes").lower())
+    if target is None:
+        # Unknown copal subpath: still the SPA shell so client-side aliases can
+        # resolve it; do not invent a new applet.
+        return await serve_index(request)
+    query = dict(request.query_params)
+    if (view or "").lower() in ("mind", "galaxy") and "mode" not in query:
+        query["mode"] = view.lower()
+    suffix = ("?" + urlencode(query)) if query else ""
+    return RedirectResponse(url=f"{target}{suffix}", status_code=302)
 
 @app.get("/backgrounds")
 async def serve_backgrounds(request: Request):

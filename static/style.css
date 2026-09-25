@@ -24394,6 +24394,23 @@ body.gallery-selecting .gallery-dl-btn,
   background: color-mix(in srgb, var(--fg) 2%, transparent);
 }
 
+.settings-finder {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 6px;
+  padding: 5px 8px;
+  font-size: 11px;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+.settings-finder:focus { border-color: var(--accent, var(--red)); }
+.settings-nav-item.settings-finder-hidden { display: none; }
+.settings-sidebar-label.settings-finder-hidden,
+.settings-sidebar-divider.settings-finder-hidden { display: none; }
+
 .settings-sidebar-divider { height: 1px; background: var(--border); margin: 8px 12px; }
 .settings-sidebar-label {
   font-size: 9px;

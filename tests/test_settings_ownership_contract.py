@@ -209,7 +209,10 @@ def test_model_management_is_account_owned_without_exposing_admin_controls():
     assert "const ADMIN_MODULE_TABS = new Set(['integrations', 'tools', 'users', 'system'])" in settings
     assert "if (MODEL_MANAGEMENT_TABS.has(tab)) {" in settings
     assert "providerControl.load({ view: tab });" in settings
-    assert "providerControl.load({ view: activeTab });" in settings
+    # S13: one activation path (activatePanel) serves nav clicks, open(),
+    # finder and deep-link — model management loads through it exactly once.
+    assert "function activatePanel(" in settings
+    assert settings.count("providerControl.load({ view: tab });") == 1
     assert "mimoProviders.load();" not in settings
     assert "modelSharing.load();" not in settings
 
@@ -245,8 +248,11 @@ def test_ai_model_controls_are_lazy_and_do_not_duplicate_add_models_reads():
         assert initializer in lazy_init
 
     assert "if (_aiSettingsInitialized) await refreshAiModelEndpoints();" in eager_init
+    # S13 consolidate: exactly one lazy activation call site (activatePanel).
     assert settings.count("if (tab === 'ai') activateAiSettings();") == 1
-    assert settings.count("if (activeTab === 'ai') activateAiSettings();") == 1
+    assert "function activatePanel(" in settings
+    assert "activatePanel(activeTab);" in settings
+    assert "activatePanel(tab);" in settings
     assert "if (!initializedNow) refreshAiModelEndpoints();" in settings
 
 

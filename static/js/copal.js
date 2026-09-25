@@ -17,6 +17,7 @@ import { canHandleInput } from './copal/inputContext.js';
 import { findReferenceToken, createReferenceRenderer, extractReferenceSection } from './copal/markdownResources.js';
 import { normalizeWikiPresentation, serializeWikiPresentation, moveWikiCard, closeWikiCard } from './copal/wikiState.js';
 import { createSpellingService } from './copal/spelling.js';
+import { appletPath, resolveAppletLocation } from './appletRoutes.js';
 import { registerAdapter, createCodeMirrorContextAdapter } from './custom-context-menu.js';
 import { styledConfirm, styledPrompt } from './ui.js';
 
@@ -278,11 +279,10 @@ async function loadDocuments(render = true) {
 
 function updateRoute(view, replace = false) {
   const selected = state.windows.get(view)?.selected || (state.view === view ? state.selected : null);
-  const query = new URLSearchParams();
-  if (selected) query.set('doc', selected);
-  if (view === 'graph') query.set('mode', getGraphView().mode);
-  const routeView = view === 'notes' ? 'editor' : view;
-  const url = `/copal/${routeView}${query.size ? `?${query}` : ''}`;
+  // Canonical direct applet address — never the legacy /copal prefix.
+  const opts = { doc: selected || undefined };
+  if (view === 'graph') opts.mode = getGraphView().mode;
+  const url = appletPath(view === 'notes' ? 'editor' : view, opts);
   history[replace ? 'replaceState' : 'pushState']({ copal: view }, '', url);
 }
 
@@ -297,7 +297,7 @@ function markActive() {
 
 async function open(view = 'notes', push = true) {
   if (view === 'calendar') {
-    if (push || location.pathname.startsWith('/copal/calendar')) {
+    if (push || location.pathname.startsWith('/calendar')) {
       history.replaceState({}, '', '/calendar');
     }
     openCalendar();
@@ -3087,7 +3087,7 @@ function ensureViewWindow(view) {
     onActivate:() => {
       if (!state.windows.has(view)) return;
       activateView(view); markActive(); localStorage.setItem(copalStorageKey('odysseus-copal-view'), view);
-      if (location.pathname.startsWith('/copal/')) updateRoute(view, true);
+      if (resolveAppletLocation(location.pathname, location.search)?.target === 'editor') updateRoute(view, true);
     },
   onClosed:() => {
     if (view === 'notes') notesFeature?.destroy();
@@ -3370,14 +3370,25 @@ export async function init(apiBase = window.location.origin) {
   await loadEntryVisibility();
   if (epoch !== state.contextEpoch) return;
   applyEntryVisibility();
+  const _resolveEditorRoute = () => {
+    const resolved = resolveAppletLocation(location.pathname, location.search);
+    if (!resolved || resolved.target !== 'editor') return null;
+    const view = resolved.openBases ? 'bases'
+      : resolved.mode === 'mind' ? 'mind'
+      : resolved.mode === 'galaxy' ? 'galaxy'
+      : (resolved.view || 'notes');
+    return resolveView(view, resolved.mode);
+  };
   window.addEventListener('popstate', () => {
-    const match = location.pathname.match(/^\/copal(?:\/([^/]+))?\/?$/);
-    if (!match) return;
-    const view = resolveView(match[1], new URLSearchParams(location.search).get('mode')); const context = ensureViewWindow(view);
+    const view = _resolveEditorRoute();
+    if (!view) return;
+    const context = ensureViewWindow(view);
     context.selected = new URLSearchParams(location.search).get('doc'); open(view, false);
   }, { signal:state.navigationEvents.signal });
-  const match = location.pathname.match(/^\/copal(?:\/([^/]+))?\/?$/);
-  if (match) { const view = resolveView(match[1], new URLSearchParams(location.search).get('mode')); ensureViewWindow(view).selected = new URLSearchParams(location.search).get('doc'); open(view, false); }
+  {
+    const view = _resolveEditorRoute();
+    if (view) { ensureViewWindow(view).selected = new URLSearchParams(location.search).get('doc'); open(view, false); }
+  }
 }
 
 export function getNotesSettings() {
@@ -3415,7 +3426,7 @@ export async function openResource(resourceRef) {
   // id or the opaque ResourceRef into browser history.
   await open('notes', false);
   if (!sameSaveScope(scope, saveScope())) return null;
-  history.pushState({ copal:'notes' }, '', '/copal/editor');
+  history.pushState({ copal:'notes' }, '', appletPath('editor'));
   // Install the Files mutation bridge before opening the shared buffer. The
   // notes feature returns its active resource immediately, so a listener
   // placed after that return would never preserve a dirty tab's renamed path.

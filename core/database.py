@@ -1009,6 +1009,11 @@ class ScheduledTask(TimestampMixin, Base):
     # Logical Copal namespace; deliberately independent from filesystem cwd.
     copal_workspace = Column(String, nullable=False, default="default")
     allowed_tools  = Column(Text, nullable=False, default="[]")
+    # Stored value is historical/API-facing. The create/update API accepts and
+    # reports ``fail_on_interaction``, but agent-turn runtime always sends
+    # ``pause_on_interaction`` in the turn envelope (task_scheduler.py) so a
+    # task pauses and waits rather than dying on the first user interaction.
+    # Do not read this column as the live runtime policy for agent turns.
     interaction_policy = Column(String, nullable=False, default="fail_on_interaction")
     max_tool_calls = Column(Integer, nullable=False, default=20)
     run_count      = Column(Integer, default=0)

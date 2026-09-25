@@ -3275,6 +3275,10 @@ class TaskScheduler:
         turn_envelope = {
             "durable_id": f"task:{task.id}",
             "root_operation_id": root_operation_id,
+            # Agent turns always pause on interaction (durable TaskWaitRequest).
+            # Tool/aux paths keep fail_on_interaction. The stored
+            # ScheduledTask.interaction_policy column is historical/API-facing
+            # only and is deliberately not consulted here.
             "interaction_policy": "pause_on_interaction",
             "allowed_tools": sorted(allowed_tools),
             # ``workspace`` is a server-derived physical cwd retained for the

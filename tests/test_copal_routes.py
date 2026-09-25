@@ -1698,7 +1698,7 @@ def test_code_editor_launcher_lives_in_copal_submenu_only():
     assert "".join(launcher["text"]).strip() == "Editor"
     assert launcher["attrs"].get("data-copal-compat") == "true"
     assert any(attrs.get("id") == "copal-submenu" for _, attrs in launcher["ancestors"])
-    visible_editor = [item for item in anchors if item["attrs"].get("href") == "/copal/editor" and "".join(item["text"]).strip() == "Editor" and "display:none" not in item["attrs"].get("style", "").replace(" ", "")]
+    visible_editor = [item for item in anchors if item["attrs"].get("href") == "/editor" and "".join(item["text"]).strip() == "Editor" and "display:none" not in item["attrs"].get("style", "").replace(" ", "")]
     assert len(visible_editor) == 1
     assert "display:none" in launcher["attrs"].get("style", "").replace(" ", "")
     # The legacy rail-notes node remains for compatibility wiring, but the
@@ -1759,8 +1759,11 @@ def test_code_editor_uses_native_open_clank_window_contract():
     assert "export const createCopalWindow = createOpenClankWindow" in windows
     launcher_block = app[app.index("const toolCodeBtn"):app.index("// Refresh notes due-reminder badge")]
     assert "_collapseSidebarToRail()" not in launcher_block
-    route_block = app[app.index("'/code':"):app.index("'/notes':")]
-    assert "_collapseSidebarToRail()" not in route_block
+    # S13 registry openers: editor-family targets must not collapse the sidebar
+    # (only the /email fullscreen opener does).
+    route_block = app[app.index("const _targetOpen = {"):app.index("const _openResolvedTarget")]
+    assert "_collapseSidebarToRail()" not in route_block.split("email:")[0]
+    assert "copalModule.open" in route_block
 
 
 def test_code_editor_folder_picker_is_separate_from_agent_workspace_state():

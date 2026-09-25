@@ -7,7 +7,23 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'open-clank-v354-contextual-help';
+const CACHE_NAME = 'open-clank-v355-applet-routes';
+
+// Mirror of static/js/appletRoutes.js SHELL_PATHS + SHELL_PATH_PREFIXES.
+// The service worker cannot import the ES module, so keep this list in sync
+// with the registry (pinned by tests/test_shell_applet_routes_s13.py).
+const SHELL_NAV_PATHS = [
+  '/', '/editor', '/files', '/wiki', '/graph', '/treehouse', '/timeline',
+  '/todo', '/calendar', '/notes', '/code', '/bases', '/mind', '/galaxy',
+  '/email', '/memory', '/gallery', '/tasks', '/library', '/cookbook', '/settings',
+];
+const SHELL_NAV_PREFIXES = ['/settings/', '/copal/'];
+
+function isShellNavigation(pathname) {
+  const path = pathname.replace(/\/+$/, '') || '/';
+  if (SHELL_NAV_PATHS.includes(path)) return true;
+  return SHELL_NAV_PREFIXES.some((prefix) => path === prefix.replace(/\/$/, '') || path.startsWith(prefix));
+}
 
 // Core shell precached on install so repeat opens are instant without any
 // network wait. Keep this list in sync with the <script type="module"> tags
@@ -154,11 +170,14 @@ self.addEventListener('fetch', (e) => {
   // Never touch API calls or non-GET.
   if (url.pathname.startsWith('/api/') || e.request.method !== 'GET') return;
 
-  // HTML navigation: network-first for the app shell — but ONLY for the
-  // SPA root. Other navigations (e.g. a deep-linked /static/*.html page) must
-  // go to the network/static handlers below; otherwise every navigation was
-  // served the app index, replacing the page the user actually asked for.
-  if (e.request.mode === 'navigate' && url.pathname === '/') {
+  // HTML navigation: network-first for the app shell — but ONLY for known
+  // shell/applet paths (direct applet addresses, /settings/<panel>, legacy
+  // /copal/*). Other navigations (e.g. a deep-linked /static/*.html page)
+  // must go to the network/static handlers below; otherwise every navigation
+  // was served the app index, replacing the page the user actually asked for.
+  // Unknown applet-ish URLs are deliberately NOT shell-caught so they keep
+  // meaningful errors.
+  if (e.request.mode === 'navigate' && isShellNavigation(url.pathname)) {
     e.respondWith(
       caches.open(CACHE_NAME).then(async cache => {
         const cached = await cache.match('/');
