@@ -1216,9 +1216,21 @@ document.addEventListener('click', function(e) {
       } catch (_) {}
     }).catch(() => {});
   } else if (kind === 'image') {
-    import('./gallery.js').then(mod => {
-      const open = mod.openGalleryImage || (mod.default && mod.default.openGalleryImage);
-      if (open) open(id);
+    // Legacy image rich-links resolve to Imps after the Gallery retirement.
+    import('./galleryEditor.js').then(async (mod) => {
+      let url = null;
+      let label = 'Image';
+      try {
+        const res = await fetch(`/api/gallery/${encodeURIComponent(id)}`, { credentials: 'same-origin' });
+        if (res.ok) {
+          const data = await res.json();
+          const img = data.image || data;
+          url = img.url || (img.filename ? `/api/generated-image/${encodeURIComponent(img.filename)}` : null);
+          label = (img.prompt || '').trim().slice(0, 60) || img.filename || 'Image';
+        }
+      } catch {}
+      const open = mod.openEditor || (mod.default && mod.default.openEditor);
+      if (open) open(url, id || null, null, label);
     }).catch(() => {});
   } else if (kind === 'email') {
     import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
@@ -1378,26 +1390,11 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   editBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     try {
-      const [galleryMod, editorMod] = await Promise.all([
-        import('./gallery.js'),
-        import('./galleryEditor.js'),
-      ]);
-      // Ensure the Gallery modal is open so the editor has a container
-      // to render into; switch its tabs to the Edit tab.
-      galleryMod.default.openGallery();
-      const modal = document.getElementById('gallery-modal');
-      if (modal) {
-        modal.querySelectorAll('.gallery-tab').forEach(t => t.classList.remove('active'));
-        modal.querySelector('.gallery-tab[data-tab="editor"]')?.classList.add('active');
-      }
-      const imagesContainer = document.getElementById('gallery-images-container');
-      const albumsContainer = document.getElementById('gallery-albums-container');
-      if (imagesContainer) imagesContainer.style.display = 'none';
-      if (albumsContainer) albumsContainer.style.display = 'none';
-      const editorContainer = document.getElementById('gallery-editor-container');
-      if (editorContainer) editorContainer.style.display = 'flex';
+      // Imps owns image open after the Gallery retirement — mount the
+      // editor directly. No Gallery modal is involved.
+      const editorMod = await import('./galleryEditor.js');
       const label = (prompt || '').trim().slice(0, 60) || 'Generated image';
-      editorMod.openEditor(imageUrl, null, null, label);
+      editorMod.openEditor(imageUrl, imageId || null, null, label);
     } catch (err) {
       console.error('[chat] open in editor failed', err);
     }
@@ -1408,16 +1405,16 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     const galleryBtn = document.createElement('button');
     galleryBtn.className = 'footer-copy-btn footer-open-gallery-btn';
     galleryBtn.type = 'button';
-    galleryBtn.title = 'Open in gallery';
-    galleryBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg><span>Open in gallery</span>';
+    galleryBtn.title = 'Open in Imps';
+    galleryBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg><span>Open in Imps</span>';
     galleryBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
-        const mod = await import('./gallery.js');
-        const open = mod.openGalleryImage || (mod.default && mod.default.openGalleryImage);
-        if (open) open(imageId);
+        // Legacy "open in gallery" resolves to Imps after the retirement.
+        const editorMod = await import('./galleryEditor.js');
+        editorMod.openEditor(imageUrl, imageId || null, null, (prompt || '').trim().slice(0, 60) || 'Generated image');
       } catch (err) {
-        console.error('[chat] open in gallery failed', err);
+        console.error('[chat] open in Imps failed', err);
       }
     });
     actions.appendChild(galleryBtn);

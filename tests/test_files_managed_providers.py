@@ -882,7 +882,14 @@ async def test_gallery_retires_albums_and_resolves_legacy_album_links(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_gallery_exact_open_is_read_only_opaque_and_owner_scoped(tmp_path):
+async def test_gallery_exact_open_exposes_managed_identity_and_owner_scope(tmp_path):
+    """Exact Imps open is owner-scoped and carries the managed save identity.
+
+    Imps Save now writes through the managed ``/api/imps`` surface, so exact
+    open is no longer read-only and must expose the (provider, resource_id)
+    pair that surface keys on. Filesystem paths stay sealed and another
+    owner's provider identity never appears in the payload.
+    """
     factory = _gallery_session_factory(tmp_path)
     image_path = tmp_path / "exact.png"
     image_path.write_bytes(b"\x89PNG\r\n\x1a\nbody")
@@ -937,9 +944,13 @@ async def test_gallery_exact_open_is_read_only_opaque_and_owner_scoped(tmp_path)
     assert exact["payload"]["filename"] == "exact.png"
     assert exact["payload"]["width"] == 640
     assert exact["payload"]["favorite"] is True
-    assert exact["payload"]["read_only"] is True
+    assert exact["payload"]["read_only"] is False
+    # Managed Imps save keys on this pair; the caller's own provider origin is
+    # intentionally present for their owner-scoped save surface.
+    assert exact["payload"]["provider"] == "gallery"
+    assert exact["payload"]["resource_id"] == "image:alice-exact-origin"
     serialized = json.dumps(exact)
-    assert "alice-exact-origin" not in serialized
+    assert "bob-exact-origin" not in serialized
     assert str(image_path) not in serialized
 
     with pytest.raises(FilesFacadeError) as denied:

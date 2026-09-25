@@ -129,9 +129,10 @@ export function handleUIControl(uiData) {
           if (fn) fn();
         }).catch(function(){});
       } else if (panel === 'gallery') {
-        import('./gallery.js').then(function(mod) {
-          var fn = mod.openGallery || (mod.default && mod.default.openGallery);
-          if (fn) fn();
+        // Gallery applet retired: open Imps (the Image Processing Suite).
+        import('./galleryEditor.js').then(function(mod) {
+          var fn = mod.openEditor || (mod.default && mod.default.openEditor);
+          if (fn) fn(null, null, null, 'Imps');
         }).catch(function(){});
       } else if (panel === 'email') {
         import('./emailLibrary.js?v=20260722emailfastindex1').then(function(mod) {

@@ -1463,12 +1463,8 @@ function canvasMenuAdapter() {
 async function openEntryInCanvas(entry, model, commandId = operationId('files-canvas')) {
   const handoff = canvasPayloadForEntry(entry, model, commandId);
   if (!handoff) { setStatus('Select one authorized image to open in Canvas.', true); return false; }
-  const gallery = window.galleryModule || await import('./gallery.js');
-  gallery.openGallery?.();
-  const editorContainer = document.getElementById('gallery-editor-container');
-  if (!editorContainer) throw new Error('Canvas is unavailable');
-  document.querySelector('#gallery-modal .gallery-tab[data-tab="editor"]')?.click();
-  editorContainer.style.display = 'flex';
+  // Imps owns the canvas host after the Gallery retirement — no Gallery
+  // modal is opened. The editor self-mounts its container.
   const editor = window.galleryEditorModule || await import('./galleryEditor.js');
   await editor.openEditor?.(null, null, { w: 1024, h: 1024 }, `Canvas · ${entry.name || 'Files image'}`);
   window.dispatchEvent(new CustomEvent('openclank-files-image-to-canvas', {
@@ -4059,16 +4055,19 @@ async function launchManagedSourceApp(app, { resourceRef = '', exact = false } =
     throw new Error('Imps is unavailable');
   }
   if (target === 'gallery') {
+    // Legacy gallery open target: resolve to Imps after the retirement.
+    const editor = window.galleryEditorModule || await import('./galleryEditor.js');
     if (exact && resourceRef) {
-      const module = window.galleryModule || await import('./gallery.js');
-      if (typeof module?.openResource !== 'function') throw new Error('Gallery exact-open is unavailable');
-      await module.openResource(resourceRef);
+      if (typeof editor?.openResource === 'function') {
+        await editor.openResource(resourceRef);
+        return;
+      }
+    }
+    if (typeof editor?.openEditor === 'function') {
+      await editor.openEditor(null, null, null, 'Imps');
       return;
     }
-    const launcher = document.getElementById('tool-gallery-btn');
-    if (!launcher) throw new Error('Gallery is unavailable');
-    launcher.click();
-    return;
+    throw new Error('Imps is unavailable');
   }
   if (target === 'document_editor' || target === 'library') {
     if (exact && target === 'document_editor' && resourceRef) {

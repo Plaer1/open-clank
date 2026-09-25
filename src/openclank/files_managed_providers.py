@@ -1611,6 +1611,11 @@ class GalleryFilesProvider:
             self._content_sync(context, origin_id)
             camera = " ".join(part for part in (row.camera_make, row.camera_model) if part).strip()
             return {
+                # Stable managed image identity for Imps save/load. This is the
+                # (provider, resource_id) pair the managed project surface uses;
+                # the Files opaque ref stays capability-scoped and separate.
+                "provider": "gallery",
+                "resource_id": origin_id,
                 "filename": _download_name(row.filename),
                 "prompt": str(row.prompt or ""),
                 "caption": str(row.caption or ""),
@@ -1628,10 +1633,10 @@ class GalleryFilesProvider:
                 "height": int(row.height) if row.height is not None else None,
                 "file_size": int(row.file_size) if row.file_size is not None else None,
                 "media_type": str(media_type),
-                # Mutations in the legacy Gallery detail still require a raw
-                # database ID. Exact opaque open is deliberately read-only
-                # until those actions move behind the facade.
-                "read_only": True,
+                # Imps writes pixels through the managed /api/imps save surface
+                # under owner scope. Exact open is no longer read-only now that
+                # Save is a recoverable managed operation.
+                "read_only": False,
             }
         finally:
             db.close()

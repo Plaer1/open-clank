@@ -105,7 +105,6 @@ const PRECACHE = [
   '/static/js/spinner.js',
   '/static/js/tts-ai.js',
   '/static/js/document.js',
-  '/static/js/gallery.js',
   '/static/js/chatRenderer.js',
   '/static/js/codeRunner.js',
   '/static/js/chatStream.js',

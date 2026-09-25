@@ -3270,9 +3270,14 @@ function _buildEditor(container) {
   });
 
   document.getElementById('ge-save').addEventListener('click', async () => {
-    if (!state.imageId) {
+    if (!state.managedResourceId && !state.imageId) {
       await exportToGallery();
       return;
+    }
+    // Normalize legacy gallery opens onto the managed identity so Save
+    // goes through /api/imps/projects/* rather than the retired replace path.
+    if (!state.managedResourceId && state.imageId) {
+      _bindManagedIdentity('gallery', `image:${state.imageId}`);
     }
     const endBusy = _saveButtonBusy('Saving…');
     let blob = null;
@@ -3291,18 +3296,7 @@ function _buildEditor(container) {
       blob = await new Promise((resolve, reject) => {
         flat.toBlob(b => b ? resolve(b) : reject(new Error('Canvas encode failed')), mime, quality);
       });
-      const fd = new FormData();
-      fd.append('image', blob, `edited.${isJpeg ? 'jpg' : 'png'}`);
-      const resp = await fetch(`${API_BASE}/api/gallery/${state.imageId}/replace`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        body: fd,
-      });
-      if (!resp.ok) {
-        let detail = '';
-        try { const j = await resp.json(); detail = j.detail || j.error || ''; } catch {}
-        throw new Error(`HTTP ${resp.status}${detail ? `: ${detail}` : ''}`);
-      }
+      const body = await _managedSave({ blob });
       const totalMs = Math.round(performance.now() - t0);
       if (uiModule) uiModule.showToast(`Saved over original (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, 4000);
       window.dispatchEvent(new CustomEvent('gallery-refresh'));
@@ -3668,6 +3662,126 @@ function _saveButtonBusy(label) {
   };
 }
 
+// ────────── Managed Imps project surface (/api/imps/projects/*) ──────────
+// Save and Load go through the managed project API: versioned editable
+// state bound to a stable image resource identity, with Lore recovery and
+// optimistic concurrency. The retired Gallery replace/upload endpoints are
+// not on this path.
+
+async function _impsRequest(path, options = {}) {
+  const resp = await fetch(`${API_BASE}${path}`, {
+    credentials: 'same-origin',
+    ...options,
+    headers: {
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  if (!resp.ok) {
+    let detail = '';
+    try { const j = await resp.json(); detail = j.detail || j.error || ''; } catch {}
+    throw new Error(`HTTP ${resp.status}${detail ? `: ${detail}` : ''}`);
+  }
+  return resp.json();
+}
+
+function _serializeEditableState() {
+  return {
+    v: 2,
+    imgWidth: state.imgWidth,
+    imgHeight: state.imgHeight,
+    activeLayerId: state.activeLayerId,
+    nextLayerId: state.nextLayerId,
+    layers: state.layers.map(l => ({
+      id: l.id,
+      name: l.name,
+      visible: l.visible,
+      opacity: l.opacity,
+      locked: l.locked,
+      isBase: !!l.isBase,
+      canvasW: l.canvas.width,
+      canvasH: l.canvas.height,
+      offset: { ...(state.layerOffsets.get(l.id) || { x: 0, y: 0 }) },
+      dataUrl: l.canvas.toDataURL('image/png'),
+    })),
+  };
+}
+
+async function _blobToBase64(blob) {
+  const buf = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function _bindManagedIdentity(provider, resourceId) {
+  state.managedProvider = provider || null;
+  state.managedResourceId = resourceId || null;
+  const m = String(resourceId || '').match(/^image:(.+)$/);
+  state.imageId = m ? m[1] : state.imageId || null;
+}
+
+async function _ensureManagedProject() {
+  if (state.projectId) return state.projectId;
+  if (!state.managedProvider || !state.managedResourceId) return null;
+  const lookup = await _impsRequest(
+    `/api/imps/projects/for-image/${encodeURIComponent(state.managedProvider)}/${encodeURIComponent(state.managedResourceId)}`
+  ).catch(() => ({ project: null }));
+  if (lookup && lookup.project) {
+    state.projectId = lookup.project.id;
+    state.projectRevision = lookup.project.project_revision;
+    state.expectedImageRevision = lookup.project.expected_image_revision || '';
+    return state.projectId;
+  }
+  const created = await _impsRequest('/api/imps/projects', {
+    method: 'POST',
+    body: JSON.stringify({
+      provider: state.managedProvider,
+      resource_id: state.managedResourceId,
+      name: state.draftName || 'Untitled',
+      width: state.imgWidth || null,
+      height: state.imgHeight || null,
+      state: _serializeEditableState(),
+      expected_image_revision: state.expectedImageRevision || '',
+    }),
+  });
+  state.projectId = created.id;
+  state.projectRevision = created.project_revision;
+  state.expectedImageRevision = created.expected_image_revision || '';
+  return state.projectId;
+}
+
+async function _managedSave({ blob = null, stateDoc = null, name = null } = {}) {
+  const projectId = await _ensureManagedProject();
+  if (!projectId) throw new Error('No managed image resource is bound to this editor session');
+  const payload = {
+    expected_project_revision: state.projectRevision,
+    expected_image_revision: state.expectedImageRevision || '',
+    new_image_revision: state.expectedImageRevision || 'uncommitted',
+    state: stateDoc || _serializeEditableState(),
+    name: name || state.draftName || undefined,
+    width: state.imgWidth || undefined,
+    height: state.imgHeight || undefined,
+  };
+  if (blob) payload.image_bytes = await _blobToBase64(blob);
+  const body = await _impsRequest(`/api/imps/projects/${encodeURIComponent(projectId)}/save`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  state.projectRevision = body.project_revision;
+  state.expectedImageRevision = (body.refresh_receipt && body.refresh_receipt.image_revision)
+    || body.refresh_receipt?.image?.revision
+    || state.expectedImageRevision;
+  return body;
+}
+
+// Save a copy: allocate a separate image resource and managed project.
+// The byte write for the new resource goes through the Gallery upload
+// allocator; the managed project is bound via /api/imps save-copy.
 export async function exportToGallery() {
   const endBusy = _saveButtonBusy('Saving copy…');
   let blob = null;
@@ -3696,6 +3810,37 @@ export async function exportToGallery() {
     if (!saveRes.ok) {
       const errBody = await saveRes.text().catch(() => '');
       throw new Error(`HTTP ${saveRes.status}: ${errBody.substring(0, 120)}`);
+    }
+    const uploaded = await saveRes.json().catch(() => ({}));
+    // Bind the new resource as a separate managed project (Save a copy).
+    const sourceProjectId = state.projectId;
+    const newResourceId = uploaded?.id ? `image:${uploaded.id}` : null;
+    if (sourceProjectId && newResourceId && state.managedProvider) {
+      try {
+        const copyBody = await _impsRequest(
+          `/api/imps/projects/${encodeURIComponent(sourceProjectId)}/save-copy`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              provider: state.managedProvider,
+              resource_id: newResourceId,
+              expected_image_revision: '',
+              state: _serializeEditableState(),
+              name: `${state.draftName || 'Untitled'} copy`,
+              width: state.imgWidth || null,
+              height: state.imgHeight || null,
+            }),
+          },
+        );
+        // The copy is a new session: rebind the editor onto it.
+        _bindManagedIdentity(state.managedProvider, newResourceId);
+        state.projectId = copyBody.project_id;
+        state.projectRevision = copyBody.project_revision;
+        state.expectedImageRevision = copyBody.refresh_receipt?.image_revision || '';
+        if (uploaded?.id) state.imageId = String(uploaded.id);
+      } catch (e) {
+        console.warn('[save-copy] managed project bind failed (image copy still saved)', e);
+      }
     }
     const totalMs = Math.round(performance.now() - t0);
     window.dispatchEvent(new CustomEvent('gallery-refresh'));
@@ -3857,45 +4002,62 @@ export function downloadPNG() {
   a.click();
 }
 
-// Save the entire layered editor state as a JSON project file. Each
-// layer is encoded as a base64 PNG so transparency / partial alpha
-// survives the round-trip. Use Load Project to restore.
-function _saveProject() {
+// Save the entire layered editor state through the managed Imps project
+// surface, then download the portable managed export. Each layer is
+// encoded as a base64 PNG so transparency / partial alpha survives the
+// round-trip. Use Load Project to restore.
+async function _saveProject() {
   if (!state.layers.length) {
     if (uiModule) uiModule.showToast('Nothing to save');
     return;
   }
-  const project = {
-    v: 1,
-    type: 'odysseus-gallery-editor-project',
-    imgWidth: state.imgWidth,
-    imgHeight: state.imgHeight,
-    activeLayerId: state.activeLayerId,
-    nextLayerId: state.nextLayerId,
-    layers: state.layers.map(l => ({
-      id: l.id,
-      name: l.name,
-      visible: l.visible,
-      opacity: l.opacity,
-      locked: l.locked,
-      canvasW: l.canvas.width,
-      canvasH: l.canvas.height,
-      offset: { ...(state.layerOffsets.get(l.id) || { x: 0, y: 0 }) },
-      dataUrl: l.canvas.toDataURL('image/png'),
-    })),
-  };
-  const json = JSON.stringify(project);
+  if (!state.managedResourceId && state.imageId) {
+    _bindManagedIdentity('gallery', `image:${state.imageId}`);
+  }
+  try {
+    const projectId = await _ensureManagedProject();
+    if (!projectId) {
+      // Blank canvas with no bound resource: persist as a portable managed
+      // export only — the caller decides where the bytes go.
+      const bundle = {
+        kind: 'imps-project',
+        schema_version: 1,
+        name: state.draftName || 'Untitled',
+        width: state.imgWidth,
+        height: state.imgHeight,
+        image: { provider: state.managedProvider || '', resource_id: state.managedResourceId || '', revision: state.expectedImageRevision || '' },
+        project_revision: state.projectRevision || 1,
+        state: _serializeEditableState(),
+        assets: [],
+      };
+      _downloadJson(bundle, 'project.imps.json');
+      if (uiModule) uiModule.showToast('Project exported', 3000);
+      return;
+    }
+    // Persist the editable state under CAS, then export the managed bundle.
+    await _managedSave({ stateDoc: _serializeEditableState(), name: state.draftName || 'Untitled' });
+    const bundle = await _impsRequest(`/api/imps/projects/${encodeURIComponent(projectId)}/export`);
+    _downloadJson(bundle, `${(state.draftName || 'project').replace(/[^\w.-]+/g, '_')}.imps.json`);
+    if (uiModule) uiModule.showToast('Project saved', 3000);
+  } catch (e) {
+    console.error('[save-project] managed save failed:', e);
+    if (uiModule) uiModule.showToast('Project save failed: ' + (e.message || e), 6000);
+  }
+}
+
+function _downloadJson(value, filename) {
+  const json = JSON.stringify(value);
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'project.geproj.json';
+  a.download = filename;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  if (uiModule) uiModule.showToast('Project saved', 3000);
 }
 
-// Open-file picker for Load Project. Restores layers + canvas size.
+// Open-file picker for Load Project. Accepts the managed Imps export and
+// the legacy ``project.geproj.json`` format. Restores layers + canvas size.
 function _loadProjectPrompt() {
   const inp = document.createElement('input');
   inp.type = 'file';
@@ -3906,6 +4068,39 @@ function _loadProjectPrompt() {
     try {
       const text = await file.text();
       const proj = JSON.parse(text);
+      if (proj && proj.kind === 'imps-project') {
+        // Managed portable export: import into the managed surface (a new
+        // project bound to the stated image identity), then restore layers.
+        const image = proj.image || {};
+        const identity = image.resource_id
+          ? { provider: image.provider || 'gallery', resource_id: image.resource_id }
+          : (state.managedResourceId
+            ? { provider: state.managedProvider || 'gallery', resource_id: state.managedResourceId }
+            : null);
+        if (!identity) {
+          if (uiModule) uiModule.showToast('Project has no image identity to import against', 5000);
+          return;
+        }
+        const imported = await _impsRequest('/api/imps/projects/import', {
+          method: 'POST',
+          body: JSON.stringify({
+            provider: identity.provider,
+            resource_id: identity.resource_id,
+            bundle: proj,
+            expected_image_revision: image.revision || '',
+          }),
+        });
+        _bindManagedIdentity(identity.provider, identity.resource_id);
+        state.projectId = imported.id;
+        state.projectRevision = imported.project_revision;
+        state.expectedImageRevision = imported.expected_image_revision || '';
+        await _restoreDraft(proj.state && proj.state.layers ? proj.state : proj);
+        composite();
+        _renderLayerPanel();
+        _fitZoom();
+        if (uiModule) uiModule.showToast('Project loaded', 3000);
+        return;
+      }
       if (proj.type !== 'odysseus-gallery-editor-project') {
         if (uiModule) uiModule.showToast('Not a project file', 5000);
         return;
@@ -4068,6 +4263,18 @@ function _unmountEditorLoading() {
 export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) {
   _setEditTabLabel(displayName || (presetSize ? 'New canvas' : 'Untitled'));
   state.imageId = imageId || null;
+  // Legacy gallery opens still receive a raw gallery id; normalize them onto
+  // the managed identity so Save uses /api/imps/projects/*.
+  if (imageId && !state.managedResourceId) {
+    _bindManagedIdentity('gallery', `image:${imageId}`);
+  } else if (!imageId && !state.managedResourceId) {
+    // Blank canvas: no bound image resource and no managed project yet.
+    _bindManagedIdentity(null, null);
+    state.imageRef = null;
+    state.projectId = null;
+    state.projectRevision = 0;
+    state.expectedImageRevision = '';
+  }
   // Track original file extension so save-over-original can re-encode in the
   // same format. JPEG re-encoding cuts upload size 5-10x for camera photos,
   // which matters over remote tunnels (Tailscale Funnel etc.).
@@ -4093,7 +4300,17 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
 
   state.container = document.getElementById('gallery-editor-container');
   if (!state.container) {
-    console.error('[openEditor] #gallery-editor-container not found in DOM — editor cannot open');
+    // Self-host: the retired Gallery modal used to own this container.
+    // Imps mounts its own overlay so no active caller needs the Gallery
+    // applet just to open the editor.
+    state.container = document.createElement('div');
+    state.container.id = 'gallery-editor-container';
+    state.container.className = 'gallery-editor-container imps-editor-host';
+    state.container.style.display = 'flex';
+    document.body.appendChild(state.container);
+  }
+  if (!state.container) {
+    console.error('[openEditor] #gallery-editor-container could not be mounted');
     if (uiModule) uiModule.showError('Editor container missing');
     return;
   }
@@ -4365,6 +4582,12 @@ export function closeEditor() {
   state.maskCanvas = null;
   state.maskCtx = null;
   state.imageId = null;
+  state.imageRef = null;
+  state.managedProvider = null;
+  state.managedResourceId = null;
+  state.projectId = null;
+  state.projectRevision = 0;
+  state.expectedImageRevision = '';
   state.container = null;
   window.__galleryEditLive = false;
   return true;
@@ -4389,14 +4612,27 @@ export async function openResource(resourceRef) {
   const payload = response.payload || {};
   const exactName = String(response.resource.name || payload.filename || payload.name || 'image');
   const previewUrl = filesFacadeClient.contentUrl(currentRef, { purpose: 'preview' });
-  openEditor(previewUrl, null, null, exactName);
-  // Preserve the Files resource ref so Save can resolve the writable original.
+  // Bind the managed image identity BEFORE openEditor so Save/Load address
+  // /api/imps/projects/* instead of the retired Gallery replace path.
+  _bindManagedIdentity(
+    payload.provider || 'gallery',
+    payload.resource_id || null,
+  );
   state.imageRef = currentRef;
+  openEditor(previewUrl, null, null, exactName);
+  state.imageRef = currentRef;
+  // Reattach to existing editable work for this image, if any.
+  try {
+    await _ensureManagedProject();
+  } catch (e) {
+    console.warn('[openResource] managed project lookup failed:', e);
+  }
   return Object.freeze({
     resourceRef: currentRef,
     name: exactName,
     previewUrl,
     readOnly: !!payload.read_only,
+    projectId: state.projectId,
   });
 }
 

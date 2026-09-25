@@ -716,62 +716,17 @@ def setup_gallery_routes() -> APIRouter:
 
     @router.get("/api/gallery/albums")
     async def list_albums(request: Request):
-        user = _gallery_owner(request)
-        db = SessionLocal()
-        try:
-            q = db.query(GalleryAlbum)
-            q = _owner_filter(q, user, GalleryAlbum)
-            albums = q.order_by(GalleryAlbum.created_at.desc()).all()
-            result = []
-            for a in albums:
-                _count_q = db.query(GalleryImage).filter(
-                    GalleryImage.album_id == a.id, GalleryImage.is_active == True
-                )
-                _count_q = _owner_filter(_count_q, user)
-                count = _count_q.count()
-                cover_url = None
-                if a.cover_id:
-                    cover_q = db.query(GalleryImage).filter(GalleryImage.id == a.cover_id)
-                    cover = _owner_filter(cover_q, user).first()
-                    if cover:
-                        cover_url = f"/api/generated-image/{cover.filename}"
-                elif count > 0:
-                    _cover_q = db.query(GalleryImage).filter(
-                        GalleryImage.album_id == a.id, GalleryImage.is_active == True
-                    )
-                    _cover_q = _owner_filter(_cover_q, user)
-                    first = _cover_q.order_by(GalleryImage.created_at.desc()).first()
-                    if first:
-                        cover_url = f"/api/generated-image/{first.filename}"
-                result.append({
-                    "id": a.id, "name": a.name, "description": a.description or "",
-                    "cover_url": cover_url, "count": count,
-                    "created_at": a.created_at.isoformat() if a.created_at else None,
-                })
-            return {"albums": result}
-        finally:
-            db.close()
+        # Albums are retired: the Files Gallery folder + Imps replaced the
+        # album organization system. Legacy callers get an honest empty list
+        # rather than live album rows.
+        return {"albums": [], "retired": "album"}
 
     @router.post("/api/gallery/albums")
     async def create_album(request: Request):
-        import uuid
-        user = _require_gallery_owner(request)
-        data = await request.json()
-        name = (data.get("name") or "").strip()
-        if not name:
-            raise HTTPException(400, "Album name required")
-        db = SessionLocal()
-        try:
-            a = GalleryAlbum(
-                id=str(uuid.uuid4()), name=name,
-                description=data.get("description", ""),
-                owner=user,
-            )
-            db.add(a)
-            db.commit()
-            return {"ok": True, "id": a.id, "name": a.name}
-        finally:
-            db.close()
+        raise HTTPException(
+            410,
+            detail={"retired": "album", "message": "Albums are retired; use the Files Gallery folder"},
+        )
 
     @router.get("/api/gallery/stats")
     async def gallery_stats(request: Request):
@@ -1447,74 +1402,32 @@ def setup_gallery_routes() -> APIRouter:
 
     @router.put("/api/gallery/albums/{album_id}")
     async def update_album(request: Request, album_id: str):
-        user = _require_gallery_owner(request)
-        data = await request.json()
-        db = SessionLocal()
-        try:
-            album = _get_or_404_album(db, album_id, user)
-            if data.get("name") is not None:
-                album.name = data["name"]
-            if data.get("description") is not None:
-                album.description = data["description"]
-            if data.get("cover_id") is not None:
-                cover_id = data["cover_id"] or None
-                if cover_id:
-                    _get_or_404_image(db, cover_id, user)
-                album.cover_id = cover_id
-            db.commit()
-            return {"ok": True}
-        finally:
-            db.close()
+        # Albums are retired (see list_albums). No album mutation survives.
+        raise HTTPException(
+            410,
+            detail={"retired": "album", "message": "Albums are retired; use the Files Gallery folder"},
+        )
 
     @router.delete("/api/gallery/albums/{album_id}")
     async def delete_album(request: Request, album_id: str):
-        user = _require_gallery_owner(request)
-        db = SessionLocal()
-        try:
-            album = _get_or_404_album(db, album_id, user)
-            q = db.query(GalleryImage).filter(GalleryImage.album_id == album_id)
-            q = q.filter(GalleryImage.owner == user)
-            q.update({"album_id": None}, synchronize_session=False)
-            db.delete(album)
-            db.commit()
-            return {"ok": True}
-        finally:
-            db.close()
+        raise HTTPException(
+            410,
+            detail={"retired": "album", "message": "Albums are retired; use the Files Gallery folder"},
+        )
 
     @router.post("/api/gallery/albums/{album_id}/add")
     async def add_to_album(request: Request, album_id: str):
-        user = _require_gallery_owner(request)
-        data = await request.json()
-        ids = data.get("image_ids", [])
-        db = SessionLocal()
-        try:
-            _get_or_404_album(db, album_id, user)
-            # Only move images the caller owns
-            q = db.query(GalleryImage).filter(GalleryImage.id.in_(ids))
-            q = q.filter(GalleryImage.owner == user)
-            updated = q.update({"album_id": album_id}, synchronize_session=False)
-            db.commit()
-            return {"ok": True, "count": updated}
-        finally:
-            db.close()
+        raise HTTPException(
+            410,
+            detail={"retired": "album", "message": "Albums are retired; use the Files Gallery folder"},
+        )
 
     @router.post("/api/gallery/albums/{album_id}/remove")
     async def remove_from_album(request: Request, album_id: str):
-        user = _require_gallery_owner(request)
-        data = await request.json()
-        ids = data.get("image_ids", [])
-        db = SessionLocal()
-        try:
-            _get_or_404_album(db, album_id, user)
-            q = db.query(GalleryImage).filter(
-                GalleryImage.id.in_(ids), GalleryImage.album_id == album_id
-            )
-            q = q.filter(GalleryImage.owner == user)
-            q.update({"album_id": None}, synchronize_session=False)
-            db.commit()
-            return {"ok": True}
-        finally:
-            db.close()
+        raise HTTPException(
+            410,
+            detail={"retired": "album", "message": "Albums are retired; use the Files Gallery folder"},
+        )
 
     # ---- Favorite toggle ----
 

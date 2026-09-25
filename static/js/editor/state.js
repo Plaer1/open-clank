@@ -207,6 +207,16 @@ export const state = {
   // Gallery image id this editor session is editing, or null for
   // blank-canvas drafts.
   imageId: null,
+  // Files opaque resource ref for the writable original (set by
+  // openResource). Save resolves the managed project through this.
+  imageRef: null,
+  // Managed Imps project identity + CAS revisions. Save/load go through
+  // /api/imps/projects/* with these; null project means "create one".
+  managedProvider: null,
+  managedResourceId: null,
+  projectId: null,
+  projectRevision: 0,
+  expectedImageRevision: '',
   // Original file extension so save-over-original re-encodes in the
   // same format (JPEG vs PNG matters: JPEG cuts upload size 5-10× for
   // camera photos over remote tunnels).

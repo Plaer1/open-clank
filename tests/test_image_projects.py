@@ -8,6 +8,8 @@ the explicit portable export/import round-trip including blank canvases.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 
 import pytest
@@ -15,9 +17,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from core.database import Base, ManagedImageProject
+from src.openclank import image_projects as image_projects_module
 from src.openclank.image_projects import (
     EXPORT_KIND,
     EXPORT_SCHEMA_VERSION,
+    L_S19_LORE_RESTORE,
+    PREIMAGE_KIND,
     ImageProjectError,
     ImageProjectRepository,
     ImageResourceIdentity,
@@ -25,7 +30,15 @@ from src.openclank.image_projects import (
     ProjectNotFound,
     StaleImageRevision,
     StaleProjectRevision,
+    default_lore_capture,
+    read_captured_preimage,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_preimage_store(tmp_path, monkeypatch):
+    """Keep durable Lore preimages inside the test's tmp dir."""
+    monkeypatch.setenv("IMPS_PREIMAGE_DIR", str(tmp_path / "preimages"))
 
 
 def _factory(tmp_path):
@@ -452,3 +465,183 @@ def test_state_is_stored_as_json_text(tmp_path):
         assert parsed["layers"] == [{"id": 1}]
     finally:
         db.close()
+
+
+# ── Lore recovery wiring (production seam) ───────────────────────────────
+
+
+def test_active_lore_capture_is_wired_in_production():
+    """The production hook is assigned — Save is never a silent no-op."""
+    assert image_projects_module.ACTIVE_LORE_CAPTURE is default_lore_capture
+    assert callable(image_projects_module.ACTIVE_LORE_CAPTURE)
+
+
+def test_default_lore_capture_persists_durable_preimage(tmp_path):
+    receipt = default_lore_capture(
+        operation_id="imps-save-abc123",
+        preimage=json.dumps({"kind": PREIMAGE_KIND, "state": {"layers": []}}),
+        owner="alice",
+        project_id="p1",
+        resource_id="image-1",
+        provider="gallery",
+    )
+    assert receipt["history_status"] == "complete"
+    stored = read_captured_preimage("imps-save-abc123")
+    assert stored is not None
+    assert stored["kind"] == PREIMAGE_KIND
+    assert stored["state"] == {"layers": []}
+
+
+def test_preimage_captures_image_bytes_when_supplied(tmp_path):
+    events = []
+
+    def lore_capture(**kwargs):
+        events.append(kwargs)
+
+    repo = ImageProjectRepository(_factory(tmp_path), lore_capture=lore_capture)
+    record = repo.create_project(
+        owner="alice",
+        image_identity=IDENTITY,
+        state={"layers": [{"id": "base"}]},
+        expected_image_revision="rev-old",
+    )
+    raw = b"\x89PNG-original-bytes"
+    outcome = repo.save_image_and_project(
+        owner="alice",
+        project_id=record.id,
+        expected_project_revision=1,
+        expected_image_revision="rev-old",
+        new_image_revision="rev-new",
+        image_writer=lambda: "rev-new",
+        state={"layers": [{"id": "base"}, {"id": "paint"}]},
+        image_bytes=raw,
+    )
+    captured = json.loads(events[0]["preimage"])
+    assert captured["image_bytes_captured"] is True
+    assert captured["image_bytes_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert base64.b64decode(captured["image_bytes"]) == raw
+    assert outcome.refresh_receipt["image_write"] == "captured-and-written"
+
+
+def test_preimage_honestly_reports_missing_image_bytes(tmp_path):
+    events = []
+
+    def lore_capture(**kwargs):
+        events.append(kwargs)
+
+    repo = ImageProjectRepository(_factory(tmp_path), lore_capture=lore_capture)
+    record = repo.create_project(
+        owner="alice",
+        image_identity=IDENTITY,
+        state={"layers": []},
+        expected_image_revision="rev-old",
+    )
+    outcome = repo.save_image_and_project(
+        owner="alice",
+        project_id=record.id,
+        expected_project_revision=1,
+        expected_image_revision="rev-old",
+        new_image_revision="rev-new",
+        image_writer=lambda: "rev-new",
+    )
+    captured = json.loads(events[0]["preimage"])
+    assert captured["image_bytes_captured"] is False
+    assert captured["image_bytes"] is None
+    assert outcome.refresh_receipt["image_write"] == "caller-owned"
+    assert outcome.refresh_receipt["restore"]["limitation"] == L_S19_LORE_RESTORE
+
+
+def test_unhooked_lore_capture_fails_closed(tmp_path, monkeypatch):
+    """No capture seam means no Save — recovery is never silently skipped."""
+    monkeypatch.setattr(image_projects_module, "ACTIVE_LORE_CAPTURE", None)
+    repo = ImageProjectRepository(_factory(tmp_path), lore_capture=None)
+    record = repo.create_project(
+        owner="alice",
+        image_identity=IDENTITY,
+        state={"layers": []},
+        expected_image_revision="rev-old",
+    )
+    writes = []
+
+    def image_writer():
+        writes.append("write")
+        return "rev-new"
+
+    with pytest.raises(LoreCaptureFailed):
+        repo.save_image_and_project(
+            owner="alice",
+            project_id=record.id,
+            expected_project_revision=1,
+            expected_image_revision="rev-old",
+            new_image_revision="rev-new",
+            image_writer=image_writer,
+        )
+    assert writes == []
+    unchanged = repo.get_project(project_id=record.id, owner="alice")
+    assert unchanged.project_revision == 1
+
+
+def test_replay_preimage_restores_state_and_image_bytes(tmp_path):
+    """Restore/replay is real: the captured before-state comes back."""
+    events = []
+
+    def lore_capture(**kwargs):
+        events.append(kwargs)
+        # Also persist through the production seam so replay can read it back.
+        default_lore_capture(**kwargs)
+
+    repo = ImageProjectRepository(_factory(tmp_path), lore_capture=lore_capture)
+    record = repo.create_project(
+        owner="alice",
+        image_identity=IDENTITY,
+        name="Sunset",
+        state={"layers": [{"id": "base"}]},
+        expected_image_revision="rev-old",
+    )
+    original_bytes = b"original-image-bytes"
+    writes = []
+    outcome = repo.save_image_and_project(
+        owner="alice",
+        project_id=record.id,
+        expected_project_revision=1,
+        expected_image_revision="rev-old",
+        new_image_revision="rev-new",
+        image_writer=lambda: "rev-new",
+        state={"layers": [{"id": "base"}, {"id": "paint"}]},
+        image_bytes=original_bytes,
+    )
+    # Save moved the project forward; the before-state is only in the preimage.
+    assert repo.get_project(project_id=record.id, owner="alice").state["layers"] == [
+        {"id": "base"},
+        {"id": "paint"},
+    ]
+
+    def restore_writer():
+        writes.append("restore")
+        return "rev-old"
+
+    restored = repo.replay_preimage(
+        owner="alice",
+        project_id=record.id,
+        action_id=outcome.action_id,
+        image_writer=restore_writer,
+    )
+    assert writes == ["restore"]
+    assert restored.refresh_receipt["image_restored"] is True
+    assert restored.refresh_receipt["state_restored"] is True
+    assert restored.refresh_receipt["limitation"] == L_S19_LORE_RESTORE
+    after = repo.get_project(project_id=record.id, owner="alice")
+    assert after.state["layers"] == [{"id": "base"}]
+    assert after.expected_image_revision == "rev-old"
+
+
+def test_replay_preimage_requires_a_captured_action(tmp_path):
+    repo = ImageProjectRepository(_factory(tmp_path), lore_capture=lambda **k: {})
+    record = repo.create_project(owner="alice", image_identity=IDENTITY)
+    with pytest.raises(ImageProjectError) as excinfo:
+        repo.replay_preimage(
+            owner="alice",
+            project_id=record.id,
+            action_id="imps-save-missing",
+        )
+    assert excinfo.value.code == "preimage_missing"

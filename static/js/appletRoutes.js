@@ -46,7 +46,9 @@ const DIRECT = Object.freeze({
   calendar: '/calendar',
   email: '/email',
   memory: '/memory',
-  gallery: '/gallery',
+  // Gallery applet retired: the legacy /gallery entry resolves to Files,
+  // where the provisioned Gallery folder now lives.
+  gallery: '/files',
   tasks: '/tasks',
   library: '/library',
   cookbook: '/cookbook',
@@ -71,7 +73,8 @@ const SEGMENTS = {
   calendar:  { target: 'calendar' },
   email:     { target: 'email' },
   memory:    { target: 'memory' },
-  gallery:   { target: 'gallery' },
+  // Gallery applet retired — legacy /gallery links resolve to Files.
+  gallery:   { target: 'files' },
   tasks:     { target: 'tasks' },
   library:   { target: 'library' },
   cookbook:  { target: 'cookbook' },

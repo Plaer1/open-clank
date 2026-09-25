@@ -60,7 +60,8 @@ def test_chat_module_graph_uses_one_url_per_stateful_module():
         Path("static/js/models.js").resolve(),
         Path("static/js/slashCommands.js").resolve(),
         Path("static/js/settings.js").resolve(),
-        Path("static/js/gallery.js").resolve(),
+        # Gallery applet retired (S19): gallery.js is no longer part of the
+        # live module graph — images open in Files/Imps.
     }
     identities = {target: set() for target in stateful_targets}
     ref_pattern = re.compile(
@@ -85,7 +86,11 @@ def test_chat_module_graph_uses_one_url_per_stateful_module():
 
 def test_agent_only_submit_has_no_orphaned_workspace_intent_gate():
     source = Path("static/js/chat.js").read_text(encoding="utf-8")
-    assert "fd.append('mode', 'agent');" in source
+    # Submit binds a chat mode whose product default is agent (the mode is
+    # user-selectable now, so the contract is the default rather than a
+    # hardcoded literal).
+    assert "fd.append('mode', chatMode)" in source
+    assert "|| 'agent';" in source
     assert "workspaceAgentIntent" not in source
 
 
@@ -98,7 +103,12 @@ def test_final_generated_image_render_uses_final_background_state():
 
 def test_early_submit_failure_gets_its_own_error_bubble():
     source = Path("static/js/chat.js").read_text(encoding="utf-8")
-    catch_body = source[source.index("    } catch (err) {"):source.index("    } finally {")]
+    # Anchor on the early-failure handler itself so the slice is the catch
+    # block that owns this contract, not the first catch in the file.
+    anchor = source.index("let errorHolder = holder?.querySelector('.body')")
+    catch_body = source[
+        source.rindex("    } catch (err) {", 0, anchor):source.index("    } finally {", anchor)
+    ]
     assert "document.querySelector('.msg-ai:last-of-type .body')" not in catch_body
     assert "holder?.querySelector('.body')" in catch_body
     assert "addMessage('assistant', '', finalMeta?.model || '')" in catch_body

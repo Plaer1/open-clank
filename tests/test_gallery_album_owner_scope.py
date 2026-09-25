@@ -1,11 +1,14 @@
-"""Issue #2754 — gallery owner-scoping.
+"""Issue #2754 — gallery owner-scoping, and the album retirement surface.
 
 `patch_gallery_image` must validate that the *target album* belongs to the caller
 before moving an image into it (otherwise user B can file B's image into user A's
-album), and `list_albums` must owner-scope the per-album count + cover-fallback
-queries. The gallery route handlers are closures, so — matching the AST-assertion
+album). The gallery route handlers are closures, so — matching the AST-assertion
 convention of test_gallery_image_privileges.py — we assert the guards are present
 in the source.
+
+Albums themselves are retired in S19 (Files Gallery folder + Imps). The album
+CRUD endpoints no longer mutate anything; they answer 410/empty. Those tests
+assert the retirement rather than the old in-function owner guards.
 """
 import ast
 from pathlib import Path
@@ -37,27 +40,28 @@ def test_upload_validates_target_album_ownership():
     assert "_get_or_404_album(db, album_id, user)" in body
 
 
-def test_list_albums_count_and_cover_are_owner_scoped():
+def test_list_albums_is_retired():
     fns = _function_sources()
     body = fns["list_albums"]
-    # The album list, per-album image count, explicit cover, and cover-fallback
-    # queries should all share the same gallery owner policy.
-    assert "q = _owner_filter(q, user, GalleryAlbum)" in body
-    assert "_count_q = _owner_filter(_count_q, user)" in body
-    assert "cover = _owner_filter(cover_q, user).first()" in body
-    assert "_cover_q = _owner_filter(_cover_q, user)" in body
+    # Albums are retired: the list is honestly empty and flagged, never a
+    # live owner-scoped album inventory.
+    assert "retired" in body
+    assert "GalleryAlbum" not in body
 
 
-def test_delete_album_cleanup_is_owner_scoped():
+def test_album_mutators_are_retired():
     fns = _function_sources()
-    body = fns["delete_album"]
-    assert "GalleryImage.album_id == album_id" in body
-    assert "GalleryImage.owner == user" in body
-    assert 'q.update({"album_id": None}' in body
+    for name in ("create_album", "update_album", "delete_album", "add_to_album", "remove_from_album"):
+        body = fns[name]
+        assert "410" in body, name
+        assert "retired" in body, name
+        # No live album mutation survives retirement.
+        assert "db.commit()" not in body, name
 
 
 def test_get_or_404_album_enforces_owner():
     # Guard the precedent we rely on: the helper rejects another user's album.
+    # It stays in place for legacy album_id references on patch/upload.
     fns = _function_sources()
     helper = fns["_get_or_404_album"]
     assert "GalleryAlbum.owner == user" in helper

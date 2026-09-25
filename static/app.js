@@ -21,7 +21,7 @@ import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
-import galleryModule from './js/gallery.js';
+// Gallery applet retired: images open in Files (browse) and Imps (edit).
 import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
@@ -1069,16 +1069,22 @@ function initializeEventListeners() {
     });
   }
 
-  // Gallery tool button
+  // Gallery tool button — the Gallery applet is retired. Its browse
+  // entry opens Files (the provisioned Gallery folder lives there) and
+  // image edit opens Imps. No Gallery modal is created or shown.
   const toolGalleryBtn = el('tool-gallery-btn');
   if (toolGalleryBtn) {
     toolGalleryBtn.addEventListener('click', async () => {
-      if (!galleryModule) return;
-      const Modals = await import('./js/modalManager.js');
-      if (!Modals.toggle('gallery-modal')) {
-        if (galleryModule.isGalleryOpen()) galleryModule.closeGallery();
-        else galleryModule.openGallery();
-      }
+      try {
+        if (filesModule && typeof filesModule.open === 'function') {
+          filesModule.open();
+          return;
+        }
+      } catch {}
+      try {
+        const editor = await import('./js/galleryEditor.js');
+        editor.openEditor?.(null, null, null, 'Imps');
+      } catch {}
     });
   }
 

@@ -27,6 +27,8 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(ipr, "SessionLocal", factory)
     # Deterministic principal for the auth-disabled path.
     monkeypatch.setenv("AUTH_ENABLED", "false")
+    # Keep durable Lore preimages inside the test's tmp dir.
+    monkeypatch.setenv("IMPS_PREIMAGE_DIR", str(tmp_path / "preimages"))
 
     app = FastAPI()
     app.include_router(ipr.setup_image_project_routes())
@@ -245,8 +247,84 @@ def test_blank_canvas_project_round_trips(client):
 
 def test_export_schema_endpoint(client):
     schema = client.get("/api/imps/export-schema").json()
-    assert schema == {"kind": "imps-project", "schema_version": 1}
+    assert schema["kind"] == "imps-project"
+    assert schema["schema_version"] == 1
+    assert schema["lore_restore_limitation"] == "L-S19-LORE-RESTORE"
 
 
 def test_missing_project_is_404(client):
     assert client.get("/api/imps/projects/nope").status_code == 404
+
+
+def test_save_reports_honest_caller_owned_image_write(client):
+    """Without image bytes the endpoint must not claim it wrote pixels."""
+    created = _create(client)
+    resp = client.post(
+        f"/api/imps/projects/{created['id']}/save",
+        json={
+            "expected_project_revision": 1,
+            "expected_image_revision": "rev-a",
+            "new_image_revision": "rev-b",
+            "state": {"v": 2, "layers": []},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    receipt = resp.json()["refresh_receipt"]
+    assert receipt["image_write"] == "caller-owned"
+    assert receipt["restore"]["limitation"] == "L-S19-LORE-RESTORE"
+
+
+def test_save_without_gallery_bytes_reports_caller_owned(client):
+    """Image bytes for a non-Gallery resource are honestly not written here."""
+    created = _create(client)
+    resp = client.post(
+        f"/api/imps/projects/{created['id']}/save",
+        json={
+            "expected_project_revision": 1,
+            "expected_image_revision": "rev-a",
+            "new_image_revision": "rev-b",
+            "image_bytes": "aW1hZ2UtYnl0ZXM=",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # No Gallery row exists for resource_id "image-1", so the write stays
+    # caller-owned and the preimage honestly marks bytes as not captured.
+    assert body["refresh_receipt"]["image_write"] == "caller-owned"
+
+
+def test_restore_replays_captured_preimage(client):
+    created = _create(client)
+    saved = client.post(
+        f"/api/imps/projects/{created['id']}/save",
+        json={
+            "expected_project_revision": 1,
+            "expected_image_revision": "rev-a",
+            "new_image_revision": "rev-b",
+            "state": {"v": 2, "layers": [{"id": 1}, {"id": 2}]},
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    action_id = saved.json()["action_id"]
+    assert action_id
+
+    restored = client.post(
+        f"/api/imps/projects/{created['id']}/restore",
+        json={"action_id": action_id},
+    )
+    assert restored.status_code == 200, restored.text
+    body = restored.json()
+    assert body["refresh_receipt"]["operation"] == "replay_restore"
+    assert body["refresh_receipt"]["state_restored"] is True
+    assert body["limitation"] == "L-S19-LORE-RESTORE"
+    fetched = client.get(f"/api/imps/projects/{created['id']}").json()
+    assert fetched["state"]["layers"] == [{"id": 1}]
+
+
+def test_restore_unknown_action_is_an_error(client):
+    created = _create(client)
+    resp = client.post(
+        f"/api/imps/projects/{created['id']}/restore",
+        json={"action_id": "imps-save-does-not-exist"},
+    )
+    assert resp.status_code == 500

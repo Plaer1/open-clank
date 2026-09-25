@@ -3006,11 +3006,13 @@ class FilesFacade:
                 "title", "language", "content", "version", "session_ref", "archived", "read_only",
             },
             "gallery": {
+                "provider", "resource_id",
                 "filename", "prompt", "caption", "model", "size", "quality", "tags", "ai_tags",
                 "favorite", "taken_at", "created_at", "updated_at", "camera", "width", "height",
                 "file_size", "media_type", "read_only",
             },
             "imps": {
+                "provider", "resource_id",
                 "filename", "prompt", "caption", "model", "size", "quality", "tags", "ai_tags",
                 "favorite", "taken_at", "created_at", "updated_at", "camera", "width", "height",
                 "file_size", "media_type", "read_only",
