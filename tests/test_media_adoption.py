@@ -14,7 +14,7 @@ from src.openclank.media_attachment_targets import (
     adopt_loose_media_for_workspace,
     collect_media_provenance,
 )
-from src.openclank.media_ownership import MediaProvenance, binary_digest
+from src.openclank.media_ownership import MediaOwnershipError, MediaProvenance, binary_digest
 
 
 class _MemoryOperationStore:
@@ -170,6 +170,35 @@ def test_adoption_never_swallows_another_registered_workspace(tmp_path):
     assert any(item["code"] == "owned_by_other_workspace" for item in result["rejected"])
     # The child workspace's asset is untouched.
     assert os.path.isfile(asset_path)
+    assert not (project / "media").exists()
+
+
+def test_adoption_fails_closed_when_workspace_registry_read_raises(tmp_path):
+    project = tmp_path / "project"
+    notes = project / "notes"
+    notes.mkdir(parents=True)
+    _write_loose_asset(str(project), "notes/draft.md", "image.png", b"png-bytes")
+
+    store = _MemoryOperationStore()
+    _seed_provenance(store, "account-alice", root=str(notes), document="draft.md", name="image.png", data=b"png-bytes")
+
+    def _registry_down(**kwargs):
+        raise RuntimeError("workspace registry is unavailable")
+
+    store.list_workspaces = _registry_down
+
+    # A failed registry read is not an empty registry: refuse rather than
+    # absorb a possible neighbor.
+    with pytest.raises(MediaOwnershipError) as exc:
+        adopt_loose_media_for_workspace(
+            operation_store=store,
+            owner_subject_id="account-alice",
+            workspace_root=str(project),
+            workspace_id="workspace-new",
+        )
+    assert exc.value.code == "provider_unavailable"
+    # Nothing was relocated.
+    assert os.path.isfile(os.path.join(str(notes), "media", "draft", "image.png"))
     assert not (project / "media").exists()
 
 

@@ -29,6 +29,7 @@ from src.openclank.media_ownership import (
     binary_digest,
     document_media_dir,
     plan_document_move,
+    recover_move_plan,
     scan_references,
 )
 
@@ -1228,7 +1229,9 @@ class LooseCopalRepository:
                 if not target:
                     continue
                 points_at_document = target in {source_rel, PurePosixPath(source_rel).name, "/" + source_rel}
-                points_at_media = target == source_media_rel or target.startswith(source_media_rel + "/") or target.startswith("media/")
+                # Only this document's own media/<stem>/ counts; a reference to
+                # some other document's media/... is unrelated to this move.
+                points_at_media = target == source_media_rel or target.startswith(source_media_rel + "/")
                 if not (points_at_document or points_at_media):
                     continue
                 touched = True
@@ -1274,13 +1277,24 @@ class LooseCopalRepository:
             raise CopalBridgeError(f"rename would break references; move left unapplied ({reasons})")
         if plan.phase == MovePhase.ABORTED:
             raise CopalBridgeError("rename preflight failed; move left unapplied")
-        # Stage: relocate owned asset bytes only.  A missing source media dir is
-        # a no-op; another document's bytes are never moved.
-        if source_media_abs.is_dir() and source_media_abs != destination_media_abs:
+        # A previous attempt can strand the rename between the media relocate
+        # and the document relocate.  Detect that half-applied state and resume
+        # it rather than refusing the retry; both-sides-present stays a conflict.
+        stranded = (
+            source_media_abs != destination_media_abs
+            and not source_media_abs.exists()
+            and destination_media_abs.is_dir()
+        )
+        if stranded:
+            plan.phase = MovePhase.RECOVERING
+        elif source_media_abs.is_dir() and source_media_abs != destination_media_abs:
+            # Stage: relocate owned asset bytes only.  A missing source media dir
+            # is a no-op; another document's bytes are never moved.
             destination_media_abs.parent.mkdir(parents=True, exist_ok=True)
             if destination_media_abs.exists():
                 raise CopalBridgeError("destination media directory already exists")
             os.replace(source_media_abs, destination_media_abs)
+            plan.phase = MovePhase.COMMITTED
         # Apply surgical reference rewrites.  Each document is rewritten once
         # from its captured preimage; no global string replacement.
         for doc_id, preimage in plan.preimages.items():
@@ -1299,17 +1313,10 @@ class LooseCopalRepository:
             self._atomic_write(other_path, rebuilt)
             record_other["head"] = self._fingerprint(rebuilt)
             record_other["updatedAt"] = time.time()
+        # Publish through the shared recovery transition so a stranded or
+        # freshly applied move commits the same idempotent receipt.
+        recover_move_plan(plan)
         receipt = plan.as_receipt()
-        plan.phase = MovePhase.PUBLISHED
-        plan.resource_receipt = {
-            "action_id": f"move-{plan.operation_id}",
-            "status": "complete",
-            "phase": MovePhase.PUBLISHED,
-            "durable": True,
-            "document_id": plan.document_id,
-            "asset_count": len(plan.asset_moves),
-            "reference_count": len(plan.reference_edits),
-        }
         self._operation(
             manifest,
             "media_move",

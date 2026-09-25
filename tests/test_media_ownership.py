@@ -253,6 +253,48 @@ def test_adoption_rejects_assets_outside_the_new_workspace():
     assert plan.rejected[0]["code"] == "outside_workspace"
 
 
+def test_root_contains_resolves_symlinked_roots(tmp_path):
+    from src.openclank.media_ownership import _root_contains
+
+    real = tmp_path / "real"
+    (real / "assets").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    escape = real / "escape"
+    escape.symlink_to(outside)
+
+    # A symlinked root still physically contains its children.
+    assert _root_contains(str(link), str(real / "assets"))
+    assert _root_contains(str(real), str(link / "assets"))
+    assert _root_contains(str(link), str(link / "assets"))
+    # A symlink that escapes the root is not inside it.
+    assert not _root_contains(str(real), str(escape))
+    assert not _root_contains(str(link), str(outside))
+
+
+def test_adoption_sees_through_a_symlinked_registered_root(tmp_path):
+    real_child = tmp_path / "child"
+    (real_child / "inside").mkdir(parents=True)
+    link_root = tmp_path / "link-to-child"
+    link_root.symlink_to(real_child)
+
+    plan = classify_adoption_candidates(
+        candidates=[_loose(str(real_child / "inside"), "deep.md", "photo.png")],
+        registered_roots=[
+            # Registered through a symlink: containment must resolve both
+            # sides or the asset looks unowned and would be absorbed.
+            WorkspaceRootRecord("workspace-child", "account-alice", str(link_root), archived=False),
+        ],
+        new_workspace_root=str(tmp_path),
+        new_workspace_id="workspace-new",
+        new_owner_subject_id="account-alice",
+    )
+    assert plan.adoptable == ()
+    assert any(item["code"] == "owned_by_other_workspace" for item in plan.rejected)
+
+
 def test_folder_named_media_alone_is_not_proof_of_orphanhood():
     # No provenance row means no adoption, regardless of folder names.
     plan = classify_adoption_candidates(

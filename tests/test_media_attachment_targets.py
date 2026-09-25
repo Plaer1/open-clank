@@ -565,3 +565,80 @@ async def test_loose_copal_rename_reports_protected_reference_conflict(tmp_path)
     assert not list(tmp_path.rglob("media/Renamed"))
     assert list(tmp_path.rglob("Draft.md"))
     assert locked["doc"]["name"] == "Locked.md"
+
+
+@pytest.mark.asyncio
+async def test_loose_copal_rename_ignores_unrelated_media_references(tmp_path):
+    bridge = LooseCopalBridge(tmp_path)
+    created = await bridge.call("create", {
+        "owner": "alice",
+        "workspace_id": "default",
+        "name": "Draft.md",
+        "kind": "markdown",
+        "content": "Hello\n",
+    })
+    doc_id = created["doc"]["id"]
+    await bridge.call("put_asset_scoped", {
+        "owner": "alice",
+        "workspace_id": "default",
+        "name": "media/Draft/image.png",
+        "ext": "png",
+        "base64": base64.b64encode(b"png-bytes").decode("ascii"),
+    })
+    # A read-only document pointing at some *other* document's media must not
+    # block this rename: only media/Draft/... belongs to the moved document.
+    await bridge.call("create", {
+        "owner": "alice",
+        "workspace_id": "default",
+        "name": "Neighbor.md",
+        "kind": "markdown",
+        "content": "see ![img](media/OtherDoc/x.png)\n",
+        "read_only": True,
+    })
+    result = await bridge.call("rename", {"owner": "alice", "workspace_id": "default", "id": doc_id, "name": "Renamed.md"})
+    assert result["outcome"] == "committed"
+    assert list(tmp_path.rglob("media/Renamed/image.png"))
+    assert not list(tmp_path.rglob("media/Draft"))
+    neighbor = next(tmp_path.rglob("Neighbor.md")).read_text(encoding="utf-8")
+    assert "media/OtherDoc/x.png" in neighbor
+
+
+@pytest.mark.asyncio
+async def test_loose_copal_rename_resumes_stranded_media_move(tmp_path):
+    bridge = LooseCopalBridge(tmp_path)
+    created = await bridge.call("create", {
+        "owner": "alice",
+        "workspace_id": "default",
+        "name": "Draft.md",
+        "kind": "markdown",
+        "content": "Hello ![img](media/Draft/image.png) end\n",
+    })
+    doc_id = created["doc"]["id"]
+    await bridge.call("put_asset_scoped", {
+        "owner": "alice",
+        "workspace_id": "default",
+        "name": "media/Draft/image.png",
+        "ext": "png",
+        "base64": base64.b64encode(b"png-bytes").decode("ascii"),
+    })
+    await bridge.call("create", {
+        "owner": "alice",
+        "workspace_id": "default",
+        "name": "Other.md",
+        "kind": "markdown",
+        "content": "see ![img](media/Draft/image.png)\n",
+    })
+    # Simulate a crash between media relocation and document relocation:
+    # media already sits at the destination, the source media dir is gone,
+    # and the document is still at its old path.
+    draft_media = next(tmp_path.rglob("media/Draft"))
+    os.replace(draft_media, draft_media.parent / "Renamed")
+
+    result = await bridge.call("rename", {"owner": "alice", "workspace_id": "default", "id": doc_id, "name": "Renamed.md"})
+    assert result["outcome"] == "committed"
+    assert result["doc"]["name"] == "Renamed.md"
+    assert list(tmp_path.rglob("media/Renamed/image.png"))
+    assert not list(tmp_path.rglob("media/Draft"))
+    other_text = next(tmp_path.rglob("Other.md")).read_text(encoding="utf-8")
+    assert "media/Renamed/image.png" in other_text
+    assert "media/Draft/image.png" not in other_text

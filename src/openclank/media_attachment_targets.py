@@ -84,32 +84,39 @@ class HostDocumentAttachmentTarget:
         )
 
     def _registry_roots(self, owner_subject_id: str) -> list[WorkspaceRootRecord]:
+        # A failed registry read is not an empty registry: classification must
+        # see every root or it would absorb a neighbor.  Fail closed.
         if self._workspace_roots is not None:
             try:
                 rows = self._workspace_roots(owner_subject_id)
-                return [
-                    WorkspaceRootRecord(
-                        str(row.get("workspace_id") or row.get("id") or ""),
-                        str(row.get("owner_subject_id") or row.get("owner") or ""),
-                        str(row.get("canonical_root") or row.get("path") or ""),
-                        bool(row.get("archived")),
-                    )
-                    for row in rows
-                    if isinstance(row, Mapping) and row.get("canonical_root", row.get("path"))
-                ]
-            except Exception:
-                return []
+            except Exception as exc:
+                raise MediaOwnershipError(
+                    "workspace registry is unavailable", code="provider_unavailable"
+                ) from exc
+            return [
+                WorkspaceRootRecord(
+                    str(row.get("workspace_id") or row.get("id") or ""),
+                    str(row.get("owner_subject_id") or row.get("owner") or ""),
+                    str(row.get("canonical_root") or row.get("path") or ""),
+                    bool(row.get("archived")),
+                )
+                for row in rows
+                if isinstance(row, Mapping) and row.get("canonical_root", row.get("path"))
+            ]
         getter = getattr(self.operation_store, "list_workspaces", None)
         if not callable(getter):
             return []
         location_getter = getattr(self.operation_store, "get_location", None)
         records: list[WorkspaceRootRecord] = []
+        # Server-side enumeration includes every account and archived row;
+        # classification must see them all or it would absorb a neighbor.  A
+        # failed registry read is not an empty registry: fail closed.
         try:
-            # Server-side enumeration includes every account and archived row;
-            # classification must see them all or it would absorb a neighbor.
             workspaces = getter(owner_subject_id=None, include_archived=True)
-        except Exception:
-            return []
+        except Exception as exc:
+            raise MediaOwnershipError(
+                "workspace registry is unavailable", code="provider_unavailable"
+            ) from exc
         for workspace in workspaces:
             location_id = getattr(workspace, "location_id", None)
             relative = str(getattr(workspace, "relative_folder", "") or "")
@@ -734,10 +741,14 @@ def _all_registered_roots(operation_store: Any) -> list[WorkspaceRootRecord]:
         return []
     location_getter = getattr(operation_store, "get_location", None)
     records: list[WorkspaceRootRecord] = []
+    # A failed registry read is not an empty registry: classification must see
+    # every root or it would absorb a neighbor.  Fail closed.
     try:
         workspaces = getter(owner_subject_id=None, include_archived=True)
-    except Exception:
-        return []
+    except Exception as exc:
+        raise MediaOwnershipError(
+            "workspace registry is unavailable", code="provider_unavailable"
+        ) from exc
     for workspace in workspaces:
         location_id = getattr(workspace, "location_id", None)
         relative = str(getattr(workspace, "relative_folder", "") or "")

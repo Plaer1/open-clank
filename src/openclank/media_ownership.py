@@ -435,8 +435,9 @@ class WorkspaceRootRecord:
 
 
 def _root_contains(root: str, candidate: str) -> bool:
-    root_path = os.path.normpath(str(root))
-    candidate_path = os.path.normpath(str(candidate))
+    # realpath, not normpath: a symlinked root must not evade containment.
+    root_path = os.path.realpath(os.path.normpath(str(root)))
+    candidate_path = os.path.realpath(os.path.normpath(str(candidate)))
     if root_path == candidate_path:
         return True
     try:
