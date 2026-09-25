@@ -95,7 +95,7 @@ await withCopalBrowser({ page }, async ({ evaluate, until }) => {
     const saved = workspace.normalizeNotesWorkspace({ version:workspace.NOTES_WORKSPACE_VERSION, root:{ type:'group', tabs:[{ type:'leaf', id:'leaf', docId:'note', selection:initial }] }, activeLeafId:'leaf' }, docs, 'note');
     const persisted = workspace.serializeNotesWorkspace(saved);
     const restored = workspace.normalizeNotesWorkspace(JSON.parse(persisted), docs, 'note');
-    const qualified = Object.fromEntries(['JavaScript', 'TypeScript JSX', 'C/C++ header', 'Java', 'Go', 'Rust', 'Python', 'CSS', 'HTML', 'XML', 'PHP', 'SQL', 'YAML', 'C#', 'Ruby', 'Shell'].map(language => [language, module.isRichCommentLanguageQualified(language)]));
+    const qualified = Object.fromEntries(['JavaScript', 'TypeScript JSX', 'C/C++ header', 'Java', 'Go', 'Rust', 'Python', 'CSS', 'HTML', 'XML', 'PHP', 'SQL', 'YAML', 'C#', 'Ruby', 'Shell', 'Kotlin', 'Swift', 'TOML', 'Mermaid', 'Dockerfile', 'SCSS'].map(language => [language, module.isRichCommentLanguageQualified(language)]));
     return { initial, inserted, undone, redone, selectedAll, allMatches, afterCommandEdit, afterCommandUndo, applied, reset, attachment, afterAttachmentUndo, duplicated, afterDuplicateUndo, restored:workspace.workspaceLeaves(restored)[0].selection, richBytes, commentMap, renderedComment:!!renderedComment, renderedCommentText, grammarResults, qualified };
   })()`);
   assert.deepEqual(result.initial.ranges, [{ anchor:0, head:5 }, { anchor:11, head:16 }]);
@@ -126,8 +126,10 @@ await withCopalBrowser({ page }, async ({ evaluate, until }) => {
   assert.equal(result.renderedComment, true, 'opt-in parser comments use the renderer for inactive regions');
   assert.equal(result.renderedCommentText.trim(), '**bold**');
   for (const language of ['JavaScript', 'TypeScript JSX', 'C/C++ header', 'Java', 'Go', 'Rust', 'Python', 'CSS', 'HTML', 'XML', 'PHP', 'SQL', 'YAML']) assert.equal(result.qualified[language], true, `${language} rich comments should be qualified`);
-  for (const language of ['C#', 'Ruby', 'Shell']) assert.equal(result.qualified[language], false, `${language} rich comments should remain unadvertised`);
-    assert.equal(result.grammarResults.length, 16);
+  // S16: every advertised comment-capable language qualifies, including the
+  // stream-adapter rows that previously stayed unadvertised.
+  for (const language of ['C#', 'Ruby', 'Shell', 'Kotlin', 'Swift', 'TOML', 'Mermaid', 'Dockerfile', 'SCSS']) assert.equal(result.qualified[language], true, `${language} rich comments should be advertised`);
+  assert.equal(result.grammarResults.length, 16);
   for (const fixture of result.grammarResults) {
     assert.equal(fixture.source.includes('Café 😀'), true, `${fixture.language} preserves Unicode source`);
     assert.equal(fixture.source.includes('\r\n'), true, `${fixture.language} preserves CRLF source`);

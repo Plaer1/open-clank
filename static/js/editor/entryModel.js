@@ -131,6 +131,27 @@ export function languageForPath(path) {
   return TEXT_FILE_NAMES[leaf] || LANGUAGE_BY_EXTENSION[ext] || 'Plain text';
 }
 
+/**
+ * Dialect under a shared display label. `.jsonc` stays the JSON label but
+ * routes to the comment-capable JSONC grammar; strict `.json` never does.
+ */
+export function languageDialectForPath(path) {
+  const { leaf, ext } = pathParts(path);
+  if (ext === 'jsonc' || ext === 'json5') return 'jsonc';
+  if (FILENAME_JSON_C_DIALECTS.has(leaf)) return 'jsonc';
+  return '';
+}
+
+const FILENAME_JSON_C_DIALECTS = new Set(['.babelrc', '.eslintrc', '.prettierrc', 'tsconfig.json', 'jsconfig.json']);
+
+/** The 30 advertised language labels, including aliases resolved by languageForPath. */
+export const ADVERTISED_LANGUAGE_LABELS = Object.freeze([
+  'JavaScript', 'JavaScript JSX', 'TypeScript', 'TypeScript JSX', 'Python', 'Rust', 'Go', 'Java',
+  'Kotlin', 'C', 'C/C++ header', 'C++', 'C++ header', 'C#', 'Ruby', 'PHP', 'Swift', 'Shell',
+  'JSON', 'YAML', 'TOML', 'XML', 'HTML', 'CSS', 'SCSS', 'Markdown', 'SQL', 'Mermaid', 'Dockerfile',
+  'Plain text',
+]);
+
 /** Extension/name hint only. The server remains authoritative when content is read. */
 export function isTextPath(path) {
   const { leaf, ext } = pathParts(path);

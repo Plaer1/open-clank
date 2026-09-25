@@ -416,6 +416,17 @@ export function registerAdapter(element, adapter) {
 
 // Shared CodeMirror command semantics. Keeping this beside the menu prevents
 // individual Editor leaves from falling back to document.execCommand.
+function hasCommentSource(request) {
+  const captured = request?.adapterContext;
+  if (!captured) return false;
+  const ranges = Array.isArray(captured.ranges) ? captured.ranges : [];
+  if (!ranges.length) return false;
+  const from = Math.min(...ranges.map((range) => Math.min(range.anchor, range.head)));
+  const to = Math.max(...ranges.map((range) => Math.max(range.anchor, range.head)));
+  const map = captured.commentSourceMap;
+  return Array.isArray(map) && map.some((region) => region.from <= to && region.to >= from);
+}
+
 export function createCodeMirrorContextAdapter(editor, identity = {}) {
   const readIdentity = (name, fallback = null) => {
     const value = identity[name];
@@ -434,6 +445,7 @@ export function createCodeMirrorContextAdapter(editor, identity = {}) {
         { id:'format-bold', label:'Bold selection', disabled:!hasSelection },
         { id:'format-italic', label:'Italic selection', disabled:!hasSelection },
         { id:'format-code', label:'Inline code selection', disabled:!hasSelection },
+        { id:'see-source', label:'See source', disabled:!hasCommentSource(request) },
         { id:'insert-template', label:'Insert template' },
         { id:'new-from-template', label:'New from template' },
       ];
@@ -445,6 +457,7 @@ export function createCodeMirrorContextAdapter(editor, identity = {}) {
         ranges, mainIndex:selection.mainIndex, text:editor.getSelectedText?.() || '',
         documentText:editor.view.state.doc.toString(), documentLength:editor.view.state.doc.length,
         bufferIdentity:readIdentity('bufferIdentity', editor), revision:readIdentity('revision'), scope:readIdentity('scope'),
+        commentSourceMap:editor.getCommentSourceMap?.() || [],
       });
     },
     execute: async (command, request) => {
@@ -480,6 +493,15 @@ export function createCodeMirrorContextAdapter(editor, identity = {}) {
       if (command === 'format-bold') { editor.formatSelections?.('**'); return; }
       if (command === 'format-italic') { editor.formatSelections?.('*'); return; }
       if (command === 'format-code') { editor.formatSelections?.('`'); return; }
+      // Range-aware See source: reveal the documentation region under the
+      // captured selection while preserving the rest of the editing state.
+      if (command === 'see-source') {
+        const map = captured.commentSourceMap || editor.getCommentSourceMap?.() || [];
+        const region = map.find((entry) => entry.from <= Math.max(mainRange.anchor, mainRange.head) && entry.to >= Math.min(mainRange.anchor, mainRange.head));
+        if (!region) return false;
+        editor.revealCommentSource?.(region.from, region.to);
+        return true;
+      }
       if (command === 'copy' || command === 'cut') {
         if (!captured.text) return;
         if (!navigator.clipboard?.writeText) throw new Error('Clipboard writing is unavailable in this browser.');

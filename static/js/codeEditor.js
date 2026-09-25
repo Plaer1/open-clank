@@ -6,7 +6,8 @@ import { styledConfirm, styledPrompt } from './ui.js';
 import { createResizablePane } from './editor/resizablePane.js';
 import { createExplorerTree } from './editor/explorerTree.js';
 import { createResourcePicker } from './copal/resourcePicker.js';
-import { languageForPath as sharedLanguageForPath, sortEntries as sortEntryList, isDirectory as entryIsDirectory } from './editor/entryModel.js';
+import { createMarkdownRenderer } from './copal/markdownRenderer.js';
+import { languageForPath as sharedLanguageForPath, languageDialectForPath as sharedLanguageDialectForPath, sortEntries as sortEntryList, isDirectory as entryIsDirectory } from './editor/entryModel.js';
 import { fileIcon, glyphIcon } from './langIcons.js';
 import { initCustomContextMenu, registerAdapter, createCodeMirrorContextAdapter } from './custom-context-menu.js';
 
@@ -49,6 +50,7 @@ const state = {
   closePromise: null,
   tabMenu: null,
   richCommentsDefault: false,
+  markdownRenderer: null,
 };
 
 function el(tag, attrs = {}, ...children) {
@@ -61,6 +63,35 @@ function el(tag, attrs = {}, ...children) {
   }
   for (const child of children.flat()) if (child != null) node.append(child.nodeType ? child : document.createTextNode(String(child)));
   return node;
+}
+
+/**
+ * Full shared Markdown renderer for Code Editor rich comments. Explicit
+ * callbacks replace any applet-singleton import so this window never reaches
+ * into another window's Copal state. Resource origin is the active host file.
+ */
+function codeEditorMarkdownRenderer() {
+  if (state.markdownRenderer) return state.markdownRenderer;
+  const renderer = createMarkdownRenderer({
+    h: el,
+    documents: () => [],
+    findByName: () => null,
+    assetUrl: (target) => {
+      // Relative media paths resolve beside the active source file.
+      const name = String(target?.name || target?.target || target?.id || '');
+      if (!name || /^(?:https?:|data:|blob:)/i.test(name)) return name || null;
+      const base = String(state.activePath || '').replace(/[^/]+$/, '');
+      return `${base}${name.replace(/^\.\//, '')}`;
+    },
+    openTarget: (target, fragment, event) => {
+      if (event?.metaKey || event?.ctrlKey || event?.shiftKey || event?.altKey) return;
+      const href = typeof target === 'string' ? target : String(target?.href || target?.url || target?.name || '');
+      if (/^https?:/i.test(href)) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
+      if (fragment || href) setStatus(`Reference: ${href || 'fragment'}${fragment ? `#${fragment}` : ''}`);
+    },
+  });
+  state.markdownRenderer = renderer;
+  return renderer;
 }
 
 function toolButton(title, glyph, onClick) {
@@ -1506,7 +1537,18 @@ function renderEditor() {
       lineWrapping: false,
       selection: buffer.selection,
       scrollTop: buffer.scrollTop,
-      richComments: buffer.richComments === true && state.richCommentLanguageQualified(languageForPath(state.activePath)),
+      richComments: buffer.richComments === true && state.richCommentLanguageQualified(languageForPath(state.activePath), { dialect: languageDialectForPath(state.activePath), path: state.activePath }),
+      languageDialect: languageDialectForPath(state.activePath),
+      languagePath: state.activePath,
+      renderPreview: (source) => {
+        // Full shared Markdown renderer, not a one-reference preview callback.
+        const renderer = codeEditorMarkdownRenderer();
+        try { return renderer.renderPreview(source); } catch (_) { return null; }
+      },
+      onSeeSource: (range) => {
+        buffer.editor?.revealCommentSource?.(range.from, range.to);
+        setStatus('Showing comment source. Press Escape to keep editing the file.');
+      },
       onSelection: selection => { buffer.selection = selection; },
       onScroll: scrollTop => { buffer.scrollTop = scrollTop; },
       onChange: value => { buffer.text = value; buffer.revision = (buffer.revision || 0) + 1; markBufferDirty(buffer); },
@@ -1521,7 +1563,7 @@ function renderEditor() {
   }
   if (buffer.editor) bindBufferContextMenu(buffer, editorHost);
   const mode = el('span', { class: 'code-editor-language', text: languageForPath(state.activePath) });
-  const richCommentQualified = state.richCommentLanguageQualified(languageForPath(state.activePath));
+  const richCommentQualified = state.richCommentLanguageQualified(languageForPath(state.activePath), { dialect: languageDialectForPath(state.activePath), path: state.activePath });
   const activeRichComments = richCommentQualified && buffer.richComments === true;
   const richComments = el('button', {
     class: 'code-editor-rich-comments', type: 'button', text: activeRichComments ? 'Raw comments' : richCommentQualified ? 'Rich comments' : 'Rich comments unavailable',

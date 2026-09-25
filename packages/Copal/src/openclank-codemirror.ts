@@ -19,6 +19,19 @@ import {
   rectangularSelection,
 } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
+import {
+  type ContentSpan,
+  type DelimiterKind,
+  type DocumentationRegion,
+  advertisedLabel,
+  dialectForPath,
+  documentationRegions,
+  documentationRegionsAsync,
+  regionMarkdown,
+  supportsRichComments,
+  safeCommentInsertion,
+  wrapMarkdownAsComment,
+} from './openclank-doc-regions';
 
 type EditorMode = 'live' | 'source';
 
@@ -109,8 +122,14 @@ interface MarkdownEditorOptions {
   onCommand?: (command: string) => void;
   /** Render a resolved Markdown image/embed source without coupling CodeMirror to resource resolution. */
   renderPreview?: (source: string) => HTMLElement | null;
-  /** Experimental, opt-in source-preserving presentation for parser comments. */
+  /** Opt-in source-preserving presentation for documentation comments/docstrings. */
   richComments?: boolean;
+  /** Dialect under a shared label, e.g. `jsonc` under JSON. */
+  languageDialect?: string;
+  /** Source path used for dialect routing when the label alone is ambiguous. */
+  languagePath?: string;
+  /** Range-aware See source action for rendered documentation elements. */
+  onSeeSource?: (range: { from:number; to:number; source:string; markdown:string }, event: Event) => void;
 }
 
 export interface CommentSourceRange {
@@ -121,6 +140,12 @@ export interface CommentSourceRange {
   language: string;
   /** Per-line source spans make CRLF, indentation, and Unicode mapping explicit. */
   contentRanges: Array<{ from:number; to:number }>;
+  delimiterKind?: DelimiterKind;
+  kind?: 'comment' | 'docstring';
+  open?: string;
+  close?: string;
+  lineStart?: number;
+  lineEnd?: number;
 }
 
 /** Return the original line-ending bytes when the logical document is unchanged. */
@@ -132,95 +157,54 @@ export function serializeEditorSource(value: string, original: string) {
   return separator ? logical.replace(/\r?\n/g, separator) : logical;
 }
 
-const commentDelimiters: Record<string, Array<{ open:string; close?:string }>> = {
-  javascript:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], typescript:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }],
-  javascriptjsx:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], jsx:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], typescriptjsx:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }],
-  c:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], 'c++':[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], 'c++header':[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], java:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], go:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }], rust:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }],
-  python:[{ open:'# ' }, { open:'#' }], css:[{ open:'/*', close:'*/' }], html:[{ open:'<!--', close:'-->' }], xml:[{ open:'<!--', close:'-->' }], php:[{ open:'// ' }, { open:'//' }, { open:'/*', close:'*/' }, { open:'# ' }, { open:'#' }], sql:[{ open:'-- ' }, { open:'--' }, { open:'/*', close:'*/' }], yaml:[{ open:'# ' }, { open:'#' }], shell:[{ open:'# ' }, { open:'#' }], dockerfile:[{ open:'# ' }, { open:'#' }], toml:[{ open:'# ' }, { open:'#' }], mermaid:[{ open:'%% ' }, { open:'%%' }],
-};
-
-// Rich comments are advertised only for grammars whose parser boundaries have
-// a source round-trip fixture. StreamLanguage modes remain available for raw
-// syntax highlighting, but cannot opt into comment presentation by accident.
-const richCommentLanguages = new Set([
-  'javascript', 'javascriptjsx', 'jsx', 'typescript', 'typescriptjsx',
-  'c', 'c++', 'c++header', 'java', 'go', 'rust', 'python',
-  'css', 'html', 'xml', 'php', 'sql', 'yaml',
-]);
-
-function normalizedCommentLanguage(language?: string) {
-  const raw = String(language || '').toLowerCase().trim();
-  if (/^c\s*\/\s*c\+\+\s*header$/.test(raw) || /^c\+\+\s*header$/.test(raw)) return 'c++header';
-  return raw.replace(/[\s_/-]+/g, '');
+// Rich comments cover every advertised comment/docstring-capable language.
+// The gate is the documentation-region adapter's source round-trip fixture,
+// not parser presence or highlighter color. Markdown and Plain text keep
+// their applicable behaviors (full-document preview / plain editing); strict
+// JSON has no comments while the JSONC dialect does.
+export function isRichCommentLanguageQualified(language?: string, options: { dialect?: string; path?: string } = {}) {
+  return supportsRichComments(language, options);
 }
 
-/** Whether this language has passed the parser-boundary rich-comment gate. */
-export function isRichCommentLanguageQualified(language?: string) {
-  return richCommentLanguages.has(normalizedCommentLanguage(language));
+function regionToCommentSourceRange(region: DocumentationRegion, language: string): CommentSourceRange {
+  return {
+    from: region.from,
+    to: region.to,
+    contentFrom: region.contentFrom,
+    contentTo: region.contentTo,
+    language: region.language || String(language || ''),
+    contentRanges: region.contentRanges.map((span: ContentSpan) => ({ from: span.from, to: span.to })),
+    delimiterKind: region.delimiterKind,
+    kind: region.kind,
+    open: region.open,
+    close: region.close,
+    lineStart: region.lineStart,
+    lineEnd: region.lineEnd,
+  };
 }
 
-function mapCommentContent(source: string, from: number, to: number, language: string): CommentSourceRange {
-  const raw = source.slice(from, to);
-  const delimiters = commentDelimiters[normalizedCommentLanguage(language)] || [];
-  const delimiter = delimiters.find((item) => raw.startsWith(item.open)) || { open:'', close:undefined };
-  let contentFrom = from + delimiter.open.length;
-  let contentTo = to - (delimiter.close && raw.endsWith(delimiter.close) ? delimiter.close.length : 0);
-  if (contentTo < contentFrom) contentTo = contentFrom;
-  const contentRanges: Array<{ from:number; to:number }> = [];
-  let cursor = contentFrom;
-  while (cursor <= contentTo) {
-    const newline = source.indexOf('\n', cursor);
-    const end = newline < 0 || newline >= contentTo ? contentTo : newline;
-    let lineFrom = cursor;
-    const line = source.slice(lineFrom, end);
-    // Line-comment delimiters were removed from `contentFrom`; preserve a
-    // leading Markdown `#` there. Only strip documentation stars on
-    // subsequent block-comment lines when the star is followed by whitespace.
-    const prefix = delimiter.close ? /^\s+\*[ \t]+/.exec(line) : null;
-    if (prefix) lineFrom += prefix[0].length;
-    if (lineFrom <= end) contentRanges.push({ from:lineFrom, to:end });
-    if (newline < 0 || newline >= contentTo) break;
-    cursor = newline + 1;
-  }
-  return { from, to, contentFrom, contentTo, language:String(language || ''), contentRanges };
-}
-
-/** Return only parser-recognized comment nodes, with exact source offsets. */
-export function parserCommentSourceRanges(state: EditorState, language = ''): CommentSourceRange[] {
+/** Return parser/adapter-recognized documentation regions with exact offsets. */
+export function parserCommentSourceRanges(state: EditorState, language = '', options: { dialect?: string; path?: string } = {}): CommentSourceRange[] {
   if (!state || !String(language || '').trim()) return [];
-  const ranges: Array<{ from:number; to:number }> = [];
-  syntaxTree(state).iterate({ enter(node) {
-    const name = String(node.name || node.type?.name || '');
-    if (/comment/i.test(name) && node.from < node.to) ranges.push({ from:node.from, to:node.to });
-  } });
-  ranges.sort((a, b) => a.from - b.from || b.to - a.to);
-  const outer = ranges.filter((range) => !ranges.some((candidate) => candidate !== range && candidate.from <= range.from && candidate.to >= range.to));
   const source = state.doc.toString();
-  const mapped = outer.map((range) => mapCommentContent(source, range.from, range.to, language));
-  const grouped: CommentSourceRange[] = [];
-  for (const current of mapped) {
-    const previous = grouped.at(-1);
-    const previousSource = previous ? source.slice(previous.from, previous.to) : '';
-    const currentSource = source.slice(current.from, current.to);
-    const previousDelimiter = commentDelimiters[normalizedCommentLanguage(language)]?.find((item) => !item.close && previousSource.startsWith(item.open));
-    const currentDelimiter = commentDelimiters[normalizedCommentLanguage(language)]?.find((item) => !item.close && currentSource.startsWith(item.open));
-    const gap = previous ? source.slice(previous.to, current.from) : '';
-    // Adjacent line comments form one Markdown paragraph. A blank line or
-    // intervening code keeps the parser ranges separate and therefore keeps
-    // source editing/selection boundaries explicit.
-    if (previous && previousDelimiter?.open === currentDelimiter?.open && /^(?:\r?\n)[ \t]*$/.test(gap)) {
-      previous.to = current.to;
-      previous.contentTo = current.contentTo;
-      previous.contentRanges.push(...current.contentRanges);
-    } else grouped.push(current);
-  }
-  return grouped;
+  return documentationRegions(source, language, options).map((region) => regionToCommentSourceRange(region, language));
+}
+
+/**
+ * Grammar-aware regions including Python docstrings. Async because Lezer
+ * parsers load on demand; stale results are the caller's revision problem.
+ */
+export async function parserCommentSourceRangesAsync(state: EditorState, language = '', options: { dialect?: string; path?: string } = {}): Promise<CommentSourceRange[]> {
+  if (!state || !String(language || '').trim()) return [];
+  const source = state.doc.toString();
+  const regions = await documentationRegionsAsync(source, language, options);
+  return regions.map((region) => regionToCommentSourceRange(region, language));
 }
 
 /** Build a renderer-ready map; calling this never mutates the source document. */
-export function mapParserComments(state: EditorState, language = '', render?: (markdown:string, range:CommentSourceRange) => unknown) {
+export function mapParserComments(state: EditorState, language = '', render?: (markdown:string, range:CommentSourceRange) => unknown, options: { dialect?: string; path?: string } = {}) {
   const source = state?.doc?.toString?.() || '';
-  return parserCommentSourceRanges(state, language).map((range) => {
+  return parserCommentSourceRanges(state, language, options).map((range) => {
     const markdown = range.contentRanges.map((span) => source.slice(span.from, span.to)).join('\n');
     return { ...range, markdown, rendered:typeof render === 'function' ? render(markdown, range) : null };
   });
@@ -283,19 +267,41 @@ const mermaidStreamParser: any = {
 
 const sourceLanguageLoads = new Map<string, Promise<any>>();
 
-function loadSourceLanguage(language?: string) {
+// JSONC keeps the JSON label but adds real comment tokens. Strict JSON stays
+// on the Lezer JSON grammar and never receives invented comment syntax.
+const jsoncStreamParser: any = {
+  startState: () => ({}),
+  token(stream: any, _state: any) {
+    if (stream.match(/^\/\/.*/)) return 'comment';
+    if (stream.match(/^\/\*[\s\S]*?\*\//)) return 'comment';
+    if (stream.match(/^"(?:\\.|[^"\\])*"?/)) return 'string';
+    if (stream.match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/)) return 'number';
+    if (stream.match(/^(?:true|false|null)\b/)) return 'atom';
+    if (stream.match(/^[{}[\],:]/)) return 'punctuation';
+    stream.next();
+    return null;
+  },
+};
+
+function loadSourceLanguage(language?: string, options: { dialect?: string; path?: string } = {}) {
   const key = String(language || '').toLowerCase();
   if (!key || key === 'plain text') return Promise.resolve([]);
   if (key === 'markdown') return Promise.resolve(markdown());
+  const dialect = String(options.dialect || options.path || '').toLowerCase();
+  if (key === 'json' && (dialect.includes('jsonc') || /(?:^|[/\\.])jsonc$/i.test(String(options.path || '')) || key.includes('jsonc'))) {
+    return Promise.resolve(StreamLanguage.define(jsoncStreamParser));
+  }
   const cached = sourceLanguageLoads.get(key);
   if (cached) return cached;
   let pending: Promise<any>;
   if (['javascript', 'javascript jsx', 'jsx', 'typescript', 'typescript jsx'].includes(key)) {
     pending = import('@codemirror/lang-javascript').then(({ javascript }) => javascript({ jsx:key.includes('jsx') || key === 'jsx', typescript:key.includes('typescript') }));
   } else if (key === 'json') pending = import('@codemirror/lang-json').then(({ json }) => json());
+  else if (key === 'jsonc') pending = Promise.resolve(StreamLanguage.define(jsoncStreamParser));
   else if (key === 'html') pending = import('@codemirror/lang-html').then(({ html }) => html());
   else if (key === 'xml') pending = import('@codemirror/lang-xml').then(({ xml }) => xml());
-  else if (['css', 'scss'].includes(key)) pending = import('@codemirror/lang-css').then(({ css }) => css());
+  else if (key === 'scss') pending = import('@codemirror/lang-sass').then(({ sass }) => sass());
+  else if (key === 'css') pending = import('@codemirror/lang-css').then(({ css }) => css());
   else if (['c', 'c++', 'c/c++ header', 'c++ header'].includes(key)) pending = import('@codemirror/lang-cpp').then(({ cpp }) => cpp());
   else if (key === 'c#') pending = import('@codemirror/legacy-modes/mode/clike').then(({ csharp }) => StreamLanguage.define(csharp));
   else if (key === 'java') pending = import('@codemirror/lang-java').then(({ java }) => java());
@@ -740,6 +746,7 @@ class CommentPreviewWidget extends WidgetType {
     private readonly from: number,
     private readonly to: number,
     private readonly renderPreview?: (source:string) => HTMLElement | null,
+    private readonly onSeeSource?: (range: { from:number; to:number; source:string; markdown:string }, event: Event) => void,
   ) { super(); }
 
   eq(other: CommentPreviewWidget) {
@@ -752,7 +759,8 @@ class CommentPreviewWidget extends WidgetType {
     root.className = `cm-rich-comment-widget${block ? ' cm-rich-comment-block' : ''}`;
     root.dataset.commentSourceFrom = String(this.from);
     root.dataset.commentSourceTo = String(this.to);
-    root.setAttribute('aria-label', 'Rendered source comment; press Enter to edit raw comment');
+    root.dataset.commentRevision = String(view.state.doc.length);
+    root.setAttribute('aria-label', 'Rendered source comment; press Enter or choose See source to edit raw comment');
     let preview: HTMLElement | null = null;
     try { preview = this.renderPreview?.(this.markdown) || null; } catch (_) { preview = null; }
     if (preview) root.append(preview);
@@ -766,15 +774,29 @@ class CommentPreviewWidget extends WidgetType {
       view.dispatch({ selection:EditorSelection.range(this.from, this.to), scrollIntoView:true });
       view.focus();
     };
-    root.addEventListener('keydown', (event) => { if ((event as KeyboardEvent).key === 'Enter') { event.preventDefault(); reveal(); } });
+    root.addEventListener('keydown', (event) => {
+      if ((event as KeyboardEvent).key === 'Enter') { event.preventDefault(); reveal(); }
+      // Range-aware See source from the keyboard.
+      if ((event as KeyboardEvent).key === 'F10' && (event as KeyboardEvent).shiftKey) {
+        event.preventDefault();
+        this.onSeeSource?.({ from:this.from, to:this.to, source:this.source, markdown:this.markdown }, event);
+      }
+    });
     root.addEventListener('dblclick', reveal);
+    root.addEventListener('contextmenu', (event) => {
+      // Always offer an explicit See source action on rendered elements.
+      const target = { from:this.from, to:this.to, source:this.source, markdown:this.markdown };
+      if (typeof this.onSeeSource === 'function') {
+        this.onSeeSource(target, event);
+      }
+    });
     return root;
   }
 
   ignoreEvent() { return false; }
 }
 
-function buildCommentDecorations(state: EditorState, language: string, renderPreview?: (source:string) => HTMLElement | null, visibleRanges: readonly { from:number; to:number }[] = [], comments = parserCommentSourceRanges(state, language)): DecorationSet {
+function buildCommentDecorations(state: EditorState, language: string, renderPreview?: (source:string) => HTMLElement | null, visibleRanges: readonly { from:number; to:number }[] = [], comments = parserCommentSourceRanges(state, language), onSeeSource?: (range: { from:number; to:number; source:string; markdown:string }, event: Event) => void): DecorationSet {
   const source = state.doc.toString();
   const active = state.selection.ranges;
   const decorations = comments.map((comment) => ({
@@ -796,22 +818,37 @@ function buildCommentDecorations(state: EditorState, language: string, renderPre
     return [{
       from:comment.from,
       to:comment.to,
-      value:Decoration.replace({ widget:new CommentPreviewWidget(source.slice(comment.from, comment.to), comment.markdown, comment.from, comment.to, renderPreview), block:source.slice(comment.from, comment.to).includes('\n') }),
+      value:Decoration.replace({ widget:new CommentPreviewWidget(source.slice(comment.from, comment.to), comment.markdown, comment.from, comment.to, renderPreview, onSeeSource), block:source.slice(comment.from, comment.to).includes('\n') }),
     }];
   });
   return Decoration.set(decorations, true);
 }
 
 /** Opt-in parser-backed comment presentation with a safe source fallback. */
-function createRichCommentPlugin(language: string, renderPreview?: (source:string) => HTMLElement | null) {
+function createRichCommentPlugin(language: string, renderPreview?: (source:string) => HTMLElement | null, regionOptions: { dialect?: string; path?: string } = {}, onSeeSource?: (range: { from:number; to:number; source:string; markdown:string }, event: Event) => void) {
   return ViewPlugin.fromClass(class {
     decorations: DecorationSet;
     comments: CommentSourceRange[];
     rawSelectionActive = false;
+    /** Monotonic revision tag; stale async parses are discarded. */
+    parseRevision = 0;
+    parsePending = false;
     constructor(view: EditorView) {
-      this.comments = parserCommentSourceRanges(view.state, language);
+      this.comments = parserCommentSourceRanges(view.state, language, regionOptions);
       this.rawSelectionActive = view.state.selection.ranges.some((selection) => this.comments.some((comment) => selection.from <= comment.to && selection.to >= comment.from));
-      this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments);
+      this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments, onSeeSource);
+    }
+    scheduleParse(view: EditorView) {
+      const revision = ++this.parseRevision;
+      if (this.parsePending) return;
+      this.parsePending = true;
+      queueMicrotask(() => {
+        this.parsePending = false;
+        if (revision !== this.parseRevision || !view.dom.isConnected) return;
+        this.comments = parserCommentSourceRanges(view.state, language, regionOptions);
+        this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments, onSeeSource);
+        view.dispatch({});
+      });
     }
     update(update: ViewUpdate) {
       let delimiterIntroduced = false;
@@ -830,7 +867,9 @@ function createRichCommentPlugin(language: string, renderPreview?: (source:strin
           contentTo:update.changes.mapPos(comment.contentTo, -1),
           contentRanges:comment.contentRanges.map((range) => ({ from:update.changes.mapPos(range.from, 1), to:update.changes.mapPos(range.to, -1) })),
         }));
-        if (!reparseChanged) this.decorations = this.decorations.map(update.changes);
+        // Edit latency stays on the mapPos path. A full reparse is scheduled
+        // asynchronously so a 1 MiB file cannot blow the p95 budget.
+        this.decorations = this.decorations.map(update.changes);
       }
       let selectionMovedAcrossWidget = false;
       if (update.selectionSet) {
@@ -838,9 +877,11 @@ function createRichCommentPlugin(language: string, renderPreview?: (source:strin
         selectionMovedAcrossWidget = rawSelection !== this.rawSelectionActive;
         this.rawSelectionActive = rawSelection;
       }
-      if (selectionMovedAcrossWidget || visibleChanged || update.viewportChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
-        if (reparseChanged || update.viewportChanged || update.transactions.some((transaction) => transaction.reconfigured)) this.comments = parserCommentSourceRanges(update.state, language);
-        this.decorations = buildCommentDecorations(update.state, language, renderPreview, update.view.visibleRanges, this.comments);
+      if (selectionMovedAcrossWidget || update.viewportChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
+        this.decorations = buildCommentDecorations(update.state, language, renderPreview, update.view.visibleRanges, this.comments, onSeeSource);
+      }
+      if (reparseChanged || update.viewportChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
+        this.scheduleParse(update.view);
       }
     }
   }, { decorations:(value) => value.decorations });
@@ -867,6 +908,7 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
     parent, doc = '', label = 'Markdown editor', placeholderText = 'Start writing…', selection,
     onChange, onFocus, onSelection, onScroll, onCommand, renderPreview,
   } = options;
+  const regionOptions = { dialect: options.languageDialect, path: options.languagePath };
   let silent = false;
   let mode: EditorMode = options.mode === 'source' ? 'source' : 'live';
   let showLineNumbers = options.lineNumbers === true;
@@ -902,7 +944,7 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
       // prevent the live --hl-* theme variables from reaching token spans.
       syntaxHighlighting(openClankHighlightStyle), syntaxHighlighting(defaultHighlightStyle, { fallback:true }), bracketMatching(), rectangularSelection(),
       highlightActiveLine(), languageCompartment.of(initialLanguage(options.language || 'markdown')), ...(lineWrapping ? [EditorView.lineWrapping] : []), placeholder(placeholderText),
-      modeCompartment.of(mode === 'live' ? [createStructuralDecorations(renderPreview), createLivePreviewPlugin(renderPreview)] : options.richComments === true && isRichCommentLanguageQualified(options.language) ? [createRichCommentPlugin(options.language || '', renderPreview)] : []),
+      modeCompartment.of(mode === 'live' ? [createStructuralDecorations(renderPreview), createLivePreviewPlugin(renderPreview)] : options.richComments === true && isRichCommentLanguageQualified(options.language, regionOptions) ? [createRichCommentPlugin(options.language || '', renderPreview, regionOptions, options.onSeeSource)] : []),
       widthCompartment.of(widthExtension(readableLineWidth)),
       keymap.of([
         { key:'Mod-s', run:() => command('save') },
@@ -960,7 +1002,7 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
     else setTimeout(show, 0);
   };
   const languageReady = mode === 'source'
-    ? loadSourceLanguage(options.language).then((language) => {
+    ? loadSourceLanguage(options.language, regionOptions).then((language) => {
       if (destroyed) return false;
       const hasLanguage = Array.isArray(language) ? language.length > 0 : Boolean(language);
       if (hasLanguage) {
@@ -1180,7 +1222,7 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
     parent.dataset.mode = mode;
     view.dispatch({ effects:modeCompartment.reconfigure(mode === 'live'
       ? [createStructuralDecorations(renderPreview), createLivePreviewPlugin(renderPreview)]
-      : options.richComments === true && isRichCommentLanguageQualified(options.language) ? [createRichCommentPlugin(options.language || '', renderPreview)] : []) });
+      : options.richComments === true && isRichCommentLanguageQualified(options.language, regionOptions) ? [createRichCommentPlugin(options.language || '', renderPreview, regionOptions, options.onSeeSource)] : []) });
   }
 
   function setLineNumbers(next: boolean) {
@@ -1250,7 +1292,14 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
     focus:() => view.focus(), focusLine,
     undo:() => undo(view), redo:() => redo(view), find, replace,
     getSelection:() => selectionSnapshot(view.state),
-    getCommentSourceMap:() => mapParserComments(view.state, options.language || ''),
+    wrapMarkdownAsComment:(markdown: string, indent = '') => wrapMarkdownAsComment(markdown, options.language || '', indent, regionOptions),
+    safeCommentInsertion:(offset: number) => safeCommentInsertion(view.state.doc.toString(), options.language || '', offset, regionOptions),
+    revealCommentSource:(from: number, to: number) => {
+      view.dispatch({ selection:EditorSelection.range(from, to), scrollIntoView:true });
+      view.focus();
+    },
+    getCommentSourceMap:() => mapParserComments(view.state, options.language || '', undefined, regionOptions),
+    getCommentSourceMapAsync:() => parserCommentSourceRangesAsync(view.state, options.language || '', regionOptions).then((ranges) => ranges.map((range) => ({ ...range, markdown:range.contentRanges.map((span) => view.state.doc.sliceString(span.from, span.to)).join('\n') }))),
     languageReady,
     destroy:() => { destroyed = true; view.destroy(); },
   };
@@ -1275,3 +1324,21 @@ export function createSourceEditor(options: MarkdownEditorOptions) {
     lineWrapping:false,
   });
 }
+
+// Documentation-region adapters are part of this bundle's public surface so
+// Code Editor, Copal Editor and image-paste insertion share one authority for
+// comment boundaries, docstrings and safe insertion points.
+export {
+  ADVERTISED_LANGUAGE_LABELS,
+  advertisedLabel,
+  dialectForPath,
+  documentationRegions,
+  documentationRegionsAsync,
+  languageMatrix,
+  regionMarkdown,
+  reconstructFromRegions,
+  safeCommentInsertion,
+  supportsRichComments,
+  wrapMarkdownAsComment,
+} from './openclank-doc-regions';
+export type { ContentSpan, DelimiterKind, DocumentationRegion, SafeInsertionResult, CommentWrapResult } from './openclank-doc-regions';

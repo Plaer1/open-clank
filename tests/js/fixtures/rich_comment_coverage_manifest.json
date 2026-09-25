@@ -1,0 +1,253 @@
+{
+  "version": "s16-rich-source-comments-v1",
+  "description": "One checked-in coverage manifest for all 30 advertised language labels. Rows are exercised through production entrypoints (documentationRegions / documentationRegionsAsync from the built editor bundle). Ordinary strings stay raw; documentation comments and Python docstrings project Markdown.",
+  "rows": [
+    {
+      "label": "JavaScript",
+      "behavior": "comments",
+      "fixture": "const x = 1; // # Heading\\n/* **block** */\\nlet re = /\\\\/\\\\/ not/;",
+      "expectRegions": 2,
+      "expectKinds": ["line", "block"],
+      "specialCases": ["strings-lookalike", "regex-lookalike", "jsdoc-block"]
+    },
+    {
+      "label": "JavaScript JSX",
+      "behavior": "comments",
+      "fixture": "const el = <div>{/* jsx comment */}</div>; // line",
+      "expectRegions": 2,
+      "expectKinds": ["block", "line"],
+      "specialCases": ["jsx-expression-comment", "jsx-text-not-comment"]
+    },
+    {
+      "label": "TypeScript",
+      "behavior": "comments",
+      "fixture": "type T = { x: number }; // typed line\\n/** JSDoc */",
+      "expectRegions": 2,
+      "expectKinds": ["line", "doc-block"],
+      "specialCases": ["typed-declarations", "jsdoc-block"]
+    },
+    {
+      "label": "TypeScript JSX",
+      "behavior": "comments",
+      "fixture": "const el: JSX.Element = <span/>; /// doc line",
+      "expectRegions": 1,
+      "expectKinds": ["doc-line"],
+      "specialCases": ["jsx-generic-lookalike", "doc-line-marker"]
+    },
+    {
+      "label": "Python",
+      "behavior": "comments-and-docstrings",
+      "fixture": "\"\"\"Module **doc**\"\"\"\\ndef f():\\n    \"fn doc\"\\n    x = \"not doc\"\\n",
+      "expectRegions": 2,
+      "expectKinds": ["docstring", "docstring"],
+      "specialCases": ["module-docstring", "function-docstring", "assigned-string-excluded"],
+      "pythonCases": {
+        "positive": ["triple", "single", "raw", "unicode", "parenthesized", "adjacent", "class", "async", "doc-after-comment"],
+        "negative": ["bytes", "fstring", "binary", "call", "assigned", "later"]
+      }
+    },
+    {
+      "label": "Rust",
+      "behavior": "comments",
+      "fixture": "fn f() {\\n    //! inner\\n    /// outer\\n    /* nested /* in */ */\\n    let s = r\"// not\";\\n}",
+      "expectRegions": 3,
+      "expectKinds": ["doc-line", "doc-line", "block"],
+      "specialCases": ["nested-block", "raw-string-lookalike", "inner-doc", "outer-doc"]
+    },
+    {
+      "label": "Go",
+      "behavior": "comments",
+      "fixture": "package main\\n// line\\n/* block */\\nvar s = \"// not\"\\n",
+      "expectRegions": 2,
+      "expectKinds": ["line", "block"],
+      "specialCases": ["raw-string-lookalike", "directive-comment-bytes"]
+    },
+    {
+      "label": "Java",
+      "behavior": "comments",
+      "fixture": "class C {\\n    /** Javadoc */\\n    // line\\n    String s = \"// not\";\\n}",
+      "expectRegions": 2,
+      "expectKinds": ["doc-block", "line"],
+      "specialCases": ["javadoc-marker-strip", "text-block-string"]
+    },
+    {
+      "label": "Kotlin",
+      "behavior": "comments",
+      "fixture": "fun f() {\\n    /** kdoc */\\n    // line\\n    val s = \"\"\"// not\"\"\"\\n}",
+      "expectRegions": 2,
+      "expectKinds": ["doc-block", "line"],
+      "specialCases": ["nested-block", "triple-string", "interpolation"]
+    },
+    {
+      "label": "C",
+      "behavior": "comments",
+      "fixture": "int main() {\\n    // line\\n    /* block */\\n    char *s = \"// not\";\\n}",
+      "expectRegions": 2,
+      "expectKinds": ["line", "block"],
+      "specialCases": ["escaped-newline-continuation", "preprocessor-boundary"]
+    },
+    {
+      "label": "C/C++ header",
+      "behavior": "comments",
+      "fixture": "#pragma once\\n// line\\n/** doc */\\n",
+      "expectRegions": 2,
+      "expectKinds": ["line", "doc-block"],
+      "specialCases": ["extension-routing", "h-vs-hpp"]
+    },
+    {
+      "label": "C++",
+      "behavior": "comments",
+      "fixture": "class C {\\n    /// doc\\n    // line\\n    /* b */\\n    auto s = R\"(// not)\";\\n}",
+      "expectRegions": 3,
+      "expectKinds": ["doc-line", "line", "block"],
+      "specialCases": ["raw-string-delimiter", "macro-comment"]
+    },
+    {
+      "label": "C++ header",
+      "behavior": "comments",
+      "fixture": "#pragma once\\n/// hpp doc\\n// line\\n",
+      "expectRegions": 2,
+      "expectKinds": ["doc-line", "line"],
+      "specialCases": ["hpp-extension", "doc-line-marker"]
+    },
+    {
+      "label": "C#",
+      "behavior": "comments",
+      "fixture": "class C {\\n    /// <summary>Doc</summary>\\n    // line\\n    var s = @\"C://not\";\\n}",
+      "expectRegions": 2,
+      "expectKinds": ["doc-line", "line"],
+      "specialCases": ["xml-doc-comment", "verbatim-string", "interpolated-string", "raw-string"]
+    },
+    {
+      "label": "Ruby",
+      "behavior": "comments",
+      "fixture": "# line\\n=begin\\nblock\\n=end\\ns = \"# not\"\\n",
+      "expectRegions": 2,
+      "expectKinds": ["line", "doc-block"],
+      "specialCases": ["begin-end-column-sensitive", "heredoc", "percent-string", "regex"]
+    },
+    {
+      "label": "PHP",
+      "behavior": "comments",
+      "fixture": "<?php\\n// line\\n# hash\\n/** doc */\\n$s = \"// not\";\\n",
+      "expectRegions": 3,
+      "expectKinds": ["line", "line", "doc-block"],
+      "specialCases": ["heredoc", "nowdoc", "mixed-html-js-css"]
+    },
+    {
+      "label": "Swift",
+      "behavior": "comments",
+      "fixture": "/// doc\\n// line\\n/* nested /* x */ */\\nlet s = \"\"\"// not\"\"\"\\n",
+      "expectRegions": 3,
+      "expectKinds": ["doc-line", "line", "block"],
+      "specialCases": ["nested-block", "multiline-string", "raw-string", "interpolation"]
+    },
+    {
+      "label": "Shell",
+      "behavior": "comments",
+      "fixture": "#!/bin/bash\\n# comment\\necho \"# not\" # tail\\n",
+      "expectRegions": 2,
+      "expectKinds": ["line", "line"],
+      "specialCases": ["shebang", "quote-lookalike", "heredoc", "backslash-continuation", "bash-zsh-aliases"]
+    },
+    {
+      "label": "JSON",
+      "behavior": "strict-json-no-comments-jsonc-rich",
+      "fixture": "{\"a\": 1}\\n",
+      "expectRegions": 0,
+      "expectKinds": [],
+      "specialCases": ["strict-json-no-comments", "jsonc-alias-rich"],
+      "dialectFixture": "{\\n  // line\\n  /* block */\\n  \"a\": 1\\n}\\n",
+      "dialect": "jsonc",
+      "dialectExpectRegions": 2
+    },
+    {
+      "label": "YAML",
+      "behavior": "comments",
+      "fixture": "# comment\\nkey: value # trailing\\nblock: |\\n  # data\\n",
+      "expectRegions": 2,
+      "expectKinds": ["line", "line"],
+      "specialCases": ["quoted-string", "block-scalar"]
+    },
+    {
+      "label": "TOML",
+      "behavior": "comments",
+      "fixture": "# comment\\nkey = \"# not\" # trailing\\n",
+      "expectRegions": 2,
+      "expectKinds": ["line", "line"],
+      "specialCases": ["multiline-basic-string", "multiline-literal-string"]
+    },
+    {
+      "label": "XML",
+      "behavior": "comments",
+      "fixture": "<!-- doc -->\\n<root attr=\"<!-- not -->\"/>\\n",
+      "expectRegions": 1,
+      "expectKinds": ["doc-block"],
+      "specialCases": ["cdata", "declaration", "attribute-value"]
+    },
+    {
+      "label": "HTML",
+      "behavior": "comments",
+      "fixture": "<!-- doc -->\\n<script>// js</script>\\n<style>/* css */</style>\\n",
+      "expectRegions": 3,
+      "expectKinds": ["doc-block", "line", "block"],
+      "specialCases": ["nested-js-comment", "nested-css-comment", "script-style-strings"]
+    },
+    {
+      "label": "CSS",
+      "behavior": "comments",
+      "fixture": "/* block */\\n.app { content: \"/* not */\"; }\\n",
+      "expectRegions": 1,
+      "expectKinds": ["block"],
+      "specialCases": ["string-url-token"]
+    },
+    {
+      "label": "SCSS",
+      "behavior": "comments",
+      "fixture": "// line\\n/* block */\\n.app { content: \"// not\"; }\\n",
+      "expectRegions": 2,
+      "expectKinds": ["line", "block"],
+      "specialCases": ["official-sass-parser", "interpolation", "string-lookalike"]
+    },
+    {
+      "label": "Markdown",
+      "behavior": "full-document-rich-preview",
+      "fixture": "# Heading\\n\\nNo comments.\\n",
+      "expectRegions": 0,
+      "expectKinds": [],
+      "specialCases": ["full-document-preview", "ordinary-image-insertion"]
+    },
+    {
+      "label": "SQL",
+      "behavior": "comments",
+      "fixture": "-- line\\n/* block */\\nSELECT '-- not';\\n",
+      "expectRegions": 2,
+      "expectKinds": ["line", "block"],
+      "specialCases": ["dialect-quotes", "string-lookalike"]
+    },
+    {
+      "label": "Mermaid",
+      "behavior": "comments",
+      "fixture": "%% comment\\n%%{init: {}}%%\\nflowchart TD\\n  A[\"%% not\"] --> B\\n",
+      "expectRegions": 1,
+      "expectKinds": ["mermaid-comment"],
+      "specialCases": ["directive-metadata-not-comment", "quoted-label"]
+    },
+    {
+      "label": "Dockerfile",
+      "behavior": "comments",
+      "fixture": "# syntax=docker/dockerfile:1\\nFROM alpine\\n# comment\\nRUN echo \"# not\"\\n",
+      "expectRegions": 1,
+      "expectKinds": ["line"],
+      "specialCases": ["parser-directive", "heredoc-body", "continued-instruction"]
+    },
+    {
+      "label": "Plain text",
+      "behavior": "plain-editing-no-invented-comments",
+      "fixture": "# not a comment\\n",
+      "expectRegions": 0,
+      "expectKinds": [],
+      "specialCases": ["no-invented-syntax", "explicit-attachment-representation"]
+    }
+  ]
+}

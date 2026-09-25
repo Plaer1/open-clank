@@ -53,6 +53,7 @@ import { cloneEnvelope, normalizeResourceHandle, sameResourceKey, snapshotEnvelo
 import { createSaveActionId, sameSaveScope } from './documentSave.js';
 import { capturePanelPositions, restorePanelPositions } from './panelPosition.js';
 import { createCodeMirrorContextAdapter } from '../custom-context-menu.js';
+import { languageForPath, languageDialectForPath } from '../editor/entryModel.js';
 // Keep model/save imports usable in Node renderers.  The prompt primitive
 // touches the DOM only when invoked, while ui.js initializes the full shell.
 import { styledPrompt } from '../dialogPrimitives.js';
@@ -2808,6 +2809,24 @@ export function createNotesFeature({
     );
   }
 
+  /**
+   * Paste-image placement for programming source: inside a documentation
+   * region the Markdown embeds as-is; outside, wrap it in the language's
+   * comment syntax at a safe line boundary. Strict JSON reports its real
+   * limitation and refuses to mutate the file.
+   */
+  function placeAttachmentMarkdown(cache, doc, cursor, markdown) {
+    const editor = cache.editor;
+    const isSourceDoc = doc.sourceKind === 'host' && doc.kind !== 'markdown';
+    if (!isSourceDoc || typeof editor.safeCommentInsertion !== 'function') return { ok:true, text:markdown };
+    const placement = editor.safeCommentInsertion(cursor?.from ?? 0);
+    if (!placement.ok) return placement;
+    if (placement.comment === '') return { ok:true, text:markdown };
+    const wrapped = editor.wrapMarkdownAsComment?.(markdown, placement.indent || '');
+    if (!wrapped?.ok) return wrapped || { ok:false, error:'Comment wrapping failed.' };
+    return { ok:true, text:`\n${wrapped.text}`, replaceFrom:placement.from, replaceTo:placement.to };
+  }
+
   function attachmentDialog(cache, doc, file, cursor) {
     if (!uploadAttachment || !cache.editor?.view || !cursor) return false;
     const caption = h('input', { class:'copal-attachment-caption', type:'text', value:String(file.name || ''), 'aria-label':'Attachment caption' });
@@ -2838,7 +2857,16 @@ export function createNotesFeature({
         attach.disabled = false; retry.hidden = false; return;
       }
       const inserted = reference();
-      const content = `${current.slice(0, cursor.from)}${inserted}${current.slice(cursor.to)}`;
+      const placed = placeAttachmentMarkdown(cache, doc, cursor, inserted);
+      if (!placed.ok) {
+        progress.textContent = placed.error || 'This format cannot hold an image comment.';
+        attach.disabled = false; retry.hidden = false;
+        return;
+      }
+      const insertAt = placed.replaceFrom ?? cursor.from;
+      const insertEnd = placed.replaceTo ?? cursor.to;
+      const insertedText = placed.text ?? inserted;
+      const content = `${current.slice(0, insertAt)}${insertedText}${current.slice(insertEnd)}`;
       attach.disabled = true; retry.hidden = true; caption.disabled = true;
       progress.textContent = 'Uploading attachment and saving the reference…';
       let prepared = null;
@@ -2862,8 +2890,8 @@ export function createNotesFeature({
         // The drop/paste target is intentionally the captured primary range.
         // CodeMirror maps every other cursor through the same change and keeps
         // those ranges alive while the upload/save receipt completes.
-        if (cache.editor.replaceRange) cache.editor.replaceRange(cursor.from, cursor.to, inserted);
-        else cache.editor.view.dispatch({ changes:{ from:cursor.from, to:cursor.to, insert:inserted }, userEvent:'input' });
+        if (cache.editor.replaceRange) cache.editor.replaceRange(insertAt, insertEnd, insertedText);
+        else cache.editor.view.dispatch({ changes:{ from:insertAt, to:insertEnd, insert:insertedText }, userEvent:'input' });
         progress.textContent = `Attached ${file.name || 'file'} · ${result.receipt?.outcome || result.outcome || 'saved'}`;
         const usageResult = await api(`/attachments/usage?name=${encodeURIComponent(attachmentName(file, doc))}`);
         usage.textContent = `${usageResult.count} document usage${usageResult.count === 1 ? '' : 's'}`;
@@ -3163,15 +3191,26 @@ export function createNotesFeature({
       const defaultCursor = frontmatter.valid && frontmatter.present ? Math.min(editorSource.length, frontmatter.end + 1) : 0;
       const editorSelection = boundedEditorSelection(leaf.selection, editorSource.length) || { anchor:defaultCursor, head:defaultCursor };
       const editorFactory = doc.sourceKind === 'host' ? createSourceEditor : createMarkdownEditor;
+      const hostPath = String(doc.name || doc.path || '');
+      const hostLanguage = doc.sourceKind === 'host' ? languageForPath(hostPath) : 'Markdown';
+      const hostDialect = doc.sourceKind === 'host' ? languageDialectForPath(hostPath) : '';
       cache.editor = editorFactory({
         parent:cache.host, doc:editorSource, label:`Edit ${doc.name}`, selection:editorSelection,
         scrollTop:leaf.scrollTop,
         mode:doc.sourceKind === 'host' && doc.kind !== 'markdown' ? 'source' : leaf.mode === 'live' && workspace.settings.previewLayout === 'inline' ? 'live' : 'source',
         lineNumbers:workspace.settings.lineNumbers, readableLineWidth:workspace.settings.readableLineWidth,
+        language:hostLanguage,
+        languageDialect:hostDialect,
+        languagePath:hostPath,
+        richComments:doc.sourceKind === 'host' && doc.kind !== 'markdown',
         // The live CodeMirror surface must use the same resolver and origin
         // semantics as the rendered Notes/Wiki view. Tests and alternate
         // hosts may still inject a specialized preview callback.
         renderPreview:renderPreview || ((source) => renderMarkdown(source, new Set([doc.id]), doc)),
+        onSeeSource:(range) => {
+          cache.editor?.revealCommentSource?.(range.from, range.to);
+          context()?.window?.setStatus('Showing comment source.');
+        },
         onSelection:(selection) => { leaf.selection = selection; cache.selectionGeneration = Number(cache.selectionGeneration || 0) + 1; cache.cursorLine = selection.line; persist(); updateLeafStatus(cache); },
         onScroll:(scrollTop) => { leaf.scrollTop = scrollTop; persist(); },
         onChange:(value) => { doc.text = value; queueSave(doc, value, { origin:'typing', history:false }); if (leaf.rawSource) publishRawBaseDefinition(doc, value); syncDocumentEditors(doc.id, value, cache.editor); updatePreview(cache, doc, value); updateLeafStatus(cache); },
