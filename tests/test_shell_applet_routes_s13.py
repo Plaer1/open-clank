@@ -244,13 +244,20 @@ def test_treehouse_share_token_survives_resolve_until_consumed():
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_treehouse_share_consumer_strips_only_its_token():
-    """TreeHouse is the sole consumer: it removes just `treehouseShare` and
-    leaves other query state in the address."""
-    treehouse = (ROOT / "static" / "js" / "copal" / "treehouse.js").read_text(encoding="utf-8")
-    assert "treehouseShare" in treehouse
-    assert "searchParams.delete('treehouseShare')" in treehouse
-    # The consumer reads the live URL, not a pre-normalized copy.
-    assert "window.location.search" in treehouse
+    """Consume-then-strip is proven on the real open path, not by source grep.
+
+    Drives the production deep-link sequence (`resolveAppletLocation` ->
+    `updateAppletRoute` -> TreeHouse `load()`) for both the direct
+    `/treehouse?treehouseShare=…` address and the legacy
+    `/copal/treehouse?treehouseShare=…` alias, and asserts the token is
+    delivered to the consumer and stripped only after acceptance.
+    """
+    suite = ROOT / "tests" / "js" / "test_treehouse_share_open_path.mjs"
+    proc = subprocess.run(
+        ["node", "--test", str(suite)],
+        capture_output=True, text=True, cwd=str(ROOT), timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")

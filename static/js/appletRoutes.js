@@ -97,6 +97,22 @@ function normalizeSearch(search) {
     : new URLSearchParams(search || '');
 }
 
+/**
+ * One-shot query tokens. They stay on an address until their consumer accepts
+ * them and strips just that parameter. Fresh destinations never invent them;
+ * live-URL rewrites carry unconsumed ones so a shell normalization cannot eat
+ * a deep link before the consumer runs. The consumer is the only stripper.
+ */
+const ONE_SHOT_QUERY_TOKENS = Object.freeze(['treehouseShare']);
+
+function carryUnconsumedOneShotTokens(params, liveSearch) {
+  const live = normalizeSearch(liveSearch);
+  for (const key of ONE_SHOT_QUERY_TOKENS) {
+    const value = live.get(key);
+    if (value != null && value !== '' && !params.has(key)) params.set(key, value);
+  }
+}
+
 function withQuery(path, params) {
   const q = params.toString();
   return `${path}${q ? `?${q}` : ''}`;
@@ -107,7 +123,8 @@ function withQuery(path, params) {
  * @param {string} name editor|wiki|graph|treehouse|timeline|todo|files|calendar|
  *                      email|memory|gallery|tasks|library|cookbook|settings|
  *                      notes|code|bases|mind|galaxy
- * @param {{doc?: string, mode?: string, panel?: string, search?: string|URLSearchParams}} [opts]
+ * @param {{doc?: string, mode?: string, panel?: string, search?: string|URLSearchParams,
+ *          liveSearch?: string|URLSearchParams}} [opts]
  */
 export function appletPath(name, opts = {}) {
   const key = String(name || '').toLowerCase();
@@ -122,14 +139,35 @@ export function appletPath(name, opts = {}) {
     path = DIRECT[seg.target] || '/';
   }
   const params = normalizeSearch(opts.search);
-  // A newly built address never inherits a one-shot TreeHouse share token;
-  // only the live URL keeps it until TreeHouse consumes it.
-  params.delete('treehouseShare');
+  // A newly built address never inherits a one-shot TreeHouse share token.
+  // opts.liveSearch is the live address being rewritten: unconsumed one-shot
+  // tokens from it ride along so their consumer stays the only stripper.
+  for (const token of ONE_SHOT_QUERY_TOKENS) params.delete(token);
   if (opts.doc) params.set('doc', String(opts.doc));
   if (seg.openBases) params.set('open', 'bases');
   const mode = opts.mode || seg.mode;
   if (mode && seg.view === 'graph') params.set('mode', String(mode));
+  if (opts.liveSearch != null) carryUnconsumedOneShotTokens(params, opts.liveSearch);
   return withQuery(path, params);
+}
+
+/**
+ * Rewrite the live browser address for a Copal view after a shell navigation
+ * or a window activation. Same canonical destination as appletPath, but
+ * unconsumed one-shot query tokens from the live search survive the rewrite —
+ * `onActivate`/`updateRoute` normalize the address and must not eat a deep
+ * link before copal/treehouse.js accepts it.
+ * @param {string} view notes|wiki|timeline|graph|treehouse|todo (or any appletPath name)
+ * @param {{doc?: string, mode?: string}} [opts]
+ * @param {boolean} [replace] replaceState instead of pushState
+ * @param {string|URLSearchParams} [liveSearch] defaults to the live location
+ * @returns {string} the address written to history
+ */
+export function updateAppletRoute(view, opts = {}, replace = false, liveSearch = null) {
+  const live = liveSearch != null ? liveSearch : (globalThis.location?.search ?? '');
+  const url = appletPath(view === 'notes' ? 'editor' : view, { ...opts, liveSearch: live });
+  history[replace ? 'replaceState' : 'pushState']({ copal: view }, '', url);
+  return url;
 }
 
 /**
@@ -206,4 +244,4 @@ export function isShellNavigation(pathname) {
   return SHELL_PATH_PREFIXES.some((prefix) => path === prefix.replace(/\/$/, '') || path.startsWith(prefix));
 }
 
-export default { SHELL_PATHS, SHELL_PATH_PREFIXES, appletPath, resolveAppletLocation, isShellNavigation };
+export default { SHELL_PATHS, SHELL_PATH_PREFIXES, appletPath, updateAppletRoute, resolveAppletLocation, isShellNavigation };

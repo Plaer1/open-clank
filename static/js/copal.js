@@ -17,7 +17,7 @@ import { canHandleInput } from './copal/inputContext.js';
 import { findReferenceToken, createReferenceRenderer, extractReferenceSection } from './copal/markdownResources.js';
 import { normalizeWikiPresentation, serializeWikiPresentation, moveWikiCard, closeWikiCard } from './copal/wikiState.js';
 import { createSpellingService } from './copal/spelling.js';
-import { appletPath, resolveAppletLocation } from './appletRoutes.js';
+import { appletPath, updateAppletRoute, resolveAppletLocation } from './appletRoutes.js';
 import { registerAdapter, createCodeMirrorContextAdapter } from './custom-context-menu.js';
 import { styledConfirm, styledPrompt } from './ui.js';
 
@@ -279,11 +279,12 @@ async function loadDocuments(render = true) {
 
 function updateRoute(view, replace = false) {
   const selected = state.windows.get(view)?.selected || (state.view === view ? state.selected : null);
-  // Canonical direct applet address — never the legacy /copal prefix.
+  // Canonical direct applet address — never the legacy /copal prefix. The
+  // live rewrite keeps unconsumed one-shot query tokens (TreeHouse share) so
+  // this normalization cannot eat a deep link before its consumer accepts it.
   const opts = { doc: selected || undefined };
   if (view === 'graph') opts.mode = getGraphView().mode;
-  const url = appletPath(view === 'notes' ? 'editor' : view, opts);
-  history[replace ? 'replaceState' : 'pushState']({ copal: view }, '', url);
+  updateAppletRoute(view, opts, replace);
 }
 
 function markActive() {
