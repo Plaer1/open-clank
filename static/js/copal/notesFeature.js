@@ -324,6 +324,7 @@ export function createNotesFeature({
   saveDocument, renameNote, deleteDocument, showHistory, showTrash, showForm,
   importVault, loadDocuments, openDocument:openOtherView, persistActiveContext, deleteDocuments,
   activateNotes, renderTimeline, openEventEditor, renderBaseEditor = null, baseAdapter = null, resourceBufferRegistry = null, saveResource = null, uploadAttachment = null, commitAttachment = null, abortAttachment = null,
+  makeEditableWikiCopy = null, previewWikiConversion = null,
 }) {
   let persistTimer = null;
   const buffers = resourceBufferRegistry || createBufferRegistry();
@@ -824,7 +825,7 @@ export function createNotesFeature({
       // presentation metadata and must not turn a source resource into live
       // Markdown widgets; host adapters may opt in with representation:
       // "markdown" when that representation is actually supported.
-      kind:representation === 'base' ? 'base' : representation === 'markdown' ? 'markdown' : 'text',
+      kind:representation === 'base' ? 'base' : representation === 'wikiArticle' ? 'wiki' : representation === 'markdown' ? 'markdown' : 'text',
       text:snapshot.envelope.text, properties:payload.properties || {}, relations:payload.relations || [], tags:[],
       resource:handle, resourceKey:key, savePolicy:key.provider === 'host' ? 'explicit' : 'autosave', sourceKind:key.provider === 'host' ? 'host' : 'copal',
       sourceMetadata:handle.metadata || null,
@@ -2693,21 +2694,34 @@ export function createNotesFeature({
     leafHeader(cache, leaf, doc, workspace, group);
     if (doc.readOnly) {
       cache.body.replaceChildren(renderMarkdown(sourceValue(doc), new Set([doc.id])));
+      if (leaf.view === 'wiki') {
+        cache.body.append(wikiArticleChrome(doc));
+        if (doc.builtin && typeof makeEditableWikiCopy === 'function') {
+          cache.body.append(h('div', { class:'copal-dialog-actions' },
+            h('button', { class:'copal-btn primary', text:'Make editable copy', onclick:() => { void makeEditableWikiCopy(doc); } })));
+        }
+      }
       cache.status.replaceChildren(h('span', { text:`${doc.resourceRef ? 'Files resource' : 'Built-in knowledge'} · ${wordCount(sourceValue(doc))} words · read only` }));
+      return cache.root;
+    }
+    if (leaf.view === 'wiki' && (doc.note_error || doc.recoveryState || doc.rawPreserved)) {
+      cache.body.replaceChildren(wikiRecoveryPanel(doc));
+      cache.status.replaceChildren(h('span', { text:'Wiki · preserved source recovery' }));
       return cache.root;
     }
     if (doc.note_error) cache.body.replaceChildren(h('div', { class:'copal-inspector-error' },
       h('strong', { text:'This database note could not be decoded' }),
       h('p', { text:'Its stored record is preserved and has not been opened for editing.' }),
       h('p', { text:doc.note_error })));
-    else if (leaf.view === 'markdown' || leaf.view === 'note') updateMarkdownLeaf(cache, leaf, doc, workspace);
+    else if (leaf.view === 'markdown' || leaf.view === 'note' || leaf.view === 'wiki') updateMarkdownLeaf(cache, leaf, doc, workspace);
     else if (leaf.rawSource) updateSourceLeaf(cache, leaf, doc, workspace);
     else if (leaf.view === 'canvas') updateCanvasLeaf(cache, doc);
     else if (leaf.view === 'base') updateBaseLeaf(cache, doc);
     else updateAssetLeaf(cache, doc, leaf.view);
-    // Properties footer for note/markdown views — inline editable card
-    if ((leaf.view === 'markdown' || leaf.view === 'note') && !doc.readOnly && !doc.note_error) {
+    // Properties footer for note/markdown/wiki views — inline editable card
+    if ((leaf.view === 'markdown' || leaf.view === 'note' || leaf.view === 'wiki') && !doc.readOnly && !doc.note_error) {
       const props = buildInlineProps(doc);
+      if (leaf.view === 'wiki') props.append(wikiArticleChrome(doc));
       cache.propsFooter.replaceChildren(props);
       cache.propsFooter.style.display = '';
     } else {
@@ -3642,6 +3656,85 @@ export function createNotesFeature({
     pane.append(add);
     if (!parsed.entries.length) pane.prepend(h('p', { class:'copal-empty-inline', text:'No properties yet.' }));
     return pane;
+  }
+
+  /** Collapsible Wiki article chrome: links/backlinks and native Details. */
+  function wikiArticleChrome(doc) {
+    const chrome = h('details', { class:'copal-wiki-article-chrome' });
+    chrome.append(h('summary', { text:'Article links and details' }));
+    const outgoing = (doc.links || []).map((target) => ({ kind:'link', target }));
+    const relations = doc.kind === 'note' || doc.kind === 'wiki'
+      ? (doc.relations || []).filter((relation) => ['link', 'embed'].includes(relation.kind))
+      : outgoing;
+    const links = h('div', { class:'copal-wiki-article-links' });
+    links.append(h('strong', { text:'Links ' }));
+    const seen = new Set();
+    for (const relation of relations) {
+      const targetName = relation.target || relation.targetDocumentId || '';
+      if (!targetName || seen.has(targetName)) continue;
+      seen.add(targetName);
+      const target = state.docs.find((candidate) => candidate.id === relation.targetDocumentId) || resolveDocumentLink(state.docs, relation.target);
+      links.append(h('button', {
+        class:'copal-chip',
+        text:`→ ${relation.target}`,
+        disabled:!target,
+        onclick:() => { if (target) open(target.id, { intent:'current' }); },
+      }));
+    }
+    const incoming = linkedMentions(state.docs, doc);
+    for (const mention of incoming) {
+      links.append(h('button', {
+        class:'copal-chip',
+        text:`← ${displayName(mention.doc)}`,
+        onclick:() => {
+          const leaf = open(mention.doc.id, { intent:'current' });
+          if (mention.line) requestAnimationFrame(() => context().noteLeafViews.get(leaf?.id)?.editor?.focusLine(mention.line));
+        },
+      }));
+    }
+    if (!seen.size && !incoming.length) links.append(h('span', { text:'None' }));
+    chrome.append(links);
+    const details = h('div', { class:'copal-wiki-article-details' });
+    const props = doc.properties && typeof doc.properties === 'object' ? doc.properties : {};
+    const propEntries = Object.entries(props);
+    if (propEntries.length) {
+      const fields = h('div', { class:'copal-meme-fields' });
+      for (const [key, value] of propEntries) {
+        const display = Array.isArray(value) ? value.join(', ') : String(value ?? '');
+        fields.append(h('span', { class:'copal-chip', text:`${key}: ${display}` }));
+      }
+      details.append(fields);
+    } else {
+      details.append(h('p', { class:'copal-empty-inline', text:'No native properties.' }));
+    }
+    if (doc.builtin) details.append(h('p', { class:'copal-empty-inline', text:'Built-in article · read-only' }));
+    chrome.append(details);
+    return chrome;
+  }
+
+  /** Preserved-source recovery for malformed/future/legacy Wiki records. */
+  function wikiRecoveryPanel(doc) {
+    const legacyMarkdown = doc.recoveryState === 'legacy-import';
+    const title = legacyMarkdown
+      ? 'Imported Markdown is ready to convert'
+      : doc.recoveryState === 'unsupported-future'
+        ? `This article uses unsupported Wiki schema version ${doc.sourceSchemaVersion || 'newer'}`
+        : 'This article is preserved but cannot be decoded';
+    const panel = h('div', { class:'copal-document-error copal-wiki-recovery', role:'alert' },
+      h('h2', { text:title }),
+      h('p', { text:String(doc.note_error || 'The stored record cannot be projected.') }),
+      h('p', { text:doc.rawPreserved ? 'Its original bytes are preserved. Repair or export the source before editing.' : 'Reload or restore a valid version before editing.' }),
+      h('div', { class:'copal-dialog-actions' },
+        legacyMarkdown && typeof previewWikiConversion === 'function'
+          ? h('button', { class:'copal-btn primary', text:'Preview conversion', onclick:() => { void previewWikiConversion(doc); } })
+          : null,
+        doc.rawPreserved ? h('button', {
+          class:'copal-btn',
+          text:doc.recoveryState === 'unsupported-future' ? 'Download original' : 'Download preserved source',
+          onclick:() => { window.location.href = `${state.api}/api/copal/documents/${encodeURIComponent(doc.id)}/download?workspace=${encodeURIComponent(state.workspace)}`; },
+        }) : null,
+      ));
+    return panel;
   }
 
   function linksPane(doc) {

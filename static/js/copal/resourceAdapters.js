@@ -15,7 +15,7 @@ export function fromCopalResource(value = {}, context = {}) {
       locationLabel: source.locationLabel || source.name || source.id,
       ...(source.resourceRef == null ? {} : { opaqueRef: source.resourceRef }),
     },
-    representation: source.representation || (source.kind === 'base' ? 'base' : 'nativeNote'),
+    representation: source.representation || (source.kind === 'base' ? 'base' : source.kind === 'wiki' || source.kind === 'meme' ? 'wikiArticle' : 'nativeNote'),
     capabilities: source.capabilities || { read:true },
   });
 }

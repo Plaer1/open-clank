@@ -17,7 +17,6 @@ import { canHandleInput } from './copal/inputContext.js';
 import { extractReferenceSection } from './copal/markdownResources.js';
 import { createMarkdownRenderer, registerAppDestination } from './copal/markdownRenderer.js';
 import { navigationIntentFromEvent } from './copal/notesWorkspace.js';
-import { normalizeWikiPresentation, serializeWikiPresentation, moveWikiCard, closeWikiCard } from './copal/wikiState.js';
 import { createSpellingService } from './copal/spelling.js';
 import { appletPath, updateAppletRoute, resolveAppletLocation } from './appletRoutes.js';
 import { registerAdapter, createCodeMirrorContextAdapter } from './custom-context-menu.js';
@@ -33,10 +32,10 @@ const MEMES_MIME = 'application/vnd.openclank.memes+json';
 const HIDDEN_KINDS = new Set(['asset', 'planning', 'calendar-projection', 'treehouse-state', 'copal-tracks', 'copal-migration']);
 const state = {
   api: '', workspace: 'default', storageNamespace: null, view: 'notes', docs: [], taskProjection: [], taskProjectionLoaded: false, taskCursor: null, taskSnapshotRevision: null, taskProjectionTotal: null, taskLoading: false, taskQueryToken: 0, taskQuery: { query:'', completed:null, source:'all', sourceFilter:'all', statusFilter:'all', hideDone:false }, taskSelectedId: null, planning: { tracks: [], floatingTodos: [] }, selected: null,
-  filter: '', story: [], pinned: new Set(), reading: false, saveTimers: new Map(),
+  filter: '', reading: false, saveTimers: new Map(),
   calendarMonth: null, windows: new Map(),
   root: null, content: null, body: null,
-  wikiEditing: new Set(), treehouseSection: 'courses', treehouseLesson: null,
+  treehouseSection: 'courses', treehouseLesson: null,
   title: null, status: null, search: null, events: null, reloadTimer: null, ignoreEventsUntil: 0, documentLoadToken: 0,
   projectedPlanningHead: null,
   baseId: null, baseView: null, basePage: 1, basePageSize: 100, baseQueryToken: 0, baseDefinition: null,
@@ -78,14 +77,7 @@ function persistActiveContext() {
   if (!context) return;
   context.selected = state.selected;
   context.filter = state.filter;
-  context.story = [...state.story];
-  context.pinned = new Set(state.pinned);
   context.reading = state.reading;
-  if (state.view === 'wiki') {
-    context.wikiEditing = new Set(state.wikiEditing);
-    context.wikiInitialized = true;
-    persistWikiPresentation(context);
-  }
 }
 
 function activateView(view) {
@@ -101,10 +93,7 @@ function activateView(view) {
   state.search = context.search;
   state.selected = context.selected || null;
   state.filter = context.filter || '';
-  state.story = [...(context.story || [])];
-  state.pinned = new Set(context.pinned || []);
   state.reading = !!context.reading;
-  if (view === 'wiki') state.wikiEditing = new Set(context.wikiEditing || []);
   return context;
 }
 
@@ -338,6 +327,23 @@ function close(view = state.view, push = true, fromManager = false) {
 }
 
 function openDocument(id, view = state.view, push = true, options = {}) {
+  const doc = state.docs.find((item) => item.id === id);
+  const wikiOwned = (doc && (doc.kind === 'wiki' || doc.kind === 'meme')) || view === 'wiki';
+  // S17: Wiki articles are typed documents inside the shared Editor. All Wiki
+  // document opens go through the Editor workspace so the S15 navigation
+  // intent (current / newTab / splitRight / splitBelow) is honored
+  // (L-S15-WIKI-INTENT). Legacy `openDocument(id, 'wiki')` callers resolve to
+  // this owner without a second window registry.
+  if (wikiOwned && notesFeature && doc) {
+    const context = ensureViewWindow('notes');
+    activateView('notes');
+    context.window.show(document.activeElement);
+    notesFeature.open(id, options);
+    state.selected = id;
+    if (push) updateRoute('notes');
+    context.window.focus();
+    return;
+  }
   const context = ensureViewWindow(view);
   if (view === 'notes' && notesFeature) {
     activateView(view);
@@ -348,11 +354,9 @@ function openDocument(id, view = state.view, push = true, options = {}) {
     return;
   }
   context.selected = id;
-  if (view === 'wiki' && !context.story.includes(id)) context.story.unshift(id);
   activateView(view);
   context.window.show(document.activeElement);
   state.selected = id;
-  if (view === 'wiki' && !state.story.includes(id)) state.story.unshift(id);
   persistActiveContext();
   if (push) updateRoute(view);
   renderView(view);
@@ -648,7 +652,9 @@ const markdownRenderer = createMarkdownRenderer({
     }
     const view = target.kind === 'wiki' ? 'wiki' : 'notes';
     const intent = navigationIntentFromEvent(event);
-    openDocument(target.id, view, true, view === 'notes' ? { intent } : {});
+    // S17: Wiki opens are Editor documents and honor the shared navigation
+    // intent (L-S15-WIKI-INTENT).
+    openDocument(target.id, view, true, { intent });
     if (fragment && view === 'notes') {
       const section = extractReferenceSection(target.text, fragment);
       if (section.status === 'resolved') notesFeature?.focusSourceLine(target.id, section.line);
@@ -827,52 +833,14 @@ function renderNotes() {
   notesFeature?.render();
 }
 
-function wikiStorageKey() {
-  return copalStorageKey('odysseus-copal-wiki-layout', state.workspace);
-}
-
-function captureWikiPresentation(context = state.windows.get('wiki')) {
-  if (!context?.window?.body) return;
-  context.wikiCards ||= {};
-  const story = context.window.body.querySelector('.copal-story');
-  if (story) context.wikiStoryScrollLeft = story.scrollLeft;
-  const library = context.window.body.querySelector('[data-wiki-library]');
-  if (library) context.wikiLibraryScrollTop = library.scrollTop;
-  for (const card of context.window.body.querySelectorAll('[data-wiki-document]')) {
-    const id = card.dataset.wikiDocument; const scroll = card.querySelector('.copal-meme-body, .copal-wiki-editor');
-    const editor = card.querySelector('.copal-wiki-editor');
-    const previous = context.wikiCards[id] || {};
-    const editorIsActive = editor && document.activeElement === editor;
-    context.wikiCards[id] = {
-      scrollTop:scroll?.scrollTop || 0,
-      // A card control can take focus before renderWiki runs. Keep the range
-      // captured by the input/blur handler until the editor is active again.
-      selectionStart:editorIsActive ? editor.selectionStart : (previous.selectionStart ?? 0),
-      selectionEnd:editorIsActive ? editor.selectionEnd : (previous.selectionEnd ?? previous.selectionStart ?? 0),
-    };
-  }
-}
-
-function persistWikiPresentation(context = state.windows.get('wiki')) {
-  if (!context || !state.storageNamespace) return;
-  const presentation = {
-    version:1, initialized:context.wikiInitialized === true,
-    story:[...(context.story || [])], pinned:[...(context.pinned || [])],
-    editing:[...(context.wikiEditing || [])], cards:context.wikiCards || {},
-    libraryScrollTop:context.wikiLibraryScrollTop || 0,
-    storyScrollLeft:context.wikiStoryScrollLeft || 0,
-  };
-  try { localStorage.setItem(wikiStorageKey(), serializeWikiPresentation(presentation)); }
-  catch (error) { context.window?.setStatus('Wiki layout could not be saved. Content autosave is still active.', true); }
-}
-
 function wikiText(doc) {
   return String(notesFeature?.getDraftSnapshot?.(doc.id)?.envelope?.text ?? doc.text ?? '');
 }
 
-function openLinkedDocument(target) {
+function openLinkedDocument(target, event = null) {
   if (!target) return;
-  openDocument(target.id, target.kind === 'wiki' ? 'wiki' : 'notes');
+  const intent = navigationIntentFromEvent(event);
+  openDocument(target.id, target.kind === 'wiki' ? 'wiki' : 'notes', true, { intent });
 }
 
 async function exportWikiMemes() {
@@ -966,160 +934,49 @@ async function previewWikiMemes(file) {
 }
 
 function renderWiki() {
-  const context = state.windows.get('wiki');
-  captureWikiPresentation(context);
+  // S17: the horizontal story-card carousel is retired. Wiki articles open as
+  // typed documents inside the shared Editor (tabs/splits, navigation intent).
+  // This view is the Wiki library/home: list, create, and native .memes
+  // export/import. Document identity, save ownership and recovery state are
+  // unchanged.
   const docs = state.docs.filter((doc) => doc.kind === 'wiki' && !HIDDEN_KINDS.has(doc.kind));
   const query = state.filter.trim().toLowerCase();
   const libraryDocs = docs.filter((doc) => !query || doc.name.toLowerCase().includes(query) || wikiText(doc).toLowerCase().includes(query));
-  const presentation = normalizeWikiPresentation({
-    version:1, initialized:context.wikiInitialized === true, story:state.story,
-    pinned:[...state.pinned], editing:[...state.wikiEditing], cards:context.wikiCards,
-    libraryScrollTop:context.wikiLibraryScrollTop, storyScrollLeft:context.wikiStoryScrollLeft,
-  }, docs.map((doc) => doc.id), docs.slice(0, 3).map((doc) => doc.id));
-  state.story = presentation.story; state.pinned = new Set(presentation.pinned); state.wikiEditing = new Set(presentation.editing);
-  Object.assign(context, { story:[...state.story], pinned:new Set(state.pinned), wikiEditing:new Set(state.wikiEditing), wikiCards:presentation.cards, wikiInitialized:true, wikiLibraryScrollTop:presentation.libraryScrollTop, wikiStoryScrollLeft:presentation.storyScrollLeft });
-  state.story = state.story.filter((id) => docs.some((doc) => doc.id === id));
-  const newMeme = async () => {
-  const name = await styledPrompt('Choose the name shown in Wiki.', { title: 'New meme', defaultValue: 'Untitled meme', confirmText: 'Create', maxLength: 160 });
+  const newArticle = async () => {
+    const name = await styledPrompt('Choose the name shown in the Editor.', { title: 'New Wiki article', defaultValue: 'Untitled article', confirmText: 'Create', maxLength: 160 });
     if (!name) return;
     const result = await api('/documents', { method: 'POST', body: JSON.stringify({ name, kind: 'wiki', content: '', corpus: 'wiki' }) });
     await loadDocuments(false);
     openDocument(result.doc.id, 'wiki');
-    state.wikiEditing.add(result.doc.id);
-    context.wikiEditing = new Set(state.wikiEditing);
     renderWiki();
-    requestAnimationFrame(() => context.window.body.querySelector(`[data-wiki-document="${CSS.escape(result.doc.id)}"] .copal-wiki-editor`)?.focus());
   };
-  const openExpandedSourceEditor = (doc) => {
-    const cardState = context.wikiCards[doc.id] || {};
-    const dialog = h('dialog', { class:'copal-dialog copal-wiki-expanded-editor' },
-      h('h2', { text:`Multi-cursor edit · ${doc.name}` }),
-      h('p', { class:'copal-dialog-help', text:'Use Mod-d for the next match, Mod-Shift-L for all matches, and Mod-Alt-arrow for vertical cursors.' }));
-    const host = h('div', { class:'copal-codemirror-host copal-wiki-expanded-host' });
-    dialog.append(host, h('div', { class:'copal-dialog-actions' }, h('button', { class:'copal-btn', text:'Close', onclick:() => dialog.close() })));
-    wireDialog(dialog); document.body.append(dialog); dialog.showModal();
-    let editor;
-    editor = createMarkdownEditor({
-      parent:host, doc:wikiText(doc), mode:'source', label:`Edit ${doc.name}`,
-      selection:cardState.selection || { anchor:Number(cardState.selectionStart) || 0, head:Number(cardState.selectionEnd) || 0 },
-      scrollTop:Number(cardState.scrollTop) || 0,
-      onSelection:(selection) => { context.wikiCards[doc.id] = { ...context.wikiCards[doc.id], selection, selectionStart:selection.anchor, selectionEnd:selection.head, scrollTop:editor?.getScrollTop?.() || 0 }; persistActiveContext(); },
-      onScroll:(scrollTop) => { context.wikiCards[doc.id] = { ...context.wikiCards[doc.id], scrollTop }; },
-      onChange:(value) => { notesFeature?.queueSave(doc, value); },
-    });
-    const dispose = registerAdapter(host, createCodeMirrorContextAdapter(editor, {
-      bufferIdentity:() => `wiki:${doc.id}`,
-      revision:() => doc.head || '',
-      scope:() => `${state.accountId || ''}:${state.workspace || ''}:${state.contextEpoch || 0}`,
-    }));
-    dialog.addEventListener('close', () => { dispose(); editor.destroy?.(); dialog.remove(); }, { once:true });
-    editor.focus();
-  };
-  const importInput = h('input', { type:'file', accept:`.memes,${MEMES_MIME}`, hidden:true, 'aria-label':'Import .memes file' });
+  const importInput = h('input', { type: 'file', accept: `.memes,${MEMES_MIME}`, hidden: true, 'aria-label': 'Import .memes file' });
   importInput.addEventListener('change', () => { const file = importInput.files?.[0]; importInput.value = ''; previewWikiMemes(file).catch(error => setStatus(error.message, true)); });
   const library = h('aside', { class: 'copal-pane' },
     h('div', { class: 'copal-pane-header' },
-      h('span', { text: 'Memes' }),
-      h('button', { class: 'copal-btn', text: '+ Meme', onclick: newMeme }),
-      h('button', { class: 'copal-btn', text: 'Export .memes', onclick:() => exportWikiMemes().catch(error => setStatus(error.message, true)) }),
-      h('button', { class: 'copal-btn', text: 'Import .memes', onclick:() => importInput.click() })));
-  const rows = h('div', { class: 'copal-scroll', 'data-wiki-library':'' });
-  for (const doc of libraryDocs) rows.append(h('button', { class: 'copal-doc-row', onclick: () => openDocument(doc.id, 'wiki') }, doc.name));
-  if (!libraryDocs.length) rows.append(h('p', { class:'copal-empty-inline', text:query ? 'No memes match this search.' : 'No memes yet.' }));
-  library.append(importInput, rows);
-  const story = h('div', { class: 'copal-story' });
-  for (const id of state.story) {
-    const doc = state.docs.find((item) => item.id === id);
-    if (!doc) continue;
-    const card = h('article', { class: `copal-meme${state.pinned.has(id) ? ' pinned' : ''}`, 'data-wiki-document':id });
-    const move = (delta) => { state.story = moveWikiCard(state.story, id, delta); renderWiki(); };
-    const legacyMarkdown = doc.recoveryState === 'legacy-import';
-    const editing = !legacyMarkdown && !doc.builtin && state.wikiEditing.has(id);
-    const malformed = !!doc.note_error || (!!doc.rawPreserved && !legacyMarkdown);
-    card.append(h('header', { class: 'copal-meme-head' }, h('strong', { text: doc.name }),
-      h('button', { class: 'copal-btn', text: '←', 'aria-label': 'Move left', onclick: () => move(-1) }),
-      h('button', { class: 'copal-btn', text: '→', 'aria-label': 'Move right', onclick: () => move(1) }),
-      h('button', { class: 'copal-btn', text: state.pinned.has(id) ? 'Unpin' : 'Pin', onclick: () => { state.pinned.has(id) ? state.pinned.delete(id) : state.pinned.add(id); renderWiki(); } }),
-      h('button', { class: 'copal-btn', text: 'History', onclick: () => showHistory(doc) }),
-      ...(malformed || legacyMarkdown || doc.builtin ? [] : [h('button', { class: 'copal-btn', text: editing ? 'Read' : 'Edit', onclick: () => { editing ? state.wikiEditing.delete(id) : state.wikiEditing.add(id); renderWiki(); } })]),
-      ...(malformed || legacyMarkdown || doc.builtin ? [] : [h('button', { class:'copal-btn', text:'Multi-edit', title:'Open the shared multi-cursor editor', onclick:() => openExpandedSourceEditor(doc) })]),
-      ...(doc.builtin ? [h('button', { class:'copal-btn', text:'Make editable copy', onclick:() => makeEditableWikiCopy(doc).catch(error => setStatus(error.message, true)) })] : []),
-      h('button', { class: 'copal-btn', text: '×', disabled:state.pinned.has(id), title:state.pinned.has(id) ? 'Unpin before closing' : 'Close meme', 'aria-label': 'Close meme', onclick: () => {
-        const next = closeWikiCard({ story:state.story, pinned:[...state.pinned], editing:[...state.wikiEditing], cards:context.wikiCards }, id);
-        state.story = next.story; state.wikiEditing = new Set(next.editing); context.wikiCards = next.cards;
-        if (state.selected === id) state.selected = state.story[Math.min(state.story.length - 1, Math.max(0, presentation.story.indexOf(id)))] || null;
-        context.selected = state.selected; renderWiki(); updateRoute('wiki', true);
-      } })));
-    if (malformed) {
-      const recoveryTitle = doc.recoveryState === 'legacy-import'
-        ? 'Imported Markdown is ready to convert'
-        : doc.recoveryState === 'unsupported-future'
-          ? `This meme uses unsupported Wiki schema version ${doc.sourceSchemaVersion || 'newer'}`
-          : 'This meme is preserved but cannot be decoded';
-      card.append(h('div', { class:'copal-meme-body copal-document-error', role:'alert' },
-        h('h2', { text:recoveryTitle }),
-        h('p', { text:String(doc.note_error) }),
-        h('p', { text:doc.rawPreserved ? 'Its original bytes are preserved. Repair or export the source before editing.' : 'Reload or restore a valid version before editing.' }),
-        h('div', { class:'copal-dialog-actions' },
-          doc.recoveryState === 'legacy-import' ? h('button', { class:'copal-btn primary', text:'Preview conversion', onclick:() => previewWikiConversion(doc).catch(error => setStatus(error.message, true)) }) : null,
-          doc.rawPreserved ? h('button', { class:'copal-btn', text:doc.recoveryState === 'unsupported-future' ? 'Download original' : 'Download preserved source', onclick:() => { window.location.href = `${state.api}/api/copal/documents/${encodeURIComponent(doc.id)}/download?workspace=${encodeURIComponent(state.workspace)}`; } }) : null
-        )));
-    } else if (editing) {
-      const editor = h('textarea', { class: 'copal-editor copal-wiki-editor', 'aria-label': `Edit ${doc.name}` });
-      editor.value = wikiText(doc);
-      editor.addEventListener('input', () => { notesFeature?.queueSave(doc, editor.value); context.wikiCards[id] = { scrollTop:editor.scrollTop, selectionStart:editor.selectionStart, selectionEnd:editor.selectionEnd }; });
-      editor.addEventListener('blur', () => { context.wikiCards[id] = { scrollTop:editor.scrollTop, selectionStart:editor.selectionStart, selectionEnd:editor.selectionEnd }; void notesFeature?.flushDocument?.(doc.id); });
-      card.append(editor);
-    } else {
-      card.append(h('div', { class: 'copal-meme-body' }, renderMarkdown(wikiText(doc), new Set([doc.id]), doc)));
-      if (legacyMarkdown) {
-        card.append(h('div', { class:'copal-wiki-format-notice', role:'status' },
-          h('span', { text:'Legacy Markdown is readable and preserved. Convert explicitly to edit it.' }),
-          h('button', { class:'copal-btn', text:'Preview conversion', onclick:() => previewWikiConversion(doc).catch(error => setStatus(error.message, true)) }),
-          h('button', { class:'copal-btn', text:'Download source', onclick:() => { window.location.href = `${state.api}/api/copal/documents/${encodeURIComponent(doc.id)}/download?workspace=${encodeURIComponent(state.workspace)}`; } }),
-        ));
-      }
-    }
-    const footer = h('footer', { class: 'copal-inspector-section copal-meme-links' });
-    // Meme fields: compact property strip.
-    const props = doc.properties;
-    if (props && typeof props === 'object' && Object.keys(props).length) {
-      const fields = h('div', { class: 'copal-meme-fields' });
-      for (const [key, value] of Object.entries(props)) {
-        const display = Array.isArray(value) ? value.join(', ') : String(value ?? '');
-        fields.append(h('span', { class: 'copal-chip', text: `${key}: ${display}` }));
-      }
-      footer.append(fields);
-    }
-    // Links section.
-    const incoming = state.docs.filter((candidate) => (candidate.links || []).some((name) => normalizeName(name) === normalizeName(doc.name) || normalizeName(name) === normalizeName(doc.name.split('/').pop())));
-    const links = h('div');
-    links.append(h('strong', { text: 'Links ' }));
-    for (const name of doc.links || []) { const target = findByName(name); links.append(h('button', { class: 'copal-chip', text: `→ ${name}`, onclick: () => openLinkedDocument(target) })); }
-    for (const source of incoming) links.append(h('button', { class: 'copal-chip', text: `← ${source.name}`, onclick: () => openLinkedDocument(source) }));
-    if (!(doc.links || []).length && !incoming.length) links.append(h('span', { text: 'None' }));
-    footer.append(links);
-    card.append(footer);
-    story.append(card);
+      h('span', { text: 'Wiki articles' }),
+      h('button', { class: 'copal-btn', text: '+ Article', onclick: newArticle }),
+      h('button', { class: 'copal-btn', text: 'Export .memes', onclick: () => exportWikiMemes().catch(error => setStatus(error.message, true)) }),
+      h('button', { class: 'copal-btn', text: 'Import .memes', onclick: () => importInput.click() })));
+  const rows = h('div', { class: 'copal-scroll', 'data-wiki-library': '' });
+  for (const doc of libraryDocs) {
+    const badges = [];
+    if (doc.builtin) badges.push(h('span', { class: 'copal-chip', text: 'built-in' }));
+    if (doc.readOnly) badges.push(h('span', { class: 'copal-chip', text: 'read only' }));
+    if (doc.note_error || doc.recoveryState || doc.rawPreserved) badges.push(h('span', { class: 'copal-chip', text: 'recovery' }));
+    rows.append(h('button', {
+      class: 'copal-doc-row',
+      'data-wiki-document': doc.id,
+      onclick: (event) => openDocument(doc.id, 'wiki', true, { intent: navigationIntentFromEvent(event) }),
+    }, h('strong', { text: doc.name }), ...badges));
   }
-  if (!state.story.length) story.append(h('div', { class:'copal-empty' }, h('h2', { text:'Your story is empty' }), h('p', { text:'Open a meme from the library when you want it here.' })));
-  const shell = h('div', { class: 'copal-layout' }, library, h('section', { style: 'grid-column:2 / -1;min-width:0;overflow:hidden' }, story));
+  if (!libraryDocs.length) rows.append(h('p', { class: 'copal-empty-inline', text: query ? 'No articles match this search.' : 'No Wiki articles yet.' }));
+  library.append(importInput, rows);
+  const shell = h('div', { class: 'copal-layout' }, library, h('section', { style: 'grid-column:2 / -1;min-width:0;overflow:hidden' },
+    h('div', { class: 'copal-empty' },
+      h('h2', { text: 'Wiki articles live in the Editor' }),
+      h('p', { text: 'Open an article from the list to edit it as a typed document with tabs and splits. Legacy Wiki links resolve here.' }))));
   state.body.replaceChildren(shell);
-  const restorePresentation = () => {
-    if (context !== state.windows.get('wiki')) return;
-    rows.scrollTop = presentation.libraryScrollTop; story.scrollLeft = presentation.storyScrollLeft;
-    for (const [id, view] of Object.entries(context.wikiCards || {})) {
-      const card = story.querySelector(`[data-wiki-document="${CSS.escape(id)}"]`); const editor = card?.querySelector('.copal-wiki-editor'); const scroll = editor || card?.querySelector('.copal-meme-body');
-      if (scroll) scroll.scrollTop = view.scrollTop || 0;
-      if (editor && document.activeElement !== editor) editor.setSelectionRange(Math.min(view.selectionStart || 0, editor.value.length), Math.min(view.selectionEnd || 0, editor.value.length));
-    }
-  };
-  // Restore the logical range before a subsequent card-control click can
-  // trigger another render; the animation-frame pass then corrects layout
-  // scroll after the browser has measured the new story.
-  restorePresentation();
-  requestAnimationFrame(restorePresentation);
-  context.story = [...state.story]; context.pinned = new Set(state.pinned); context.wikiEditing = new Set(state.wikiEditing); persistWikiPresentation(context);
 }
 
 function allPlanningTasks(data = planningData()) {
@@ -2794,6 +2651,8 @@ notesFeature = createNotesFeature({
   renderTimeline:(body) => planningFeature.renderTimeline(body),
   openEventEditor:(eventId) => planningFeature.openEventEditor(eventId),
   baseAdapter:createBaseSheetAdapter(),
+  makeEditableWikiCopy,
+  previewWikiConversion,
 });
 
 function renderTreeHouse() {
@@ -2997,27 +2856,13 @@ function ensureViewWindow(view) {
   },
   });
   const search = h('input', { class:'copal-search', type:'search', placeholder:`Search ${LABELS[view]}…`, 'aria-label':`Search ${LABELS[view]}` });
-  const context = { view, window:windowApi, search, selected:null, filter:'', story:[], pinned:new Set(), reading:false, wikiEditing:new Set(), wikiCards:{}, wikiInitialized:false, wikiLibraryScrollTop:0, wikiStoryScrollLeft:0 };
+  const context = { view, window:windowApi, search, selected:null, filter:'', reading:false };
   if (view === 'notes') {
     try {
       const saved = JSON.parse(localStorage.getItem(copalStorageKey('odysseus-copal-notes-layout', state.workspace)) || '{}');
       notesFeature?.loadSaved(context, saved);
       context.selected = saved.selected || null;
     } catch (_) {}
-  }
-  if (view === 'wiki') {
-    try {
-      const saved = JSON.parse(localStorage.getItem(wikiStorageKey()) || '{}');
-      if (saved?.version === 1 && saved.initialized === true) {
-        context.story = Array.isArray(saved.story) ? saved.story.map(String) : [];
-        context.pinned = new Set(Array.isArray(saved.pinned) ? saved.pinned.map(String) : []);
-        context.wikiEditing = new Set(Array.isArray(saved.editing) ? saved.editing.map(String) : []);
-        context.wikiCards = saved.cards && typeof saved.cards === 'object' ? saved.cards : {};
-        context.wikiLibraryScrollTop = Number(saved.libraryScrollTop) || 0;
-        context.wikiStoryScrollLeft = Number(saved.storyScrollLeft) || 0;
-        context.wikiInitialized = true;
-      }
-    } catch (_) { /* malformed presentation state falls back once documents load */ }
   }
   state.windows.set(view, context);
   search.addEventListener('input', () => { activateView(view); context.filter = search.value; state.filter = search.value; renderView(view); });
@@ -3190,7 +3035,6 @@ function connectEvents() {
 function suspendCopalScope() {
   if (state.storageNamespace && state.windows.size) {
     persistActiveContext();
-    const wiki = state.windows.get('wiki'); captureWikiPresentation(wiki); persistWikiPresentation(wiki);
   }
   notesFeature?.suspendScope();
   planningFeature?.suspendScope?.();
@@ -3211,9 +3055,9 @@ function suspendCopalScope() {
   state.noteEditors.clear();
   Object.assign(state, {
     storageNamespace:null, accountId:null, workspace:'default', view:'notes', docs:[],
-    planning:{ tracks:[], floatingTodos:[] }, taskProjection:[], taskProjectionLoaded:false, taskCursor:null, taskSnapshotRevision:null, taskProjectionTotal:null, taskIndexedTotal:null, taskMatchedTotal:null, taskTotalExact:false, taskLoading:false, taskQuery:{ query:'', completed:null, source:'all', sourceFilter:'all', statusFilter:'all', hideDone:false }, taskQueryToken:state.taskQueryToken + 1, taskSelectedId:null, selected:null, filter:'', story:[], pinned:new Set(), reading:false,
+    planning:{ tracks:[], floatingTodos:[] }, taskProjection:[], taskProjectionLoaded:false, taskCursor:null, taskSnapshotRevision:null, taskProjectionTotal:null, taskIndexedTotal:null, taskMatchedTotal:null, taskTotalExact:false, taskLoading:false, taskQuery:{ query:'', completed:null, source:'all', sourceFilter:'all', statusFilter:'all', hideDone:false }, taskQueryToken:state.taskQueryToken + 1, taskSelectedId:null, selected:null, filter:'', reading:false,
     root:null, content:null, body:null, title:null, status:null, search:null,
-    wikiEditing:new Set(), calendarMonth:null, projectedPlanningHead:null, ignoreEventsUntil:0,
+    calendarMonth:null, projectedPlanningHead:null, ignoreEventsUntil:0,
     baseId:null, baseView:null, basePage:1, baseDefinition:null, baseSourceDocs:new Map(),
     baseFocusRow:-1, baseFocusCol:-1, baseFocusTable:null, baseQueryToken:state.baseQueryToken + 1,
     entryVisibility:null, entryVisibilityError:null,

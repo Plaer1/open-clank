@@ -120,6 +120,9 @@ export function noteViewType(doc = {}) {
   if (kind === 'timeline') return 'timeline';
   if (kind === 'note') return 'note';
   if (kind === 'copal-event') return 'event';
+  // Native Wiki articles keep a typed Editor view. A Wiki resource must never
+  // fall through to the Markdown leaf merely because its body is readable text.
+  if (kind === 'wiki' || kind === 'meme') return 'wiki';
   if (kind === 'canvas' || name.endsWith('.canvas')) return 'canvas';
   if (kind === 'base' || name.endsWith('.base')) return 'base';
   if (kind === 'asset') {

@@ -1,7 +1,11 @@
 /** Shared, authority-neutral Copal resource and revision DTOs. */
 
 const PROVIDERS = new Set(['copal', 'host', 'treehouse']);
-const REPRESENTATIONS = new Set(['nativeNote', 'markdown', 'text', 'base', 'meme', 'asset', 'courseDraft']);
+const REPRESENTATIONS = new Set(['nativeNote', 'markdown', 'text', 'base', 'wikiArticle', 'meme', 'asset', 'courseDraft']);
+// `meme` is a compatibility ingress alias for the typed Wiki article
+// representation. New code writes `wikiArticle`; handles normalize at the
+// boundary so existing callers and saved DTOs keep loading.
+const REPRESENTATION_ALIASES = new Map([['meme', 'wikiArticle']]);
 const REVISION_KINDS = new Set(['copalHead', 'hostFingerprint', 'domain']);
 
 const string = (value, field) => {
@@ -56,8 +60,9 @@ function resourceMetadata(value = {}) {
 
 export function normalizeResourceHandle(value = {}) {
   const source = value && typeof value === 'object' ? value : {};
-  const representation = string(source.representation, 'representation');
-  if (!REPRESENTATIONS.has(representation)) throw new TypeError(`unsupported representation: ${representation}`);
+  const rawRepresentation = string(source.representation, 'representation');
+  if (!REPRESENTATIONS.has(rawRepresentation)) throw new TypeError(`unsupported representation: ${rawRepresentation}`);
+  const representation = REPRESENTATION_ALIASES.get(rawRepresentation) || rawRepresentation;
   const location = source.locator && typeof source.locator === 'object' ? source.locator : {};
   const metadata = resourceMetadata(source.metadata);
   return Object.freeze({

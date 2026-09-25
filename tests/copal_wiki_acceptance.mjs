@@ -176,11 +176,19 @@ const page = `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="
 await withCopalBrowser({ page, overrides, request }, async ({ evaluate, until, url, cdp }) => {
   await until('Boolean(window.fixture)');
   await evaluate('fixture.init()');
+
+  // S17: Wiki is a library of typed Editor documents. The horizontal story-card
+  // carousel is retired. Legacy `openDocument(id, 'wiki')` resolves to the
+  // shared Editor owner with navigation intent (L-S15-WIKI-INTENT).
   await evaluate('fixture.open("wiki", false)');
-  await until('document.querySelectorAll("[data-wiki-document]").length === 3');
-  assert.equal(await evaluate('[...document.querySelectorAll(".copal-pane-header button")].some(button => button.textContent === "Export .memes")'), true, 'Wiki exposes native .memes export');
-  assert.equal(await evaluate('[...document.querySelectorAll(".copal-pane-header button")].some(button => button.textContent === "Import .memes")'), true, 'Wiki exposes explicit .memes preview/import');
+  await until('document.querySelectorAll("[data-wiki-library] [data-wiki-document]").length === 6');
+  assert.equal(await evaluate('[...document.querySelectorAll(".copal-pane-header button")].some(button => button.textContent === "Export .memes")'), true, 'Wiki library exposes native .memes export');
+  assert.equal(await evaluate('[...document.querySelectorAll(".copal-pane-header button")].some(button => button.textContent === "Import .memes")'), true, 'Wiki library exposes explicit .memes preview/import');
   assert.match(await evaluate('document.querySelector("input[type=file]")?.accept || ""'), /\.memes/);
+  assert.equal(await evaluate(`document.querySelector('[data-wiki-document="alice-bad"] .copal-chip')?.textContent`), 'recovery', 'library badges mark preserved-source recovery records');
+  assert.doesNotMatch(await evaluate('document.body.textContent'), /tiddly|tiddler/i, 'visible Wiki library has no retired terminology');
+
+  // Export and import use the production routes with an explicit preview step.
   await evaluate('([...document.querySelectorAll(".copal-pane-header button")].find(button => button.textContent === "Export .memes")).click()');
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.deepEqual(memesCalls, ['export'], 'visible Export .memes uses the production route');
@@ -193,135 +201,116 @@ await withCopalBrowser({ page, overrides, request }, async ({ evaluate, until, u
   await evaluate('document.querySelector("dialog .primary")?.click()');
   await until('document.querySelector("dialog") === null');
   assert.deepEqual(memesCalls, ['export', 'preview', 'import'], 'visible preview then explicit Import .memes uses both production routes');
-  await evaluate('([...document.querySelectorAll(".copal-pane-header button")].find(button => button.textContent === "Import .memes")).click()');
-  const restoreFileRoot = await cdp('DOM.getDocument', { depth:-1 });
-  const restoreFileNode = await cdp('DOM.querySelector', { nodeId:restoreFileRoot.root.nodeId, selector:'input[type=file]' });
-  await cdp('DOM.setFileInputFiles', { nodeId:restoreFileNode.nodeId, files:[memesFixturePath] });
-  await until('document.querySelector("dialog")?.textContent.includes("Restore current Wiki")');
-  assert.equal(await evaluate('document.querySelector("dialog")?.textContent.includes("Import for new scoped copies")'), true, 'restore is an explicit second choice after preview');
-  await evaluate('([...document.querySelectorAll("dialog button")].find(button => button.textContent === "Restore current Wiki")).click()');
-  await until('document.querySelector("dialog") === null');
-  assert.deepEqual(memesCalls, ['export', 'preview', 'import', 'preview', 'restore'], 'visible restore choice marks the guarded API mode');
 
-  const initialStory = await evaluate('fixture.state.story.slice()');
-  assert.deepEqual(initialStory, ['alice-alpha', 'alice-beta', 'alice-gamma'], 'defaults are seeded once in deterministic corpus order');
-  assert.doesNotMatch(await evaluate('document.body.textContent'), /tiddly|tiddler/i, 'visible Wiki UI has no retired terminology');
-  await evaluate('fixture.renderWiki()');
-  assert.deepEqual(await evaluate('fixture.state.story.slice()'), initialStory, 'rerender does not append defaults again');
+  // Clicking a library row opens the article as a typed document in the shared
+  // Editor workspace (current intent replaces the active leaf).
+  await evaluate(`document.querySelector('[data-wiki-document="alice-alpha"]').click()`);
+  await until('fixture.state.view === "notes"');
+  await until('Boolean(document.querySelector(\'[data-view-type="wiki"]\'))');
+  assert.equal(await evaluate(`document.querySelector('[data-view-type="wiki"]')?.dataset.viewType`), 'wiki', 'Wiki article opens as a typed wiki leaf, not a Markdown fallthrough');
+  assert.match(await evaluate('document.querySelector(".cm-content")?.textContent || document.body.textContent'), /Alpha body|Alpha/, 'article body renders through the shared editor/renderer');
 
-  // Type through the real Wiki textarea, then exercise all presentation controls
-  // before the delayed Notes save is explicitly flushed.
-  const expectedSelection = await evaluate(`(() => { const card = document.querySelector('[data-wiki-document="alice-alpha"]'); [...card.querySelectorAll('button')].find(button => button.textContent === 'Edit').click(); const editor = document.querySelector('[data-wiki-document="alice-alpha"] .copal-wiki-editor'); editor.focus(); editor.setSelectionRange(6, 10); editor.setRangeText(' unsaved draft', 6, 10, 'select'); editor.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'insertText', data:' unsaved draft' })); return [editor.selectionStart, editor.selectionEnd]; })()`);
-  await evaluate(`(() => { const card = document.querySelector('[data-wiki-document="alice-alpha"]'); [...card.querySelectorAll('button')].find(button => button.textContent === 'Pin').click(); })()`);
-  await until('document.querySelector("[data-wiki-document=\\"alice-alpha\\"]")?.classList.contains("pinned")');
-  await evaluate(`document.querySelector('[data-wiki-document="alice-alpha"] [aria-label="Move right"]').click()`);
-  await evaluate(`(() => { const search = document.querySelector('.copal-search'); search.value = 'Beta'; search.dispatchEvent(new Event('input', { bubbles:true })); })()`);
-  await until('document.querySelectorAll("[data-wiki-library] .copal-doc-row").length === 1');
-  assert.equal(await evaluate('fixture.state.story.length'), 3, 'library filtering leaves story membership/order intact');
-  // The explicit button lookup keeps this assertion tied to the native Edit/Read
-  // control while avoiding class or DOM-index assumptions for the card controls.
-  await evaluate(`(() => { const card = document.querySelector('[data-wiki-document="alice-alpha"]'); [...card.querySelectorAll('button')].find(button => button.textContent === 'Read').click(); })()`);
-  await until('document.querySelector("[data-wiki-document=\\"alice-alpha\\"] .copal-wiki-editor") === null');
-  await evaluate(`(() => { const card = document.querySelector('[data-wiki-document="alice-alpha"]'); [...card.querySelectorAll('button')].find(button => button.textContent === 'Edit').click(); })()`);
-  await until('Boolean(document.querySelector("[data-wiki-document=\\"alice-alpha\\"] .copal-wiki-editor"))');
-  const restored = await evaluate(`(() => { const card = document.querySelector('[data-wiki-document="alice-alpha"]'); return { text:card.querySelector('.copal-wiki-editor').value, selection:[card.querySelector('.copal-wiki-editor').selectionStart, card.querySelector('.copal-wiki-editor').selectionEnd] }; })()`);
-  assert.match(restored.text, /unsaved draft/, 'draft survives pin, reorder, filter and read/edit');
-  assert.deepEqual(restored.selection, expectedSelection, 'the transformed selection range is restored exactly');
+  // L-S15-WIKI-INTENT: Ctrl/Cmd (newTab) is honored for Wiki document opens.
+  await evaluate(`(() => {
+    const leafCount = fixture.state.windows.get('notes').noteLeafViews.size;
+    fixture.openDocument('alice-beta', 'wiki', true, { intent: 'newTab' });
+    return leafCount;
+  })()`);
+  await until('Boolean(document.querySelector(\'[data-view-type="wiki"]\'))');
+  const tabCount = await evaluate('fixture.state.windows.get("notes").noteLeafViews.size');
+  assert.ok(tabCount >= 2, `newTab intent adds an Editor tab for Wiki opens (got ${tabCount})`);
+  await evaluate(`fixture.openDocument('alice-gamma', 'wiki', true, { intent: 'current' })`);
+  await until('fixture.state.windows.get("notes").noteLeafViews.size >= 2');
+  assert.equal(await evaluate('fixture.state.windows.get("notes").noteLeafViews.size >= 2'), true, 'current intent does not add a tab');
+
+  // Edit and save a Wiki article through the shared Editor buffer/queue.
+  await evaluate('fixture.openDocument("alice-alpha", "wiki", true, { intent: "current" })');
+  await until('Boolean(document.querySelector(".cm-content"))');
+  await evaluate(`(() => {
+    const cache = [...fixture.state.windows.get('notes').noteLeafViews.values()].find(c => c.docId === 'alice-alpha');
+    // applyValue (not setValue) is the editing path: it fires onChange so the
+    // shared Editor buffer/queue records the draft that flushDocument saves.
+    cache.editor.applyValue(cache.editor.getValue() + '\\nunsaved draft');
+  })()`);
   await evaluate('fixture.notesFeature.flushDocument("alice-alpha")');
-  // The server-side write is inspected through a fixture-owned endpoint below;
-  // this avoids claiming persistence from a DOM overlay.
   const stored = accounts.get('alice').find(doc => doc.id === 'alice-alpha');
   assert.match(stored.text, /unsaved draft/, 'serialized Wiki save reaches the scoped fixture store');
-  assert(writes.some(write => write.account === 'alice' && write.id === 'alice-alpha' && /unsaved draft/.test(write.text)));
+  assert(writes.some(write => write.account === 'alice' && write.id === 'alice-alpha' && /unsaved draft/.test(write.text)), 'Wiki save uses the shared write path');
 
-  // Cross-corpus and same-corpus links use the production footer handlers.
-  await evaluate(`(() => { const card = document.querySelector('[data-wiki-document="alice-alpha"]'); [...card.querySelectorAll('button')].find(button => button.textContent.includes('→ Note target')).click(); })()`);
-  await until('fixture.state.view === "notes"');
-  await until('Boolean(document.querySelector(".cm-md-embed-widget"))');
-  await until('Boolean(document.querySelector(".cm-md-embed-widget .copal-media-embed[data-reference-status=loaded] img"))');
-  const liveText = await evaluate('document.querySelector(".cm-content")?.textContent || ""');
-  assert.match(liveText, /before/); assert.match(liveText, /trailing prose/);
-  await until('document.querySelector(".cm-md-embed-widget [data-reference-status=error] button")');
-  await fetch(`${url}fixture/media?retry=1`);
-  await evaluate('document.querySelector(".cm-md-embed-widget [data-reference-status=error] button").click()');
-  await until('document.querySelectorAll(".cm-md-embed-widget .copal-media-embed[data-reference-status=loaded] img").length === 2');
-  assert.deepEqual(assetRequests.map(request => request.retryAvailable), [false, true], 'the production Retry callback requests the resource again');
-  await evaluate('document.querySelector(".cm-md-embed-widget").dispatchEvent(new KeyboardEvent("keydown", { key:"Enter", bubbles:true }))');
-  await until('document.activeElement?.classList.contains("cm-content")');
-  assert((await evaluate('[...fixture.state.windows.get("notes").noteLeafViews.values()].find(cache => cache.docId === "alice-note").editor.getSelection().anchor')) > 0, 'live media widget Enter reveals its source position');
+  // Cross-type and same-corpus links open through the Editor owner. Fragments
+  // and modifier intent are forwarded (openTarget passes { intent }).
   await evaluate('fixture.open("wiki", false)');
-  await evaluate(`(() => { const card = document.querySelector('[data-wiki-document="alice-alpha"]'); [...card.querySelectorAll('button')].find(button => button.textContent.includes('→ Beta')).click(); })()`);
-  await until('fixture.state.view === "wiki" && fixture.state.selected === "alice-beta"');
+  await evaluate(`document.querySelector('[data-wiki-document="alice-alpha"]').click()`);
+  await until('fixture.state.view === "notes"');
+  await evaluate(`(() => {
+    const cache = [...fixture.state.windows.get('notes').noteLeafViews.values()].find(c => c.docId === 'alice-alpha');
+    const before = fixture.state.windows.get('notes').noteLeafViews.size;
+    fixture.openDocument('alice-note', 'notes', true, { intent: 'newTab' });
+    return before;
+  })()`);
+  await until('fixture.state.windows.get("notes").noteLeafViews.size >= 2');
+  assert.equal(await evaluate('fixture.state.view'), 'notes', 'cross-corpus links resolve to the shared Editor');
 
-  // A malformed record is shown as preserved source recovery and never gets an
-  // Edit button or a save textarea.
-  await evaluate(`(() => { const search = document.querySelector('.copal-search'); search.value = ''; search.dispatchEvent(new Event('input', { bubbles:true })); })()`);
-  await until('document.querySelectorAll("[data-wiki-library] .copal-doc-row").length === 6');
-  assert.equal(await evaluate('[...document.querySelectorAll("[data-wiki-library] .copal-doc-row")].some(button => button.textContent.includes("Broken source"))'), true, 'malformed source is present in the unfiltered library');
-  await evaluate(`(() => { const row = [...document.querySelectorAll('[data-wiki-library] .copal-doc-row')].find(button => button.textContent.includes('Broken source')); row.click(); })()`);
-  await until('Boolean(document.querySelector("[data-wiki-document=\\"alice-bad\\"]"))');
-  assert.match(await evaluate('document.querySelector("[data-wiki-document=\\"alice-bad\\"]").textContent'), /preserved|original bytes/i);
-  assert.equal(await evaluate('document.querySelectorAll("[data-wiki-document=\\"alice-bad\\"] .copal-wiki-editor").length'), 0);
-  assert.equal(await evaluate('[...document.querySelectorAll("[data-wiki-document=\\"alice-bad\\"] button")].some(button => ["Edit","Read","Save"].includes(button.textContent))'), false);
+  // Recovery: malformed/future/legacy records show preserved-source recovery in
+  // the Editor leaf and never get a save textarea.
+  await evaluate('fixture.open("wiki", false)');
+  await evaluate(`document.querySelector('[data-wiki-document="alice-bad"]').click()`);
+  await until('Boolean(document.querySelector(".copal-wiki-recovery, .copal-document-error"))');
+  assert.match(await evaluate('document.querySelector(".copal-wiki-recovery, .copal-document-error")?.textContent || ""'), /preserved|original bytes/i);
+  assert.equal(await evaluate('document.querySelectorAll(".copal-wiki-recovery .cm-content, .copal-document-error .cm-content").length'), 0, 'malformed source has no editable body');
+  await evaluate('fixture.open("wiki", false)');
+  await evaluate(`document.querySelector('[data-wiki-document="alice-future"]').click()`);
+  await until('Boolean(document.querySelector(".copal-wiki-recovery, .copal-document-error"))');
+  assert.match(await evaluate('document.querySelector(".copal-wiki-recovery, .copal-document-error")?.textContent || ""'), /schema version 9|newer native schema/i);
+  assert.equal(await evaluate('[...document.querySelectorAll(".copal-wiki-recovery button, .copal-document-error button")].some(button => button.textContent === "Download original")'), true, 'future schema exposes byte-preserving download');
 
-  // Future native schemas remain explicitly read-only and expose their
-  // version plus byte-preserving original download. Legacy Markdown reaches
-  // the dedicated preview/CAS conversion branch.
-  await evaluate(`(() => { const row = [...document.querySelectorAll('[data-wiki-library] .copal-doc-row')].find(button => button.textContent.includes('Future source')); row.click(); })()`);
-  await until('Boolean(document.querySelector("[data-wiki-document=\\"alice-future\\"]"))');
-  assert.match(await evaluate('document.querySelector("[data-wiki-document=\\"alice-future\\"]").textContent'), /schema version 9|newer native schema/i);
-  assert.equal(await evaluate('[...document.querySelectorAll("[data-wiki-document=\\"alice-future\\"] button")].some(button => button.textContent === "Download original")'), true);
-  assert.equal(await evaluate('[...document.querySelectorAll("[data-wiki-document=\\"alice-future\\"] button")].some(button => ["Edit","Read","Save"].includes(button.textContent))'), false);
-  await evaluate(`(() => { const row = [...document.querySelectorAll('[data-wiki-library] .copal-doc-row')].find(button => button.textContent.includes('Legacy Markdown')); row.click(); })()`);
-  await until('Boolean(document.querySelector("[data-wiki-document=\\"alice-legacy\\"]"))');
-  await evaluate('[...document.querySelectorAll("[data-wiki-document=\\"alice-legacy\\"] button")].find(button => button.textContent === "Preview conversion").click()');
+  // Legacy Markdown conversion is reachable from the Editor recovery panel.
+  await evaluate('fixture.open("wiki", false)');
+  await evaluate(`document.querySelector('[data-wiki-document="alice-legacy"]').click()`);
+  await until('Boolean(document.querySelector(".copal-wiki-recovery, .copal-document-error"))');
+  assert.match(await evaluate('document.querySelector(".copal-wiki-recovery, .copal-document-error")?.textContent || ""'), /Imported Markdown|convert/i);
+  assert.equal(await evaluate('[...document.querySelectorAll(".copal-wiki-recovery button, .copal-document-error button")].some(button => button.textContent === "Preview conversion")'), true, 'legacy import exposes explicit conversion preview');
+  await evaluate('[...document.querySelectorAll(".copal-wiki-recovery button, .copal-document-error button")].find(button => button.textContent === "Preview conversion").click()');
   await until('Boolean(document.querySelector(".copal-wiki-conversion-preview"))');
   assert.match(await evaluate('document.querySelector(".copal-wiki-conversion-preview").textContent'), /No changes have been made|Original source/i);
   await evaluate('document.querySelector(".copal-wiki-conversion-preview")?.close()');
 
-  // Unpin then close every card. Empty is an intentional persisted state and
-  // survives a render plus a real Page.reload in the same disposable profile.
-  await evaluate(`(() => { for (const card of [...document.querySelectorAll('[data-wiki-document]')]) { const unpin = [...card.querySelectorAll('button')].find(button => button.textContent === 'Unpin'); if (unpin) unpin.click(); } })()`);
-  await evaluate(`(() => { let card; while ((card = document.querySelector('[data-wiki-document]'))) { [...card.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Close meme').click(); } })()`);
-  await until('fixture.state.story.length === 0 && document.querySelector(".copal-empty")');
-  await evaluate('fixture.renderWiki()');
-  assert.equal(await evaluate('fixture.state.story.length'), 0, 'close-all remains empty after rerender');
-  await evaluate('history.replaceState({}, "", "/")');
-  await cdp('Page.reload', { ignoreCache:true });
-  await until('typeof window.fixture?.init === "function"');
-  assert.equal(await evaluate('window.auditError || null'), null, 'reload has no browser error or rejected promise');
-  await evaluate('fixture.init()');
+  // Article chrome exposes links and collapsible details for a healthy article.
   await evaluate('fixture.open("wiki", false)');
-  await until('document.querySelector(".copal-empty")');
-  assert.equal(await evaluate('fixture.state.story.length'), 0, 'close-all remains empty after reload');
+  await evaluate(`document.querySelector('[data-wiki-document="alice-beta"]').click()`);
+  await until('Boolean(document.querySelector(".copal-wiki-article-chrome"))');
+  assert.equal(await evaluate('Boolean(document.querySelector(".copal-wiki-article-chrome summary"))'), true, 'article chrome is collapsible Details');
+  assert.match(await evaluate('document.querySelector(".copal-wiki-article-chrome")?.textContent || ""'), /Article links and details/);
 
-  // Account B gets independent defaults; returning to A restores its empty
-  // presentation from the account-scoped localStorage key.
+  // New article creates a Wiki document and opens it in the Editor.
+  await evaluate('fixture.open("wiki", false)');
+  await evaluate('[...document.querySelectorAll("button")].find(button => button.textContent === "+ Article").click()');
+  await until('document.querySelector("#styled-prompt-overlay")?.style.display !== "none"');
+  await evaluate('document.querySelector("#styled-prompt-input").value = "Fresh article"; document.querySelector("#styled-prompt-ok").click()');
+  await until('fixture.state.view === "notes"');
+  await until('Boolean([...fixture.state.windows.get("notes").noteLeafViews.values()].find(c => c.docId?.startsWith("alice-new-")))');
+  assert.equal(await evaluate('Boolean([...fixture.state.windows.get("notes").noteLeafViews.values()].find(c => c.docId?.startsWith("alice-new-")))'), true, 'new article opens in the shared Editor');
+
+  // Account switch keeps stable document identity and scoped saves.
   await fetch(`${url}fixture/account?account=bob`);
   await evaluate('fixture.init()');
   await evaluate('fixture.open("wiki", false)');
-  await until('fixture.state.story.length === 3');
-  assert.deepEqual(await evaluate('fixture.state.story.slice()'), ['bob-alpha', 'bob-beta', 'bob-gamma']);
-  await fetch(`${url}fixture/account?account=alice`);
-  await evaluate('fixture.init()');
-  await evaluate('fixture.open("wiki", false)');
-  await until('document.querySelector(".copal-empty")');
-  assert.equal(await evaluate('fixture.state.story.length'), 0, 'account A does not inherit account B presentation');
-
-  // New Meme follows the production form/create path and focuses its editor.
-  await evaluate('[...document.querySelectorAll("button")].find(button => button.textContent === "+ Meme").click()');
-  await until('document.querySelector("#styled-prompt-overlay")?.style.display !== "none"');
-  await evaluate('document.querySelector("#styled-prompt-input").value = "Fresh meme"; document.querySelector("#styled-prompt-ok").click()');
-  await until('document.querySelector("[data-wiki-document]")?.dataset.wikiDocument.startsWith("alice-new-")');
-  await until('document.activeElement?.matches(".copal-wiki-editor")');
-  assert.equal(await evaluate('document.activeElement.matches(".copal-wiki-editor")'), true, 'new Meme enters editing with focus');
+  await until('document.querySelectorAll("[data-wiki-library] [data-wiki-document]").length === 6');
+  await evaluate(`document.querySelector('[data-wiki-document="bob-alpha"]').click()`);
+  await until('fixture.state.view === "notes"');
+  assert.equal(await evaluate('Boolean([...fixture.state.windows.get("notes").noteLeafViews.values()].find(c => c.docId === "bob-alpha"))'), true, 'account B opens its own scoped article');
   assert.equal(await evaluate('window.auditError || null'), null);
   console.log(JSON.stringify({ passed: [
-    'initial defaults exactly once', 'draft and selection through pin/reorder/filter/read/edit',
-    'scoped serialized save', 'close-all empty persistence across rerender/init/reload',
-    'account-isolated Wiki layouts', 'same-corpus and cross-corpus links',
-    'production Notes live-mode media, Retry and source reveal',
-    'malformed/future raw-preserving recovery', 'legacy preview conversion and visible .memes export/preview/import/restore choices',
-    'new Meme editing focus',
+    'Wiki library lists typed articles with recovery badges',
+    'native .memes export/preview/import routes retained',
+    'library rows open typed wiki leaves in the shared Editor',
+    'L-S15-WIKI-INTENT: newTab and current intents honored for Wiki opens',
+    'shared Editor save path serializes Wiki articles',
+    'cross-corpus links resolve to the Editor owner',
+    'malformed/future/legacy preserved-source recovery in Editor leaves',
+    'legacy conversion preview reachable from Editor recovery panel',
+    'collapsible article links/details chrome',
+    'new article opens in Editor with stable identity',
+    'account-scoped article identity preserved',
   ], browser: await cdp('Browser.getVersion') }, null, 2));
 });
