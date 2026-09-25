@@ -22,10 +22,11 @@ const Parameters = z.object({
 
 function denialMessage(denial: InvocationDenial, name: string): string {
   switch (denial) {
-    // Gated names get a generic deny (no existence-oracle reason, no flip coaching).
+    // Gated and missing share one model-facing string (no existence-oracle shape).
     case "hidden_from_model":
     case "model_invocation_disabled":
-      return `Skill "${name}" is not invocable in this context.`
+    case "not_found":
+      return `Skill "${name}" not found.`
     case "disabled":
       return `Skill "${name}" is disabled and cannot run.`
     case "untrusted":
@@ -34,8 +35,6 @@ function denialMessage(denial: InvocationDenial, name: string): string {
       return `Skill "${name}" is revoked and cannot run.`
     case "staged":
       return `Skill "${name}" is not published (staged/draft) and cannot run.`
-    default:
-      return `Skill "${name}" not found.`
   }
 }
 
@@ -78,7 +77,13 @@ export const SkillTool = Tool.define(
                   `workflow({ operation: "run", name: "${params.name}", args: { ... } }). Do NOT use the skill tool for it.`,
               )
             }
-            if (result.reason === "not_found") {
+            // Gated (hidden / model-disabled) and truly missing share one model-facing
+            // miss catalog and one message shape, so gated probes cannot confirm names.
+            if (
+              result.reason === "not_found" ||
+              result.reason === "hidden_from_model" ||
+              result.reason === "model_invocation_disabled"
+            ) {
               const all = yield* skill.all()
               // Never leak hidden or model-disabled skills through the miss catalog.
               const available = all
