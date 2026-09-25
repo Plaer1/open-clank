@@ -125,7 +125,7 @@ export function serializeAttachmentInsertion(insertion, { mode = 'link' } = {}) 
   if (!['link', 'embed'].includes(mode)) throw new Error('Attachment action is unsupported.');
   const safeLabel = label.replace(/[\\[\]]/gu, '\\$&').replace(/[\r\n]/gu, ' ');
   const safeTarget = target.replace(/[\\()\r\n]/gu, '\\$&');
-  const embed = mode === 'embed' && /^(?:image|video|audio)$/iu.test(mediaKind);
+  const embed = mode === 'embed' && /^(?:image|video|audio)(?:\/|$)/iu.test(mediaKind);
   return `${embed ? '!' : ''}[${safeLabel}](<${safeTarget}>)`;
 }
 
@@ -176,7 +176,7 @@ export function validateAttachmentPreparationRecovery(result, {
   if (sourceItemValue != null && String(sourceItemValue) !== String(sourceItemId)) throw new Error('Attachment source item changed; retry the drop.');
   const identity = preparation.target_identity;
   const recoveredRef = String(identity?.resource_ref || identity?.resourceRef || '').trim();
-  if (String(identity?.kind || '') !== 'copal_document' || (targetRef && recoveredRef !== String(targetRef))) throw new Error('Attachment target changed; retry the drop.');
+  if (!['copal_document', 'host_document'].includes(String(identity?.kind || '')) || (targetRef && recoveredRef !== String(targetRef))) throw new Error('Attachment target changed; retry the drop.');
   const recoveredKey = identity?.resource_key || identity?.resourceKey;
   if (recoveredKey != null && canonicalEditorResourceKey(recoveredKey) !== String(targetKey)) throw new Error('Attachment target identity changed; retry the drop.');
   if (JSON.stringify(preparation.target_revision) !== JSON.stringify(targetRevision)) throw new Error('Attachment target revision changed; retry the drop.');
@@ -2759,9 +2759,24 @@ export function createNotesFeature({
       && cache.editor.getSelection?.().head === cursor.selection.head;
   }
 
-  function attachmentName(file) {
+  /** Workspace-relative media stem for a document: ``projects/design.md`` -> ``projects/design``. */
+  function documentMediaStem(doc) {
+    const raw = String(doc?.name || doc?.path || 'untitled').replace(/\\/g, '/').replace(/^\/+/, '');
+    const withoutExt = raw.replace(/\.[^./]+$/, '');
+    return withoutExt || 'untitled';
+  }
+
+  function attachmentName(file, doc) {
     const name = String(file?.name || 'attachment').replace(/\\/g, '/').split('/').pop().replace(/[^\w.()\- ]+/g, '_').trim() || 'attachment';
-    return `attachments/${name}`;
+    return `media/${documentMediaStem(doc)}/${name}`;
+  }
+
+  /** Direct inline image syntax with a correctly escaped relative reference. */
+  function attachmentReference(target, label, mediaKind, mode = 'embed') {
+    return serializeAttachmentInsertion(
+      { format: 'markdown', link_target: target, label: label || 'attachment', media_kind: mediaKind || 'application/octet-stream' },
+      { mode },
+    );
   }
 
   function attachmentDialog(cache, doc, file, cursor) {
@@ -2778,10 +2793,13 @@ export function createNotesFeature({
       h('div', { class:'copal-dialog-actions' }, h('button', { class:'copal-btn', text:'Cancel', onclick:() => dialog.close() }), retry, attach));
     wireDialog(dialog); document.body.append(dialog); dialog.showModal();
     let actionId = `attachment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const mediaKind = String(file.type || 'application/octet-stream');
     const reference = () => {
-      const name = attachmentName(file);
-      const label = caption.value.trim();
-      return `![[${name}${label && label !== file.name ? `|${label}` : ''}]]`;
+      const name = attachmentName(file, doc);
+      const label = caption.value.trim() || String(file.name || 'attachment');
+      // Inline image syntax for image media; other types stay a plain link.
+      const mode = /^(?:image|video|audio)(?:\/|$)/i.test(mediaKind) ? 'embed' : 'link';
+      return attachmentReference(name, label, mediaKind, mode);
     };
     const run = async () => {
       const current = cache.editor.view.state.doc.toString() || cache.host?.querySelector('.cm-content')?.textContent || sourceValue(doc);
@@ -2798,7 +2816,7 @@ export function createNotesFeature({
       let result = null;
       let lockedEditor = null;
       try {
-        prepared = await uploadAttachment({ actionId, documentId:doc.id, name:attachmentName(file), mime:file.type || 'application/octet-stream', bytes:file, content, sourceText:current, base:doc.head, caption:caption.value.trim() });
+        prepared = await uploadAttachment({ actionId, documentId:doc.id, name:attachmentName(file, doc), mime:file.type || 'application/octet-stream', bytes:file, content, sourceText:current, base:doc.head, caption:caption.value.trim() });
         if (!attachmentCursorCurrent(cache, doc, cursor)) throw new Error('The captured editor state changed; retry the attachment.');
         const lifecycle = prepared?.preparation;
         if (commitAttachment && lifecycle?.asset_id && lifecycle?.asset_name && lifecycle?.source_text_hash) {
@@ -2818,7 +2836,7 @@ export function createNotesFeature({
         if (cache.editor.replaceRange) cache.editor.replaceRange(cursor.from, cursor.to, inserted);
         else cache.editor.view.dispatch({ changes:{ from:cursor.from, to:cursor.to, insert:inserted }, userEvent:'input' });
         progress.textContent = `Attached ${file.name || 'file'} · ${result.receipt?.outcome || result.outcome || 'saved'}`;
-        const usageResult = await api(`/attachments/usage?name=${encodeURIComponent(attachmentName(file))}`);
+        const usageResult = await api(`/attachments/usage?name=${encodeURIComponent(attachmentName(file, doc))}`);
         usage.textContent = `${usageResult.count} document usage${usageResult.count === 1 ? '' : 's'}`;
         retry.hidden = true; attach.hidden = true;
       } catch (error) {
@@ -2958,7 +2976,7 @@ export function createNotesFeature({
     const comparableResultKey = resultKey && typeof resultKey === 'object'
       ? canonicalEditorResourceKey(resultKey, identity?.provider) : String(resultKey || '');
     const resultRef = String(identity?.resource_ref || identity?.resourceRef || '').trim();
-    if (String(identity?.kind || '') !== 'copal_document') throw new Error('Attachment target identity changed; retry the drop.');
+    if (!['copal_document', 'host_document'].includes(String(identity?.kind || ''))) throw new Error('Attachment target identity changed; retry the drop.');
     if ((targetRef && resultRef !== String(targetRef)) || (comparableResultKey && targetKey && comparableResultKey !== String(targetKey)) || (!resultRef && !comparableResultKey)) throw new Error('Attachment target identity changed; retry the drop.');
     if (JSON.stringify(result.target_revision) !== JSON.stringify(targetRevision)) throw new Error('Attachment target revision changed; retry the drop.');
     const history = result.history;

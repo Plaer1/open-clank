@@ -24,6 +24,13 @@ from typing import Any
 from src.openclank.copal_bridge import CopalBridgeError
 from src.openclank.copal_commit_lock import copal_commit_lock
 from src.openclank.copal_guarded import GuardedCommitCoordinator
+from src.openclank.media_ownership import (
+    MovePreflight,
+    binary_digest,
+    document_media_dir,
+    plan_document_move,
+    scan_references,
+)
 
 
 class LooseCopalRepository:
@@ -1146,6 +1153,171 @@ class LooseCopalRepository:
         self._save(vault, manifest)
         return self._record_doc(vault, record, include_body=True)
 
+    def _plan_and_apply_media_move(
+        self,
+        vault: Path,
+        manifest: dict[str, Any],
+        record: dict[str, Any],
+        destination_name: str,
+    ) -> dict[str, Any]:
+        """Repair app-known media references during a document rename.
+
+        Uses the S14 move planner so the mirrored ``media/<stem>/`` folder
+        follows the document and known authorized references are rewritten
+        surgically.  A protected or read-only reference leaves the move
+        unapplied with a concrete conflict instead of being broken.  Returns
+        one resource-change receipt describing what was staged.
+        """
+        source_path = str(record.get("path") or "")
+        if not source_path:
+            return {"status": "noop"}
+        # Loose Copal treats the vault as the document's canonical root.
+        try:
+            source_layout = document_media_dir(
+                document_path=source_path,
+                canonical_root=str(vault),
+                origin="workspace",
+                owner_subject_id=str(record.get("owner") or ""),
+            )
+            destination_layout = document_media_dir(
+                document_path=destination_name,
+                canonical_root=str(vault),
+                origin="workspace",
+                owner_subject_id=str(record.get("owner") or ""),
+            )
+        except Exception:
+            return {"status": "noop"}
+        source_media_abs = Path(source_layout.absolute_media_dir())
+        destination_media_abs = Path(destination_layout.absolute_media_dir())
+        assets: list[dict[str, str]] = []
+        if source_media_abs.is_dir():
+            for child in sorted(source_media_abs.iterdir()):
+                if not child.is_file():
+                    continue
+                try:
+                    data = child.read_bytes()
+                except OSError:
+                    continue
+                assets.append({
+                    "name": child.name,
+                    "digest": binary_digest(data),
+                    "asset_id": child.name,
+                    "owner_document_id": str(record.get("id") or ""),
+                })
+        # App-known authorized references are the other live documents in this
+        # vault.  Trashed/read-only documents are treated as protected so a
+        # rename never silently breaks them.
+        referencing: list[tuple[str, str, bool]] = []
+        incoming: list = []
+        source_rel = source_path
+        source_media_rel = source_layout.media_dir
+        for other_id, other in (manifest.get("documents") or {}).items():
+            if not isinstance(other, dict) or other.get("trashed") or other.get("id") == record.get("id"):
+                continue
+            other_path = vault / str(other.get("path") or "")
+            if not other_path.is_file():
+                continue
+            try:
+                text = other_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            sites = scan_references(str(other_id), text, protected=bool(other.get("readOnly")))
+            touched = False
+            for site in sites:
+                target = str(site.target or "").replace("\\", "/").lstrip("./")
+                if not target:
+                    continue
+                points_at_document = target in {source_rel, PurePosixPath(source_rel).name, "/" + source_rel}
+                points_at_media = target == source_media_rel or target.startswith(source_media_rel + "/") or target.startswith("media/")
+                if not (points_at_document or points_at_media):
+                    continue
+                touched = True
+                from src.openclank.media_ownership import IncomingReference
+                incoming.append(IncomingReference(
+                    document_id=str(other_id),
+                    source=str(other.get("path") or ""),
+                    target=str(site.target or ""),
+                    protected=bool(other.get("readOnly")),
+                    writable=not bool(other.get("readOnly")),
+                ))
+            if touched:
+                referencing.append((str(other_id), text, bool(other.get("readOnly"))))
+        expected = str(record.get("head") or "")
+        current = expected
+        source_file = vault / source_path
+        if source_file.is_file():
+            try:
+                current = self._fingerprint(source_file.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                current = expected
+        from src.openclank.media_ownership import MovePhase
+        plan = plan_document_move(
+            operation_id=f"rename-{record.get('id')}-{uuid.uuid4().hex[:8]}",
+            document_id=str(record.get("id") or ""),
+            source_document_path=source_path,
+            destination_document_path=destination_name,
+            canonical_root=str(vault),
+            origin="workspace",
+            owner_subject_id=str(record.get("owner") or ""),
+            preflight=MovePreflight(
+                expected_revision=expected,
+                current_revision=current,
+                incoming=tuple(incoming),
+                assets=tuple(assets),
+            ),
+            referencing_documents=referencing,
+        )
+        if plan.conflicts:
+            reasons = "; ".join(
+                f"{item.code} in {item.document_id}: {item.reason}" for item in plan.conflicts
+            )
+            raise CopalBridgeError(f"rename would break references; move left unapplied ({reasons})")
+        if plan.phase == MovePhase.ABORTED:
+            raise CopalBridgeError("rename preflight failed; move left unapplied")
+        # Stage: relocate owned asset bytes only.  A missing source media dir is
+        # a no-op; another document's bytes are never moved.
+        if source_media_abs.is_dir() and source_media_abs != destination_media_abs:
+            destination_media_abs.parent.mkdir(parents=True, exist_ok=True)
+            if destination_media_abs.exists():
+                raise CopalBridgeError("destination media directory already exists")
+            os.replace(source_media_abs, destination_media_abs)
+        # Apply surgical reference rewrites.  Each document is rewritten once
+        # from its captured preimage; no global string replacement.
+        for doc_id, preimage in plan.preimages.items():
+            record_other = (manifest.get("documents") or {}).get(doc_id)
+            if not isinstance(record_other, dict) or record_other.get("trashed"):
+                continue
+            if record_other.get("readOnly"):
+                continue
+            edits = [item for item in plan.reference_edits if item.document_id == doc_id]
+            if not edits:
+                continue
+            rebuilt = preimage
+            for item in sorted(edits, key=lambda row: row.site.start, reverse=True):
+                rebuilt = rebuilt[: item.site.start] + item.new_text + rebuilt[item.site.end :]
+            other_path = vault / str(record_other.get("path") or "")
+            self._atomic_write(other_path, rebuilt)
+            record_other["head"] = self._fingerprint(rebuilt)
+            record_other["updatedAt"] = time.time()
+        receipt = plan.as_receipt()
+        plan.phase = MovePhase.PUBLISHED
+        plan.resource_receipt = {
+            "action_id": f"move-{plan.operation_id}",
+            "status": "complete",
+            "phase": MovePhase.PUBLISHED,
+            "durable": True,
+            "document_id": plan.document_id,
+            "asset_count": len(plan.asset_moves),
+            "reference_count": len(plan.reference_edits),
+        }
+        self._operation(
+            manifest,
+            "media_move",
+            f"media move {source_path} -> {destination_name}",
+            document_id=str(record.get("id") or ""),
+        )
+        return receipt
+
     def _refresh_external_files(self, vault: Path, manifest: dict[str, Any]) -> None:
         """Turn an out-of-band file edit into one durable source operation.
 
@@ -1370,7 +1542,10 @@ class LooseCopalRepository:
             raw_name = str(args.get("name") or "")
             name = self._safe_name(raw_name, "asset")
             existing = next((row for row in documents.values() if isinstance(row, dict) and row.get("kind") == "asset" and row.get("name") == name and not row.get("trashed")), None)
-            digest = self._fingerprint(data.decode("latin1"))
+            # Asset heads must hash the original bytes.  The text fingerprint
+            # re-encodes a Latin-1 decode as UTF-8, which disagrees with the
+            # verification path for non-ASCII payloads.
+            digest = binary_digest(data)
             if existing is not None:
                 if existing.get("head") == digest:
                     return {"doc": self._record_doc(vault, existing, include_body=False)}
@@ -1451,6 +1626,9 @@ class LooseCopalRepository:
             if destination.exists() or any(other.get("path") == name and other.get("id") != record["id"] and not other.get("trashed") for other in documents.values() if isinstance(other, dict)):
                 raise CopalBridgeError("document already exists")
             source = vault / str(record["path"])
+            # Repair media links first so a protected reference refuses the
+            # rename before any document or asset byte is relocated.
+            media_receipt = self._plan_and_apply_media_move(vault, manifest, record, name)
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, destination)
             record["name"] = name
@@ -1459,7 +1637,10 @@ class LooseCopalRepository:
             record["updatedAt"] = time.time()
             self._operation(manifest, "rename", f"rename {name}", document_id=record["id"], action_id=action_id)
             self._save(vault, manifest)
-            return {"outcome": "committed", "doc": self._record_doc(vault, record, include_body=True)}
+            result = {"outcome": "committed", "doc": self._record_doc(vault, record, include_body=True)}
+            if media_receipt.get("status") != "noop" or media_receipt.get("asset_moves") is not None:
+                result["media_move"] = media_receipt
+            return result
         if operation == "trash" and not args.get("id"):
             return {"docs": [self._record_doc(vault, record, include_body=False) for record in documents.values() if isinstance(record, dict) and record.get("trashed") and (not args.get("corpus") or record.get("corpus") == args.get("corpus"))]}
         if operation in {"delete", "trash"}:

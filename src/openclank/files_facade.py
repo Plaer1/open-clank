@@ -452,7 +452,7 @@ def _validated_preparation(value: Mapping[str, Any], *, operation_id: str, expec
     allowed_keys = {
         "operation_id", "generation", "preparation_receipt_id", "source_revision", "target_identity", "target_revision",
         "insertion", "asset", "source_digest", "request_digest", "asset_size", "account_id", "workspace_id",
-        "source_identity", "mode", "action_receipt", "receipt", "history",
+        "source_identity", "mode", "action_receipt", "receipt", "history", "provenance",
     }
     if set(value) - allowed_keys:
         raise FilesFacadeError("provider returned an invalid preparation", code="provider_unavailable")
@@ -529,6 +529,33 @@ def _validated_preparation(value: Mapping[str, Any], *, operation_id: str, expec
     for nested_key in ("action_receipt", "receipt"):
         if value.get(nested_key) is not None and not isinstance(value[nested_key], Mapping):
             raise FilesFacadeError("provider preparation receipt is invalid", code="provider_unavailable")
+    provenance = value.get("provenance")
+    safe_provenance = None
+    if provenance is not None:
+        if not isinstance(provenance, Mapping):
+            raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
+        provenance_allowed = {
+            "canonical_root", "origin", "owner_subject_id", "workspace_id", "document_id", "document_path",
+            "asset_name", "asset_id", "asset_digest", "references", "created_unix_ms",
+        }
+        if set(provenance) - provenance_allowed:
+            raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
+        origin = str(provenance.get("origin") or "").strip()
+        if origin not in {"workspace", "loose"}:
+            raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
+        digest_value = str(provenance.get("asset_digest") or "")
+        if not digest_value.startswith("sha256:") or len(digest_value) > 128:
+            raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
+        references = provenance.get("references")
+        if references is not None and (
+            not isinstance(references, (list, tuple))
+            or any(not isinstance(item, str) or not item.strip() or len(item) > 1024 for item in references)
+        ):
+            raise FilesFacadeError("provider preparation provenance is invalid", code="provider_unavailable")
+        safe_provenance = dict(provenance)
+        safe_provenance["origin"] = origin
+        safe_provenance["asset_digest"] = digest_value
+        safe_provenance["references"] = [str(item) for item in (references or ())]
     target_identity = value.get("target_identity")
     if not isinstance(target_identity, Mapping):
         raise FilesFacadeError("provider preparation target identity is invalid", code="provider_unavailable")
@@ -592,6 +619,8 @@ def _validated_preparation(value: Mapping[str, Any], *, operation_id: str, expec
         result["mode"] = mode.strip().lower()
     if safe_asset is not None:
         result["asset"] = safe_asset
+    if safe_provenance is not None:
+        result["provenance"] = safe_provenance
     history = _public_action_receipt(
         value.get("action_receipt") if isinstance(value.get("action_receipt"), Mapping)
         else value.get("receipt") if isinstance(value.get("receipt"), Mapping)
@@ -1697,7 +1726,7 @@ class FilesFacade:
         else:
             raise FilesFacadeError("attachment source must have exactly one variant", code="invalid_resource_request")
         target_kind = str(target.get("kind") or "").strip()
-        if target_kind == "copal_document":
+        if target_kind in {"copal_document", "host_document"}:
             if set(target) - {"kind", "resource_ref", "expected_revision"} or not str(target.get("resource_ref") or "").strip():
                 raise FilesFacadeError("attachment target descriptor is invalid", code="invalid_resource_request")
         elif target_kind == "treehouse_lesson":
@@ -1712,7 +1741,7 @@ class FilesFacade:
         target_provider = None
         target_adapter = None
         target_ref = None
-        if target_kind == "copal_document":
+        if target_kind in {"copal_document", "host_document"}:
             target_token = str(target.get("resource_ref") or target.get("ref") or "").strip()
             if not target_token:
                 raise FilesFacadeError("attachment target reference is required", code="invalid_resource_request")
@@ -1723,6 +1752,13 @@ class FilesFacade:
             if target_entry.origin_id != target_ref.origin_id or "write" not in target_entry.capabilities:
                 raise FilesFacadeError("attachment target is not writable", code="resource_unavailable")
             self._check_revision(target_entry, target.get("expected_revision"))
+            if target_kind == "host_document":
+                # Host targets dispatch through the registered adapter so the
+                # receipt keeps its own identity; synthetic Host ids are never
+                # presented as Copal ids.
+                target_adapter = self._attachment_targets.get(target_kind)
+                if target_adapter is None:
+                    raise FilesFacadeError("attachment representation is unavailable", code="unsupported_provider_kind")
         elif target_kind == "treehouse_lesson":
             target_adapter = self._attachment_targets.get(target_kind)
         # Workspace and account are part of the idempotency identity.  A
@@ -1820,8 +1856,11 @@ class FilesFacade:
             return failed
         # Materialization is owned by the target provider.  This permits a
         # Host source to become a Copal asset without granting the Host
-        # adapter authority to mutate a Copal document.
-        preparer = getattr(target_provider or target_adapter, "prepare_attachment", None) if (target_provider or target_adapter) is not None else None
+        # adapter authority to mutate a Copal document.  A registered target
+        # adapter (TreeHouse, Host media) owns the representation instead of
+        # the provider whenever one is bound to the target kind.
+        preparer_owner = target_adapter if target_adapter is not None else target_provider
+        preparer = getattr(preparer_owner, "prepare_attachment", None) if preparer_owner is not None else None
         if not callable(preparer):
             failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": operation, "outcome": "failed", "code": "unsupported_provider_kind"}]}
             self._save_operation(context, operation, digest, context.policy_generation, failed)
@@ -1837,6 +1876,7 @@ class FilesFacade:
                     source_provider=source_provider,
                     source_origin_id=source_ref.origin_id if source_ref is not None else None,
                     source_entry=source_entry,
+                    target_origin_id=target_ref.origin_id if target_ref is not None else None,
                 )
             elif target_provider is not None and (
                 target_provider is not source_provider

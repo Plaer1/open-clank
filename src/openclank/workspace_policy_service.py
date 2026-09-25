@@ -152,6 +152,7 @@ def bind_workspace_path(
     path: str,
     purpose: WorkspacePurpose,
     name: str | None = None,
+    media_adoption: object | None = None,
 ) -> WorkspaceBinding:
     """Create/reuse a Workspace without granting any new Agent/People access."""
 
@@ -226,13 +227,26 @@ def bind_workspace_path(
         )
     except FilePolicyError as error:
         raise WorkspacePolicyServiceError(str(error), code=error.code) from error
-    return resolve_workspace_binding(
+    binding = resolve_workspace_binding(
         repository,
         workspace,
         subject_id=owner_subject_id,
         is_admin=is_admin,
         purpose=purpose,
     )
+    # Workspace creation adopts only provenance-backed loose media into the new
+    # root's mirror.  Adoption is best-effort and never blocks the workspace
+    # itself; conflicts are returned to the caller through the recorded receipt.
+    if callable(media_adoption):
+        try:
+            media_adoption(
+                workspace_root=binding.path,
+                workspace_id=workspace.id,
+                owner_subject_id=owner_subject_id,
+            )
+        except Exception:
+            pass
+    return binding
 
 
 def workspace_view(binding: WorkspaceBinding, *, include_path: bool = True) -> dict[str, object]:

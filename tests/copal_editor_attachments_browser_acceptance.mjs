@@ -33,12 +33,12 @@ await withCopalBrowser({ page, request:async (req, res) => {
       const asset = { id:'asset-1', kind:'asset', name:payload.name, head:'asset-head-1', text:'', resource:{ key:{ accountId:'account-owner', workspaceId:'default', provider:'copal', resourceId:'asset-1' }, revision:{ kind:'copalHead', value:'asset-head-1' }, representation:'asset', locator:{ displayName:payload.name, locationLabel:'default' }, capabilities:{ read:true, edit:true, rename:true, trash:true, reveal:true } } };
       return json(res, { outcome:'prepared', actionId:payload.actionId, asset, preparation:{ action_id:payload.actionId, phase:'pending', document_id:payload.documentId, base:payload.base, source_text_hash:payload.sourceTextHash, asset_id:'asset-1', asset_name:payload.name } });
     }
-    state.doc.text = payload.content; state.doc.head = 'head-2'; state.references = (state.doc.text.match(/!\[\[/g) || []).length;
+    state.doc.text = payload.content; state.doc.head = 'head-2'; state.references = (state.doc.text.match(/!?\[[^\]]*\]\(/g) || []).length;
     const asset = { id:'asset-1', kind:'asset', name:payload.name, head:'asset-head-1', text:'', resource:{ key:{ accountId:'account-owner', workspaceId:'default', provider:'copal', resourceId:'asset-1' }, revision:{ kind:'copalHead', value:'asset-head-1' }, representation:'asset', locator:{ displayName:payload.name, locationLabel:'default' }, capabilities:{ read:true, edit:true, rename:true, trash:true, reveal:true } } };
     return json(res, { outcome:'applied', actionId:payload.actionId, doc:state.doc, asset, receipt:{ outcome:'applied', actionId:payload.actionId, operationId:payload.actionId, assetId:'asset-1', documentId:'note-1' } });
   }
   if (url.pathname === '/api/copal/attachments/commit' && req.method === 'POST') {
-    const payload = await body(req); state.doc.text = payload.content; state.doc.head = 'head-2'; state.references = (state.doc.text.match(/!\[\[/g) || []).length;
+    const payload = await body(req); state.doc.text = payload.content; state.doc.head = 'head-2'; state.references = (state.doc.text.match(/!?\[[^\]]*\]\(/g) || []).length;
     return json(res, { outcome:'applied', actionId:payload.actionId, assetId:payload.assetId, doc:state.doc, receipt:{ outcome:'applied', actionId:payload.actionId, operationId:payload.actionId, assetId:payload.assetId, documentId:payload.documentId } });
   }
   if (url.pathname === '/api/copal/attachments/usage') return json(res, { name:url.searchParams.get('name'), count:state.references, usages:[{ id:'note-1', name:state.doc.name, head:state.doc.head }] });
@@ -59,17 +59,17 @@ await withCopalBrowser({ page, request:async (req, res) => {
   await evaluate('document.querySelector(".copal-attachment-caption").value="A photo"');
   await evaluate('document.querySelector(".copal-attachment-dialog[open] button.copal-btn.primary").click()');
   await until('document.querySelector(".copal-attachment-dialog[open] .copal-attachment-progress")?.textContent.includes("failed")');
-  assert.equal(await evaluate('document.querySelector(".cm-content").textContent.includes("![[")'), false, 'failed upload must not insert a broken reference');
+  assert.equal(await evaluate('document.querySelector(".cm-content").textContent.includes("![") || document.querySelector(".cm-content").textContent.includes("![[")'), false, 'failed upload must not insert a broken reference');
   await evaluate('[...document.querySelectorAll(".copal-attachment-dialog[open] button")].find(button => button.textContent.trim() === "Retry").click()');
   await until('document.querySelector(".copal-attachment-dialog[open] .copal-attachment-progress")?.textContent.includes("Attached")');
   assert.equal(await evaluate('document.querySelector(".copal-attachment-dialog[open] .copal-attachment-progress").textContent.includes("applied")'), true);
-  assert.equal(await evaluate('document.querySelector(".cm-content").textContent.includes("![[attachments/photo.png|A photo]]")'), true);
+  assert.equal(await evaluate('document.querySelector(".cm-content").textContent.includes("![A photo](<media/Draft/photo.png>)")'), true);
   const result = await evaluate('fetch("/api/test-state").then(r => r.json())');
   assert.equal(result.uploads, 2);
-  assert.deepEqual(result.objects, ['attachments/photo.png']);
+  assert.deepEqual(result.objects, ['media/Draft/photo.png']);
   assert.deepEqual(result.actionIds, [result.actionIds[0], result.actionIds[0]]);
   assert.equal(result.references, 1);
-  const token = '![[attachments/photo.png|A photo]]';
+  const token = '![A photo](<media/Draft/photo.png>)';
   assert(result.text.indexOf(token) > 0 && result.text.indexOf(token) < result.text.length - token.length, `attachment must be inserted into the existing text: ${result.text}`);
   assert.equal(await evaluate('document.querySelector(".copal-attachment-dialog[open]").textContent.includes("Retry")'), true);
   assert.equal(await evaluate('document.querySelector(".copal-attachment-dialog[open] .copal-attachment-usage").textContent'), '1 document usage');
@@ -87,7 +87,7 @@ await withCopalBrowser({ page, request:async (req, res) => {
   assert.equal(completed.references, 3);
   assert.equal(completed.uploads, 4);
   assert.equal(completed.objectCreates, 3);
-  assert.deepEqual(completed.objects.sort(), ['attachments/dropped.txt', 'attachments/pasted.txt', 'attachments/photo.png']);
+  assert.deepEqual(completed.objects.sort(), ['media/Draft/dropped.txt', 'media/Draft/pasted.txt', 'media/Draft/photo.png']);
   assert.equal(completed.actionIds[0], completed.actionIds[1]);
   assert.equal(new Set(completed.actionIds.slice(2)).size, 2);
   console.log('Production Editor attachment path: captured cursor, caption, failure recovery, retry idempotency surface, usage status, and real CodeMirror insertion passed.');

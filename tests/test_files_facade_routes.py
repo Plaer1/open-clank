@@ -216,7 +216,7 @@ def test_roots_and_children_return_only_opaque_owner_bound_refs(tmp_path):
         assert page.status_code == 200
         assert {row["name"] for row in page.json()["entries"]} == {"Documents", "Notes", "Wiki", "System", "Trash"}
 
-        owner["value"] = "alice"
+        owner["value"] = "bob"
         forged = client.post("/api/files-v1/children", json={"parent_ref": copal["ref"]})
         assert forged.status_code == 404
         assert forged.json()["detail"]["code"] == "resource_unavailable"

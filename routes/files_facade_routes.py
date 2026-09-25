@@ -34,6 +34,10 @@ from src.openclank.files_service_client import client_for_owner, close_all_clien
 from src.openclank.filesystem_registry import FilesystemRootRegistry
 from src.openclank.resource_refs import resolve_resource_ref
 from src.openclank.copal_treehouse_repository import TreeHouseRepository
+from src.openclank.media_attachment_targets import (
+    HostDocumentAttachmentTarget,
+    adopt_loose_media_for_workspace,
+)
 from src.openclank.treehouse_files_adapter import TreeHouseLessonAttachmentTarget
 from src.constants import DATA_DIR
 from src.openclank.workspace_policy_service import (
@@ -167,7 +171,7 @@ class AttachmentSourceRequest(_StrictModel):
 
 
 class AttachmentTargetRequest(_StrictModel):
-    kind: Literal["copal_document", "treehouse_lesson"]
+    kind: Literal["copal_document", "host_document", "treehouse_lesson"]
     resource_ref: str | None = Field(default=None, min_length=8, max_length=16_384)
     course_id: str | None = Field(default=None, min_length=1, max_length=256)
     lesson_id: str | None = Field(default=None, min_length=1, max_length=256)
@@ -175,8 +179,8 @@ class AttachmentTargetRequest(_StrictModel):
 
     @model_validator(mode="after")
     def validate_target(self):
-        if self.kind == "copal_document" and (self.resource_ref is None or self.course_id is not None or self.lesson_id is not None):
-            raise ValueError("Copal attachment target requires a resource ref")
+        if self.kind in {"copal_document", "host_document"} and (self.resource_ref is None or self.course_id is not None or self.lesson_id is not None):
+            raise ValueError(f"{self.kind} attachment target requires a resource ref")
         if self.kind == "treehouse_lesson" and (self.course_id is None or self.lesson_id is None or self.resource_ref is not None):
             raise ValueError("TreeHouse attachment target requires course and lesson IDs")
         return self
@@ -365,8 +369,9 @@ def setup_files_facade_routes(
             session_manager=getattr(app_state, "session_manager", None),
             mimo_supervisor=getattr(app_state, "mimo_supervisor", None),
         )
+        host_provider = HostFilesProvider(registry=host_registry, client_factory=host_client_factory, operation_store=repository)
         providers = [
-            HostFilesProvider(registry=host_registry, client_factory=host_client_factory, operation_store=repository),
+            host_provider,
             GalleryFilesProvider(session_factory),
             LibraryFilesProvider(session_factory, chat_lifecycle=chat_lifecycle),
         ]
@@ -381,7 +386,10 @@ def setup_files_facade_routes(
             providers,
             place_repository=repository,
             operation_store=repository,
-            attachment_targets={"treehouse_lesson": TreeHouseLessonAttachmentTarget(treehouse_repository)},
+            attachment_targets={
+                "host_document": HostDocumentAttachmentTarget(provider=host_provider, operation_store=repository),
+                "treehouse_lesson": TreeHouseLessonAttachmentTarget(treehouse_repository),
+            },
         )
 
     def _raise(error: FilesFacadeError) -> None:
@@ -726,6 +734,12 @@ def setup_files_facade_routes(
                 path=target.directory_path,
                 purpose=body.purpose,
                 name=target.name,
+                media_adoption=lambda *, workspace_root, workspace_id, owner_subject_id: adopt_loose_media_for_workspace(
+                    operation_store=repository,
+                    owner_subject_id=owner_subject_id,
+                    workspace_root=workspace_root,
+                    workspace_id=workspace_id,
+                ),
             )
         except FilesFacadeError as error:
             _raise(error)
