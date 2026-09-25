@@ -914,6 +914,43 @@ def test_replace_messages_tombstone_failure_blocks_delete(manager_db):
     assert rows == [original_id], "projection delete ran despite tombstone failure"
 
 
+def test_replace_messages_tombstone_not_found_blocks_delete(manager_db):
+    """tombstone not_found must not authorize the drop without archive proof."""
+    from src.openclank.conversation_archive import ArchiveUnavailableError
+
+    manager, SessionLocal, engine, archive_path = manager_db
+    session_id = _seed_session(SessionLocal)
+    original_id = "orig-stable-tombstone-not-found"
+    _seed_messages(
+        SessionLocal,
+        session_id,
+        [(original_id, "user", "keep this", {"source": "before"})],
+    )
+    session = manager.get_session(session_id)
+    incoming = [
+        ChatMessage(role="system", content="[Conversation summary]\nsummary", metadata={"compacted": True})
+    ]
+
+    def _not_found_tombstone(**kwargs):
+        return {"ok": False, "error": "not_found"}
+
+    archive = get_conversation_archive()
+    original_tombstone = archive.tombstone_part
+    archive.tombstone_part = _not_found_tombstone
+    try:
+        with pytest.raises(ArchiveUnavailableError):
+            manager.replace_messages(session_id, incoming)
+    finally:
+        archive.tombstone_part = original_tombstone
+
+    db = SessionLocal()
+    try:
+        rows = [r.id for r in db.query(cdb.ChatMessage).filter(cdb.ChatMessage.session_id == session_id)]
+    finally:
+        db.close()
+    assert rows == [original_id], "projection delete ran despite not_found tombstone"
+
+
 def test_replace_messages_archives_tool_parts_not_just_body(manager_db):
     """replace_messages archive path must capture tool_calls/tool_results."""
     manager, SessionLocal, engine, archive_path = manager_db
