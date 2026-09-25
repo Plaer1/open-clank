@@ -66,6 +66,7 @@ import { MCP } from "../mcp"
 import { normalizeToolResult } from "../mcp/tool-result"
 import { LSP } from "../lsp"
 import { Flag } from "../flag/flag"
+import { isMemoryWriteEnabled } from "@/memory/write-gate"
 import { ulid } from "ulid"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
@@ -449,6 +450,60 @@ export const layer = Layer.effect(
 
       if (inserted) yield* prune.resetThresholds(input.sessionID)
       return inserted
+    })
+
+    type RebuildAttempt = "rebuilt" | "writer-failed" | "insert-failed" | "memory-write-off"
+    const MANUAL_WRITER_WAIT_MS = 300_000
+
+    // Shared by the manual /rebuild command and the auto overflow path: try the
+    // on-disk checkpoint first, then start a writer and wait (bounded) when none
+    // exists yet. Returns the single outcome every caller reports.
+    const rebuildEnsuringCheckpoint = Effect.fn("SessionPrompt.rebuildEnsuringCheckpoint")(function* (input: {
+      sessionID: SessionID
+      msgs: MessageV2.WithParts[]
+      agentID?: string
+      agent: string
+      model: { providerID: string; id: string }
+      writerWaitMs: number
+      onWaitingForWriter?: Effect.Effect<void>
+    }) {
+      if (!isMemoryWriteEnabled(yield* config.get())) return "memory-write-off" as const
+
+      if (yield* rebuildFromCheckpoint(input).pipe(Effect.catch(() => Effect.succeed(false))))
+        return "rebuilt" as const
+
+      const hasCP = yield* checkpoint.hasCheckpoint(input.sessionID).pipe(Effect.catch(() => Effect.succeed(false)))
+      const boundary = hasCP
+        ? yield* checkpoint.lastBoundary(input.sessionID).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        : undefined
+      if (hasCP && boundary) return "insert-failed" as const
+
+      const writerRunning = yield* checkpoint
+        .isWriterRunning(input.sessionID)
+        .pipe(Effect.catch(() => Effect.succeed(false)))
+      if (!writerRunning) {
+        yield* checkpoint
+          .tryStartCheckpointWriter({
+            sessionID: input.sessionID,
+            model: { providerID: input.model.providerID, modelID: input.model.id },
+            promptOps: {} as never,
+          })
+          .pipe(Effect.catch(() => Effect.succeed<"started" | "queued" | "skipped">("skipped")))
+      }
+
+      if (input.onWaitingForWriter) yield* input.onWaitingForWriter
+
+      const writerOutcome = yield* checkpoint
+        .waitForWriter(input.sessionID)
+        .pipe(
+          Effect.timeout(input.writerWaitMs),
+          Effect.catch(() => Effect.succeed<"success" | "failure" | "no-writer">("failure")),
+        )
+      if (writerOutcome !== "success") return "writer-failed" as const
+
+      if (yield* rebuildFromCheckpoint(input).pipe(Effect.catch(() => Effect.succeed(false))))
+        return "rebuilt" as const
+      return "insert-failed" as const
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
@@ -4489,25 +4544,45 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
 
       // /rebuild — manually rebuild the conversation context now, from the
-      // latest checkpoint. Reuses the SAME rebuildFromCheckpoint step as the
+      // latest checkpoint. Reuses the SAME rebuildEnsuringCheckpoint step as the
       // automatic overflow path (identical logic + boundary conditions), so a
       // user-triggered rebuild behaves exactly like an auto one: it inserts a
       // checkpoint boundary at the watermark (recent messages after it are kept
       // verbatim; earlier ones collapse to the checkpoint summary on the next
-      // turn). If no usable checkpoint exists yet, tell the user rather than
-      // silently doing nothing — the first checkpoint has to be produced by
-      // normal turns before there is anything to rebuild from.
+      // turn). On a cold session it starts a writer and waits (bounded) rather
+      // than silently doing nothing. Outcomes are reported to the user.
       if (input.command === Command.Default.REBUILD) {
         const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" })
         const lastUser = msgs.findLast((m) => m.info.role === "user")
         const model = yield* lastModel(input.sessionID)
-        const inserted = yield* rebuildFromCheckpoint({
+        const attempt: RebuildAttempt = yield* rebuildEnsuringCheckpoint({
           sessionID: input.sessionID,
           msgs,
           agentID: lastUser?.info.agentID ?? "main",
           agent: agentName,
           model: { providerID: model.providerID, id: model.modelID },
-        }).pipe(Effect.catch(() => Effect.succeed(false)))
+          writerWaitMs: MANUAL_WRITER_WAIT_MS,
+          onWaitingForWriter: status
+            .set(input.sessionID, { type: "busy", message: "Writing checkpoint\u2026" })
+            .pipe(Effect.catch(() => Effect.void)),
+        }).pipe(Effect.catch(() => Effect.succeed("insert-failed" as const)))
+        if (attempt === "writer-failed" || attempt === "memory-write-off") {
+          yield* compaction
+            .create({
+              sessionID: input.sessionID,
+              agent: agentName,
+              model: { providerID: model.providerID, modelID: model.modelID },
+              auto: true,
+              agentID: lastUser?.info.agentID ?? "main",
+            })
+            .pipe(Effect.ignore)
+        }
+        const text =
+          attempt === "rebuilt"
+            ? "Context rebuilt from the latest checkpoint. Recent messages are preserved; earlier context is now summarized."
+            : attempt === "insert-failed"
+              ? "A checkpoint was written but the context could not be rebuilt from it. Context is unchanged and nothing was compacted — retry /rebuild, or report this if it repeats."
+              : "No checkpoint could be written (the checkpoint writer failed), so the context was compacted instead — earlier messages were dropped rather than rebuilt from a checkpoint."
         return yield* prompt({
           sessionID: input.sessionID,
           messageID: input.messageID,
@@ -4515,9 +4590,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           parts: [
             {
               type: "text",
-              text: inserted
-                ? "Context rebuilt from the latest checkpoint. Recent messages are preserved; earlier context is now summarized."
-                : "No checkpoint is available to rebuild from yet — continue the conversation and a checkpoint will be written automatically.",
+              text,
               synthetic: true,
             },
           ],

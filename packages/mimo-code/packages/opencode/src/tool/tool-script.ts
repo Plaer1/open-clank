@@ -9,6 +9,7 @@ import { Log, Filesystem } from "@/util"
 import { Agent } from "@/agent/agent"
 import type { ModelID, ProviderID } from "../provider/schema"
 import { evalScript, type HostFn } from "../workflow/sandbox"
+import { MessageV2 } from "../session/message-v2"
 import { toolScriptRegistry, TOOL_SCRIPT_ALIASES, TOOL_SCRIPT_EXCLUDED } from "./tool-script-ref"
 import DESCRIPTION from "./tool-script.txt"
 import * as Tool from "./tool"
@@ -100,6 +101,111 @@ export function renderToolScriptDeclarations(defs: Tool.Def[]): string {
     "}",
     "```",
   ].join("\n")
+}
+
+export type ExecSubPartSnapshot = {
+  seq: number
+  type: "tool"
+  callID: string
+  tool: string
+  state: {
+    status: "running" | "completed" | "error"
+    input: unknown
+    title?: string
+    output?: string
+    error?: string
+    metadata?: Record<string, unknown>
+    providerOutput?: unknown
+    providerMetadata?: Record<string, unknown>
+    time: { start: number; end?: number }
+    attachments?: Omit<MessageV2.FilePart, "id" | "sessionID" | "messageID">[]
+  }
+}
+
+export const EXEC_METADATA_SCHEMA = 1
+
+function metadataRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  return value as Record<string, unknown>
+}
+
+function optionalMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+const ExecAttachment = MessageV2.FilePart.omit({ id: true, sessionID: true, messageID: true })
+type ExecAttachment = z.infer<typeof ExecAttachment>
+
+function normalizeAttachments(value: unknown): ExecAttachment[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const attachments = value.flatMap((item) => {
+    const parsed = ExecAttachment.safeParse(item)
+    return parsed.success ? [parsed.data] : []
+  })
+  return attachments.length ? attachments : undefined
+}
+
+/** Pure view over exec `metadata.sub_parts`: validates schema version and entries,
+ * drops malformed records, preserves invocation order. No storage writes. */
+export function viewExecSubtools(metadata: unknown): ExecSubPartSnapshot[] {
+  const root = metadataRecord(metadata)
+  if (root.exec_schema !== EXEC_METADATA_SCHEMA || !Array.isArray(root.sub_parts)) return []
+  const seenSeq = new Set<number>()
+  const seenCallID = new Set<string>()
+  return root.sub_parts
+    .flatMap((value) => {
+      const item = metadataRecord(value)
+      const seq = item.seq
+      const callID = item.callID
+      const tool = item.tool
+      const type = item.type
+      const state = metadataRecord(item.state)
+      const status = state.status
+      const input = state.input
+      const time = metadataRecord(state.time)
+      const start = time.start
+      const end = time.end
+      const stateMetadata = optionalMetadata(state.metadata)
+      const attachments = normalizeAttachments(state.attachments)
+      if (
+        typeof seq !== "number" || !Number.isInteger(seq) || seq < 1 ||
+        type !== "tool" ||
+        typeof callID !== "string" || callID.length === 0 ||
+        seenSeq.has(seq) || seenCallID.has(callID) ||
+        typeof tool !== "string" || tool.length === 0 ||
+        (status !== "running" && status !== "completed" && status !== "error") ||
+        !Object.prototype.hasOwnProperty.call(state, "input") ||
+        typeof start !== "number" || !Number.isFinite(start) ||
+        ((status === "completed" || status === "error") && (typeof end !== "number" || !Number.isFinite(end))) ||
+        (status === "completed" && (typeof state.title !== "string" || typeof state.output !== "string")) ||
+        (status === "error" && typeof state.error !== "string")
+      ) return []
+      seenSeq.add(seq)
+      seenCallID.add(callID)
+      return [{
+        seq,
+        type: "tool" as const,
+        callID,
+        tool,
+        state: {
+          status,
+          input,
+          ...(typeof state.title === "string" ? { title: state.title } : {}),
+          ...(typeof state.output === "string" ? { output: state.output } : {}),
+          ...(typeof state.error === "string" ? { error: state.error } : {}),
+          ...(stateMetadata ? { metadata: stateMetadata } : {}),
+          time: {
+            start,
+            ...(typeof end === "number" && Number.isFinite(end) ? { end } : {}),
+          },
+          ...(attachments ? { attachments } : {}),
+          ...(state.providerOutput !== undefined ? { providerOutput: state.providerOutput } : {}),
+          ...(optionalMetadata(state.providerMetadata) ? { providerMetadata: optionalMetadata(state.providerMetadata) } : {}),
+        },
+      } satisfies ExecSubPartSnapshot]
+    })
+    .toSorted((a, b) => a.seq - b.seq)
 }
 
 /** Guest-side prelude: `tools` proxy → __callTool RPC, console → __log capture.

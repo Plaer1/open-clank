@@ -1,10 +1,14 @@
 import type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite"
+import { eq, inArray } from "drizzle-orm"
 import { Global } from "../global"
 import { Log } from "../util"
 import { ProjectTable } from "../project/project.sql"
 import { SessionTable, MessageTable, PartTable, TodoTable, PermissionTable } from "../session/session.sql"
 import { SessionShareTable } from "../share/share.sql"
+import { HistoryFtsTable } from "../history/fts.sql"
+import { extract, DEFAULT_KINDS } from "../history/extract"
+import type { MessageV2 } from "../session/message-v2"
 import path from "path"
 import { existsSync } from "fs"
 import { Filesystem } from "../util"
@@ -103,6 +107,71 @@ export async function run(db: SQLiteBunDatabase<any, any> | NodeSQLiteDatabase<a
     } catch (e) {
       errs.push(`failed to migrate ${label} batch: ${e}`)
       return 0
+    }
+  }
+
+  // JSON imports bypass the Bus history writer. Index imported parts here so
+  // they stay searchable even when the background index migration is already done.
+  function indexImportedParts(ids: readonly string[]) {
+    if (ids.length === 0) return
+    const enabled = new Set(DEFAULT_KINDS)
+    for (let offset = 0; offset < ids.length; offset += 128) {
+      const batch = ids.slice(offset, offset + 128)
+      if (batch.length === 0) continue
+      const rows = db
+        .select({
+          id: PartTable.id,
+          session_id: PartTable.session_id,
+          message_id: PartTable.message_id,
+          data: PartTable.data,
+          time_created: PartTable.time_created,
+          message_data: MessageTable.data,
+          project_id: SessionTable.project_id,
+        })
+        .from(PartTable)
+        .innerJoin(MessageTable, eq(MessageTable.id, PartTable.message_id))
+        .innerJoin(SessionTable, eq(SessionTable.id, PartTable.session_id))
+        .where(inArray(PartTable.id, batch as never))
+        .all()
+      for (const row of rows) {
+        const role = (row.message_data as { role?: string } | undefined)?.role === "user" ? "user" : "assistant"
+        const extracted = extract(
+          {
+            id: row.id,
+            sessionID: row.session_id,
+            messageID: row.message_id,
+            ...(row.data as object),
+          } as MessageV2.Part,
+          role,
+          enabled,
+        )
+        if (!extracted) continue
+        try {
+          db.insert(HistoryFtsTable)
+            .values({
+              part_id: row.id,
+              session_id: row.session_id,
+              message_id: row.message_id,
+              project_id: row.project_id,
+              kind: extracted.kind,
+              tool_name: extracted.tool_name,
+              body: extracted.body,
+              time_created: row.time_created,
+            })
+            .onConflictDoUpdate({
+              target: HistoryFtsTable.part_id,
+              set: {
+                kind: extracted.kind,
+                tool_name: extracted.tool_name,
+                body: extracted.body,
+                time_created: row.time_created,
+              },
+            })
+            .run()
+        } catch (e) {
+          errs.push(`failed to index part ${row.id}: ${e}`)
+        }
+      }
     }
   }
 
@@ -307,6 +376,7 @@ export async function run(db: SQLiteBunDatabase<any, any> | NodeSQLiteDatabase<a
     }
     values.length = count
     stats.parts += insert(values, PartTable, "part")
+    indexImportedParts((values as { id: string }[]).map((row) => row.id))
     step("parts", end - i)
   }
   log.info("migrated parts", { count: stats.parts })
