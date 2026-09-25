@@ -1214,6 +1214,8 @@ interface LezerParserLike {
 }
 
 const lezerParserCache = new Map<string, Promise<LezerParserLike | null>>();
+/** Resolved parsers so the sync API can apply the same opaque-span rules. */
+const lezerParserResolved = new Map<string, LezerParserLike | null>();
 
 function loadLezerParser(language: string): Promise<LezerParserLike | null> {
   const key = advertisedLabel(language);
@@ -1284,8 +1286,15 @@ function loadLezerParser(language: string): Promise<LezerParserLike | null> {
     }
   })();
   lezerParserCache.set(key, pending);
-  pending.catch(() => lezerParserCache.delete(key));
+  pending.then((parser) => { lezerParserResolved.set(key, parser); }).catch(() => lezerParserCache.delete(key));
   return pending;
+}
+
+/** Sync access to an already-loaded Lezer parser (never triggers a load). */
+function peekLezerParser(language: string): LezerParserLike | null {
+  const key = advertisedLabel(language);
+  if (!lezerParserResolved.has(key)) return null;
+  return lezerParserResolved.get(key) ?? null;
 }
 
 function commentNodeName(name: string): boolean {
@@ -1545,7 +1554,55 @@ export function documentationRegions(source: string, language?: string, options:
     if (dialect !== 'jsonc') return [];
   }
   if (label === 'Markdown' || label === 'Plain text') return [];
-  return runStreamAdapter(String(source ?? ''), label, spec.forms);
+  const text = String(source ?? '');
+  const streamRegions = runStreamAdapter(text, label, spec.forms);
+  // Same opaque-span rules as the async path once a parser is cached. The
+  // production widget path schedules an async parse; this keeps any other
+  // sync caller from disagreeing with it after the first load.
+  const parser = peekLezerParser(label);
+  if (!parser) return streamRegions;
+  return mergeStreamWithLezer(text, label, spec, streamRegions, parser);
+}
+
+/**
+ * One source of truth for folding stream-adapter regions into Lezer comment
+ * nodes while honoring parser-rejected opaque spans (CDATA, JSX text, strings).
+ */
+function mergeStreamWithLezer(
+  text: string,
+  label: string,
+  spec: { forms: CommentForm[]; docstrings?: boolean },
+  streamRegions: DocumentationRegion[],
+  parser: LezerParserLike,
+): DocumentationRegion[] {
+  if (spec.docstrings) {
+    const docstrings = collectPythonDocstrings(text, parser);
+    let regions = [...docstrings, ...streamRegions].sort((a, b) => a.from - b.from || a.to - b.to);
+    regions = regions.filter((r) => !docstrings.some((d) => r.from >= d.from && r.to <= d.to && r !== d));
+    return regions;
+  }
+  if (label === 'Kotlin' || label === 'C#' || label === 'Ruby' || label === 'Swift'
+    || label === 'Shell' || label === 'TOML' || label === 'Mermaid' || label === 'Dockerfile'
+    || label === 'SCSS' || label === 'JSON') {
+    return streamRegions;
+  }
+  const { regions: lezerRegions, opaqueSpans } = lezerCommentRegions(text, label, spec.forms, parser);
+  const merged: DocumentationRegion[] = [];
+  const used = new Set<DocumentationRegion>();
+  for (const lr of lezerRegions) {
+    const match = streamRegions.find((r) => !used.has(r) && r.from === lr.from && r.to === lr.to);
+    if (match) { used.add(match); merged.push(lr); }
+    else merged.push(lr);
+  }
+  for (const r of streamRegions) {
+    if (used.has(r)) continue;
+    // Parser rejection wins: never keep a generic-scan region inside an opaque span.
+    if (opaqueSpans.some((s) => s.from <= r.from && r.to <= s.to)) continue;
+    if (!merged.some((m) => m.from <= r.from && m.to >= r.to)) merged.push(r);
+  }
+  const deduped = merged.filter((region) => !merged.some((other) => other !== region && other.from <= region.from && other.to >= region.to && (other.to - other.from) > (region.to - region.from)));
+  deduped.sort((a, b) => a.from - b.from || a.to - b.to);
+  return deduped;
 }
 
 function resolveDialect(options: RegionOptions, language?: string): string {
@@ -1574,47 +1631,7 @@ export async function documentationRegionsAsync(source: string, language?: strin
   const streamRegions = runStreamAdapter(text, label, spec.forms);
   const parser = await loadLezerParser(label);
   if (!parser) return streamRegions;
-  let regions = streamRegions;
-  if (spec.docstrings) {
-    const docstrings = collectPythonDocstrings(text, parser);
-    // Docstrings are first-class regions; they may sit beside `#` comments.
-    regions = [...docstrings, ...regions].sort((a, b) => a.from - b.from || a.to - b.to);
-    // Drop any stream region that is fully inside a docstring (should not happen).
-    regions = regions.filter((r) => !docstrings.some((d) => r.from >= d.from && r.to <= d.to && r !== d));
-    return regions;
-  }
-  if (label === 'Kotlin' || label === 'C#' || label === 'Ruby' || label === 'Swift'
-    || label === 'Shell' || label === 'TOML' || label === 'Mermaid' || label === 'Dockerfile'
-    || label === 'SCSS' || label === 'JSON') {
-    // Stream adapters are authoritative for these rows; Lezer comment names
-    // (when present) must not invent regions the adapter did not bound.
-    return regions;
-  }
-  const { regions: lezerRegions, opaqueSpans } = lezerCommentRegions(text, label, spec.forms, parser);
-  // Prefer the longer/more precise of the two maps per outer range; a region
-  // is kept when both agree on outer bounds, otherwise the Lezer bounds win
-  // for parser languages because they never split a token. Regions fully
-  // contained in another region (a `//` tail of `///`) are dropped.
-  const merged: DocumentationRegion[] = [];
-  const used = new Set<DocumentationRegion>();
-  for (const lr of lezerRegions) {
-    const match = regions.find((r) => !used.has(r) && r.from === lr.from && r.to === lr.to);
-    if (match) { used.add(match); merged.push(lr); }
-    else merged.push(lr);
-  }
-  for (const r of regions) {
-    if (used.has(r)) continue;
-    // The parser owns lookalike rejection: a generic scan must never
-    // override a token the grammar rejected as data (CDATA bodies, JSX
-    // text nodes, string/template/raw-string bodies).
-    if (opaqueSpans.some((s) => s.from <= r.from && r.to <= s.to)) continue;
-    // Keep stream regions that Lezer missed (JSX `{/* */}` etc.).
-    if (!merged.some((m) => m.from <= r.from && m.to >= r.to)) merged.push(r);
-  }
-  // Drop any region fully covered by a longer region.
-  const deduped = merged.filter((region) => !merged.some((other) => other !== region && other.from <= region.from && other.to >= region.to && (other.to - other.from) > (region.to - region.from)));
-  deduped.sort((a, b) => a.from - b.from || a.to - b.to);
-  return deduped;
+  return mergeStreamWithLezer(text, label, spec, streamRegions, parser);
 }
 
 /**

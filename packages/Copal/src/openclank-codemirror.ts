@@ -837,25 +837,29 @@ function createRichCommentPlugin(language: string, renderPreview?: (source:strin
       this.comments = parserCommentSourceRanges(view.state, language, regionOptions);
       this.rawSelectionActive = view.state.selection.ranges.some((selection) => this.comments.some((comment) => selection.from <= comment.to && selection.to >= comment.from));
       this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments, onSeeSource);
+      // First paint may use the sync map; immediately converge on the
+      // grammar-aware path so JSX text / CDATA never stay as widgets.
+      this.scheduleParse(view);
     }
     scheduleParse(view: EditorView) {
       this.parseRevision += 1;
       if (this.parsePending) return;
       this.parsePending = true;
-      queueMicrotask(() => {
+      void (async () => {
         this.parsePending = false;
         if (!view.dom.isConnected) return;
         // Parse the newest document revision: edits that arrived while this
-        // parse was queued are already reflected in view.state.
+        // parse was queued are already reflected in view.state. The async
+        // API is the production source of truth (opaque-span filtering).
         const parsedRevision = this.parseRevision;
-        this.comments = parserCommentSourceRanges(view.state, language, regionOptions);
+        this.comments = await parserCommentSourceRangesAsync(view.state, language, regionOptions);
         this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments, onSeeSource);
         view.dispatch({});
         if (this.parseRevision !== parsedRevision) {
           // A newer revision was tagged while the parse ran; catch up.
           this.scheduleParse(view);
         }
-      });
+      })();
     }
     update(update: ViewUpdate) {
       let delimiterIntroduced = false;

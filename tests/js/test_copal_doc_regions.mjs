@@ -178,3 +178,25 @@ const regionsOf = async (source, language, options = {}) => {
 }
 
 console.log(`copal documentation-region tests passed (${asserts} asserts)`);
+
+// --- production path: sync API must agree with async after parser load -----
+{
+  const jsx = 'function App() {\n  return (\n    <div>\n      {/* real */}\n      not a comment\n    </div>\n  );\n}';
+  const asyncRegions = await mod.documentationRegionsAsync(jsx, 'JavaScript JSX');
+  ok(!asyncRegions.some((r) => jsx.slice(r.from, r.to).includes('not a comment')),
+    'async: JSX text is not a comment region');
+  // After the parser is cached the sync path must apply the same opaque rules.
+  const syncRegions = mod.documentationRegions(jsx, 'JavaScript JSX');
+  ok(!syncRegions.some((r) => jsx.slice(r.from, r.to).includes('not a comment')),
+    'sync: JSX text is not a comment region after parser load');
+  ok(syncRegions.some((r) => jsx.slice(r.from, r.to).includes('real')),
+    'sync: real JSX comment is still a region');
+  eq(syncRegions.length, asyncRegions.length, 'sync and async region counts match');
+
+  const cdata = '<?xml version="1.0"?><root><![CDATA[// not a comment]]></root>';
+  const cAsync = await mod.documentationRegionsAsync(cdata, 'XML');
+  const cSync = mod.documentationRegions(cdata, 'XML');
+  ok(!cAsync.some((r) => cdata.slice(r.from, r.to).includes('not a comment')), 'async: CDATA stays source');
+  ok(!cSync.some((r) => cdata.slice(r.from, r.to).includes('not a comment')), 'sync: CDATA stays source');
+  console.log(`copal production-path opaque-span tests passed (${asserts} asserts total)`);
+}
