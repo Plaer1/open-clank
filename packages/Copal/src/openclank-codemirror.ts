@@ -839,15 +839,22 @@ function createRichCommentPlugin(language: string, renderPreview?: (source:strin
       this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments, onSeeSource);
     }
     scheduleParse(view: EditorView) {
-      const revision = ++this.parseRevision;
+      this.parseRevision += 1;
       if (this.parsePending) return;
       this.parsePending = true;
       queueMicrotask(() => {
         this.parsePending = false;
-        if (revision !== this.parseRevision || !view.dom.isConnected) return;
+        if (!view.dom.isConnected) return;
+        // Parse the newest document revision: edits that arrived while this
+        // parse was queued are already reflected in view.state.
+        const parsedRevision = this.parseRevision;
         this.comments = parserCommentSourceRanges(view.state, language, regionOptions);
         this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments, onSeeSource);
         view.dispatch({});
+        if (this.parseRevision !== parsedRevision) {
+          // A newer revision was tagged while the parse ran; catch up.
+          this.scheduleParse(view);
+        }
       });
     }
     update(update: ViewUpdate) {

@@ -108,6 +108,24 @@ const regionsOf = async (source, language, options = {}) => {
 }
 
 {
+  // Insertion refuses when the target line boundary is inside a literal body.
+  const heredoc = 'cat <<EOF\nbody\nEOF\n';
+  const inBody = mod.safeCommentInsertion(heredoc, 'Shell', 14);
+  eq(inBody.ok, false, 'shell heredoc body refuses insertion');
+  ok(String(inBody.error || '').includes('Refusing'), 'heredoc refusal is explicit');
+  eq(mod.safeCommentInsertion(heredoc, 'Shell', 9).ok, false, 'shell heredoc opener line refuses insertion');
+  eq(mod.safeCommentInsertion(heredoc, 'Shell', 15).ok, true, 'shell heredoc terminator line allows insertion');
+  const template = 'const s = `\n  hello\n`;\n';
+  eq(mod.safeCommentInsertion(template, 'JavaScript', 16).ok, false, 'js template body refuses insertion');
+  eq(mod.safeCommentInsertion(template, 'JavaScript', 11).ok, false, 'js template opener line refuses insertion');
+  const after = mod.safeCommentInsertion(template, 'JavaScript', 22);
+  eq(after.ok, true, 'js after template allows insertion');
+  const phpHeredoc = '<?php\n$x = <<<EOT\n# not\nEOT;\n';
+  eq(mod.safeCommentInsertion(phpHeredoc, 'PHP', 20).ok, false, 'php heredoc body refuses insertion');
+  eq(mod.safeCommentInsertion(phpHeredoc, 'PHP', 30).ok, true, 'php after heredoc allows insertion');
+}
+
+{
   const wrapped = mod.wrapMarkdownAsComment('![img](a.png)', 'Python', '    ');
   eq(wrapped.ok, true, 'python wrap');
   ok(wrapped.text.startsWith('    # '), 'python wrap uses hash comment and indent');

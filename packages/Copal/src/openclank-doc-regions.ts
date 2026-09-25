@@ -451,6 +451,20 @@ interface ScanContext {
   regions: DocumentationRegion[];
   /** Incomplete heredoc/raw tag waiting for a terminator on a later line. */
   pendingHeredoc: { tag: string; indented: boolean; raw: boolean } | null;
+  /**
+   * Optional collector for string/template/heredoc/body spans. Used by
+   * `safeCommentInsertion` to prove an insertion point is outside literals.
+   */
+  dataSpans?: Array<{ from: number; to: number }>;
+}
+
+function noteDataSpan(ctx: ScanContext, from: number, to: number): void {
+  if (ctx.dataSpans && to > from) ctx.dataSpans.push({ from, to });
+}
+
+/** Hazard span for a multi-line construct that never closed before EOF. */
+function noteOpenDataSpan(ctx: ScanContext, from: number): void {
+  noteDataSpan(ctx, from, ctx.source.length + 1);
 }
 
 type StringHandler = (ctx: ScanContext) => void;
@@ -466,25 +480,29 @@ function sourceIndexOfNewline(source: string, from: number, limit: number): numb
 
 function scanLineString(ctx: ScanContext, quote: string, escapes = true): void {
   // Consume a single-line quoted string starting at ctx.index (on the quote).
+  const from = ctx.index;
   ctx.index += 1;
   while (ctx.index < ctx.source.length) {
     const ch = ctx.source[ctx.index];
     if (ch === '\\' && escapes) { ctx.index += 2; continue; }
-    if (ch === quote) { ctx.index += 1; return; }
-    if (ch === '\n') return;
+    if (ch === quote) { ctx.index += 1; noteDataSpan(ctx, from, ctx.index); return; }
+    if (ch === '\n') { noteDataSpan(ctx, from, ctx.index); return; }
     ctx.index += 1;
   }
+  noteOpenDataSpan(ctx, from);
 }
 
 function scanTripleString(ctx: ScanContext, quote: string, raw = false): void {
   const delim = quote.repeat(3);
   if (!matchAt(ctx.source, ctx.index, delim)) return;
+  const from = ctx.index;
   ctx.index += 3;
   while (ctx.index < ctx.source.length) {
     if (!raw && ctx.source[ctx.index] === '\\') { ctx.index += 2; continue; }
-    if (matchAt(ctx.source, ctx.index, delim)) { ctx.index += 3; return; }
+    if (matchAt(ctx.source, ctx.index, delim)) { ctx.index += 3; noteDataSpan(ctx, from, ctx.index); return; }
     ctx.index += 1;
   }
+  noteOpenDataSpan(ctx, from);
 }
 
 function scanMultilineRaw(ctx: ScanContext, hashes: number): void {
@@ -492,12 +510,14 @@ function scanMultilineRaw(ctx: ScanContext, hashes: number): void {
   const hashesStr = '#'.repeat(hashes);
   const open = `${hashesStr}"`;
   if (!matchAt(ctx.source, ctx.index, open)) return;
+  const from = ctx.index;
   ctx.index += open.length;
   const close = `"${hashesStr}`;
   while (ctx.index < ctx.source.length) {
-    if (matchAt(ctx.source, ctx.index, close)) { ctx.index += close.length; return; }
+    if (matchAt(ctx.source, ctx.index, close)) { ctx.index += close.length; noteDataSpan(ctx, from, ctx.index); return; }
     ctx.index += 1;
   }
+  noteOpenDataSpan(ctx, from);
 }
 
 function lineIndentAndText(source: string, pos: number): { indent: string; text: string; lineStart: number; lineEnd: number } {
@@ -547,19 +567,35 @@ function scanFormsBlock(ctx: ScanContext, forms: CommentForm[], language: string
   return false;
 }
 
-function scanFormsLine(ctx: ScanContext, forms: CommentForm[], language: string, validStart: (ctx: ScanContext) => boolean): boolean {
+function scanFormsLine(ctx: ScanContext, forms: CommentForm[], language: string, validStart: (ctx: ScanContext) => boolean, lineContinuation = false): boolean {
   const sorted = [...forms].filter((f) => !f.close).sort((a, b) => b.open.length - a.open.length);
   for (const form of sorted) {
     if (!matchAt(ctx.source, ctx.index, form.open)) continue;
     if (!validStart(ctx)) return false;
     const from = ctx.index;
-    const newline = ctx.source.indexOf('\n', ctx.index);
-    const to = newline < 0 ? ctx.source.length : newline;
+    let newline = ctx.source.indexOf('\n', ctx.index);
+    let to = newline < 0 ? ctx.source.length : newline;
+    // C-family translation-phase-2 splicing: a backslash-newline inside a
+    // `//` comment continues the comment onto the next line.
+    if (lineContinuation) {
+      while (to < ctx.source.length && endsWithSplice(ctx.source, to)) {
+        newline = ctx.source.indexOf('\n', to + 1);
+        to = newline < 0 ? ctx.source.length : newline;
+      }
+    }
     ctx.index = to;
     pushLineRegion(ctx, from, to, form.open, form, language);
     return true;
   }
   return false;
+}
+
+/** True when the line ending at `newlineIndex` ends with a backslash splice. */
+function endsWithSplice(source: string, newlineIndex: number): boolean {
+  if (source[newlineIndex] !== '\n') return false;
+  let cut = newlineIndex;
+  if (cut > 0 && source[cut - 1] === '\r') cut -= 1;
+  return cut > 0 && source[cut - 1] === '\\';
 }
 
 /**
@@ -574,11 +610,27 @@ function scanGeneric(ctx: ScanContext, forms: CommentForm[], language: string, o
   verbatimAt?: boolean;
   hashLine?: boolean;
   htmlComment?: boolean;
+  lineContinuation?: boolean;
+  phpHeredoc?: boolean;
+  xmlCdata?: boolean;
 } = {}): void {
   const lineValid = options.lineValid || (() => true);
   while (ctx.index < ctx.source.length) {
     const ch = ctx.source[ctx.index];
-    if (ch === '\n') { ctx.index += 1; continue; }
+    if (ch === '\n') {
+      ctx.index += 1;
+      if (ctx.pendingHeredoc) consumeHeredocBody(ctx);
+      continue;
+    }
+    if (options.xmlCdata && matchAt(ctx.source, ctx.index, '<![CDATA[')) {
+      // CDATA bodies are ordinary source data; lookalike markup inside is
+      // never a comment.
+      const from = ctx.index;
+      const close = ctx.source.indexOf(']]>', ctx.index + 9);
+      ctx.index = close < 0 ? ctx.source.length : close + 3;
+      noteDataSpan(ctx, from, ctx.index);
+      continue;
+    }
     if (options.htmlComment && matchAt(ctx.source, ctx.index, '<!--')) {
       const from = ctx.index;
       const close = ctx.source.indexOf('-->', ctx.index + 4);
@@ -587,8 +639,10 @@ function scanGeneric(ctx: ScanContext, forms: CommentForm[], language: string, o
       pushBlockRegion(ctx, from, ctx.index, '<!--', '-->', form, language);
       continue;
     }
+    if (options.phpHeredoc && tryPhpHeredoc(ctx)) continue;
     if (options.verbatimAt && ch === '@' && ctx.source[ctx.index + 1] === '"') {
       // C# verbatim string: "" escapes a quote; no backslash escapes.
+      const from = ctx.index;
       ctx.index += 2;
       while (ctx.index < ctx.source.length) {
         if (ctx.source[ctx.index] === '"') {
@@ -597,6 +651,7 @@ function scanGeneric(ctx: ScanContext, forms: CommentForm[], language: string, o
         }
         ctx.index += 1;
       }
+      noteDataSpan(ctx, from, ctx.index);
       continue;
     }
     if (options.rawTripleQuote && matchAt(ctx.source, ctx.index, options.rawTripleQuote)) {
@@ -611,20 +666,95 @@ function scanGeneric(ctx: ScanContext, forms: CommentForm[], language: string, o
       continue;
     }
     if (ch === '`') {
-      // JS template literals; skip interpolation-inside strings loosely.
+      // JS template literals run to the closing backtick, across lines.
+      const from = ctx.index;
       ctx.index += 1;
+      let depth = 0;
       while (ctx.index < ctx.source.length) {
-        if (ctx.source[ctx.index] === '\\') { ctx.index += 2; continue; }
-        if (ctx.source[ctx.index] === '`') { ctx.index += 1; break; }
-        if (ctx.source[ctx.index] === '\n') break;
+        const c = ctx.source[ctx.index];
+        if (c === '\\') { ctx.index += 2; continue; }
+        if (c === '`' && depth === 0) { ctx.index += 1; break; }
+        if (c === '$' && ctx.source[ctx.index + 1] === '{') { depth += 1; ctx.index += 2; continue; }
+        if (c === '}' && depth > 0) { depth -= 1; ctx.index += 1; continue; }
         ctx.index += 1;
       }
+      noteDataSpan(ctx, from, ctx.index);
       continue;
     }
     if (scanFormsBlock(ctx, forms, language)) continue;
-    if (scanFormsLine(ctx, forms, language, lineValid)) continue;
+    if (scanFormsLine(ctx, forms, language, lineValid, options.lineContinuation)) continue;
     ctx.index += 1;
   }
+}
+
+/**
+ * Consume a pending heredoc/nowdoc body as data so comment-like prefixes
+ * inside the body are never scanned as comments.
+ */
+function consumeHeredocBody(ctx: ScanContext): void {
+  const pending = ctx.pendingHeredoc;
+  if (!pending) return;
+  const { tag, indented } = pending;
+  // The hazard starts at the opener's line break: inserting there would push
+  // a new line into the body.
+  const bodyFrom = ctx.index > 0 && ctx.source[ctx.index - 1] === '\n' ? ctx.index - 1 : ctx.index;
+  while (ctx.index < ctx.source.length) {
+    const lineStart = ctx.index;
+    const lineEnd = ctx.source.indexOf('\n', ctx.index);
+    const end = lineEnd < 0 ? ctx.source.length : lineEnd;
+    const line = ctx.source.slice(lineStart, end);
+    const trimmed = indented ? line.trim() : line;
+    if (trimmed === tag) {
+      noteDataSpan(ctx, bodyFrom, lineStart);
+      ctx.index = lineStart;
+      ctx.pendingHeredoc = null;
+      return;
+    }
+    if (lineEnd < 0) break;
+    ctx.index = lineEnd + 1;
+  }
+  // Unterminated body: the hazard runs past EOF.
+  noteOpenDataSpan(ctx, bodyFrom);
+  ctx.index = ctx.source.length;
+  ctx.pendingHeredoc = null;
+}
+
+/**
+ * PHP heredoc (`<<<TAG`, `<<<"TAG"`) and nowdoc (`<<<'TAG'`) openers. The
+ * body starts on the following line and ends at the identifier; a trailing
+ * `;` or `)` after the identifier stays ordinary code.
+ */
+function tryPhpHeredoc(ctx: ScanContext): boolean {
+  if (!matchAt(ctx.source, ctx.index, '<<<')) return false;
+  const m = /^<<<[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(ctx.source.slice(ctx.index, ctx.index + 128));
+  if (!m) return false;
+  const tag = m[2];
+  ctx.index += m[0].length;
+  const lineEnd = ctx.source.indexOf('\n', ctx.index);
+  if (lineEnd < 0) {
+    ctx.index = ctx.source.length;
+    return true;
+  }
+  // Hazard starts at the opener's line break, like every other heredoc body.
+  const bodyFrom = lineEnd;
+  let cursor = lineEnd + 1;
+  while (cursor < ctx.source.length) {
+    const end = ctx.source.indexOf('\n', cursor);
+    const line = ctx.source.slice(cursor, end < 0 ? ctx.source.length : end);
+    const rest = line.replace(/^[ \t]*/, '');
+    if (rest === tag || (rest.startsWith(tag) && !/[A-Za-z0-9_]/.test(rest[tag.length] || ''))) {
+      noteDataSpan(ctx, bodyFrom, cursor);
+      // Resume scanning after the identifier so trailing `;`/`)` stays code.
+      ctx.index = cursor + (line.length - rest.length) + tag.length;
+      return true;
+    }
+    if (end < 0) break;
+    cursor = end + 1;
+  }
+  // Unterminated body: the hazard runs past EOF.
+  noteOpenDataSpan(ctx, bodyFrom);
+  ctx.index = ctx.source.length;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -650,14 +780,17 @@ function scanCsharp(ctx: ScanContext, forms: CommentForm[]): void {
     // C# 11 raw strings: """...""" and $"""...""".
     const rawMatch = /^(\$?)("""+)/.exec(ctx.source.slice(ctx.index, ctx.index + 8));
     if (rawMatch) {
+      const from = ctx.index;
       const hashes = rawMatch[2].length;
       const delim = '"'.repeat(hashes);
       ctx.index += rawMatch[1].length + hashes;
       const close = ctx.source.indexOf(delim, ctx.index);
       ctx.index = close < 0 ? ctx.source.length : close + hashes;
+      noteDataSpan(ctx, from, ctx.index);
       continue;
     }
     if (ch === '@' && ctx.source[ctx.index + 1] === '"') {
+      const from = ctx.index;
       ctx.index += 2;
       while (ctx.index < ctx.source.length) {
         if (ctx.source[ctx.index] === '"') {
@@ -666,6 +799,7 @@ function scanCsharp(ctx: ScanContext, forms: CommentForm[]): void {
         }
         ctx.index += 1;
       }
+      noteDataSpan(ctx, from, ctx.index);
       continue;
     }
     if (ch === '"') {
@@ -707,7 +841,12 @@ function scanRuby(ctx: ScanContext, forms: CommentForm[]): void {
   const heredoc = /<<[-~]?(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
   while (ctx.index < ctx.source.length) {
     const ch = ctx.source[ctx.index];
-    if (ch === '\n') { ctx.index += 1; continue; }
+    if (ch === '\n') {
+      ctx.index += 1;
+      // Heredoc bodies start on the line after the opener; consume as data.
+      if (ctx.pendingHeredoc) consumeHeredocBody(ctx);
+      continue;
+    }
     // Column-sensitive =begin/=end documentation blocks (column 0 only).
     if (ctx.index === 0 || ctx.source[ctx.index - 1] === '\n') {
       if (matchAt(ctx.source, ctx.index, '=begin')) {
@@ -744,7 +883,7 @@ function scanRuby(ctx: ScanContext, forms: CommentForm[]): void {
     }
     // Percent strings: %q{}, %Q{}, %w[], %i[], %r{}, %s().
     if (ch === '%' && /[qQwWiIrsx]/.test(ctx.source[ctx.index + 1] || '') && /[[({<|!]/.test(ctx.source[ctx.index + 2] || '')) {
-      const kind = ctx.source[ctx.index + 1];
+      const from = ctx.index;
       const open = ctx.source[ctx.index + 2];
       const close = { '[': ']', '{': '}', '(': ')', '<': '>', '|': '|', '!': '!', '#': '#' }[open as string] || open;
       ctx.index += 3;
@@ -755,6 +894,7 @@ function scanRuby(ctx: ScanContext, forms: CommentForm[]): void {
         else if (ctx.source[ctx.index] === close) depth -= 1;
         ctx.index += 1;
       }
+      noteDataSpan(ctx, from, ctx.index);
       continue;
     }
     // Heredocs: <<TAG, <<'TAG', <<"TAG", <<-TAG, <<~TAG
@@ -779,6 +919,7 @@ function scanRuby(ctx: ScanContext, forms: CommentForm[]): void {
     }
     if (ch === '/' && ctx.index > 0 && /[(=,[!|&?:{;\s]/.test(ctx.source[ctx.index - 1] || ' ')) {
       // Regex literal (not division). Skip to unescaped closing slash.
+      const from = ctx.index;
       ctx.index += 1;
       while (ctx.index < ctx.source.length) {
         if (ctx.source[ctx.index] === '\\') { ctx.index += 2; continue; }
@@ -786,6 +927,7 @@ function scanRuby(ctx: ScanContext, forms: CommentForm[]): void {
         if (ctx.source[ctx.index] === '\n') break;
         ctx.index += 1;
       }
+      noteDataSpan(ctx, from, ctx.index);
       continue;
     }
     if (scanFormsLine(ctx, forms, 'Ruby', (c) => {
@@ -803,21 +945,7 @@ function scanShell(ctx: ScanContext, forms: CommentForm[]): void {
     if (ch === '\n') {
       ctx.index += 1;
       // Consume heredoc bodies as data, never as comments.
-      if (ctx.pendingHeredoc) {
-        const { tag, indented } = ctx.pendingHeredoc;
-        while (ctx.index < ctx.source.length) {
-          const lineStart = ctx.index;
-          const lineEnd = ctx.source.indexOf('\n', ctx.index);
-          const end = lineEnd < 0 ? ctx.source.length : lineEnd;
-          const line = ctx.source.slice(lineStart, end);
-          const trimmed = indented ? line.trim() : line;
-          if (trimmed === tag) { ctx.index = end; break; }
-          ctx.index = end;
-          if (lineEnd < 0) break;
-          ctx.index = lineEnd + 1;
-        }
-        ctx.pendingHeredoc = null;
-      }
+      if (ctx.pendingHeredoc) consumeHeredocBody(ctx);
       continue;
     }
     if (ch === '#') {
@@ -837,12 +965,14 @@ function scanShell(ctx: ScanContext, forms: CommentForm[]): void {
     if (ch === "'" ) { scanLineString(ctx, ch, false); continue; }
     if (ch === '"') { scanLineString(ctx, ch, true); continue; }
     if (ch === '`') {
+      const from = ctx.index;
       ctx.index += 1;
       while (ctx.index < ctx.source.length && ctx.source[ctx.index] !== '`') {
         if (ctx.source[ctx.index] === '\\') ctx.index += 1;
         ctx.index += 1;
       }
       ctx.index += 1;
+      noteDataSpan(ctx, from, ctx.index);
       continue;
     }
     if (ch === '<' && ctx.source[ctx.index + 1] === '<') {
@@ -885,14 +1015,22 @@ function scanDockerfile(ctx: ScanContext, forms: CommentForm[]): void {
         const tag = m[3];
         const indented = /<<-/.test(m[1]);
         const lineEnd = ctx.source.indexOf('\n', ctx.index);
+        const bodyFrom = lineEnd < 0 ? ctx.source.length : lineEnd;
         let cursor = lineEnd < 0 ? ctx.source.length : lineEnd + 1;
+        let closed = false;
         while (cursor < ctx.source.length) {
           const end = ctx.source.indexOf('\n', cursor);
           const line = ctx.source.slice(cursor, end < 0 ? ctx.source.length : end);
-          if ((indented ? line.trim() : line) === tag) { cursor = end < 0 ? ctx.source.length : end; break; }
+          if ((indented ? line.trim() : line) === tag) {
+            noteDataSpan(ctx, bodyFrom, cursor);
+            closed = true;
+            cursor = end < 0 ? ctx.source.length : end;
+            break;
+          }
           if (end < 0) break;
           cursor = end + 1;
         }
+        if (!closed && lineEnd >= 0) noteOpenDataSpan(ctx, bodyFrom);
         ctx.index = cursor;
         continue;
       }
@@ -971,6 +1109,7 @@ function scanYaml(ctx: ScanContext, forms: CommentForm[]): void {
     if (ch === '\n') { ctx.index += 1; continue; }
     // Block scalars: | and > with optional indicators; content is data.
     if ((ch === '|' || ch === '>') && /^\s*[|>][-+]?\d*\s*(?:#.*)?$/.test(ctx.source.slice(ctx.index, ctx.source.indexOf('\n', ctx.index) < 0 ? ctx.source.length : ctx.source.indexOf('\n', ctx.index)))) {
+      const from = ctx.index;
       const lineEnd = ctx.source.indexOf('\n', ctx.index);
       let cursor = lineEnd < 0 ? ctx.source.length : lineEnd + 1;
       const indentMatch = /^[ \t]*/.exec(ctx.source.slice(cursor))?.[0].length || 0;
@@ -984,9 +1123,11 @@ function scanYaml(ctx: ScanContext, forms: CommentForm[]): void {
           if (end < 0) { cursor = ctx.source.length; break; }
           cursor = end + 1;
         }
+        noteDataSpan(ctx, from, cursor);
         ctx.index = cursor;
         continue;
       }
+      noteDataSpan(ctx, from, lineEnd < 0 ? ctx.source.length : lineEnd + 1);
       ctx.index = lineEnd < 0 ? ctx.source.length : lineEnd + 1;
       continue;
     }
@@ -1008,12 +1149,17 @@ function scanYaml(ctx: ScanContext, forms: CommentForm[]): void {
   }
 }
 
-function scanPhpHtml(ctx: ScanContext, forms: CommentForm[]): void {
+function scanPhpHtml(ctx: ScanContext, forms: CommentForm[], allowHeredoc = false): void {
   // HTML comments plus PHP/JS/CSS comment forms. Nested regions use their own
   // grammar's delimiters; script/style strings stay data.
   while (ctx.index < ctx.source.length) {
     const ch = ctx.source[ctx.index];
-    if (ch === '\n') { ctx.index += 1; continue; }
+    if (ch === '\n') {
+      ctx.index += 1;
+      if (ctx.pendingHeredoc) consumeHeredocBody(ctx);
+      continue;
+    }
+    if (allowHeredoc && tryPhpHeredoc(ctx)) continue;
     // Quoted attribute/string values are never comments.
     if (ch === '"' || ch === "'") { scanLineString(ctx, ch, true); continue; }
     if (matchAt(ctx.source, ctx.index, '<!--')) {
@@ -1034,18 +1180,17 @@ function scanPhpHtml(ctx: ScanContext, forms: CommentForm[]): void {
       // Scan embedded JS/CSS comments as regions with their own delimiters.
       const embeddedLanguage = tag === 'script' ? 'JavaScript' : 'CSS';
       const embeddedForms = LANGUAGE_SPECS[embeddedLanguage].forms;
-      const sub: ScanContext = { source: ctx.source, index: ctx.index, regions: ctx.regions, pendingHeredoc: null };
-      if (tag === 'script') scanGeneric(sub, embeddedForms, embeddedLanguage, {});
-      else scanGeneric(sub, embeddedForms, embeddedLanguage, {});
+      const sub: ScanContext = { source: ctx.source, index: ctx.index, regions: ctx.regions, pendingHeredoc: null, dataSpans: ctx.dataSpans };
+      scanGeneric(sub, embeddedForms, embeddedLanguage, { lineContinuation: false });
       ctx.index = regionEnd;
       continue;
     }
     if (ch === '<' && ctx.source[ctx.index + 1] === '?') {
-      // PHP region: use PHP comment forms inside.
+      // PHP region: use PHP comment forms inside; heredoc bodies stay data.
       const close = ctx.source.indexOf('?>', ctx.index);
       const regionEnd = close < 0 ? ctx.source.length : close;
-      const sub: ScanContext = { source: ctx.source, index: ctx.index + 2, regions: ctx.regions, pendingHeredoc: null };
-      scanGeneric(sub, forms, 'PHP', {});
+      const sub: ScanContext = { source: ctx.source, index: ctx.index + 2, regions: ctx.regions, pendingHeredoc: null, dataSpans: ctx.dataSpans };
+      scanGeneric(sub, forms, 'PHP', { phpHeredoc: true });
       ctx.index = regionEnd;
       continue;
     }
@@ -1079,7 +1224,13 @@ function loadLezerParser(language: string): Promise<LezerParserLike | null> {
       switch (key) {
         case 'JavaScript': case 'JavaScript JSX': case 'TypeScript': case 'TypeScript JSX': {
           const mod = await import('@lezer/javascript');
-          return (mod as any).parser;
+          // JSX/TS labels need the matching dialect so JSX text is rejected
+          // as code and never reinterpreted as comments by a generic scan.
+          const base = (mod as any).parser;
+          if (key === 'JavaScript') return base;
+          if (key === 'JavaScript JSX') return base.configure({ dialect: 'jsx' });
+          if (key === 'TypeScript') return base.configure({ dialect: 'ts' });
+          return base.configure({ dialect: 'jsx ts' });
         }
         case 'Python': {
           const mod = await import('@lezer/python');
@@ -1141,6 +1292,14 @@ function commentNodeName(name: string): boolean {
   return /comment/i.test(name);
 }
 
+/**
+ * Parser nodes that own their text as data: a generic scanner must never
+ * reinterpret comment-like tokens inside them (CDATA bodies, JSX text,
+ * string/template/raw-string literals, attribute values). `Template` is
+ * deliberately absent: Lezer PHP names its root node that.
+ */
+const OPAQUE_PARSER_NODES = /^(?:Cdata|CData|JSXText|String|StringContent|StringContentGroup|TemplateString|TemplateContent|RawString|Character|RegExp|AttributeValue|CharRef|Entity)$/;
+
 /** Map a Lezer comment node into a DocumentationRegion using the language forms. */
 function regionFromLezerComment(source: string, from: number, to: number, language: string, forms: CommentForm[]): DocumentationRegion | null {
   const raw = source.slice(from, to);
@@ -1159,18 +1318,20 @@ function regionFromLezerComment(source: string, from: number, to: number, langua
   });
 }
 
-function lezerCommentRegions(source: string, language: string, forms: CommentForm[], parser: LezerParserLike): DocumentationRegion[] {
+function lezerCommentRegions(source: string, language: string, forms: CommentForm[], parser: LezerParserLike): { regions: DocumentationRegion[]; opaqueSpans: Array<{ from: number; to: number }> } {
   const ranges: Array<{ from: number; to: number }> = [];
+  const opaqueSpans: Array<{ from: number; to: number }> = [];
   const tree = parser.parse(source);
   tree.iterate({
     enter(node) {
       if (commentNodeName(node.name) && node.from < node.to) ranges.push({ from: node.from, to: node.to });
+      else if (OPAQUE_PARSER_NODES.test(node.name) && node.from < node.to) opaqueSpans.push({ from: node.from, to: node.to });
     },
   });
   ranges.sort((a, b) => a.from - b.from || a.to - b.to);
   const outer = ranges.filter((range) => !ranges.some((other) => other !== range && other.from <= range.from && other.to >= range.to));
   const mapped = outer.map((range) => regionFromLezerComment(source, range.from, range.to, language, forms)).filter(Boolean) as DocumentationRegion[];
-  return groupAdjacentLineRegions(source, mapped, language, forms);
+  return { regions: groupAdjacentLineRegions(source, mapped, language, forms), opaqueSpans };
 }
 
 // --- Python docstrings (PEP 257 structural recognition) --------------------
@@ -1344,9 +1505,11 @@ function docstringRegionFromExpression(source: string, expr: PyNode, nodes: PyNo
 // Public API
 // ---------------------------------------------------------------------------
 
-function runStreamAdapter(source: string, language: string, forms: CommentForm[]): DocumentationRegion[] {
+const C_FAMILY = new Set(['C', 'C/C++ header', 'C++', 'C++ header']);
+
+function runStreamAdapter(source: string, language: string, forms: CommentForm[], dataSpans?: Array<{ from: number; to: number }>): DocumentationRegion[] {
   const spec = LANGUAGE_SPECS[language];
-  const ctx: ScanContext = { source, index: 0, regions: [], pendingHeredoc: null };
+  const ctx: ScanContext = { source, index: 0, regions: [], pendingHeredoc: null, dataSpans };
   const adapter = spec?.streamAdapter;
   if (adapter === 'kotlin') scanKotlin(ctx, forms);
   else if (adapter === 'csharp') scanCsharp(ctx, forms);
@@ -1359,8 +1522,11 @@ function runStreamAdapter(source: string, language: string, forms: CommentForm[]
   else if (adapter === 'scss') scanScss(ctx, forms);
   else if (adapter === 'jsonc') scanJsonc(ctx, forms);
   else if (language === 'YAML') scanYaml(ctx, forms);
-  else if (language === 'PHP' || language === 'HTML') scanPhpHtml(ctx, forms);
-  else scanGeneric(ctx, forms, language, {});
+  else if (language === 'PHP' || language === 'HTML') scanPhpHtml(ctx, forms, language === 'PHP');
+  else scanGeneric(ctx, forms, language, {
+    lineContinuation: C_FAMILY.has(language),
+    xmlCdata: language === 'XML',
+  });
   return groupAdjacentLineRegions(source, ctx.regions, language, forms);
 }
 
@@ -1424,12 +1590,11 @@ export async function documentationRegionsAsync(source: string, language?: strin
     // (when present) must not invent regions the adapter did not bound.
     return regions;
   }
-  const lezerRegions = lezerCommentRegions(text, label, spec.forms, parser);
+  const { regions: lezerRegions, opaqueSpans } = lezerCommentRegions(text, label, spec.forms, parser);
   // Prefer the longer/more precise of the two maps per outer range; a region
   // is kept when both agree on outer bounds, otherwise the Lezer bounds win
   // for parser languages because they never split a token. Regions fully
   // contained in another region (a `//` tail of `///`) are dropped.
-  if (!lezerRegions.length) return regions;
   const merged: DocumentationRegion[] = [];
   const used = new Set<DocumentationRegion>();
   for (const lr of lezerRegions) {
@@ -1439,6 +1604,10 @@ export async function documentationRegionsAsync(source: string, language?: strin
   }
   for (const r of regions) {
     if (used.has(r)) continue;
+    // The parser owns lookalike rejection: a generic scan must never
+    // override a token the grammar rejected as data (CDATA bodies, JSX
+    // text nodes, string/template/raw-string bodies).
+    if (opaqueSpans.some((s) => s.from <= r.from && r.to <= s.to)) continue;
     // Keep stream regions that Lezer missed (JSX `{/* */}` etc.).
     if (!merged.some((m) => m.from <= r.from && m.to >= r.to)) merged.push(r);
   }
@@ -1450,7 +1619,9 @@ export async function documentationRegionsAsync(source: string, language?: strin
 
 /**
  * Choose a safe adjacent syntax boundary for inserting a new comment.
- * Never splits literals, tokens, continued directives or heredoc bodies.
+ * Text is placed only at a line boundary that is provably outside strings,
+ * templates and multi-line delimiter bodies (heredocs, nowdocs, raw strings).
+ * When safety cannot be proven the call refuses instead of editing.
  * Strict JSON reports a real format limitation instead of inventing syntax.
  */
 export function safeCommentInsertion(source: string, language?: string, offset = 0, options: RegionOptions = {}): SafeInsertionResult {
@@ -1478,13 +1649,23 @@ export function safeCommentInsertion(source: string, language?: string, offset =
   if (inside) {
     return { ok: true, from: at, to: at, indent: lineIndentAndText(text, at).indent, text: '', comment: '' };
   }
-  // Find the nearest valid line boundary that is not inside a string/heredoc.
   const line = lineIndentAndText(text, at);
   const indent = line.indent;
   const form = pickInsertForm(spec.forms, label);
   if (!form) return { ok: false, error: `${label} has no usable comment form for automatic insertion.` };
   // Insert on a fresh line after the current line so we never split tokens.
   const insertAt = line.lineEnd;
+  // Prove the target line boundary is outside string/template/multi-line
+  // delimiter bodies; refuse rather than splice into a literal.
+  const dataSpans: Array<{ from: number; to: number }> = [];
+  runStreamAdapter(text, label, spec.forms, dataSpans);
+  const hazard = dataSpans.find((span) => span.from <= insertAt && insertAt < span.to);
+  if (hazard) {
+    return {
+      ok: false,
+      error: `Refusing comment insertion at offset ${insertAt}: that line boundary is inside a string, template, or multi-line delimiter body (offsets ${hazard.from}–${hazard.to}). Move the cursor outside that construct and retry.`,
+    };
+  }
   return { ok: true, from: insertAt, to: insertAt, indent, text: '', comment: form.open };
 }
 
