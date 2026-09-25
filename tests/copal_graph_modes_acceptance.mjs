@@ -34,7 +34,46 @@ window.__graphTest={
 };`;
 const copal=source.replace('export default { init,',injection+'\nexport default { init,');
 const page=`<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/static/style.css"><style>html,body{margin:0;background:#17202a;color:#eee}#graph{width:1100px;height:760px}</style><main id="graph" data-window-id="graph-test"></main><script type="module">import { registerInputContext, activateInputContext } from "/static/js/copal/inputContext.js"; import "/static/js/copal.js"; window.__ready=()=>Boolean(window.__graphTest); window.__register=()=>{const b=document.querySelector('#graph');const c={windowId:'graph-test',paneId:'graph',capabilities:{keyboard:true,pointer:true,wheel:true}};registerInputContext(b,c);activateInputContext(c);};</script>`;
-const server=http.createServer((req,res)=>{if(req.url==='/'){res.writeHead(200,{'content-type':'text/html'});res.end(page);return;}if(req.url==='/static/js/copal.js'){res.writeHead(200,{'content-type':'text/javascript'});res.end(copal);return;}if(req.url.startsWith('/static/')){const file=path.join(root,req.url.slice(1));if(!file.startsWith(path.join(root,'static'))){res.writeHead(403);res.end();return;}try{const type=file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'application/octet-stream';res.writeHead(200,{'content-type':type});res.end(fs.readFileSync(file));}catch{res.writeHead(404);res.end();}return;}res.writeHead(404);res.end();});
+let facetCorpus=[];
+function buildFacetResponse(url){
+  const offset=Math.max(0,Number(new URL(url,'http://x').searchParams.get('offset')||0));
+  const limit=Math.min(1000,Math.max(1,Number(new URL(url,'http://x').searchParams.get('limit')||200)));
+  const query=String(new URL(url,'http://x').searchParams.get('query')||'').trim().toLowerCase();
+  const docs=facetCorpus;
+  const kinds={}, folders={}, tags={}, properties={};
+  const totals=new Map(); const official=new Map(); let officialTotal=0;
+  for (const doc of docs) {
+    const kind=doc.kind==='wiki'?'wiki':doc.kind==='base'?'base':doc.kind==='copal-event'?'event':'note';
+    kinds[kind]=(kinds[kind]||0)+1;
+    const name=String(doc.name||''); const cut=name.lastIndexOf('/');
+    const folder=cut>0?name.slice(0,cut):'';
+    folders[folder]=(folders[folder]||0)+1;
+    const top=folder.split('/')[0]||'';
+    if (top) totals.set(top,(totals.get(top)||0)+1);
+    const isOfficial=doc.builtin===true||String((doc.properties&&doc.properties.product)||doc.product||'').trim().toLowerCase()==='open-clank'||(doc.properties&&doc.properties.builtin===true);
+    if (isOfficial&&top) { officialTotal+=1; official.set(top,(official.get(top)||0)+1); }
+    for (const tag of doc.tags||[]) { const t=String(tag).trim(); if(t) tags[t]=(tags[t]||0)+1; }
+    for (const [key,value] of Object.entries(doc.properties||{})) {
+      const pk=String(key).trim(); if(!pk) continue;
+      const bucket=properties[pk]=properties[pk]||{};
+      for (const item of (Array.isArray(value)?value:[value])) {
+        if (item===null||item===undefined||item===''||typeof item==='object') continue;
+        const text=String(item); bucket[text]=(bucket[text]||0)+1;
+      }
+    }
+  }
+  let officialRoot=null;
+  const candidates=[...official.entries()].filter(([f,c])=>(totals.get(f)||0)===c&&c===officialTotal);
+  if (candidates.length) officialRoot=candidates.sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]))[0][0];
+  const sorted=(obj)=>Object.entries(obj).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])).map(([value,count])=>({value,count}));
+  const paginate=(values)=>{
+    const matched=query?values.filter((item)=>item.value.toLowerCase().includes(query)):values;
+    const window=matched.slice(offset,offset+limit);
+    return {values:window,total:matched.length,offset,limit,hasMore:offset+window.length<matched.length};
+  };
+  return {version:1,generation:'fixture-facets',officialRoot,totalDocuments:docs.length,facets:{kinds:paginate(sorted(kinds)),folders:paginate(sorted(folders)),tags:paginate(sorted(tags)),properties:Object.fromEntries(Object.entries(properties).map(([k,v])=>[k,paginate(sorted(v))]))}};
+}
+const server=http.createServer((req,res)=>{if(req.url==='/'){res.writeHead(200,{'content-type':'text/html'});res.end(page);return;}if(req.url==='/static/js/copal.js'){res.writeHead(200,{'content-type':'text/javascript'});res.end(copal);return;}if(req.url.startsWith('/static/')){const file=path.join(root,req.url.slice(1));if(!file.startsWith(path.join(root,'static'))){res.writeHead(403);res.end();return;}try{const type=file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'application/octet-stream';res.writeHead(200,{'content-type':type});res.end(fs.readFileSync(file));}catch{res.writeHead(404);res.end();}return;}if(req.url.startsWith('/api/copal/graph/facets')){if(!facetCorpus.length){res.writeHead(404);res.end();return;}res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(buildFacetResponse(req.url)));return;}res.writeHead(404);res.end();});
 let browser,ws,serverClosed=false; let serverPort;
 try {
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve)); serverPort=server.address().port;
@@ -79,9 +118,9 @@ try {
  await evalPage(`(()=>{const nodes=[...document.querySelectorAll('.copal-mind-tree-node')];const source=nodes.find(item=>item.textContent.includes('Root'));const target=nodes.find(item=>item.textContent.includes('Renamed'));const transfer=new DataTransfer();source.dispatchEvent(new DragEvent('dragstart',{bubbles:true,dataTransfer:transfer}));window.__graphTest.drafts['mind-doc'].localRevision+=1;target.dispatchEvent(new DragEvent('dragover',{bubbles:true,dataTransfer:transfer}));target.dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer:transfer}))})()`);assert.equal((await evalPage('window.__graphTest.mindTransactions()')).length,cycleCount);
  const readOnlyDoc={...mindDoc,id:'readonly-doc',name:'Read only.md',readOnly:true};await evalPage(`window.__graphTest.setup({account:'acct-mind',workspace:'ws-mind',docs:${JSON.stringify([readOnlyDoc])},drafts:{'readonly-doc':{text:${JSON.stringify(mindText)},expectedRevision:{kind:'copalHead',value:'mind-head-1'},localRevision:0}},body:document.querySelector('#graph')});window.__graphTest.setSource('readonly-doc');window.__graphTest.renderMind()`);assert.equal(await evalPage('document.querySelector(".copal-mind-tree-node")?.draggable'),false);assert.equal(await evalPage('(()=>{const n=document.querySelector(".copal-mind-tree-node");const d=new DataTransfer();n.dispatchEvent(new DragEvent("dragstart",{bubbles:true,dataTransfer:d}));const event=new DragEvent("dragover",{bubbles:true,dataTransfer:d});n.dispatchEvent(event);return d.dropEffect})()'),'none');
  const stateCases=[
-  {id:'base-source',doc:{id:'base-source',name:'View.base',kind:'base',text:'version: 1',head:'base-1'},title:'Mind source unsupported'},
-  {id:'missing-source',doc:null,title:'Mind source unavailable'},
-  {id:'parse-source',doc:{id:'parse-source',name:'Broken.md',kind:'note',text:'',head:'parse-1',rawPreserved:true,recoveryState:'malformed-preserved',note_error:'native parse failed'},title:'Mind source parse failed'},
+  {id:'base-source',doc:{id:'base-source',name:'View.base',kind:'base',text:'version: 1',head:'base-1'},title:'Structure source unsupported'},
+  {id:'missing-source',doc:null,title:'Structure source unavailable'},
+  {id:'parse-source',doc:{id:'parse-source',name:'Broken.md',kind:'note',text:'',head:'parse-1',rawPreserved:true,recoveryState:'malformed-preserved',note_error:'native parse failed'},title:'Structure source parse failed'},
   {id:'empty-source',doc:{id:'empty-source',name:'Empty.md',kind:'note',text:'plain body',head:'empty-1'},title:'No headings or bullets found in this source'},
  ];
  for (const item of stateCases) { const docs=item.doc?[item.doc]:[]; await evalPage(`window.__graphTest.setup({account:'acct-state',workspace:'ws-state',docs:${JSON.stringify(docs)},body:document.querySelector('#graph')});window.__graphTest.setSource(${JSON.stringify(item.id)});window.__graphTest.renderMind()`);await delay(2);assert.match(await evalPage('document.body.textContent'),new RegExp(item.title.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&'))); }
@@ -94,9 +133,9 @@ try {
  const fitBefore=await evalPage('document.querySelector(".copal-graph").getAttribute("viewBox")');await evalPage(`document.querySelector('.copal-graph-ctrl[title="Fit graph"]').click()`);await delay(20);const fitAfter=await evalPage('document.querySelector(".copal-graph").getAttribute("viewBox")');assert.notEqual(fitAfter,fitBefore);report.push({case:'Fit control reframes mounted content',fitBefore,fitAfter});
  // S20: real facet filters and the official-docs default come from scoped
  // metadata, not a hardcoded kind allowlist.
- const facetDocs=[{id:'p1',name:'Notes/Personal.md',kind:'note',tags:['keep'],properties:{status:'open'},text:'personal'},{id:'o1',name:'OpenClank/Start Here',kind:'note',tags:['builtin'],properties:{product:'open-clank',builtin:true},builtin:true,text:'official'}];
+ const facetDocs=[{id:'p1',name:'Notes/Personal.md',kind:'note',tags:['keep'],properties:{status:'open'},text:'personal'},{id:'o1',name:'OpenClank/Start Here',kind:'note',tags:['builtin'],properties:{product:'open-clank',builtin:true},builtin:true,text:'official'}]; facetCorpus=facetDocs;
  await evalPage(`window.__graphTest.setup(Object.assign({account:'acct-facet',workspace:'ws-facet',docs:${JSON.stringify(facetDocs)},planning:{tracks:[],floatingTodos:[]}},{body:document.querySelector('#graph')}));window.__graphTest.actual()`);await delay(20);const officialDefault=await evalPage(`({mounted:document.querySelectorAll('.copal-graph-node').length,official:document.querySelector('[data-graph-id="document:o1"]')!==null})`);assert.equal(officialDefault.official,false,'official docs are hidden by default');assert.equal(officialDefault.mounted,1);await evalPage(`(()=>{const t=document.querySelector('.copal-graph-official input');t.checked=true;t.dispatchEvent(new Event('change',{bubbles:true}))})()`);await delay(20);const officialShown=await evalPage(`document.querySelector('[data-graph-id="document:o1"]')!==null`);assert.equal(officialShown,true,'official docs are explicitly includable');report.push({case:'official docs excluded by default and includable',officialDefault,officialShown});
- await evalPage(`(()=>{const group=[...document.querySelectorAll('.copal-graph-facet-group')].find(g=>g.dataset.facetGroup==='Tag');const input=group.querySelector('input');input.checked=true;input.dispatchEvent(new Event('change',{bubbles:true}))})()`);await delay(20);const tagFiltered=await evalPage(`({nodes:document.querySelectorAll('.copal-graph-node').length,info:document.querySelector('.copal-graph-info')?.textContent})`);report.push({case:'real tag facet filter',tagFiltered});
+ const tagPick=await evalPage(`(()=>{const group=[...document.querySelectorAll('.copal-graph-facet-group')].find(g=>g.dataset.facetGroup==='Tag');const input=group.querySelector('input');const label=input.closest('label')?.textContent||'';input.checked=true;input.dispatchEvent(new Event('change',{bubbles:true}));return {label}})()`);await delay(20);const tagFiltered=await evalPage(`({nodes:document.querySelectorAll('.copal-graph-node').length,info:document.querySelector('.copal-graph-info')?.textContent,visible:[...document.querySelectorAll('.copal-graph-node')].map(n=>n.dataset.graphId)})`);assert.equal(tagFiltered.nodes,1,'a tag facet narrows the graph to matching documents');assert.match(tagFiltered.info||'',/1 nodes/,'info reports the narrowed node count');report.push({case:'real tag facet filter',tagPick,tagFiltered});
  // S20: structure mode shows nested bullets beside headings, and a source
  // without structure gets a useful empty state.
  const structureText='# Root\n- top\n  - nested\n## Child\n\nJust prose after.';

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, isOfficialDocument, documentFolder, facetCacheKey } from '../../static/js/copal/graphModel.js';
+import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, isOfficialDocument, documentFolder, facetCacheKey, mergeFacets } from '../../static/js/copal/graphModel.js';
 
 const docs = [
   { id:'a', name:'A', kind:'markdown', links:['B'], relations:[{ targetDocumentId:'b', kind:'embed' }, { targetDocumentId:'missing', kind:'link' }] },
@@ -139,5 +139,79 @@ assert.deepEqual(reconcileFilters({ kinds:['anything'] }, null).kinds, ['anythin
 assert.notEqual(facetCacheKey('a', 'w', 'g1'), facetCacheKey('a', 'w', 'g2'));
 assert.notEqual(facetCacheKey('a', 'w', 'g1'), facetCacheKey('b', 'w', 'g1'));
 assert.equal(facetCacheKey('', 'w', 'g1'), null);
+
+// P01.2: a top folder shared with personal notes is never claimed as the
+// official root, and provisioned docs outside any root stay hidden by identity.
+const mixedCorpus = [
+  { id:'p-a', name:'Notes/Personal A.md', kind:'note', tags:['personal'], text:'a' },
+  { id:'p-b', name:'Notes/Personal B.md', kind:'note', tags:['personal'], text:'b' },
+  { id:'o-mix', name:'Notes/Official Guide', kind:'note', builtin:true, properties:{ product:'open-clank' }, text:'guide' },
+  { id:'o-start', name:'Notes/Official Start', kind:'note', builtin:true, properties:{ product:'open-clank' }, text:'start' },
+  { id:'o-out', name:'Other/Moved Official', kind:'note', builtin:true, properties:{ product:'open-clank' }, text:'moved' },
+];
+assert.equal(officialDocsRoot(mixedCorpus), null, 'a mixed top folder is never claimed as the official root');
+const mixedFacets = deriveFacets(mixedCorpus, { generation:'gen-mixed' });
+assert.equal(mixedFacets.officialRoot, null, 'derived facets report no official root for mixed folders');
+const mixedDefault = filterDocuments(mixedCorpus, {}, mixedFacets).map((doc) => doc.id).sort();
+assert.deepEqual(mixedDefault, ['p-a', 'p-b'], 'personal notes sharing a folder with builtin docs stay visible');
+const mixedAll = filterDocuments(mixedCorpus, { includeOfficial:true }, mixedFacets).map((doc) => doc.id).sort();
+assert.deepEqual(mixedAll, ['o-mix', 'o-out', 'o-start', 'p-a', 'p-b'], 'identity inclusion reveals every provisioned doc, including outside the majority folder');
+assert.ok(!filterDocuments(mixedCorpus, {}, mixedFacets).some((doc) => doc.id === 'o-out'), 'a builtin doc outside any derived root is still hidden by identity');
+assert.ok(filterDocuments(mixedCorpus, { folders:['Notes'] }, mixedFacets).some((doc) => doc.id === 'p-a'), 'folder filter sees personal notes in the shared folder');
+assert.ok(filterDocuments(mixedCorpus, { folders:['Notes'] }, mixedFacets).some((doc) => doc.id === 'o-mix'), 'selecting the shared folder is an explicit official opt-in');
+
+// An all-official folder still binds as the official root.
+const cleanCorpus = [
+  { id:'p1', name:'Notes/Personal.md', kind:'note', text:'p' },
+  { id:'o1', name:'OpenClank/Start Here', kind:'note', builtin:true, properties:{ product:'open-clank' }, text:'o' },
+  { id:'o2', name:'OpenClank/Guide.md', kind:'note', builtin:true, properties:{ product:'open-clank' }, text:'g' },
+];
+assert.equal(officialDocsRoot(cleanCorpus), 'OpenClank', 'an all-official folder is the official root');
+assert.deepEqual(filterDocuments(cleanCorpus, {}, deriveFacets(cleanCorpus)).map((doc) => doc.id), ['p1']);
+
+// Empty kind set narrows instead of widening; an absent kind filter stays open.
+assert.deepEqual(filterDocuments(corpus, { kinds:[] }, facets).map((doc) => doc.id), [], 'clearing every kind chip narrows to nothing');
+assert.ok(filterDocuments(corpus, { kinds:['wiki'] }, facets).some((doc) => doc.id === 'w1'), 'a kind selection still matches its kind');
+assert.ok(!filterDocuments(corpus, { kinds:['wiki'] }, facets).some((doc) => doc.id === 'n1'), 'a kind selection excludes other kinds');
+assert.ok(filterDocuments(corpus, {}, facets).some((doc) => doc.id === 'n1'), 'an absent kind filter stays open');
+
+// Truncated facet pages must not be read as deletions.
+const wideTags = Array.from({ length:250 }, (_, index) => ({ value:`t${index}`, count:1 }));
+const partialPage = {
+  generation:'gen-page',
+  officialRoot:null,
+  totalDocuments:250,
+  kinds:[{ value:'note', count:250 }],
+  folders:[],
+  tags:wideTags.slice(0, 200),
+  properties:{},
+  incomplete:true,
+};
+const kept = reconcileFilters({ tags:['t0', 't250'], kinds:['note'] }, partialPage);
+assert.deepEqual(kept.tags, ['t0', 't250'], 'a partial page keeps off-page selections instead of pruning them');
+const completePage = { ...partialPage, tags:wideTags, incomplete:false };
+assert.deepEqual(reconcileFilters({ tags:['t0', 't250'] }, completePage).tags, ['t0'], 'a complete snapshot still drops deleted values');
+assert.deepEqual(reconcileFilters({ tags:['t0', 't250'] }, { ...partialPage, incomplete:true }).tags, ['t0', 't250'], 'an explicitly incomplete snapshot leaves intent untouched');
+assert.deepEqual(reconcileFilters({ tags:['t0', 't250'] }, { tags:{ values:wideTags.slice(0, 200), hasMore:true } }).tags, ['t0', 't250'], 'a raw truncated page shape keeps off-page selections');
+assert.deepEqual(reconcileFilters({ tags:['t0', 't250'] }, { tags:{ values:wideTags, hasMore:false } }).tags, ['t0'], 'a finished raw page shape still reconciles');
+
+// mergeFacets unions server pages over the local derivation.
+const local = deriveFacets(corpus, { generation:'local' });
+const server = {
+  generation:'gen-1',
+  officialRoot:'OpenClank',
+  totalDocuments:9,
+  kinds:[{ value:'base', count:3 }],
+  folders:[{ value:'Archive', count:2 }],
+  tags:[{ value:'alpha', count:5 }, { value:'remote', count:1 }],
+  properties:{ status:[{ value:'open', count:2 }, { value:'archived', count:1 }] },
+};
+const merged = mergeFacets(local, server);
+assert.ok(merged.tags.some((item) => item.value === 'alpha'), 'merge keeps locally derived values');
+assert.ok(merged.tags.some((item) => item.value === 'remote'), 'merge keeps server-only values');
+assert.equal(merged.tags.find((item) => item.value === 'alpha').count, 6, 'merge sums overlapping counts');
+assert.ok(merged.kinds.some((item) => item.value === 'base'), 'merge unions kinds across sources');
+assert.ok(merged.properties.status.some((item) => item.value === 'archived'), 'merge unions property values across sources');
+assert.equal(merged.incomplete, false, 'merging complete pages stays complete');
 
 console.log('Copal Graph/Galaxy projection and state tests passed');

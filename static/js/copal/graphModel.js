@@ -135,7 +135,7 @@ export function structureTree(entries) {
     const node = { ...entry, children:[] };
     // Headings nest by heading level; bullets nest by indent depth under the
     // nearest enclosing node so one tree can hold both without a second parse.
-    const level = entry.kind === 'bullet' ? entry.level : entry.level;
+    const level = entry.level;
     while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
     if (stack.length) stack[stack.length - 1].children.push(node);
     else roots.push(node);
@@ -335,9 +335,10 @@ export function normalizeGraphState(source = {}) {
  * Reconcile a saved filter set against a freshly derived facet snapshot.
  *
  * Values that no longer exist in the scoped corpus are dropped so a renamed or
- * deleted folder/tag/property cannot silently hide the whole graph.  Absent
- * facet categories leave their saved values untouched (still recoverable) so
- * a partial or in-flight snapshot does not discard user intent.
+ * deleted folder/tag/property cannot silently hide the whole graph.  Absent or
+ * truncated facet categories leave their saved values untouched (still
+ * recoverable) so a partial page or an in-flight snapshot does not discard
+ * user intent — a value outside the loaded page is not a deleted value.
  */
 export function reconcileFilters(filters = {}, facets = null) {
   const next = {
@@ -351,21 +352,81 @@ export function reconcileFilters(filters = {}, facets = null) {
     includeOfficial: filters.includeOfficial === true,
   };
   if (!facets || typeof facets !== 'object') return next;
+  // A capped or mid-pagination snapshot must never look like deletions.
+  if (facets.incomplete === true) return next;
+  const valuesOf = (entry) => {
+    if (Array.isArray(entry)) return entry.map((item) => (item && item.value !== undefined ? item.value : item));
+    if (entry && typeof entry === 'object' && Array.isArray(entry.values)) return entry.values.map((item) => (item && item.value !== undefined ? item.value : item));
+    return null;
+  };
+  const truncated = (entry) => Boolean(entry && typeof entry === 'object' && !Array.isArray(entry) && entry.hasMore === true);
   const prune = (values, known) => {
     if (!Array.isArray(known)) return values;
     const allowed = new Set(known.map(String));
     return values.filter((value) => allowed.has(String(value)));
   };
-  if (Array.isArray(facets.kinds)) next.kinds = prune(next.kinds, facets.kinds.map((item) => (item && item.value !== undefined ? item.value : item)));
-  if (Array.isArray(facets.folders)) next.folders = prune(next.folders, facets.folders.map((item) => (item && item.value !== undefined ? item.value : item)));
-  if (Array.isArray(facets.tags)) next.tags = prune(next.tags, facets.tags.map((item) => (item && item.value !== undefined ? item.value : item)));
+  const kinds = valuesOf(facets.kinds);
+  if (kinds && !truncated(facets.kinds)) next.kinds = prune(next.kinds, kinds);
+  const folders = valuesOf(facets.folders);
+  if (folders && !truncated(facets.folders)) next.folders = prune(next.folders, folders);
+  const tags = valuesOf(facets.tags);
+  if (tags && !truncated(facets.tags)) next.tags = prune(next.tags, tags);
   if (facets.properties && typeof facets.properties === 'object') {
-    const allowedByKey = new Map(Object.entries(facets.properties).map(([key, values]) => [String(key), new Set((Array.isArray(values) ? values : []).map((item) => String(item && item.value !== undefined ? item.value : item)))]));
+    const allowedByKey = new Map();
+    for (const [key, entry] of Object.entries(facets.properties)) {
+      if (truncated(entry)) continue;
+      const values = valuesOf(entry);
+      if (values) allowedByKey.set(String(key), new Set(values.map(String)));
+    }
     next.properties = Object.fromEntries(Object.entries(next.properties)
       .filter(([key]) => allowedByKey.has(String(key)))
       .map(([key, values]) => [key, values.filter((value) => allowedByKey.get(String(key)).has(String(value)))]));
   }
   return next;
+}
+
+/**
+ * Merge facet snapshots so a lazily loaded server page refines — never
+ * replaces — the locally derived values.  Values are unioned by identity and
+ * counts are summed, so off-page and local values both stay discoverable.
+ */
+export function mergeFacets(base = null, extra = null) {
+  const pickList = (entry) => {
+    if (!entry) return [];
+    if (Array.isArray(entry)) return entry;
+    if (Array.isArray(entry.values)) return entry.values;
+    return [];
+  };
+  const mergeList = (left, right) => {
+    const map = new Map();
+    for (const item of [...pickList(left), ...pickList(right)]) {
+      const value = item && item.value !== undefined ? item.value : item;
+      const key = String(value ?? '');
+      if (!key && value !== '') continue;
+      const count = item && typeof item === 'object' && Number.isFinite(item.count) ? item.count : 0;
+      const prev = map.get(key);
+      if (prev) prev.count += count;
+      else map.set(key, { value:key, count });
+    }
+    return [...map.values()];
+  };
+  const left = base && typeof base === 'object' ? base : {};
+  const right = extra && typeof extra === 'object' ? extra : {};
+  const properties = {};
+  for (const key of new Set([...Object.keys(left.properties || {}), ...Object.keys(right.properties || {})])) {
+    properties[key] = mergeList((left.properties || {})[key], (right.properties || {})[key]);
+  }
+  return {
+    version:1,
+    generation:String(right.generation ?? left.generation ?? '0'),
+    officialRoot: right.officialRoot ?? left.officialRoot ?? null,
+    totalDocuments: Number(right.totalDocuments ?? left.totalDocuments ?? 0),
+    kinds: mergeList(left.kinds, right.kinds),
+    folders: mergeList(left.folders, right.folders),
+    tags: mergeList(left.tags, right.tags),
+    properties,
+    incomplete: left.incomplete === true || right.incomplete === true,
+  };
 }
 
 export function graphStorageKey(accountId, workspace) {
@@ -401,21 +462,37 @@ export function isOfficialDocument(doc) {
 
 /**
  * The provisioned official-docs root folder, derived from the real identities
- * of the shipped documents rather than a hardcoded folder name.  Returns null
- * when the scoped corpus contains no provisioned documentation.
+ * of the shipped documents rather than a hardcoded folder name.  A root exists
+ * only when one top folder contains every provisioned document and nothing
+ * else, so a folder shared with personal notes is never claimed (and never
+ * hidden wholesale) and a builtin moved outside the root cannot invent one.
+ * Returns null when provisioned docs are mixed or scattered — identity remains
+ * the hiding mechanism in that case.
  */
 export function officialDocsRoot(documents) {
-  const roots = new Map();
-  for (const doc of documents || []) {
-    if (!isOfficialDocument(doc)) continue;
+  const docs = Array.isArray(documents) ? documents : [];
+  const totals = new Map();
+  const official = new Map();
+  let officialTotal = 0;
+  for (const doc of docs) {
     const folder = documentFolder(doc.name).split('/')[0] || '';
     if (!folder) continue;
-    roots.set(folder, (roots.get(folder) || 0) + 1);
+    totals.set(folder, (totals.get(folder) || 0) + 1);
+    if (isOfficialDocument(doc)) {
+      officialTotal += 1;
+      official.set(folder, (official.get(folder) || 0) + 1);
+    }
   }
-  if (!roots.size) return null;
-  // Prefer the root that covers the most provisioned documents; ties resolve
-  // lexicographically so the choice is deterministic across refreshes.
-  return [...roots.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0][0];
+  const roots = [];
+  for (const [folder, count] of official) {
+    // All-official folder that covers every provisioned document.
+    if ((totals.get(folder) || 0) !== count) continue;
+    if (count !== officialTotal) continue;
+    roots.push([folder, count]);
+  }
+  if (!roots.length) return null;
+  // Ties resolve lexicographically so the choice is deterministic across refreshes.
+  return roots.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0][0];
 }
 
 function facetValue(value) {
@@ -484,10 +561,13 @@ export function deriveFacets(documents, { generation = 0, officialRoot = undefin
  * dimensions are AND-ed; within a dimension any selected value matches so the
  * user can widen a facet without adding a separate control.
  *
- * Official documentation is excluded through the general folder filter bound to
- * the derived official root.  Dot-folders are never treated as official/system
- * provenance, so personal `.events/` or `.memes/` content stays governed by the
- * ordinary filters rather than being silently dropped.
+ * Official documentation is excluded by its real identity metadata — never by
+ * a folder guess — so a top folder shared with personal notes keeps those
+ * notes visible and a provisioned document outside any derived root is still
+ * hidden.  An empty `kinds` selection narrows to nothing (consistent with the
+ * non-document branch of the graph), while an absent kind filter stays open.
+ * Dot-folders are never treated as official/system provenance, so personal
+ * `.events/` or `.memes/` content stays governed by the ordinary filters.
  */
 export function matchesFilters(doc, filters = {}, facets = null) {
   const search = String(filters.search || '').trim().toLowerCase();
@@ -496,8 +576,10 @@ export function matchesFilters(doc, filters = {}, facets = null) {
     if (!haystack.some((value) => value.includes(search))) return false;
   }
   const kind = documentKind(doc);
-  const kinds = Array.isArray(filters.kinds) ? filters.kinds : [];
-  if (kinds.length && !kinds.includes(kind)) return false;
+  if (filters.kinds !== undefined && filters.kinds !== null) {
+    const kinds = Array.isArray(filters.kinds) ? filters.kinds.map(String) : [];
+    if (!kinds.includes(kind)) return false;
+  }
   const folder = documentFolder(doc.name);
   const folders = Array.isArray(filters.folders) ? filters.folders : [];
   if (folders.length && !folders.includes(folder)) return false;
@@ -513,14 +595,11 @@ export function matchesFilters(doc, filters = {}, facets = null) {
     const actual = (Array.isArray(raw) ? raw : [raw]).map((value) => String(value ?? ''));
     if (!wanted.some((value) => actual.includes(value))) return false;
   }
-  if (filters.includeOfficial !== true) {
-    const root = facets && typeof facets === 'object' ? facets.officialRoot : undefined;
-    const officialRoot = root === undefined ? null : root;
-    const top = folder.split('/')[0] || '';
-    // Folder-based default: the provisioned official-docs root is hidden until
-    // the user opts in. Identity metadata still marks the docs themselves.
-    if (officialRoot && top === officialRoot) return false;
-    if (!officialRoot && isOfficialDocument(doc)) return false;
+  if (filters.includeOfficial !== true && isOfficialDocument(doc)) {
+    // Selecting the document's folder through the ordinary folder filter is an
+    // explicit opt-in, so the official folder chip is not inert without the toggle.
+    const folderOptIn = folders.includes(folder) || folders.includes(folder.split('/')[0] || '');
+    if (!folderOptIn) return false;
   }
   return true;
 }

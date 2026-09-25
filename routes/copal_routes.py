@@ -2201,16 +2201,28 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             product = str(properties.get("product", document.get("product", ""))).strip().casefold()
             return product == "open-clank" or properties.get("builtin") is True
 
-        root_counts: dict[str, int] = {}
+        # A root exists only when one top folder contains every provisioned
+        # document and nothing else, so a folder shared with personal notes is
+        # never claimed and a builtin moved outside cannot invent a root.
+        folder_totals: dict[str, int] = {}
+        official_counts: dict[str, int] = {}
+        official_total = 0
         for document in documents:
-            if not _is_official(document):
-                continue
             top = _folder(document.get("name", "")).split("/")[0]
-            if top:
-                root_counts[top] = root_counts.get(top, 0) + 1
+            if not top:
+                continue
+            folder_totals[top] = folder_totals.get(top, 0) + 1
+            if _is_official(document):
+                official_total += 1
+                official_counts[top] = official_counts.get(top, 0) + 1
+        all_official = [
+            (folder, count)
+            for folder, count in official_counts.items()
+            if folder_totals.get(folder, 0) == count and count == official_total
+        ]
         official_root = None
-        if root_counts:
-            official_root = sorted(root_counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+        if all_official:
+            official_root = sorted(all_official, key=lambda item: (-item[1], item[0]))[0][0]
 
         def _document_kind(document: dict[str, Any]) -> str:
             kind = str(document.get("kind") or "")

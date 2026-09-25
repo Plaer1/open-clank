@@ -12,7 +12,7 @@ import { filesFacadeClient } from './filesFacadeClient.js';
 import { saveResourceSnapshot } from './codeEditor.js';
 import { prepareDocumentSave, commitDocumentSave, sameSaveScope } from './copal/documentSave.js';
 import { cloneEnvelope, normalizeResourceHandle, sameResourceKey, snapshotEnvelope } from './copal/resourceModel.js';
-import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, moveHeadingSection as moveGraphHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, facetCacheKey } from './copal/graphModel.js';
+import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, moveHeadingSection as moveGraphHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, facetCacheKey, mergeFacets } from './copal/graphModel.js';
 import { canHandleInput } from './copal/inputContext.js';
 import { extractReferenceSection } from './copal/markdownResources.js';
 import { createMarkdownRenderer, registerAppDestination } from './copal/markdownRenderer.js';
@@ -1180,7 +1180,7 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
       links.append(chip);
     }
 
-    const openBtn = h('button', { class:'copal-graph-inspector-open', text:node.kind === 'track' ? 'Edit track' : node.task ? 'Open event' : node.kind === 'wiki' ? 'Open in Wiki' : 'Open in Editor', onclick:() => onOpen(node) });
+    const openBtn = h('button', { class:'copal-graph-inspector-open', text:node.kind === 'track' ? 'Edit track' : node.task ? 'Open event' : 'Open in Editor', onclick:() => onOpen(node) });
 
     meta.textContent = `${connected.length} connection${connected.length !== 1 ? 's' : ''}`;
     inspector.append(name, kindLabel, meta);
@@ -1511,29 +1511,78 @@ function renderGalaxy() {
 }
 
 // Lazy live facets: cached by account/workspace/index generation. The
-// mounted page size is never treated as corpus size; values outside the first
-// page stay discoverable through the facet query, and a new generation
-// refetches so renamed/deleted values reconcile.
+// mounted page size is never treated as corpus size — each page is followed
+// through `hasMore`/`offset` so a value outside the first page stays
+// discoverable, and a new generation refetches so renamed/deleted values
+// reconcile. A generation hit reuses the already-paged snapshot.
 const graphFacetCache = new Map();
+const FACET_FETCH_LIMIT = 200;
+const FACET_MAX_PAGES = 25;
+
+function facetPageValues(page) {
+  if (!page) return [];
+  if (Array.isArray(page)) return page;
+  return Array.isArray(page.values) ? page.values : [];
+}
+
+function facetPageHasMore(page) {
+  return Boolean(page && typeof page === 'object' && !Array.isArray(page) && page.hasMore === true);
+}
+
+function anyFacetHasMore(response) {
+  const facets = response?.facets || {};
+  return facetPageHasMore(facets.kinds) || facetPageHasMore(facets.folders) || facetPageHasMore(facets.tags)
+    || Object.values(facets.properties || {}).some((page) => facetPageHasMore(page));
+}
+
+function snapshotFromFacetResponse(response) {
+  const facets = response?.facets || {};
+  return {
+    generation: String(response?.generation ?? ''),
+    officialRoot: response?.officialRoot ?? null,
+    totalDocuments: response?.totalDocuments ?? 0,
+    kinds: facetPageValues(facets.kinds),
+    folders: facetPageValues(facets.folders),
+    tags: facetPageValues(facets.tags),
+    properties: Object.fromEntries(Object.entries(facets.properties || {}).map(([key, page]) => [key, facetPageValues(page)])),
+    incomplete: false,
+  };
+}
+
 async function loadGraphFacets({ force = false } = {}) {
   const account = state.accountId || '';
   const workspace = state.workspace || '';
   if (!account || !workspace) return null;
   try {
-    const response = await api('/graph/facets?limit=200', {}, workspace);
-    const generation = String(response?.generation ?? '');
+    const first = await api(`/graph/facets?limit=${FACET_FETCH_LIMIT}&offset=0`, {}, workspace);
+    const generation = String(first?.generation ?? '');
     const key = facetCacheKey(account, workspace, generation);
     if (!key) return null;
     if (!force && graphFacetCache.has(key)) return graphFacetCache.get(key);
-    const snapshot = {
-      generation,
-      officialRoot: response?.officialRoot ?? null,
-      totalDocuments: response?.totalDocuments ?? 0,
-      kinds: response?.facets?.kinds?.values ?? response?.facets?.kinds ?? [],
-      folders: response?.facets?.folders?.values ?? response?.facets?.folders ?? [],
-      tags: response?.facets?.tags?.values ?? response?.facets?.tags ?? [],
-      properties: Object.fromEntries(Object.entries(response?.facets?.properties ?? {}).map(([key2, page]) => [key2, page?.values ?? page ?? []])),
-    };
+    const snapshot = snapshotFromFacetResponse(first);
+    // Page through remaining values. `hasMore` is per category and the same
+    // offset/limit applies to each, so keep requesting while any category
+    // still reports more and merge the pages into one complete snapshot.
+    let offset = FACET_FETCH_LIMIT;
+    let pages = 1;
+    let more = anyFacetHasMore(first);
+    while (more && pages < FACET_MAX_PAGES) {
+      const next = await api(`/graph/facets?limit=${FACET_FETCH_LIMIT}&offset=${offset}`, {}, workspace);
+      const merged = mergeFacets(snapshot, snapshotFromFacetResponse(next));
+      snapshot.kinds = merged.kinds;
+      snapshot.folders = merged.folders;
+      snapshot.tags = merged.tags;
+      snapshot.properties = merged.properties;
+      snapshot.officialRoot = merged.officialRoot;
+      snapshot.totalDocuments = merged.totalDocuments;
+      snapshot.generation = merged.generation;
+      more = anyFacetHasMore(next);
+      offset += FACET_FETCH_LIMIT;
+      pages += 1;
+    }
+    // A capped walk is incomplete: off-page values are still discoverable and
+    // must never be reconciled as deletions.
+    if (more) snapshot.incomplete = true;
     // Keep one snapshot per account/workspace/generation; drop other
     // generations so stale values cannot leak across cache identities.
     for (const cachedKey of [...graphFacetCache.keys()]) {
@@ -1587,6 +1636,8 @@ function renderGraph() {
   };
   // Mount immediately with locally derived facets, then refine with the lazy
   // server snapshot so the graph stays responsive while values stream in.
+  // Server pages merge over the local derivation — they never replace it — so
+  // off-page values stay discoverable and local values are never dropped.
   // Galaxy's facet vocabulary comes from tracks/events, not document metadata,
   // so its kinds are never reconciled against document-derived facets.
   if (view.mode === 'galaxy') {
@@ -1608,7 +1659,7 @@ function renderGraph() {
     if (!snapshot || !state.body.isConnected) return;
     if (!sameSaveScope(scope, saveScope())) return;
     if (getGraphView().mode !== view.mode) return;
-    mount(snapshot);
+    mount(mergeFacets(localFacets, snapshot));
   }).catch(() => {});
 }
 
@@ -1888,23 +1939,23 @@ function renderMind() {
   const doc = requested ? docs.find((d) => d.id === requested) : docs[0];
   const requestedAny = requested ? allDocs.find((item) => item.id === requested) : null;
   if (graphView.source?.docId && requestedAny && !doc) {
-    state.body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' }, h('h2', { text:'Mind source unsupported' }), h('p', { text:`${requestedAny.name || requestedAny.id} is a ${requestedAny.kind || 'non-text'} resource and has no heading tree.` }), h('button', { class:'copal-btn', text:'Open source', onclick:() => openDocument(requestedAny.id, requestedAny.kind === 'wiki' ? 'wiki' : 'notes') }), h('button', { class:'copal-btn', text:'Choose another source', onclick:() => { graphView.source = null; navigation.docId = null; persistGraphView(); renderMind(); } })));
+    state.body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' }, h('h2', { text:'Structure source unsupported' }), h('p', { text:`${requestedAny.name || requestedAny.id} is a ${requestedAny.kind || 'non-text'} resource and has no heading tree.` }), h('button', { class:'copal-btn', text:'Open source', onclick:() => openDocument(requestedAny.id, requestedAny.kind === 'wiki' ? 'wiki' : 'notes') }), h('button', { class:'copal-btn', text:'Choose another source', onclick:() => { graphView.source = null; navigation.docId = null; persistGraphView(); renderMind(); } })));
     return;
   }
   // Keep an explicit source identity visible through deletion, revocation, or
   // an unavailable projection. Never silently substitute another document.
   if (graphView.source?.docId && !doc) {
     state.body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' },
-      h('h2', { text:'Mind source unavailable' }),
+      h('h2', { text:'Structure source unavailable' }),
       h('p', { text:`The selected source ${graphView.source.docId} is unavailable in this account or workspace.` }),
       h('p', { text:'Its ResourceKey and revision are retained so it can be retried or reauthorized safely.' }),
-      h('button', { class:'copal-btn', text:'Retry source', 'aria-label':'Retry unavailable Mind source', onclick:() => loadDocuments().then(() => renderMind()).catch((error) => setViewStatus('graph', error.message, true)) }),
+      h('button', { class:'copal-btn', text:'Retry source', 'aria-label':'Retry unavailable structure source', onclick:() => loadDocuments().then(() => renderMind()).catch((error) => setViewStatus('graph', error.message, true)) }),
       h('button', { class:'copal-btn', text:'Choose another source', onclick:() => { graphView.source = null; navigation.docId = null; persistGraphView(); renderMind(); } }),
     ));
     return;
   }
   if (!doc) {
-    state.body.replaceChildren(h('div', { class: 'copal-mind-empty' }, h('h2', { text: 'Mind' }), h('p', { text: 'No document source is available for headings.' }), h('button', { class:'copal-btn', text:'Open Editor', onclick:() => open('notes') })));
+    state.body.replaceChildren(h('div', { class: 'copal-mind-empty' }, h('h2', { text: 'Structure' }), h('p', { text: 'No document source is available for headings.' }), h('button', { class:'copal-btn', text:'Open Editor', onclick:() => open('notes') })));
     return;
   }
   navigation.docId = doc.id;
@@ -1916,7 +1967,7 @@ function renderMind() {
   if (doc.rawPreserved && doc.recoveryState !== 'legacy-import') {
     const parseFailed = doc.recoveryState === 'malformed-preserved';
     const sourceLabel = doc.recoveryState === 'unsupported-future' ? 'This source was written by a newer Wiki format.' : parseFailed ? 'This source could not be parsed as a native Wiki record.' : 'This source is preserved but unavailable to the headings parser.';
-    state.body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' }, h('h2', { text:parseFailed ? 'Mind source parse failed' : 'Mind source unavailable' }), h('p', { text:sourceLabel }), h('p', { text:String(doc.note_error || 'Choose an explicit recovery action in Wiki.') }), h('button', { class:'copal-btn', text:'Open source in Wiki', onclick:() => openDocument(doc.id, 'wiki') })));
+    state.body.replaceChildren(h('div', { class:'copal-mind-empty', role:'status' }, h('h2', { text:parseFailed ? 'Structure source parse failed' : 'Structure source unavailable' }), h('p', { text:sourceLabel }), h('p', { text:String(doc.note_error || 'Choose an explicit recovery action in the Editor.') }), h('button', { class:'copal-btn', text:'Open in Editor', onclick:() => openDocument(doc.id, 'wiki') })));
     return;
   }
   const entries = mindOutlineEntries(source);
@@ -1939,7 +1990,7 @@ function renderMind() {
 
   // Document picker
   const picker = h('div', { class: 'copal-mind-picker' }, h('h3', { text: 'Documents' }));
-  const pickerSearch = h('input', { class:'copal-mind-doc-search', type:'search', placeholder:'Search documents…', 'aria-label':'Search Mind sources' });
+  const pickerSearch = h('input', { class:'copal-mind-doc-search', type:'search', placeholder:'Search documents…', 'aria-label':'Search structure sources' });
   const docList = h('ul', { class: 'copal-mind-doc-list' });
   const pickerStatus = h('div', { class:'copal-mind-picker-status', role:'status' });
   const renderPicker = () => {
@@ -1951,7 +2002,7 @@ function renderMind() {
       if (selected) rows.unshift(selected);
     }
     docList.replaceChildren(...rows.map((d) => h('li', { class: `copal-mind-doc-item${d.id === navigation.docId ? ' active' : ''}` },
-      h('button', { class: 'copal-mind-doc-btn', text: d.name, 'aria-label':`Select ${d.name} as Mind source`, onclick: () => { navigation.docId = d.id; graphView.source = graphSourceEnvelope(d); if (context) context.selected = d.id; state.selected = d.id; navigation.collapsed.clear(); navigation.selectedLine = null; navigation.editingLine = null; persistGraphView(); renderMind(); } }))));
+      h('button', { class: 'copal-mind-doc-btn', text: d.name, 'aria-label':`Select ${d.name} as structure source`, onclick: () => { navigation.docId = d.id; graphView.source = graphSourceEnvelope(d); if (context) context.selected = d.id; state.selected = d.id; navigation.collapsed.clear(); navigation.selectedLine = null; navigation.editingLine = null; persistGraphView(); renderMind(); } }))));
     pickerStatus.textContent = matches.length > rows.length ? `${matches.length} sources · showing ${rows.length}; search to reach more` : `${matches.length} source${matches.length === 1 ? '' : 's'}`;
   };
   pickerSearch.addEventListener('input', renderPicker);

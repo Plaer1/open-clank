@@ -2358,3 +2358,129 @@ def test_write_route_passes_corpus_for_wiki_doc(tmp_path, monkeypatch):
     write_calls = [c for c in wiki_bridge.calls if c[0] == "write"]
     assert len(write_calls) >= 1
     assert write_calls[-1][1]["corpus"] == "wiki"
+
+
+class FacetsBridge(FakeBridge):
+    """Corpus that exercises official-root binding and facet discovery."""
+
+    def __init__(self, data_dir):
+        super().__init__(data_dir)
+        self.docs = {
+            "p-a": {
+                "id": "p-a", "kind": "note", "name": "Notes/Personal A.md", "head": "p-a-h",
+                "text": "a", "format": "copal-note-v1", "storage": "database",
+                "tags": ["personal", "keep"], "properties": {"status": "open"}, "frontmatter": {}, "links": [],
+            },
+            "p-b": {
+                "id": "p-b", "kind": "note", "name": "Notes/Personal B.md", "head": "p-b-h",
+                "text": "b", "format": "copal-note-v1", "storage": "database",
+                "tags": ["personal"], "properties": {"status": "done"}, "frontmatter": {}, "links": [],
+            },
+            "o-mix": {
+                "id": "o-mix", "kind": "note", "name": "Notes/Official Guide", "head": "o-mix-h",
+                "text": "guide", "format": "copal-note-v1", "storage": "database",
+                "tags": ["builtin"], "properties": {"product": "open-clank", "builtin": True},
+                "builtin": True, "frontmatter": {}, "links": [],
+            },
+            "o-out": {
+                "id": "o-out", "kind": "note", "name": "Other/Moved Official", "head": "o-out-h",
+                "text": "moved", "format": "copal-note-v1", "storage": "database",
+                "tags": ["builtin"], "properties": {"product": "open-clank"},
+                "builtin": True, "frontmatter": {}, "links": [],
+            },
+        }
+
+    async def call(self, operation, args, timeout=20):
+        self.calls.append((operation, args, timeout))
+        if operation == "index":
+            docs = list(self.docs.values())
+            if args.get("kind"):
+                docs = [doc for doc in docs if doc["kind"] == args["kind"]]
+            return {"docs": docs}
+        return await super().call(operation, args, timeout)
+
+
+def test_graph_facets_bind_official_root_by_identity_and_paginate(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    app = FastAPI()
+    app.include_router(setup_copal_routes())
+    app.state.copal_bridge = FacetsBridge(tmp_path)
+    http = TestClient(app)
+
+    response = http.get("/api/copal/graph/facets?workspace=personal")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["version"] == 1
+    assert payload["totalDocuments"] == 4
+    # A top folder shared with personal notes is never claimed as the official
+    # root, and provisioned docs outside any root cannot invent one.
+    assert payload["officialRoot"] is None
+    facets = payload["facets"]
+    kinds = {item["value"]: item["count"] for item in facets["kinds"]["values"]}
+    assert kinds == {"note": 4}
+    folders = {item["value"]: item["count"] for item in facets["folders"]["values"]}
+    assert folders == {"Notes": 3, "Other": 1}
+    tags = {item["value"]: item["count"] for item in facets["tags"]["values"]}
+    assert tags == {"personal": 2, "keep": 1, "builtin": 2}
+    assert facets["tags"]["hasMore"] is False
+    props = {item["value"]: item["count"] for item in facets["properties"]["status"]["values"]}
+    assert props == {"open": 1, "done": 1}
+
+    # Pagination: a small window reports hasMore and offset advances.
+    page = http.get("/api/copal/graph/facets?workspace=personal&category=tags&limit=1&offset=0").json()
+    assert page["facets"]["tags"]["limit"] == 1
+    assert page["facets"]["tags"]["offset"] == 0
+    assert page["facets"]["tags"]["total"] == 3
+    assert page["facets"]["tags"]["hasMore"] is True
+    assert len(page["facets"]["tags"]["values"]) == 1
+    page2 = http.get("/api/copal/graph/facets?workspace=personal&category=tags&limit=1&offset=1").json()
+    assert page2["facets"]["tags"]["offset"] == 1
+    assert page2["facets"]["tags"]["hasMore"] is True
+    assert page2["facets"]["tags"]["values"][0]["value"] != page["facets"]["tags"]["values"][0]["value"]
+
+    # Query narrows facet values so off-page entries stay discoverable.
+    searched = http.get("/api/copal/graph/facets?workspace=personal&category=tags&query=keep").json()
+    assert searched["facets"]["tags"]["total"] == 1
+    assert searched["facets"]["tags"]["values"] == [{"value": "keep", "count": 1}]
+
+    # Generation is stable for the same corpus and changes when it changes.
+    again = http.get("/api/copal/graph/facets?workspace=personal").json()
+    assert again["generation"] == payload["generation"]
+    app.state.copal_bridge.docs["p-a"]["head"] = "p-a-h-next"
+    changed = http.get("/api/copal/graph/facets?workspace=personal").json()
+    assert changed["generation"] != payload["generation"]
+
+
+def test_graph_facets_bind_clean_official_folder_as_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    app = FastAPI()
+    app.include_router(setup_copal_routes())
+
+    class CleanOfficialBridge(FacetsBridge):
+        def __init__(self, data_dir):
+            super().__init__(data_dir)
+            self.docs = {
+                "p1": {
+                    "id": "p1", "kind": "note", "name": "Notes/Personal.md", "head": "p1-h",
+                    "text": "p", "format": "copal-note-v1", "storage": "database",
+                    "tags": [], "properties": {}, "frontmatter": {}, "links": [],
+                },
+                "o1": {
+                    "id": "o1", "kind": "note", "name": "OpenClank/Start Here", "head": "o1-h",
+                    "text": "o", "format": "copal-note-v1", "storage": "database",
+                    "tags": [], "properties": {"product": "open-clank"},
+                    "builtin": True, "frontmatter": {}, "links": [],
+                },
+                "o2": {
+                    "id": "o2", "kind": "note", "name": "OpenClank/Guide.md", "head": "o2-h",
+                    "text": "g", "format": "copal-note-v1", "storage": "database",
+                    "tags": [], "properties": {"product": "open-clank"},
+                    "builtin": True, "frontmatter": {}, "links": [],
+                },
+            }
+
+    app.state.copal_bridge = CleanOfficialBridge(tmp_path)
+    http = TestClient(app)
+    payload = http.get("/api/copal/graph/facets?workspace=personal").json()
+    assert payload["officialRoot"] == "OpenClank"
+    assert payload["totalDocuments"] == 3
