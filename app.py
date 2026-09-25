@@ -76,7 +76,10 @@ from core.middleware import (
     INTERNAL_TOOL_USER,
     INTERNAL_TOOL_WORKSPACE_HEADER,
     SecurityHeadersMiddleware,
+    get_application_route_path,
     is_cors_preflight,
+    path_is_route_or_child,
+    with_asgi_root_path,
 )
 from core.auth import AuthManager, normalize_known_username
 from core.exceptions import (
@@ -387,7 +390,7 @@ if AUTH_ENABLED:
             return str(method or "").upper() in {"GET", "HEAD"}
         if path in AUTH_EXEMPT_EXACT:
             return True
-        if any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES):
+        if any(path_is_route_or_child(path, p) for p in AUTH_EXEMPT_PREFIXES):
             return True
         return any(p.match(path) for p in AUTH_EXEMPT_PATTERNS)
 
@@ -409,7 +412,13 @@ if AUTH_ENABLED:
     app.state._token_cache_dirty = True
 
     def _refresh_token_cache():
-        """Rebuild the prefix→[(id,hash)] map from the DB."""
+        """Rebuild the prefix→[(id,hash)] map from the DB.
+
+        Readers hold the previous dict reference until the swap completes;
+        a clear()-then-update() left a window where the map was empty and
+        concurrent auth checks returned 401.
+        """
+        global _token_cache
         from collections import defaultdict
         new_map = defaultdict(list)
         db = SessionLocal()
@@ -439,13 +448,13 @@ if AUTH_ENABLED:
                 )
         finally:
             db.close()
-        _token_cache.clear()
-        _token_cache.update(new_map)
+        _token_cache = dict(new_map)
+        app.state._token_cache = _token_cache
         app.state._token_cache_dirty = False
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
-            path = request.url.path
+            path = get_application_route_path(request.scope)
             # A genuine CORS preflight (OPTIONS + Access-Control-Request-Method)
             # carries no credentials by design and must reach CORSMiddleware to be
             # answered. AuthMiddleware is the outermost middleware, so gating the
@@ -501,7 +510,10 @@ if AUTH_ENABLED:
             if not auth_manager.is_configured:
                 # No users yet — redirect to login for first-time setup
                 if not path.startswith("/api/"):
-                    return RedirectResponse(url="/login", status_code=302)
+                    return RedirectResponse(
+                        url=with_asgi_root_path(request.scope, "/login"),
+                        status_code=302,
+                    )
                 return JSONResponse(status_code=401, content={"error": "Setup required"})
 
             # --- Bearer token auth (API tokens for external integrations) ---
@@ -587,7 +599,10 @@ if AUTH_ENABLED:
             if not valid_session:
                 if path.startswith("/api/"):
                     return JSONResponse(status_code=401, content={"error": "Not authenticated"})
-                return RedirectResponse(url="/login", status_code=302)
+                return RedirectResponse(
+                    url=with_asgi_root_path(request.scope, "/login"),
+                    status_code=302,
+                )
 
             # Attach current username to request state for downstream routes
             request.state.current_user = auth_manager.get_username_for_token(token)

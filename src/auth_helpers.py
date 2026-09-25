@@ -4,6 +4,11 @@ import os
 from typing import Optional
 from fastapi import Request, HTTPException
 from core.middleware import INTERNAL_TOOL_OWNER_HEADER
+from src.owner_identity import (
+    auth_disabled as _owner_identity_auth_disabled,
+    copal_owner_for as _owner_identity_copal_owner,
+    is_internal_tool_identity,
+)
 
 
 _COPAL_RESERVED_OWNERS = frozenset(
@@ -18,10 +23,15 @@ _COPAL_RESERVED_OWNER_PREFIXES = ("user:", "deleted:")
 
 
 def copal_owner_for_user(username: Optional[str]) -> str:
-    """Resolve a human username without colliding with Copal sentinels."""
+    """Resolve a human username without colliding with Copal sentinels.
+
+    Unnamed auth-disabled scope maps to the existing Copal ``local`` adapter
+    (see src.owner_identity). Reserved names are namespaced so a real human
+    account can never impersonate a Copal sentinel.
+    """
     owner = str(username or "").strip().lower()
     if not owner:
-        return "local"
+        return _owner_identity_copal_owner(owner)
     if owner in _COPAL_RESERVED_OWNERS or owner.startswith(_COPAL_RESERVED_OWNER_PREFIXES):
         return f"user:{owner}"
     return owner
@@ -59,7 +69,7 @@ def effective_user(request: Request) -> Optional[str]:
     # identity and forward the human session owner separately.  Keep model and
     # other owner-scoped lookups on that human account instead of accidentally
     # creating globally ownerless rows or an unusable internal-tool catalogue.
-    if user == "internal-tool":
+    if is_internal_tool_identity(user):
         headers = getattr(request, "headers", None)
         owner = (headers.get(INTERNAL_TOOL_OWNER_HEADER) if headers is not None else None)
         if owner:
@@ -87,9 +97,9 @@ def require_authenticated_request(request: Request) -> str:
 
 def _auth_disabled() -> bool:
     """True when the operator has explicitly turned off auth via .env.
-    Mirrors the AUTH_ENABLED parse in app.py / core/middleware.py so the
-    three call sites agree on what "off" means."""
-    return os.getenv("AUTH_ENABLED", "true").lower() == "false"
+    Shared with src.owner_identity so the auth-disabled mapping and route
+    gates agree on what "off" means."""
+    return _owner_identity_auth_disabled()
 
 
 def require_user(request: Request) -> str:

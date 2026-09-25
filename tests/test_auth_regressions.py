@@ -17,14 +17,28 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-# Stub `core.database` / `core.auth` before the route modules import them.
-# (Same trick as test_null_owner_gates.py — the real modules instantiate
-# SQLAlchemy declarative classes at import-time which blow up under the
-# conftest's `sqlalchemy.*` MagicMock stubs.)
+# Stub `core.database` / `core.auth` before the route modules import them
+# *only when the real modules cannot load*. Route modules import real symbols
+# (SetAdminResult, TOKEN_TTL, is_reserved_username, RESERVED_USERNAMES), so an
+# incomplete MagicMock stub breaks every handler that touches them.
+def _try_real_module(name: str):
+    """Import the real module when its package path resolves.
+
+    Returns the real module or None. Real SQLAlchemy is available under the
+    test venv; conftest pre-imports it, so core.auth loads cleanly and the
+    route/task symbols exist.
+    """
+    import importlib
+    try:
+        return importlib.import_module(name)
+    except Exception:
+        return None
+
+
 def _ensure_stub(name: str, **attrs):
     """Create or augment a stub module with the given attributes.
-    Augments existing entries because earlier-run tests may have already
-    stubbed the same module with a different attribute set.
+    Prefers the real module when importable so route-level imports keep
+    working. Falls back to a stub for dependency-free environments.
 
     Also stubs the parent package and wires the child onto it as an
     attribute. Without stubbing the parent we'd either (a) run the real
@@ -32,6 +46,16 @@ def _ensure_stub(name: str, **attrs):
     modules and explodes under the conftest mocks, or (b) leave the
     stub orphaned so `import core.auth; core.auth.AuthManager` raises
     `AttributeError`."""
+    existing = sys.modules.get(name)
+    if existing is not None and getattr(existing, "__file__", None):
+        # Real (or previously real) module already loaded — keep it.
+        return existing
+
+    real = _try_real_module(name)
+    if real is not None and getattr(real, "__file__", None):
+        sys.modules[name] = real
+        return real
+
     # Stub the parent package first if not already loaded. We point
     # `__path__` at the real on-disk directory so submodules NOT
     # stubbed here can still resolve via normal import machinery —
