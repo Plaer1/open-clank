@@ -723,7 +723,12 @@ registerAppDestination('settings', ({ panel }) => {
   else setStatus('Settings are still loading.', true);
 });
 registerAppDestination('files', () => {
-  window.dispatchEvent(new CustomEvent('openclank:activate-applet', { detail:{ view:'files' } }));
+  // Files is a shell applet, not a Copal view window. Open it through the
+  // same module the sidebar launcher uses; the old
+  // openclank:activate-applet dispatch had no listener and silently no-op'd.
+  const open = window.filesModule?.open;
+  if (typeof open === 'function') open();
+  else setStatus('Files is still loading.', true);
 });
 registerAppDestination('editor', () => openDocument(state.selected || state.docs[0]?.id || '', 'notes'));
 registerAppDestination('wiki', () => { ensureViewWindow('wiki'); activateView('wiki'); });
@@ -732,6 +737,13 @@ registerAppDestination('galaxy', () => { ensureViewWindow('graph'); activateView
 registerAppDestination('treehouse', () => { ensureViewWindow('treehouse'); activateView('treehouse'); });
 registerAppDestination('timeline', () => { ensureViewWindow('timeline'); activateView('timeline'); });
 registerAppDestination('tasks', () => { ensureViewWindow('todo'); activateView('todo'); });
+registerAppDestination('memory', () => {
+  // Menmery lives behind the shell tool button (same open path as /memory,
+  // slash /brain and admin helpers), not a Copal view window.
+  const opener = document.getElementById('tool-memory-btn') || document.getElementById('rail-memory');
+  if (opener) opener.click();
+  else setStatus('Menmery is still loading.', true);
+});
 
 
 async function showHistory(doc) {

@@ -25,7 +25,11 @@ FIELD_GUIDE_COVERAGE_VERSION = "2026-09-25.1"
 
 # Older published template revisions.  Upgrades are explicit and versioned;
 # the previous same-key early return froze installed content forever.
-LEGACY_TEMPLATE_VERSIONS = ("2026-09-05.1", "2026-09-08.1")
+# Fingerprints below are 2026-09-05.1 payloads only — 2026-09-08.1 was a
+# coverage-version stamp, never a published template revision, so it is
+# deliberately absent (an install claiming it would fingerprint-mismatch
+# every lesson into "preserved edited").
+LEGACY_TEMPLATE_VERSIONS = ("2026-09-05.1",)
 
 CLASS_KEYS = (
     "house-collaborate",
@@ -1291,7 +1295,7 @@ _CLASSES: tuple[dict[str, Any], ...] = (
                     "automatic evidence for an unrelated action award. In the "
                     "achievements view, mystery entries show `???` until earned and "
                     "count toward the normal total from the beginning; ultra rares "
-                    "stay absent until earned and appear as a separate ` + U` "
+                    "stay absent until earned and appear as a separate `+U` "
                     "suffix. Alpha admin/edit mode may reveal spoilers."
                 ),
                 (
