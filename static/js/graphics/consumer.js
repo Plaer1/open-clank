@@ -91,21 +91,33 @@ export function createGraphicsConsumer(options = {}) {
   let disposed = false;
   let initialized = false;
 
+  /**
+   * Swap in a replacement canvas after WebGL taint (context loss or init
+   * failure). DOM swap runs for caller-supplied canvases too — otherwise the
+   * replacement is invisible and the tainted original stays mounted. Ownership
+   * only gates dispose-time removal, not the swap itself.
+   */
   function adoptCanvas(nextCanvas) {
     const previous = canvas;
-    if (previous && previous !== nextCanvas && previous.__graphicsOwned && typeof previous.remove === 'function') {
-      if (typeof nextCanvas.getContext === 'function') {
-        // Preserve layout box from the old surface.
-        if (nextCanvas.style && previous.style) {
-          nextCanvas.style.cssText = previous.style.cssText;
-        }
-        nextCanvas.id = previous.id || id;
-        if (previous.parentNode && typeof previous.parentNode.replaceChild === 'function') {
-          previous.parentNode.replaceChild(nextCanvas, previous);
-        }
+    if (previous && previous !== nextCanvas && typeof nextCanvas.getContext === 'function') {
+      // Preserve layout box from the old surface.
+      if (nextCanvas.style && previous.style) {
+        nextCanvas.style.cssText = previous.style.cssText;
+      }
+      // Carry backing-store size so the swap is not blank until the next resize.
+      if (typeof previous.width === 'number' && previous.width > 0) {
+        nextCanvas.width = previous.width;
+      }
+      if (typeof previous.height === 'number' && previous.height > 0) {
+        nextCanvas.height = previous.height;
+      }
+      nextCanvas.id = previous.id || id;
+      if (previous.parentNode && typeof previous.parentNode.replaceChild === 'function') {
+        previous.parentNode.replaceChild(nextCanvas, previous);
       }
     }
     canvas = nextCanvas;
+    // The replacement was created here, so this consumer owns it for dispose.
     canvas.__graphicsOwned = true;
   }
 

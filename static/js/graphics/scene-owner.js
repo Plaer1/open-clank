@@ -9,6 +9,11 @@
  * Honors visibility and prefers-reduced-motion. Reduced motion still paints
  * one frame after a setting/data change, then stops the loop. dispose()
  * cancels frames, timers and listeners and frees the owner slot.
+ *
+ * Checkpoint B: this registry (`__openClankGraphicsSceneOwners`) and theme.js
+ * `__openClankBackgroundOwner` are separate single-owner guards. When theme
+ * scenes adopt this consumer, integration must reconcile them so one surface
+ * never keeps both owners live — a duplicate loop or canvas remount flickers.
  */
 
 const OWNER_KEY = '__openClankGraphicsSceneOwners';

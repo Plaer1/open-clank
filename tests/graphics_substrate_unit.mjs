@@ -438,6 +438,15 @@ test('consumer: webgl2 success then context loss falls back with state intact an
   const mount = {
     children: [],
     appendChild(c) { this.children.push(c); c.parentNode = this; },
+    replaceChild(next, prev) {
+      const idx = this.children.indexOf(prev);
+      if (idx >= 0) this.children[idx] = next;
+      else this.children.push(next);
+      next.parentNode = this;
+      prev.parentNode = null;
+      prev.removed = true;
+      return prev;
+    },
   };
   const gl = {
     MAX_TEXTURE_SIZE: 1,
@@ -516,12 +525,21 @@ test('consumer: webgl2 success then context loss falls back with state intact an
     drawElements() {},
   };
   let webglAlive = true;
+  let webglEverAcquired = false;
   const canvas = mockCanvas2d();
+  canvas.width = 64;
+  canvas.height = 32;
   canvas.getContext = (kind) => {
-    if (kind === 'webgl2') return webglAlive ? gl : null;
+    if (kind === 'webgl2') {
+      if (webglAlive) webglEverAcquired = true;
+      return webglAlive ? gl : null;
+    }
     if (kind === '2d') {
-      // After a live WebGL context exists the same canvas cannot yield 2D.
-      return webglAlive ? null : canvas.__ctx;
+      // Real taint rule: a canvas that has ever held a WebGL context can
+      // never yield 2D — not before loss, not after. Returning a working 2D
+      // context here would skip adoptCanvas and hide a real browser defect.
+      if (webglEverAcquired) return null;
+      return canvas.__ctx;
     }
     return null;
   };
@@ -563,6 +581,18 @@ test('consumer: webgl2 success then context loss falls back with state intact an
   assert.equal(consumer.scene.id, sceneId);
   assert.deepEqual(consumer.scene.documentState, before.documentState);
   assert.equal(countSceneOwners(host), 1);
+
+  // A WebGL-tainted canvas never yields 2D, so adoptCanvas must replace it:
+  // new element in the mount, old one detached, dimensions carried over.
+  const replaced = consumer.canvas;
+  assert.notEqual(replaced, canvas, 'tainted canvas must be replaced');
+  assert.equal(canvas.removed, true, 'old canvas detached from the mount');
+  assert.equal(replaced.parentNode, mount, 'replacement is mounted');
+  assert.ok(mount.children.includes(replaced), 'mount hosts the replacement');
+  assert.ok(!mount.children.includes(canvas), 'mount dropped the tainted canvas');
+  assert.equal(replaced.width, 64, 'backing-store width carried across the swap');
+  assert.equal(replaced.height, 32, 'backing-store height carried across the swap');
+  assert.ok(replaced.getContext('2d'), 'replacement can yield a 2D context');
 
   win.__pump(1);
   assert.ok(paints.includes(BACKEND_WEBGL2));
