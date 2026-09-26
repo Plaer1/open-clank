@@ -667,7 +667,8 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
           const target = String(surface.appLink || (surface.key ? `clank://${surface.key}` : '')).trim();
           if (target) {
             event?.preventDefault?.();
-            openAppDestination(target, event);
+            const opened = openAppDestination(target, event);
+            if (opened && opened.ok === false) setStatus(opened.error || `Could not open ${target}`, true);
             return;
           }
           if (surface.href && surface.href !== '#') return; // let the anchor navigate
@@ -1150,8 +1151,10 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     if (appLink) {
       // Surface destinations resolve through the shared app-link registry so
       // context-menu activation focuses the same view as the lesson action,
-      // preserving chat identity and unsaved drafts.
-      openAppDestination(appLink, null);
+      // preserving chat identity and unsaved drafts. Failures surface in the
+      // status line instead of vanishing.
+      const opened = openAppDestination(appLink, null);
+      if (opened && opened.ok === false) setStatus(opened.error || `Could not open ${appLink}`, true);
     } else if (href && href !== '#') {
       window.location.assign(href);
     }

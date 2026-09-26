@@ -107,6 +107,25 @@ def test_every_lesson_uses_the_shared_app_link_resolver():
         assert stale not in joined
 
 
+def test_every_app_destination_root_has_a_live_js_handler():
+    """Every APP_DESTINATIONS key must resolve in the shipped JS registry.
+
+    A Python destination with no `registerAppDestination` is a dead Open
+    action: `openAppDestination` returns `ok:false` and the learner's click
+    does nothing. Settings panels share the `settings` root handler.
+    """
+    import re
+
+    copal_js = (Path(__file__).parents[1] / "static" / "js" / "copal.js").read_text()
+    registered = set(re.findall(r"registerAppDestination\('([^']+)'", copal_js))
+    roots = {key.split("/", 1)[0] for key in APP_DESTINATIONS}
+    missing = roots - registered
+    assert not missing, f"dead app destinations (no JS handler): {sorted(missing)}"
+    # Files must open the real applet, not the listener-less activate-applet event.
+    assert "dispatchEvent(new CustomEvent('openclank:activate-applet'" not in copal_js
+    assert "filesModule" in copal_js
+
+
 def test_completion_is_marked_honestly_and_practice_is_complete():
     manifest = field_guide_manifest()
     kinds = {lesson["completion"] for lesson in manifest["lessons"]}
