@@ -300,7 +300,9 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
   return _freezeThemeValue(snapshot);
 }
 
-export function themeStorageKey(owner = null) {
+// No default: omitted args must stay `undefined` so `_themeOwnerKey` falls
+// back to the active owner. An explicit `null` still means "no owner".
+export function themeStorageKey(owner) {
   return _themeOwnerKey(owner);
 }
 
