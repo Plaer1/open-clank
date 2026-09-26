@@ -447,7 +447,11 @@ def _check_n02(state: PredicateState, event: ActivityEvent) -> Qualification | N
     if state.flag("N02"):
         return None
     state.set_flag("N02", True)
-    return Qualification("N02", (event.source_event_id,), {"conversationId": _ident(facts, "conversationId")})
+    return Qualification("N02", (event.source_event_id,), {
+        "conversationId": _ident(facts, "conversationId"),
+        "sessionId": _ident(facts, "sessionId"),
+        "taskId": _ident(facts, "taskId"),
+    })
 
 
 def _check_n03(state: PredicateState, event: ActivityEvent) -> Qualification | None:
@@ -461,7 +465,10 @@ def _check_n03(state: PredicateState, event: ActivityEvent) -> Qualification | N
     if state.flag("N03"):
         return None
     state.set_flag("N03", True)
-    return Qualification("N03", (event.source_event_id,), {"taskId": _ident(facts, "taskId")})
+    return Qualification("N03", (event.source_event_id,), {
+        "taskId": _ident(facts, "taskId"),
+        "sessionId": _ident(facts, "sessionId"),
+    })
 
 
 def _check_n04(state: PredicateState, event: ActivityEvent) -> Qualification | None:
@@ -735,7 +742,10 @@ def _check_n17(state: PredicateState, event: ActivityEvent) -> Qualification | N
     if state.flag("N17"):
         return None
     state.set_flag("N17", True)
-    return Qualification("N17", (event.source_event_id,), {"taskId": _ident(facts, "taskId")})
+    return Qualification("N17", (event.source_event_id,), {
+        "taskId": _ident(facts, "taskId"),
+        "sessionId": _ident(facts, "sessionId"),
+    })
 
 
 def _check_n18(state: PredicateState, event: ActivityEvent) -> Qualification | None:
@@ -1240,6 +1250,7 @@ class AwardRecord:
     earned_at: str
     evidence_refs: tuple[str, ...]
     awarded_via: str
+    facts: Mapping[str, Any] = field(default_factory=dict)
     predicate_version: str = PREDICATE_VERSION
     catalog_revision: str = CATALOG_REVISION
 
@@ -1397,6 +1408,7 @@ class TreeHouseAchievementEngine:
             earned_at=occurred_at or _now_iso(),
             evidence_refs=tuple(qualification.evidence_refs),
             awarded_via=via,
+            facts=dict(qualification.facts),
         )
         stored = self.repository.put_achievement_award(record)
         if not stored.get("inserted"):
@@ -1469,7 +1481,10 @@ class TreeHouseAchievementEngine:
         event = self._coerce(payload)
         if event.source_hash is None and record.get("source_hash"):
             event = ActivityEvent(**{**event.normalized(), "source_hash": record.get("source_hash")})
-        # Bind the source family into the stable identity so live/backfill overlap dedupes.
+        # Bind the source family into the stable identity so backfill records
+        # keep a distinct receipt identity from live delivery.  Overlap between
+        # live and backfill is deduped at the award layer (once per account per
+        # achievement), not the receipt layer.
         if source_family and not event.source_event_id.startswith(f"{source_family}:"):
             event = ActivityEvent(
                 source_event_id=f"{source_family}:{event.source_event_id}",

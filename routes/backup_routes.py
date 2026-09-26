@@ -113,7 +113,6 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         try:
             from src.openclank.copal_treehouse_repository import TreeHouseRepository
             from src.constants import DATA_DIR
-            from src.memory_scope import memory_owner as _resolve_account_id
             th_path = os.environ.get("TREEHOUSE_REPOSITORY_PATH") or os.path.join(str(DATA_DIR), "treehouse.sqlite3")
             th_repo = TreeHouseRepository(th_path)
             auth_manager = getattr(request.app.state, "auth_manager", None)

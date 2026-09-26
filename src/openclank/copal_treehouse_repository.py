@@ -933,7 +933,14 @@ class TreeHouseRepository:
         earned_at = str(getattr(record, "earned_at", "") or "")
         evidence_refs = list(getattr(record, "evidence_refs", ()) or ())
         awarded_via = str(getattr(record, "awarded_via", "") or "")
-        evidence_json = json.dumps({"evidenceRefs": evidence_refs}, ensure_ascii=False, separators=(",", ":"))
+        facts = dict(getattr(record, "facts", None) or {})
+        evidence_payload: dict[str, Any] = {"evidenceRefs": evidence_refs}
+        # Persist qualification facts (taskId, sessionId, etc.) so notification
+        # payloads can surface S12 task identity for the "Open task" toast action.
+        for key, value in facts.items():
+            if value not in (None, "", [], {}):
+                evidence_payload[key] = value
+        evidence_json = json.dumps(evidence_payload, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -1233,61 +1240,6 @@ class TreeHouseRepository:
                     ),
                 )
                 counts["predicateState"] = 1
-            db.commit()
-        return counts
-
-    def rename_achievement_owner(self, source_account_id: str, target_account_id: str) -> dict[str, int]:
-        """Preserve the account-wide ledger across an account rename.
-
-        Awards stay unique on the new identity; colliding awards keep the
-        existing row rather than inventing a second record.
-        """
-        counts = {"awards": 0, "receipts": 0, "state": 0, "cursors": 0, "outbox": 0}
-        if source_account_id == target_account_id:
-            return counts
-        with self._lock, self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            # Move awards only where the target does not already hold the id.
-            cur = db.execute(
-                "UPDATE treehouse_achievement_awards SET account_id=? WHERE account_id=? AND achievement_id NOT IN "
-                "(SELECT achievement_id FROM treehouse_achievement_awards WHERE account_id=?)",
-                (target_account_id, source_account_id, target_account_id),
-            )
-            counts["awards"] = int(cur.rowcount or 0)
-            db.execute("DELETE FROM treehouse_achievement_awards WHERE account_id=?", (source_account_id,))
-            cur = db.execute(
-                "UPDATE treehouse_activity_receipts SET account_id=? WHERE account_id=? AND source_event_id NOT IN "
-                "(SELECT source_event_id FROM treehouse_activity_receipts WHERE account_id=?)",
-                (target_account_id, source_account_id, target_account_id),
-            )
-            counts["receipts"] = int(cur.rowcount or 0)
-            db.execute("DELETE FROM treehouse_activity_receipts WHERE account_id=?", (source_account_id,))
-            row = db.execute(
-                "SELECT account_id FROM treehouse_achievement_predicate_state WHERE account_id=?",
-                (target_account_id,),
-            ).fetchone()
-            if row is None:
-                cur = db.execute(
-                    "UPDATE treehouse_achievement_predicate_state SET account_id=? WHERE account_id=?",
-                    (target_account_id, source_account_id),
-                )
-                counts["state"] = int(cur.rowcount or 0)
-            else:
-                db.execute("DELETE FROM treehouse_achievement_predicate_state WHERE account_id=?", (source_account_id,))
-            cur = db.execute(
-                "UPDATE treehouse_achievement_backfill_cursors SET account_id=? WHERE account_id=? AND source_family NOT IN "
-                "(SELECT source_family FROM treehouse_achievement_backfill_cursors WHERE account_id=?)",
-                (target_account_id, source_account_id, target_account_id),
-            )
-            counts["cursors"] = int(cur.rowcount or 0)
-            db.execute("DELETE FROM treehouse_achievement_backfill_cursors WHERE account_id=?", (source_account_id,))
-            cur = db.execute(
-                "UPDATE treehouse_achievement_outbox SET account_id=? WHERE account_id=? AND achievement_id NOT IN "
-                "(SELECT achievement_id FROM treehouse_achievement_outbox WHERE account_id=?)",
-                (target_account_id, source_account_id, target_account_id),
-            )
-            counts["outbox"] = int(cur.rowcount or 0)
-            db.execute("DELETE FROM treehouse_achievement_outbox WHERE account_id=?", (source_account_id,))
             db.commit()
         return counts
 

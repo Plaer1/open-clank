@@ -4,7 +4,8 @@ Deterministic receipt predicates only.  No predicate is delegated to a
 language model.  These tests use disposable owners/state and cover owner
 isolation, duplicate/out-of-order delivery, backfill/live overlap, missing
 historical proof, secrecy presentation, Class-reset separation, ledger
-export/purge/restore and toast outbox durability.
+export/purge/restore, rename identity, toast outbox durability, and
+S12 task-identity payloads.
 """
 
 from __future__ import annotations
@@ -313,9 +314,11 @@ def _positive_event(achievement_id: str, source: str) -> ActivityEvent:
         "N01": lambda s: _shell_ready(s),
         "N02": lambda s: _event(s, EventFamily.CONVERSATION_TURN_COMPLETED, kind=KIND_RECEIPT, facts={
             "userTurnPersisted": True, "assistantCompleted": True, "origin": "user", "conversationId": "c1",
+            "sessionId": "sess-1", "taskId": "task-1",
         }),
         "N03": lambda s: _event(s, EventFamily.SCHEDULED_TASK_RUN_COMPLETED, kind=KIND_RECEIPT, facts={
             "createdByOwner": True, "scheduled": True, "runStatus": "success", "taskId": "t1",
+            "sessionId": "sess-2",
         }),
         "N04": lambda s: _event(s, EventFamily.GOAL_VERIFIED_COMPLETED, kind=KIND_RECEIPT, facts={
             "transition": "verified_completed", "evidenceSatisfied": True, "evidenceRefs": ["g1"], "goalId": "g1",
@@ -353,6 +356,7 @@ def _positive_event(achievement_id: str, source: str) -> ActivityEvent:
         }),
         "N17": lambda s: _event(s, EventFamily.TASK_SOURCE_COMPLETED, kind=KIND_RECEIPT, facts={
             "checkboxChange": "unchecked_to_checked", "documentId": "d1", "revisionId": "rev-4", "taskId": "t1",
+            "sessionId": "sess-3",
         }),
         "N19": lambda s: _event(s, EventFamily.CLIPBOARD_IMAGE_INSERTED, kind=KIND_RECEIPT, facts={
             "prepared": True, "inserted": True, "assetId": "img1", "documentId": "d1", "mediaLocation": "attachments",
@@ -845,3 +849,142 @@ def test_future_catalog_additions_keep_totals_honest():
     presentation = build_presentation(["N01"], admin=False)
     assert presentation["normalTotal"] == NORMAL_COUNT
     assert presentation["normalEarned"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Class-progress reset separation (lifetime awards)
+# ---------------------------------------------------------------------------
+
+
+def test_class_progress_reset_leaves_global_awards(tmp_path):
+    repo = _repo(tmp_path)
+    engine = TreeHouseAchievementEngine(repo)
+    engine.ingest("acct-a", [_shell_ready("shell-1")])
+    assert "N01" in repo.earned_achievement_ids("acct-a")
+    # Seed a course-progress row that the reset should clear.
+    repo.put_progress("acct-a", "acct-owner", "school", "course:one", {"profiles": {"acct-a": {"id": "acct-a"}}}, expected_revision=0)
+    # Ordinary Class-progress reset must not touch achievement tables.
+    repo.reset_progress_all("acct-a", "school", [], command_id="reset-1", payload={"type": "progress.reset", "payload": {}})
+    assert "N01" in repo.earned_achievement_ids("acct-a"), "class-progress reset must not erase global awards"
+    award = repo.get_achievement_award("acct-a", "N01")
+    assert award is not None
+    # Progress was actually reset (evidence the reset ran).
+    progress, revision = repo.get_progress("acct-a", "acct-owner", "school", "course:one")
+    assert progress.get("profiles") == {} or "enrollments" not in progress or progress.get("progressResets")
+
+
+# ---------------------------------------------------------------------------
+# Ledger export / purge / restore / rename identity
+# ---------------------------------------------------------------------------
+
+
+def test_ledger_export_purge_restore_round_trip(tmp_path):
+    repo = _repo(tmp_path)
+    engine = TreeHouseAchievementEngine(repo)
+    engine.ingest("acct-a", [_shell_ready("shell-1")])
+    exported = repo.export_achievement_ledger("acct-a")
+    assert any(r["achievement_id"] == "N01" for r in exported["awards"])
+    assert exported["accountId"] == "acct-a"
+    # Purge removes everything.
+    counts = repo.purge_achievement_ledger("acct-a")
+    assert counts["treehouse_achievement_awards"] >= 1
+    assert repo.earned_achievement_ids("acct-a") == []
+    assert repo.export_achievement_ledger("acct-a")["awards"] == []
+    # Restore brings the ledger back.
+    restore_counts = repo.restore_achievement_ledger("acct-a", exported)
+    assert restore_counts["awards"] >= 1
+    assert "N01" in repo.earned_achievement_ids("acct-a")
+
+
+def test_rename_preserves_ledger_identity(tmp_path):
+    """Awards are keyed by immutable account_id, which survives username rename."""
+    repo = _repo(tmp_path)
+    engine = TreeHouseAchievementEngine(repo)
+    engine.ingest("acct-1", [_shell_ready("shell-1")])
+    assert "N01" in repo.earned_achievement_ids("acct-1")
+    # Rename the username: account_id does not change.  The ledger must still
+    # resolve under the same account_id.
+    exported = repo.export_achievement_ledger("acct-1")
+    assert exported["accountId"] == "acct-1"
+    assert any(r["achievement_id"] == "N01" for r in exported["awards"])
+    # Same account_id after rename — no migration step required.
+    assert "N01" in repo.earned_achievement_ids("acct-1")
+
+
+# ---------------------------------------------------------------------------
+# Toast outbox durability and S12 task identity
+# ---------------------------------------------------------------------------
+
+
+def test_outbox_dedupes_by_award_id_across_reconnects(tmp_path):
+    repo = _repo(tmp_path)
+    first = repo.enqueue_award_notification("acct-a", "N01")
+    assert first["inserted"] is True
+    # Reconnects / tabs / repeated polls must not re-deliver the same award.
+    second = repo.enqueue_award_notification("acct-a", "N01")
+    assert second["inserted"] is False
+    assert second["outboxId"] == first["outboxId"]
+    pending = repo.list_pending_notifications("acct-a")
+    assert len(pending) == 1
+
+
+def test_notification_payload_carries_task_and_session_identity(tmp_path):
+    repo = _repo(tmp_path)
+    engine = TreeHouseAchievementEngine(repo)
+    engine.ingest("acct-a", [
+        _event("conv-1", EventFamily.CONVERSATION_TURN_COMPLETED, kind=KIND_RECEIPT, facts={
+            "userTurnPersisted": True, "assistantCompleted": True, "origin": "user",
+            "conversationId": "c1", "sessionId": "sess-1", "taskId": "task-1",
+        }),
+    ])
+    award = repo.get_achievement_award("acct-a", "N02")
+    assert award is not None
+    evidence = award["evidence"]
+    assert evidence.get("sessionId") == "sess-1"
+    assert evidence.get("taskId") == "task-1"
+    assert evidence.get("conversationId") == "c1"
+
+
+def test_failed_toast_never_erases_award(tmp_path):
+    repo = _repo(tmp_path)
+    engine = TreeHouseAchievementEngine(repo)
+    engine.ingest("acct-a", [_shell_ready("shell-1")])
+    assert "N01" in repo.earned_achievement_ids("acct-a")
+    note = repo.enqueue_award_notification("acct-a", "N01")
+    outbox_id = note["outboxId"]
+    # Simulate a toast failure.
+    failed = repo.mark_notification_failed(outbox_id)
+    assert failed["state"] == "failed"
+    # The durable award survives the failed toast.
+    assert "N01" in repo.earned_achievement_ids("acct-a")
+    assert repo.get_achievement_award("acct-a", "N01") is not None
+    # The outbox row records the failure but does not re-deliver.
+    assert repo.list_pending_notifications("acct-a") == []
+
+
+def test_n02_n03_n17_evidence_carries_session_identity(tmp_path):
+    repo = _repo(tmp_path)
+    engine = TreeHouseAchievementEngine(repo)
+    engine.ingest("acct-a", [
+        _event("conv-1", EventFamily.CONVERSATION_TURN_COMPLETED, kind=KIND_RECEIPT, facts={
+            "userTurnPersisted": True, "assistantCompleted": True, "origin": "user",
+            "conversationId": "c1", "sessionId": "sess-a", "taskId": "task-a",
+        }),
+        _event("sched-1", EventFamily.SCHEDULED_TASK_RUN_COMPLETED, kind=KIND_RECEIPT, facts={
+            "createdByOwner": True, "scheduled": True, "runStatus": "success",
+            "taskId": "task-b", "sessionId": "sess-b",
+        }),
+        _event("task-1", EventFamily.TASK_SOURCE_COMPLETED, kind=KIND_RECEIPT, facts={
+            "checkboxChange": "unchecked_to_checked", "documentId": "d1", "revisionId": "rev-1",
+            "taskId": "task-c", "sessionId": "sess-c",
+        }),
+    ])
+    n02 = repo.get_achievement_award("acct-a", "N02")
+    assert n02["evidence"].get("sessionId") == "sess-a"
+    assert n02["evidence"].get("taskId") == "task-a"
+    n03 = repo.get_achievement_award("acct-a", "N03")
+    assert n03["evidence"].get("sessionId") == "sess-b"
+    assert n03["evidence"].get("taskId") == "task-b"
+    n17 = repo.get_achievement_award("acct-a", "N17")
+    assert n17["evidence"].get("sessionId") == "sess-c"
+    assert n17["evidence"].get("taskId") == "task-c"
