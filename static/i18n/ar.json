@@ -4269,7 +4269,7 @@
   "ui.local.first.vault.db.backed": "القبو المحلي الأول · مدعوم بقاعدة البيانات ·",
   "ui.local.kokoro.82m": "محلي (كوكورو-82M)",
   "ui.local.model.provider": "مزوّد نموذج محلي",
-  "ui.local.model.server.url": "عنوان خادم النموذج المحلي",
+  "ui.local.model.server.url": "عنوان URL لخادم النموذج المحلي",
   "ui.local.model.server.vllm.lm.studio.llama.cpp.ollama": "خادم الطراز المحلي (vLLM / LM Studio / llama.cpp / Ollama)",
   "ui.local.server": "الخادم المحلي",
   "ui.local.server.appears.offline.value.click.to.try.anyway.or": "يظهر الخادم المحلي في وضع عدم الاتصال: {0}. انقر للمحاولة على أي حال، أو أعد التشغيل في كتاب الطبخ.",
