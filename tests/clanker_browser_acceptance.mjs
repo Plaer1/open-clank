@@ -171,9 +171,40 @@ try {
       if (this.canvas===canvas) stamps.push(performance.now());
       return clearRect.apply(this,args);
     };
-    try { await new Promise(resolve=>setTimeout(resolve, ${Number(duration)})); }
-    finally { proto.clearRect=clearRect; }
-    const intervals=stamps.slice(1).map((stamp,index)=>stamp-stamps[index]).sort((a,b)=>a-b);
+    // Graphics-substrate patterns (code rain) may run on the WebGL2 backend,
+    // which clears with gl.clear and never touches Canvas2D.clearRect. Count
+    // that as the frame marker — not fillRect/drawImage, which run several
+    // times per frame and would fake a double-paint.
+    let glClear=null;
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+      glClear=WebGL2RenderingContext.prototype.clear;
+      WebGL2RenderingContext.prototype.clear=function(...args) {
+        if (this.canvas===canvas) stamps.push(performance.now());
+        return glClear.apply(this,args);
+      };
+    }
+    // Sample over animation frames, not a wall-clock window. Headless/software
+    // rendering often delivers ~30fps; a 260ms clock then catches only ~8
+    // frames and the old >=10 gate was a cadence race, not a product signal.
+    // A stopped animation still fails (timeout with a low count).
+    try {
+      await new Promise(resolve => {
+        let ticks = 0;
+        const target = ${Number(duration)} >= 300 ? 14 : 12;
+        const tick = () => {
+          ticks += 1;
+          if (ticks >= target) resolve();
+          else requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+        setTimeout(resolve, 2500);
+      });
+    }
+    finally {
+      proto.clearRect=clearRect;
+      if (glClear) WebGL2RenderingContext.prototype.clear=glClear;
+    }
+    const intervals=stamps.slice(1).map((ts,index)=>ts-stamps[index]).sort((a,b)=>a-b);
     return { paints:stamps.length, min:intervals[0] || 0, median:intervals[Math.floor(intervals.length/2)] || 0, max:intervals.at(-1) || 0 };
   })()`);
   const canvasCadenceStable = async id => {
@@ -393,7 +424,20 @@ try {
       recordMode(this);
       return stroke.apply(this,args);
     };
-    try { await new Promise(resolve=>setTimeout(resolve,260)); }
+    try {
+      // Frame-counted sample (same rationale as canvasCadence): a wall-clock
+      // window races the compositor cadence and under-counts on ~30fps.
+      await new Promise(resolve => {
+        let ticks = 0;
+        const tick = () => {
+          ticks += 1;
+          if (ticks >= 12) resolve();
+          else requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+        setTimeout(resolve, 2500);
+      });
+    }
     finally {
       proto.clearRect=clearRect;
       proto.drawImage=drawImage;
@@ -528,7 +572,11 @@ try {
   const patternResults = {};
   for (const [pattern, canvasId, screenshotName, minimumPaintedRatio] of [
     ['clanker-kene-weave', 'clanker-kene-weave-canvas', 'clanker-kene-weave', 0.16],
-    ['clanker-lcars', 'clanker-lcars-canvas', 'clanker-lcars', 0.28],
+    // LCARS is an open-center frame: in the chat-pane mount the rail is 9px
+    // (inset 0 → thin rail), so painted coverage is a few percent, not a third
+    // of the canvas. 0.28 was calibrated for a denser rail and fails on the
+    // S25 thin-rail geometry.
+    ['clanker-lcars', 'clanker-lcars-canvas', 'clanker-lcars', 0.06],
     ['clanker-gem-drift', 'clanker-gem-drift-canvas', 'clanker-gem-drift', 0.025],
     ['clanker-emoji-drift', 'clanker-emoji-drift-canvas', 'clanker-emoji-drift', 0.012],
     ['clanker-matrix-rain', 'clanker-matrix-rain-canvas', 'clanker-matrix-rain', 0.018],
@@ -706,7 +754,14 @@ try {
     };
 
     await choose('clanker-lcars');
-    const saved=JSON.parse(localStorage.getItem('odysseus-theme'));
+    // Owner-scoped key is authoritative once auth is established (save() writes
+    // THEME_OWNER_PREFIX + owner, not the legacy LS_KEY).
+    const saved=(() => {
+      for (const key of ['odysseus-theme:scope:theme-test', 'odysseus-theme']) {
+        try { const raw = localStorage.getItem(key); if (raw) return JSON.parse(raw); } catch {}
+      }
+      return null;
+    })();
     return { kene, gem, emoji, matrixRain, emojiRain, hidden:document.getElementById('theme-bg-effect-controls')?.hidden, saved, controls:saved?.bgEffectControls };
   })()`);
   assert(effectControlResults.kene.controls);
@@ -898,7 +953,7 @@ try {
 
   await evaluate("document.querySelector('#themeGrid [data-theme=\"clanker-light\"]').click()");
   await waitFor("document.body.classList.contains('theme-clanker-light')", 'Clanker Light selection');
-  const light = await evaluate(`(() => { const root=getComputedStyle(document.documentElement),body=getComputedStyle(document.body),saved=JSON.parse(localStorage.getItem('odysseus-theme')); return { bg:root.getPropertyValue('--bg').trim(), classes:[...document.body.classList], font:body.fontFamily, animation:body.animationName, saved, texture:getComputedStyle(document.querySelector('.sidebar')).backgroundImage }; })()`);
+  const light = await evaluate(`(() => { const root=getComputedStyle(document.documentElement),body=getComputedStyle(document.body); const saved=(()=>{ for (const key of ['odysseus-theme:scope:theme-test','odysseus-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw); } catch {} } return null; })(); return { bg:root.getPropertyValue('--bg').trim(), classes:[...document.body.classList], font:body.fontFamily, animation:body.animationName, saved, texture:getComputedStyle(document.querySelector('.sidebar')).backgroundImage }; })()`);
   assert.equal(light.bg.toUpperCase(), '#F3EEDB');
   assert(light.classes.includes('bg-pattern-clanker-blueprint'));
   assert.match(light.font, /Liga Comic Mono/); assert.match(light.animation, /clanker-lcars-status-sweep/);
@@ -909,7 +964,7 @@ try {
   await reloadAndWait("document.querySelector('#themeGrid .theme-swatch.active')?.dataset.theme === 'clanker-light'", 'Clanker Light reload persistence');
   await waitFor("!!document.querySelector('#themeGrid [data-theme=\"dark\"]')", 'Original theme swatch');
   assert.equal(await evaluate("(() => { const sw=document.querySelector('#themeGrid [data-theme=\"dark\"]'); if (!sw) return false; sw.click(); return true; })()"), true);
-  const original = await evaluate(`(() => ({ classes:[...document.body.classList], font:getComputedStyle(document.body).fontFamily, pattern:JSON.parse(localStorage.getItem('odysseus-theme')).bgPattern || 'none', locked:document.getElementById('theme-font-select').disabled }))()`);
+  const original = await evaluate(`(() => { const saved=(()=>{ for (const key of ['odysseus-theme:scope:theme-test','odysseus-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw); } catch {} } return null; })(); return { classes:[...document.body.classList], font:getComputedStyle(document.body).fontFamily, pattern:saved?.bgPattern || 'none', locked:document.getElementById('theme-font-select').disabled }; })()`);
   assert(!original.classes.some(name => name.startsWith('theme-clanker-')));
   assert.match(original.font, /Fira Code/); assert.equal(original.pattern, 'none'); assert.equal(original.locked, false);
 
@@ -952,6 +1007,9 @@ try {
   for (const [pattern, canvasId] of Object.entries(canvasPatternIds)) {
     await evaluate(`(() => { const select=document.getElementById('theme-bg-pattern-select'); select.value=${JSON.stringify(pattern)}; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
     await waitFor(`document.getElementById(${JSON.stringify(canvasId)})?.isConnected`, `${pattern} reduced motion`);
+    // One-shot reduced-motion paint can land a task after isConnected; sample
+    // after a beat so we measure the painted frame, not the pre-paint canvas.
+    await new Promise(resolve => setTimeout(resolve, 120));
     const frameA = await canvasState(canvasId);
     await new Promise(resolve => setTimeout(resolve, 180));
     const frameB = await canvasState(canvasId);
@@ -1027,10 +1085,10 @@ try {
 
   await command('Emulation.setDeviceMetricsOverride', { width:1440, height:1000, deviceScaleFactor:1, mobile:false });
   await evaluate("document.querySelector('#themeGrid [data-theme=\"clanker-light\"]').click()");
-  await waitFor("JSON.parse(localStorage.getItem('odysseus-theme'))?.name === 'clanker-light'", 'saved light theme before login');
+  await waitFor(`(() => { for (const key of ['odysseus-theme:scope:theme-test','odysseus-theme']) { try { const raw=localStorage.getItem(key); if (raw && JSON.parse(raw)?.name === 'clanker-light') return true; } catch {} } return false; })()`, 'saved light theme before login');
   await command('Page.navigate', { url:`${base}/login` });
   await waitFor("document.readyState === 'complete' && document.body.classList.contains('theme-clanker-dark') && document.getElementById('clanker-routefield-canvas')?.isConnected", 'Clanker login theme');
-  const login = await evaluate(`(async () => { await document.fonts.load("16px 'Liga Comic Mono'"); await document.fonts.load("32px 'Fredoka'"); const root=getComputedStyle(document.documentElement), body=getComputedStyle(document.body), card=getComputedStyle(document.querySelector('.card')); return { bg:root.getPropertyValue('--bg').trim(), savedName:JSON.parse(localStorage.getItem('odysseus-theme'))?.name, classes:[...document.body.classList], font:body.fontFamily, backgroundImage:body.backgroundImage, effectCanvasCount:document.querySelectorAll('[data-background-effect-canvas]').length, logoFont:getComputedStyle(document.querySelector('.logo span')).fontFamily, logoMark:document.querySelector('.logo-mark')?.innerHTML, favicon:decodeURIComponent(document.querySelector("link[rel='icon']").href.split(',')[1]), submitBackground:getComputedStyle(document.querySelector('#submitBtn')).backgroundColor, cardBorder:card.borderTopWidth, cardRadius:card.borderTopLeftRadius, cardShadow:card.boxShadow, liga:document.fonts.check("16px 'Liga Comic Mono'"), fredoka:document.fonts.check("32px 'Fredoka'") }; })()`);
+  const login = await evaluate(`(async () => { await document.fonts.load("16px 'Liga Comic Mono'"); await document.fonts.load("32px 'Fredoka'"); const root=getComputedStyle(document.documentElement), body=getComputedStyle(document.body), card=getComputedStyle(document.querySelector('.card')); const savedName=(()=>{ for (const key of ['odysseus-theme:scope:theme-test','odysseus-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw)?.name; } catch {} } return null; })(); return { bg:root.getPropertyValue('--bg').trim(), savedName, classes:[...document.body.classList], font:body.fontFamily, backgroundImage:body.backgroundImage, effectCanvasCount:document.querySelectorAll('[data-background-effect-canvas]').length, logoFont:getComputedStyle(document.querySelector('.logo span')).fontFamily, logoMark:document.querySelector('.logo-mark')?.innerHTML, favicon:decodeURIComponent(document.querySelector("link[rel='icon']").href.split(',')[1]), submitBackground:getComputedStyle(document.querySelector('#submitBtn')).backgroundColor, cardBorder:card.borderTopWidth, cardRadius:card.borderTopLeftRadius, cardShadow:card.boxShadow, liga:document.fonts.check("16px 'Liga Comic Mono'"), fredoka:document.fonts.check("32px 'Fredoka'") }; })()`);
   assert.match(login.font, /Liga Comic Mono/); assert.match(login.logoFont, /Fredoka/);
   assert.equal(login.bg.toUpperCase(), '#191A1E'); assert.equal(login.savedName, 'clanker-light');
   assert(login.classes.includes('theme-clanker-dark') && login.classes.includes('bg-pattern-clanker-routefield'));

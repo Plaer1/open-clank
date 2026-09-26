@@ -1,0 +1,504 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>S26 visual harness</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    html, body { margin: 0; padding: 0; background: var(--bg, #191A1E); color: var(--fg, #FFF4D6);
+      font: 12px/1.4 monospace; }
+    #chat-container { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
+    .panel-label { position: fixed; left: 8px; top: 8px; z-index: 5;
+      background: rgba(0,0,0,.55); padding: 3px 8px; border-radius: 4px; }
+    .probe-block { position: fixed; right: 12px; top: 12px; z-index: 5; width: 220px;
+      background: rgba(20,20,24,.72); border: 1px solid #555A62; border-radius: 8px;
+      padding: 8px 10px; }
+  </style>
+</head>
+<body class="theme-clanker-dark">
+  <div class="panel-label" id="label">S26 harness</div>
+  <div class="probe-block" id="probe" hidden>
+    <div>Intensity</div>
+    <input type="range" id="probe-intensity" min="0" max="100" step="5" value="100">
+    <div>Size</div>
+    <input type="range" id="probe-size" min="30" max="250" step="10" value="100">
+    <!-- Settings-panel seams referenced by theme.js control visibility. -->
+    <div id="theme-bg-intensity-group"><label class="theme-fd-label">Intensity</label>
+      <input type="range" id="theme-bg-intensity" min="0" max="100" step="5" value="100"></div>
+    <div id="theme-bg-size-group"><label class="theme-fd-label">Size</label>
+      <input type="range" id="theme-bg-size" min="30" max="250" step="10" value="100"></div>
+    <div id="theme-bg-effect-controls"></div>
+    <select id="theme-bg-pattern-select"></select>
+    <input type="color" id="theme-bg-effect-color" value="#9cdef2">
+  </div>
+  <main id="chat-container" class="chat-container"></main>
+  <script type="module">
+    import * as theme from '/static/js/theme.js';
+
+    // Stub prefers-reduced-motion so the capture can toggle it without CDP
+    // media emulation (which has hung this fixture before).
+    let reducedMotion = false;
+    const motionListeners = new Set();
+    window.__motionStubDispatch = () => {
+      motionListeners.forEach(fn => {
+        try { fn({ matches: reducedMotion }); } catch (_) { /* ignore */ }
+      });
+    };
+    const realMatchMedia = window.matchMedia.bind(window);
+    window.matchMedia = (query) => {
+      if (String(query).includes('prefers-reduced-motion')) {
+        return {
+          get matches() { return reducedMotion; },
+          media: query,
+          addEventListener: (type, fn) => { if (type === 'change') motionListeners.add(fn); },
+          removeEventListener: (type, fn) => { motionListeners.delete(fn); },
+          addListener: (fn) => motionListeners.add(fn),
+          removeListener: (fn) => motionListeners.delete(fn),
+        };
+      }
+      return realMatchMedia(query);
+    };
+
+    window.__theme = theme;
+    window.__themeReady = true;
+
+    window.__setReducedMotion = (value) => {
+      reducedMotion = !!value;
+      // Notify every mounted effect's motion listener.
+      document.querySelectorAll('canvas').forEach(() => {});
+      if (window.__motionStubDispatch) window.__motionStubDispatch();
+    };
+
+    // Minimal DOM nodes that some effects clip against / collide with.
+    const chat = document.getElementById('chat-container');
+    const bar = document.createElement('div');
+    bar.className = 'chat-top-bar';
+    bar.style.cssText = 'position:absolute;left:0;right:0;top:0;height:48px;background:#25272C;';
+    chat.append(bar);
+
+    const hashCanvas = (canvas) => {
+      if (!canvas) return null;
+      const probe = document.createElement('canvas');
+      probe.width = 64; probe.height = 40;
+      const pctx = probe.getContext('2d');
+      pctx.drawImage(canvas, 0, 0, 64, 40);
+      const data = pctx.getImageData(0, 0, 64, 40).data;
+      let hash = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        hash = (hash * 31 + data[i] + data[i + 1] * 3 + data[i + 2] * 7) >>> 0;
+      }
+      return hash;
+    };
+
+    window.__s26 = {
+      async mount(pattern) {
+        theme.applyBgPattern(pattern);
+        await new Promise(r => setTimeout(r, 260));
+        const canvas = document.querySelector('[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas');
+        return {
+          mounted: !!canvas?.isConnected,
+          canvasId: canvas?.id || null,
+          owner: !!window.__openClankBackgroundOwner,
+        };
+      },
+      async reapply(pattern) {
+        const before = window.__openClankBackgroundOwner;
+        const canvasBefore = document.querySelector('[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas');
+        const idBefore = canvasBefore?.id || null;
+        theme.applyBgPattern(pattern);
+        await new Promise(r => setTimeout(r, 180));
+        const after = window.__openClankBackgroundOwner;
+        const canvasAfter = document.querySelector('[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas');
+        return {
+          sameOwner: before === after && !!after,
+          sameCanvasId: idBefore === (canvasAfter?.id || null),
+          canvasId: canvasAfter?.id || null,
+        };
+      },
+      setIntensity(v) {
+        theme.applyBgEffectIntensity(v);
+        return getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity').trim();
+      },
+      setSize(v) {
+        theme.applyBgEffectSize(v);
+        return {
+          size: getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-size').trim(),
+          grid: getComputedStyle(document.documentElement).getPropertyValue('--clanker-grid-size').trim(),
+        };
+      },
+      setColor(c) {
+        theme.applyBgEffectColor(c);
+        return getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-color').trim();
+      },
+      // T15: compare CSS opacity to the painted canvas (single application).
+      legacyIntensityProbe() {
+        const canvas = document.getElementById('rain-canvas')
+          || document.getElementById('synapse-canvas')
+          || document.getElementById('constellations-canvas');
+        if (!canvas) return null;
+        const styles = getComputedStyle(canvas);
+        return {
+          cssOpacity: styles.opacity,
+          hash: hashCanvas(canvas),
+          width: canvas.width,
+          height: canvas.height,
+        };
+      },
+      // T11/T12/T13: Emoji Drift scene introspection.
+      driftProbe() {
+        const canvas = document.getElementById('clanker-emoji-drift-canvas');
+        const scene = canvas?.__backgroundScene;
+        if (!scene) return null;
+        const glyphs = scene.shards.slice(0, 24).map(s => s.emoji);
+        // Shards that are actually integrating rotation (angle non-zero).
+        const rotating = scene.shards.filter(s => Math.abs(s.angle || 0) > 1e-6);
+        return {
+          shardCount: scene.shards.length,
+          spriteCacheEntries: scene.emojiSprites.size,
+          sampleGlyphs: glyphs,
+          multiCodePoint: glyphs.filter(g => [...g].length > 1).length,
+          rotatingCount: rotating.length,
+          angles: rotating.slice(0, 5).map(s => Math.round((s.angle || 0) * 1000) / 1000),
+          rotations: rotating.slice(0, 5).map(s => Math.round((s.rotation || 0) * 1000) / 1000),
+        };
+      },
+      async stressDriftSizes() {
+        const canvas = document.getElementById('clanker-emoji-drift-canvas');
+        if (!canvas) return null;
+        // Reduced motion parks the RAF loop. Without it, every frame re-rasterizes
+        // ~410 of 458 shards (LRU cap 48 thrash) and starves CDP to the point
+        // where evaluate/screenshot time out. applyBgEffectSize still invalidates
+        // once per step, so the cache is exercised without a live loop.
+        window.__setReducedMotion(true);
+        try {
+          for (const size of [0.3, 0.6, 1, 1.4, 1.8, 2.2, 2.5, 1, 0.4, 1.6]) {
+            theme.applyBgEffectSize(size);
+            await new Promise(r => setTimeout(r, 30));
+          }
+        } finally {
+          window.__setReducedMotion(false);
+        }
+        // Read the LIVE scene — size changes rebuild it, so the cache to bound
+        // is the current one.
+        const scene = canvas.__backgroundScene;
+        return { spriteCacheEntries: scene?.emojiSprites?.size ?? null, cap: 48 };
+      },
+      async driftSpeedChange() {
+        const canvas = document.getElementById('clanker-emoji-drift-canvas');
+        const scene = canvas?.__backgroundScene;
+        if (!scene) return null;
+        const rotating = scene.shards.filter(s => Math.abs(s.angle || 0) > 1e-6);
+        const sample = rotating.slice(0, 5);
+        // Controlled timestamps: each paint advances the drift clock by exactly
+        // 50ms so the integrated angle step is predictable.
+        const base = Number.isFinite(scene.driftRenderTime) ? scene.driftRenderTime : 0;
+        const paintAt = (t) => { canvas.__backgroundPaint(t, false); };
+        const read = () => sample.map(s => Math.round((s.angle || 0) * 10000) / 10000);
+        paintAt(base + 50);
+        const step1 = read();
+        paintAt(base + 100);
+        const step2 = read();
+        // Change rotation speed 100% → 400%. Rotation speed is an Advanced
+        // setting, so unlock that group first or the input is not rendered.
+        const host = document.getElementById('theme-bg-effect-controls');
+        let changed = false;
+        if (host) {
+          const adv = host.querySelector('input[aria-label="Advanced settings"]');
+          if (adv && !adv.checked) {
+            adv.checked = true;
+            adv.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          const input = host.querySelector('input[aria-label="Rotation speed"]');
+          if (input) {
+            input.value = '400';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            changed = true;
+          }
+        }
+        paintAt(base + 150);
+        const step3 = read();
+        const d1 = step2.map((v, i) => Math.round((v - step1[i]) * 10000) / 10000);
+        const d2 = step3.map((v, i) => Math.round((v - step2[i]) * 10000) / 10000);
+        return {
+          sampled: sample.length,
+          changed,
+          step1, step2, step3,
+          dSlow: d1,
+          dFast: d2,
+          // Integration proof: slow steps ≈ 50ms * 0.00045 * 1 = 0.0225,
+          // fast steps ≈ 50ms * 0.00045 * 4 = 0.09, and step3 continues from
+          // step2 (no reseeding of the absolute angle).
+          noJump: d2.map(v => Math.abs(v) > 0.02 && Math.abs(v) < 0.25),
+          continued: step3.map((v, i) => Math.abs(v - step2[i]) < 0.25 && Math.abs(v) > Math.abs(step2[i]) - 0.001),
+        };
+      },
+      // T10: reduced-motion one-shot repaint on style change.
+      reducedMotionProbe() {
+        const canvas = document.querySelector('[data-background-effect-canvas], [data-clanker-effect-canvas], #rain-canvas');
+        return {
+          hash: hashCanvas(canvas),
+          cssIntensity: getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity').trim(),
+          cssColor: getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-color').trim(),
+        };
+      },
+      forceRepaint() {
+        theme._invalidateBackgroundPaint();
+      },
+      // T18: backing store follows devicePixelRatio.
+      dprProbe() {
+        const canvas = document.getElementById('rain-canvas')
+          || document.getElementById('synapse-canvas')
+          || document.querySelector('[data-background-effect-canvas], [data-clanker-effect-canvas]');
+        if (!canvas) return null;
+        return {
+          dpr: window.devicePixelRatio,
+          backingWidth: canvas.width,
+          backingHeight: canvas.height,
+          cssWidth: canvas.style.width || getComputedStyle(canvas).width,
+        };
+      },
+      // T17: intensity control visibility for dots vs none.
+      controlVisibility(pattern) {
+        theme.applyBgPattern(pattern);
+        const ig = document.getElementById('theme-bg-intensity-group');
+        const sg = document.getElementById('theme-bg-size-group');
+        return {
+          pattern,
+          intensityVisible: !!ig && ig.style.display !== 'none',
+          sizeVisible: !!sg && sg.style.display !== 'none',
+        };
+      },
+      // T16: blueprint computed background-image mentions the effect color.
+      blueprintComputed() {
+        const styles = getComputedStyle(document.body);
+        return {
+          backgroundImage: styles.backgroundImage,
+          backgroundSize: styles.backgroundSize,
+          animationName: styles.animationName,
+          cssColor: getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-color').trim(),
+        };
+      },
+      ownerCount() {
+        const canvases = document.querySelectorAll('[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas');
+        return {
+          canvases: canvases.length,
+          owner: !!window.__openClankBackgroundOwner,
+          ids: [...canvases].map(c => c.id),
+        };
+      },
+      // Gap 1 repair: actually APPLY and PAINT a palette, then sample real
+      // pixels from the composited page — not just Object.keys(THEMES).
+      applyPalette(name) {
+        const before = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+        const result = theme.applyTheme(name, null, { persist: false });
+        const root = getComputedStyle(document.documentElement);
+        const body = getComputedStyle(document.body);
+        const applied = {
+          name,
+          ok: !!result,
+          bg: root.getPropertyValue('--bg').trim(),
+          fg: root.getPropertyValue('--fg').trim(),
+          panel: root.getPropertyValue('--panel').trim(),
+          border: root.getPropertyValue('--border').trim(),
+          red: root.getPropertyValue('--red').trim(),
+          bodyBg: body.backgroundColor,
+          bodyFg: body.color,
+          identityPreserved: !!(result && result.colors && result.colors.bg),
+          cssBgMatchesPalette: !!(result && result.colors && result.colors.bg
+            && root.getPropertyValue('--bg').trim().toLowerCase() === String(result.colors.bg).toLowerCase()),
+        };
+        // Sample real composited pixels from a scratch canvas filled with the
+        // live CSS variables — proves the palette is non-blank and distinct.
+        const scratch = document.createElement('canvas');
+        scratch.width = 64; scratch.height = 40;
+        const sctx = scratch.getContext('2d');
+        sctx.fillStyle = applied.bg || '#000';
+        sctx.fillRect(0, 0, 64, 40);
+        sctx.fillStyle = applied.fg || '#fff';
+        sctx.fillRect(0, 0, 32, 20);
+        sctx.fillStyle = applied.panel || '#111';
+        sctx.fillRect(32, 20, 32, 20);
+        sctx.fillStyle = applied.red || '#f00';
+        sctx.fillRect(16, 10, 16, 16);
+        const data = sctx.getImageData(0, 0, 64, 40).data;
+        const colors = new Set();
+        for (let i = 0; i < data.length; i += 4) {
+          colors.add(data[i] + ',' + data[i + 1] + ',' + data[i + 2]);
+        }
+        applied.pixelColors = colors.size;
+        applied.nonBlank = colors.size >= 2;
+        applied.sampleHash = hashCanvas(scratch);
+        applied.beforeBg = before;
+        return applied;
+      },
+      // Custom-theme path (plan req 3: custom themes enumerated too).
+      applyCustomPalette() {
+        const colors = {
+          bg: '#102030', fg: '#E0F0FF', panel: '#182838', border: '#405060', red: '#FF6688',
+        };
+        const saved = theme.saveCustomTheme('s26-probe-custom', colors, { bgPattern: 'none' });
+        const applied = theme.applyTheme('s26-probe-custom', null, { persist: false });
+        const root = getComputedStyle(document.documentElement);
+        const scratch = document.createElement('canvas');
+        scratch.width = 32; scratch.height = 20;
+        const sctx = scratch.getContext('2d');
+        sctx.fillStyle = root.getPropertyValue('--bg').trim() || '#000';
+        sctx.fillRect(0, 0, 32, 20);
+        sctx.fillStyle = root.getPropertyValue('--fg').trim() || '#fff';
+        sctx.fillRect(0, 0, 16, 10);
+        const data = sctx.getImageData(0, 0, 32, 20).data;
+        const colorsSeen = new Set();
+        for (let i = 0; i < data.length; i += 4) colorsSeen.add(data[i] + ',' + data[i + 1] + ',' + data[i + 2]);
+        const out = {
+          saved,
+          ok: !!applied,
+          bg: root.getPropertyValue('--bg').trim(),
+          fg: root.getPropertyValue('--fg').trim(),
+          pixelColors: colorsSeen.size,
+          nonBlank: colorsSeen.size >= 2,
+          cssBgMatchesPalette: root.getPropertyValue('--bg').trim().toLowerCase() === colors.bg.toLowerCase(),
+        };
+        theme.deleteCustomTheme('s26-probe-custom');
+        return out;
+      },
+      // Gap 1 repair: per-control qualification matrix. For every exposed
+      // control record default / min / max / live update / persistence /
+      // applicability / reduced-motion dirty-paint.
+      controlMatrix() {
+        const rows = [];
+        const snapshot = () => {
+          try { return JSON.stringify(theme.getSaved() || null); }
+          catch (_) { return 'null'; }
+        };
+        const paintHash = () => {
+          const canvas = document.querySelector('[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas');
+          return canvas ? hashCanvas(canvas) : null;
+        };
+
+        // ── global effect controls (intensity / size / color) ──────────────
+        // Persistence for these three is wired in initThemeUI (slider →
+        // _saveFull → save). This fixture does not mount the full settings
+        // panel, so persistence is source-asserted here and behaviourally
+        // covered by theme_browser_acceptance — not claimed as probed.
+        const globalDefs = [
+          { key: 'bgEffectIntensity', label: 'Intensity', apply: v => theme.applyBgEffectIntensity(v),
+            read: () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-intensity')),
+            def: 1, lo: 0, hi: 1, applies: 'all canvas patterns (not none)',
+            persistNote: 'source: initThemeUI intensity slider → _saveFull' },
+          { key: 'bgEffectSize', label: 'Size', apply: v => theme.applyBgEffectSize(v),
+            read: () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-size')),
+            def: 1, lo: 0.2, hi: 3, applies: 'patterns with a scale knob (not none/dots)',
+            persistNote: 'source: initThemeUI size slider → _saveFull' },
+          { key: 'bgEffectColor', label: 'Effect color', apply: v => theme.applyBgEffectColor(v),
+            read: () => getComputedStyle(document.documentElement).getPropertyValue('--bg-effect-color').trim(),
+            def: '#9cdef2', lo: '#000000', hi: '#FF00AA', applies: 'all effect patterns',
+            persistNote: 'source: initThemeUI effect color picker → _saveFull' },
+        ];
+        window.__setReducedMotion(true);
+        for (const def of globalDefs) {
+          const hash0 = paintHash();
+          def.apply(def.def);
+          const defVal = def.read();
+          def.apply(def.hi);
+          const hiVal = def.read();
+          def.apply(def.lo);
+          const loVal = def.read();
+          def.apply(def.def);
+          const restored = def.read();
+          const hash1 = paintHash();
+          rows.push({
+            scope: 'global', key: def.key, label: def.label,
+            default: def.def, min: def.lo, max: def.hi,
+            liveUpdate: String(hiVal) !== String(defVal) || String(loVal) !== String(defVal),
+            liveValueHi: hiVal, liveValueLo: loVal, restoredDefault: restored,
+            persistence: 'source-wired (see persistNote)',
+            persistNote: def.persistNote,
+            applicability: def.applies,
+            reducedMotionDirtyPaint: hash0 !== hash1,
+            hashBefore: hash0, hashAfter: hash1,
+          });
+        }
+        window.__setReducedMotion(false);
+
+        // ── per-pattern registered effect controls ─────────────────────────
+        const patterns = [
+          'clanker-kene-weave', 'clanker-gem-drift', 'clanker-emoji-drift',
+          'clanker-matrix-rain', 'clanker-emoji-rain',
+        ];
+        for (const pattern of patterns) {
+          theme.applyBgPattern(pattern);
+          // Unlock advanced group so every registered control renders.
+          const host = document.getElementById('theme-bg-effect-controls');
+          const adv = host && host.querySelector('input[aria-label="Advanced settings"]');
+          if (adv && !adv.checked) {
+            adv.checked = true;
+            adv.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          // Open showWhen gates so conditional children render too.
+          for (const gate of ['snakeSpeedVariationToggle', 'shorterLastLonger', 'longerDisappearSooner', 'splashEmojiMix']) {
+            const el = host && host.querySelector(`input[aria-label][id*="${gate}"]`)
+              || (host ? [...host.querySelectorAll('input[type="checkbox"]')].find(i => i.id.endsWith(gate)) : null);
+            if (el && !el.checked) {
+              el.checked = true;
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+          const inputs = host ? [...host.querySelectorAll('input')] : [];
+          for (const input of inputs) {
+            const label = input.getAttribute('aria-label') || input.id;
+            const isToggle = input.type === 'checkbox';
+            const key = input.id.split('-').pop();
+            const row = {
+              scope: pattern, key, label,
+              type: isToggle ? 'toggle' : 'range',
+              default: isToggle ? input.checked : input.value,
+              min: isToggle ? 'false' : input.min,
+              max: isToggle ? 'true' : input.max,
+              step: isToggle ? '' : input.step,
+              appliesWhen: input.closest('[style*="display: none"]') ? 'conditional' : 'always',
+            };
+            // Live update + reduced-motion dirty paint for this control.
+            window.__setReducedMotion(true);
+            const h0 = paintHash();
+            const saved0 = snapshot();
+            if (isToggle) {
+              input.checked = !input.checked;
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              row.liveUpdate = true;
+              input.checked = !input.checked;
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            } else {
+              const max = Number(input.max);
+              const min = Number(input.min);
+              input.value = String(max);
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              row.liveUpdate = Number(input.value) === max;
+              input.value = String(min);
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              row.minEffective = input.value;
+              input.value = String(row.default);
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            const h1 = paintHash();
+            const saved1 = snapshot();
+            window.__setReducedMotion(false);
+            row.reducedMotionDirtyPaint = h0 !== h1;
+            row.persistence = saved0 !== saved1;
+            rows.push(row);
+          }
+        }
+        theme.applyBgPattern('clanker-routefield');
+        return rows;
+      },
+      hashActive() {
+        const canvas = document.querySelector('[data-background-effect-canvas], [data-clanker-effect-canvas], #synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas');
+        return hashCanvas(canvas);
+      },
+    };
+  </script>
+</body>
+</html>

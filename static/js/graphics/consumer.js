@@ -215,6 +215,10 @@ export function createGraphicsConsumer(options = {}) {
       batch.clear();
       backend.beginFrame();
       try {
+        // Full-frame transparent clear. Every consumer redraws its scene from
+        // scratch; without this the previous frame accumulates (code rain
+        // smears) and Canvas2D cadence probes see zero clears.
+        backend.clear(0, 0, 0, 0);
         draw({ backend, scene, batch, time, reduced, budget });
         batch.flush(backend);
       } finally {
