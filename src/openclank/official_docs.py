@@ -953,7 +953,51 @@ def _is_user_modified(document: dict[str, Any]) -> bool:
     return False
 
 
-def plan_official_provision(existing: list[dict[str, Any]]) -> dict[str, Any]:
+def plan_input_from_content(
+    document_id: str,
+    name: str,
+    content: str,
+    *,
+    read_only: bool = False,
+    trashed: bool = False,
+) -> dict[str, Any]:
+    """Build one ``plan_official_provision`` input row from stored note bytes.
+
+    Loose records keep identity inside the encoded note (product, builtin,
+    docId), not on the document record. Decode that identity so the live
+    provisioning path can use the same docId/alias matching as the plan helper.
+    """
+    properties: dict[str, Any] = {}
+    extensions: dict[str, Any] = {}
+    try:
+        record = json.loads(str(content or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        record = None
+    if isinstance(record, dict):
+        raw_properties = record.get("properties")
+        if isinstance(raw_properties, list):
+            for prop in raw_properties:
+                if isinstance(prop, dict) and isinstance(prop.get("key"), str):
+                    properties[prop["key"]] = prop.get("value")
+        elif isinstance(raw_properties, dict):
+            properties = dict(raw_properties)
+        raw_extensions = record.get("extensions")
+        if isinstance(raw_extensions, dict):
+            extensions = raw_extensions
+    return {
+        "id": document_id,
+        "name": name,
+        "trashed": trashed,
+        "readOnly": read_only,
+        "properties": properties,
+        "extensions": extensions,
+    }
+
+
+def plan_official_provision(
+    existing: list[dict[str, Any]],
+    payloads: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Decide create/update/skip for every manifest article.
 
     Matching is by stable identity (the ``docId`` property) first. A same-named
@@ -961,11 +1005,15 @@ def plan_official_provision(existing: list[dict[str, Any]]) -> dict[str, Any]:
     claimed. Known aliases of previously installed defaults are adopted and
     renamed to the canonical name in place.
 
+    ``payloads`` defaults to the full maintained manifest; callers that
+    provision a subset pass that subset so interrupted runs resume cleanly.
+
     Returns ``{"create": [...], "update": [...], "skip": [...], "conflicts": [...]}``
     where each entry carries the payload and, for updates, the matched
     document id.
     """
-    payloads = official_payloads()
+    if payloads is None:
+        payloads = official_payloads()
     by_doc_id: dict[str, dict[str, Any]] = {}
     by_name: dict[str, dict[str, Any]] = {}
     for document in existing or []:
@@ -998,6 +1046,12 @@ def plan_official_provision(existing: list[dict[str, Any]]) -> dict[str, Any]:
             if named is not None and _is_official_record(named) and not _existing_doc_id(named):
                 # Previously installed default without a stable id: adopt it.
                 matched = named
+        if matched is not None and rename_from is None:
+            # Identity matched but the record still sits under a known alias.
+            current_name = str(matched.get("name") or "")
+            aliases = {str(alias) for alias in payload.get("aliases") or ()}
+            if current_name and current_name != name and current_name in aliases:
+                rename_from = current_name
         if matched is None:
             collision = by_name.get(name)
             if collision is not None and not _is_official_record(collision):

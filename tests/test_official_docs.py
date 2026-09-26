@@ -25,6 +25,7 @@ from openclank.official_docs import (  # noqa: E402
     official_articles,
     official_home,
     official_payloads,
+    plan_input_from_content,
     plan_official_provision,
     plan_summary,
     validate_official_terminology,
@@ -357,3 +358,137 @@ def test_handbook_help_entry_is_wired():
     copal_js = (root / "static/js/copal.js").read_text(encoding="utf-8")
     assert "function openClankHandbook" in copal_js
     assert "OpenClank/Home" in copal_js
+    # Article ids (`openclank-docs-*`) are not document ids (`doc_*`).
+    # The fallback must match the article name/aliases present in state.docs.
+    assert "home?.id && state.docs.find((item) => item.id === home.id)" not in copal_js
+    assert "home.aliases" in copal_js or "home?.aliases" in copal_js
+
+
+# ── Plan wiring into the live Loose path ─────────────────────────────────────
+
+def test_plan_helper_is_wired_into_live_provisioning():
+    """plan_official_provision must run in production, not only in unit tests."""
+    import inspect
+    from src.openclank import copal_loose
+    src = inspect.getsource(copal_loose.LooseCopalRepository.provision_official_docs)
+    assert "plan_official_provision" in src
+    assert "plan_input_from_content" in src
+
+
+@pytest.mark.asyncio
+async def test_live_provision_adopts_alias_without_duplicating(tmp_path):
+    """A previously installed default under a known alias is renamed in place."""
+    bridge = LooseCopalBridge(tmp_path / "vaults")
+    await bridge.start()
+    payloads = official_payloads()
+    await bridge.call("provision_official", {"owner": "owner", "workspace_id": "notes", "articles": payloads})
+
+    indexed = await bridge.call("index", {"owner": "owner", "workspace_id": "notes"})
+    home = next(doc for doc in indexed["docs"] if doc["name"] == f"{OFFICIAL_ROOT_FOLDER}/Home")
+    alias = official_home()["aliases"][0]
+    renamed = await bridge.call("rename", {
+        "owner": "owner", "workspace_id": "notes", "id": home["id"], "name": alias,
+    })
+    assert renamed["outcome"] == "committed"
+
+    result = await bridge.call("provision_official", {
+        "owner": "owner", "workspace_id": "notes", "articles": payloads,
+    })
+    assert result["created"] == []
+    assert alias not in result["created"]
+    assert any(name == f"{OFFICIAL_ROOT_FOLDER}/Home" for name in result["updated"])
+
+    indexed = await bridge.call("index", {"owner": "owner", "workspace_id": "notes"})
+    names = [doc["name"] for doc in indexed["docs"] if str(doc.get("name", "")).startswith(f"{OFFICIAL_ROOT_FOLDER}/")]
+    assert f"{OFFICIAL_ROOT_FOLDER}/Home" in names
+    assert alias not in names
+    assert len(names) == len(payloads)
+    assert len(names) == len(set(names)), "alias adoption must not leave a duplicate"
+
+
+@pytest.mark.asyncio
+async def test_live_provision_updates_unmodified_official_revision(tmp_path):
+    """A newer seed body replaces an unmodified official page in place."""
+    bridge = LooseCopalBridge(tmp_path / "vaults")
+    await bridge.start()
+    payloads = official_payloads()
+    await bridge.call("provision_official", {"owner": "owner", "workspace_id": "notes", "articles": payloads})
+
+    refreshed = []
+    for payload in payloads:
+        item = dict(payload)
+        if item["name"] == f"{OFFICIAL_ROOT_FOLDER}/Home":
+            record = json.loads(item["content"])
+            record["extensions"]["interchange"]["source"] = "# Open Clank Handbook (revised)"
+            record["extensions"]["interchange"]["projectionHash"] = __import__("hashlib").sha256(
+                b"# Open Clank Handbook (revised)"
+            ).hexdigest()
+            record["extensions"]["seed"]["version"] = OFFICIAL_DOCS_SEED_VERSION + 1
+            item["content"] = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        refreshed.append(item)
+
+    result = await bridge.call("provision_official", {
+        "owner": "owner", "workspace_id": "notes", "articles": refreshed,
+    })
+    assert result["created"] == []
+    assert f"{OFFICIAL_ROOT_FOLDER}/Home" in result["updated"]
+    home_id = next(
+        doc["id"] for doc in (await bridge.call("index", {"owner": "owner", "workspace_id": "notes"}))["docs"]
+        if doc["name"] == f"{OFFICIAL_ROOT_FOLDER}/Home"
+    )
+    body = await _body(bridge, home_id)
+    assert "revised" in body
+
+
+def test_plan_accepts_subset_payloads_for_interrupted_runs():
+    payloads = official_payloads()
+    plan = plan_official_provision([], payloads[:3])
+    assert len(plan["create"]) == 3
+    assert all(item["name"] in {p["name"] for p in payloads[:3]} for item in plan["create"])
+
+
+def test_plan_input_from_content_reads_identity():
+    payload = official_payloads()[0]
+    row = plan_input_from_content("doc_x", payload["name"], payload["content"], read_only=True)
+    assert row["properties"]["docId"] == payload["docId"]
+    assert row["properties"]["product"] == PRODUCT_MARKER
+    assert row["extensions"]["interchange"]["modified"] is False
+    broken = plan_input_from_content("doc_y", "n", "not json")
+    assert broken["properties"] == {}
+    assert broken["id"] == "doc_y"
+
+
+# ── Formatting demo source-reveal is implemented (not merely claimed) ────────
+
+def test_formatting_demo_source_reveal_is_implemented():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    notes_js = (root / "static/js/copal/notesFeature.js").read_text(encoding="utf-8")
+    renderer_js = (root / "static/js/copal/markdownRenderer.js").read_text(encoding="utf-8")
+    style_css = (root / "static/style.css").read_text(encoding="utf-8")
+
+    # The claim in official bodies must match a real, demo-only inspector.
+    assert "renderFormattingDemoBody" in notes_js
+    assert "Back to rendered" in notes_js
+    assert "isFormattingDemoDocument" in notes_js
+    assert "FORMATTING_DEMO_DOC_ID" in notes_js
+    # Read-only inspector: no editor mount, no save from the reveal path.
+    assert "copal-md-source-inspector" in notes_js
+    assert "copal-md-source-inspector" in style_css
+    # Renderer stamps source spans the inspector reads.
+    assert "data-md-start" in renderer_js
+    assert "data-md-end" in renderer_js
+
+    bodies = "\n".join(article["body"] for article in official_articles())
+    assert "Back to rendered" in bodies
+    assert "reveal the exact Markdown source" in bodies
+
+
+def test_formatting_demo_claim_is_confined_to_the_demo():
+    """Limits must not claim a universal source toggle."""
+    limits = next(
+        article for article in official_articles()
+        if article["id"] == "openclank-docs-limits"
+    )
+    assert "Markdown Formatting Demo" in limits["body"]
+    assert "only" in limits["body"].lower()

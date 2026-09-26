@@ -2659,6 +2659,88 @@ export function createNotesFeature({
     cache.header.replaceChildren(breadcrumb, title, h('span', { class:'copal-leaf-mode', text:mode }), actions);
   }
 
+  // S21 plan item 5: the Markdown Formatting Demo is the only page whose
+  // rendered elements reveal their matching raw Markdown source. Ordinary
+  // documentation pages stay rendered with no universal source toggle.
+  const FORMATTING_DEMO_DOC_ID = 'openclank-docs-formatting-demo';
+
+  function isFormattingDemoDocument(doc) {
+    if (!doc) return false;
+    const docId = doc.properties && doc.properties.docId;
+    if (String(docId || '') === FORMATTING_DEMO_DOC_ID) return true;
+    const name = String(doc.name || doc.path || '');
+    return name === 'OpenClank/Markdown Formatting Demo'
+      || name === 'Markdown Formatting Demo'
+      || name.endsWith('/Markdown Formatting Demo');
+  }
+
+  function renderFormattingDemoBody(doc) {
+    const source = sourceValue(doc);
+    const sourceLines = String(source || '').split('\n');
+    const rendered = renderMarkdown(source, new Set([doc.id]));
+    const shell = h('div', { class:'copal-md-source-reveal' });
+    let inspector = null;
+    const backToRendered = () => {
+      if (inspector) { inspector.remove(); inspector = null; }
+      rendered.style.display = '';
+    };
+    const revealSource = (node) => {
+      const start = Number(node.getAttribute('data-md-start') || 0);
+      const end = Number(node.getAttribute('data-md-end') || 0) || start;
+      const from = Math.max(0, (start || 1) - 1);
+      const to = Math.max(from + 1, end);
+      const snippet = sourceLines.slice(from, to).join('\n');
+      if (inspector) inspector.remove();
+      rendered.style.display = 'none';
+      inspector = h('div', {
+        class:'copal-md-source-inspector',
+        role:'region',
+        'aria-label':'Markdown source inspector',
+      },
+        h('div', { class:'copal-md-source-inspector-bar' },
+          h('span', { class:'copal-md-source-inspector-label', text:`Source · lines ${from + 1}–${to}` }),
+          h('button', {
+            class:'copal-btn',
+            type:'button',
+            text:'Back to rendered',
+            onclick:() => backToRendered(),
+          })),
+        // Read-only inspector: selectable, copyable, never editable, never a save.
+        h('pre', { class:'copal-md-source-inspector-body', tabindex:'0' }, h('code', { text:snippet })));
+      // Defensive: reject paste/drop so the inspector cannot become an editor.
+      inspector.addEventListener('paste', (event) => event.preventDefault());
+      inspector.addEventListener('drop', (event) => event.preventDefault());
+      inspector.addEventListener('dragover', (event) => event.preventDefault());
+      shell.append(inspector);
+    };
+    for (const child of Array.from(rendered.children)) {
+      if (!child || child.nodeType !== 1 || !child.hasAttribute('data-md-start')) continue;
+      child.setAttribute('tabindex', '0');
+      child.setAttribute('role', 'button');
+      child.setAttribute('aria-label', 'Reveal Markdown source for this element');
+      child.classList.add('copal-md-source-reveal-target');
+      child.addEventListener('click', (event) => {
+        // Keep real links, chips and controls doing their own work.
+        const interactive = event.target && event.target.closest
+          ? event.target.closest('a, button, input, select, textarea, .copal-chip, .copal-code-copy')
+          : null;
+        if (interactive && child.contains(interactive)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        revealSource(child);
+      });
+      child.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          event.stopPropagation();
+          revealSource(child);
+        }
+      });
+    }
+    shell.append(rendered);
+    return shell;
+  }
+
   function renderLeaf(leaf, doc, workspace, group) {
     const current = context();
     let cache = current.noteLeafViews.get(leaf.id);
@@ -2703,7 +2785,11 @@ export function createNotesFeature({
     }
     leafHeader(cache, leaf, doc, workspace, group);
     if (doc.readOnly) {
-      cache.body.replaceChildren(renderMarkdown(sourceValue(doc), new Set([doc.id])));
+      cache.body.replaceChildren(
+        isFormattingDemoDocument(doc)
+          ? renderFormattingDemoBody(doc)
+          : renderMarkdown(sourceValue(doc), new Set([doc.id])),
+      );
       if (leaf.view === 'wiki') {
         cache.body.append(wikiArticleChrome(doc));
         if (doc.builtin && typeof makeEditableWikiCopy === 'function') {

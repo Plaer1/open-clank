@@ -145,12 +145,25 @@ export function createMarkdownRenderer({
       const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
       if (end > 0) { lines.splice(0, end + 1); lineOffset = end + 1; }
     }
+    // Stamp each top-level block with its 1-based source line span (original
+    // numbering, including any stripped frontmatter). Consumers like the
+    // Markdown Formatting Demo source-reveal read these; rendering itself is
+    // unchanged.
+    const stamp = (node, start, end) => {
+      if (node && node.nodeType === 1) {
+        node.setAttribute('data-md-start', String(start + 1 + lineOffset));
+        node.setAttribute('data-md-end', String(end + 1 + lineOffset));
+      }
+      return node;
+    };
+    const appendBlock = (node, start, end) => root.append(stamp(node, start, end));
     let codeBlock = null;
     for (let index = 0; index < lines.length; index += 1) {
+      const blockStart = index;
       const raw = lines[index].replace(/%%[^%\n]*(?:%(?!%)[^%\n]*)*%%/g, '');
       const fence = /^\s*```\s*([^\s`]*)/.exec(raw);
       if (fence) {
-        if (codeBlock) { root.append(codeBlock.wrapper); codeBlock = null; }
+        if (codeBlock) { appendBlock(codeBlock.wrapper, codeBlock.start, index); codeBlock = null; }
         else {
           const lang = fence[1] || '';
           const isPluginBlock = /^(dataview|tasks|dataviewjs|tasksjs)$/i.test(lang);
@@ -165,9 +178,9 @@ export function createMarkdownRenderer({
             const convertBtn = onConvertPluginBlock
               ? h('button', { type:'button', class:'copal-btn copal-plugin-convert', text:'Convert to Base', onclick:() => onConvertPluginBlock(code.textContent || '', lang) })
               : null;
-            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block copal-plugin-block' }, header, banner, copy, convertBtn, pre) };
+            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block copal-plugin-block' }, header, banner, copy, convertBtn, pre), start:index };
           } else {
-            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block' }, header, copy, pre) };
+            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block' }, header, copy, pre), start:index };
           }
         }
         continue;
@@ -181,7 +194,7 @@ export function createMarkdownRenderer({
           if (index + 1 >= lines.length) break;
           math.push(lines[++index]);
         }
-        root.append(h('pre', { class:'copal-math-block', text:math.join('\n').replace(/^\s*\$\$|\$\$\s*$/g, '').trim() }));
+        appendBlock(h('pre', { class:'copal-math-block', text:math.join('\n').replace(/^\s*\$\$|\$\$\s*$/g, '').trim() }), blockStart, index);
         continue;
       }
       const callout = raw.match(/^>\s*\[!([A-Za-z0-9_-]+)\][+-]?\s*(.*)$/);
@@ -190,7 +203,7 @@ export function createMarkdownRenderer({
         while (lines[index + 1]?.match(/^>\s?/)) body.push(lines[++index].replace(/^>\s?/, ''));
         const box = h('aside', { class:`copal-callout copal-callout-${callout[1].toLowerCase()}` }, h('strong', { text:callout[2] || callout[1] }));
         for (const line of body) { const paragraph = h('p'); inline(paragraph, line); box.append(paragraph); }
-        root.append(box);
+        appendBlock(box, blockStart, index);
         continue;
       }
       if (raw.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1] || '')) {
@@ -203,26 +216,26 @@ export function createMarkdownRenderer({
           const row = h('tr'); for (const value of cells(lines[++index])) { const cell = h('td'); inline(cell, value); row.append(cell); }
           body.append(row);
         }
-        table.append(body); root.append(table); continue;
+        table.append(body); appendBlock(table, blockStart, index); continue;
       }
       const heading = raw.match(/^(#{1,6})\s+(.*)$/);
-      if (heading) { const node = h(`h${heading[1].length}`, { 'data-line':String(index + 1 + lineOffset) }); inline(node, heading[2]); root.append(node); continue; }
+      if (heading) { const node = h(`h${heading[1].length}`, { 'data-line':String(index + 1 + lineOffset) }); inline(node, heading[2]); appendBlock(node, blockStart, index); continue; }
       const task = raw.match(/^(\s*)[-*+] \[([ xX])\]\s+(.*)$/);
-      if (task) { const checkbox = h('input', { type:'checkbox', disabled:true, 'aria-label':task[3] }); checkbox.checked = !!task[2].trim(); const node = h('p', { class:'copal-markdown-task', style:`--indent:${task[1].length}` }, checkbox); inline(node, task[3]); root.append(node); continue; }
+      if (task) { const checkbox = h('input', { type:'checkbox', disabled:true, 'aria-label':task[3] }); checkbox.checked = !!task[2].trim(); const node = h('p', { class:'copal-markdown-task', style:`--indent:${task[1].length}` }, checkbox); inline(node, task[3]); appendBlock(node, blockStart, index); continue; }
       const bullet = raw.match(/^(\s*)[-*+]\s+(.*)$/);
-      if (bullet) { const node = h('p', { class:'copal-markdown-bullet', style:`--indent:${bullet[1].length}` }, '• '); inline(node, bullet[2]); root.append(node); continue; }
+      if (bullet) { const node = h('p', { class:'copal-markdown-bullet', style:`--indent:${bullet[1].length}` }, '• '); inline(node, bullet[2]); appendBlock(node, blockStart, index); continue; }
       const ordered = raw.match(/^(\s*)(\d+[.)])\s+(.*)$/);
-      if (ordered) { const node = h('p', { class:'copal-markdown-bullet ordered', style:`--indent:${ordered[1].length}` }, `${ordered[2]} `); inline(node, ordered[3]); root.append(node); continue; }
+      if (ordered) { const node = h('p', { class:'copal-markdown-bullet ordered', style:`--indent:${ordered[1].length}` }, `${ordered[2]} `); inline(node, ordered[3]); appendBlock(node, blockStart, index); continue; }
       const quote = raw.match(/^>\s?(.*)$/);
-      if (quote) { const node = h('blockquote'); inline(node, quote[1]); root.append(node); continue; }
-      if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(raw)) { root.append(h('hr')); continue; }
+      if (quote) { const node = h('blockquote'); inline(node, quote[1]); appendBlock(node, blockStart, index); continue; }
+      if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(raw)) { appendBlock(h('hr'), blockStart, index); continue; }
       const footnote = raw.match(/^\s*\[\^([^\]]+)\]:\s*(.*)$/);
-      if (footnote) { const node = h('aside', { class:'copal-footnote' }, h('sup', { text:footnote[1] })); inline(node, footnote[2]); root.append(node); continue; }
+      if (footnote) { const node = h('aside', { class:'copal-footnote' }, h('sup', { text:footnote[1] })); inline(node, footnote[2]); appendBlock(node, blockStart, index); continue; }
       const para = h('p');
       inline(para, raw);
-      root.append(para);
+      appendBlock(para, blockStart, index);
     }
-    if (codeBlock) root.append(codeBlock.wrapper);
+    if (codeBlock) appendBlock(codeBlock.wrapper, codeBlock.start, lines.length - 1);
     return root;
   }
 

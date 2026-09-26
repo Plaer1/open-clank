@@ -1374,79 +1374,158 @@ class LooseCopalRepository:
         """Idempotently provision the maintained official docs folder.
 
         Each article is a real read-only document under the official root, not
-        a link placeholder. Matching is by exact canonical name: an existing
-        read-only record is replaced only when its stored body is still an
-        unmodified official revision, so a personal edit is never clobbered. A
-        same-named page the caller did not provision (no read-only flag) is
-        personal data and is left alone.
+        a link placeholder. Matching goes through ``plan_official_provision``:
+        stable ``docId`` identity first, then known historical aliases (which
+        are adopted and renamed to the canonical name in place), then the
+        canonical name. A same-named page that is not ours is personal data and
+        is left alone. An existing read-only record is replaced only when its
+        stored body is still an unmodified official revision, so a personal
+        edit is never clobbered.
 
         Re-running creates nothing twice: an interrupted run resumes by
         creating whatever is missing and refreshing whatever is present.
         """
-        from src.openclank.official_docs import is_user_modified_content
+        from src.openclank.official_docs import (
+            is_user_modified_content,
+            plan_input_from_content,
+            plan_official_provision,
+        )
 
         vault, manifest = self._scope(args)
         documents = manifest.setdefault("documents", {})
         articles = args.get("articles")
         if not isinstance(articles, list) or not articles:
             raise CopalBridgeError("official docs provisioning requires articles")
+
+        # Identity lives inside the encoded note, so decode it before planning.
+        existing: list[dict[str, Any]] = []
+        for record in documents.values():
+            if not isinstance(record, dict) or record.get("trashed"):
+                continue
+            content = ""
+            try:
+                content = self._read_content(vault / str(record.get("path") or record.get("name") or ""))
+            except (OSError, UnicodeDecodeError):
+                content = ""
+            existing.append(plan_input_from_content(
+                str(record.get("id") or ""),
+                str(record.get("name") or ""),
+                content,
+                read_only=bool(record.get("readOnly")),
+            ))
+
+        plan = plan_official_provision(existing, [a for a in articles if isinstance(a, dict)])
         created: list[str] = []
         updated: list[str] = []
         skipped: list[dict[str, Any]] = []
-        for article in articles:
-            if not isinstance(article, dict):
+
+        for conflict in plan.get("conflicts") or []:
+            skipped.append({
+                "name": str(conflict.get("name") or ""),
+                "id": conflict.get("existingId"),
+                "reason": "personal-page-occupies-name",
+            })
+        for item in plan.get("skip") or []:
+            skipped.append({
+                "name": str(item.get("name") or ""),
+                "id": item.get("existingId"),
+                "reason": str(item.get("reason") or "user-modified"),
+            })
+
+        for payload in plan.get("create") or []:
+            if not isinstance(payload, dict):
                 raise CopalBridgeError("official article must be an object")
-            name = self._safe_name(str(article.get("name") or ""), str(article.get("kind") or "wiki"))
-            content = str(article.get("content") or "")
-            read_only = bool(article.get("read_only", True))
-            existing = next(
-                (row for row in documents.values()
-                 if isinstance(row, dict) and row.get("path") == name and not row.get("trashed")),
-                None,
-            )
-            if existing is None:
-                document_id = f"doc_{uuid.uuid4().hex}"
-                record = {
-                    "id": document_id,
-                    "owner": args.get("owner"),
-                    "workspace_id": args.get("workspace_id"),
-                    "kind": str(article.get("kind") or "wiki"),
-                    "corpus": str(article.get("corpus") or "wiki"),
-                    "name": name,
-                    "path": name,
-                    "head": self._fingerprint(content),
-                    "createdAt": time.time(),
-                    "updatedAt": time.time(),
-                    "readOnly": read_only,
-                    "trashed": False,
-                }
-                documents[document_id] = record
-                self._atomic_write(vault / name, content)
-                try:
-                    record["mtime_ns"] = (vault / name).stat().st_mtime_ns
-                except OSError:
-                    pass
-                self._operation(manifest, "create", f"create {name}", document_id=document_id)
-                created.append(name)
-                continue
-            if not existing.get("readOnly"):
-                # Personal page occupies the name. Never overwrite it.
-                skipped.append({"name": name, "id": existing.get("id"), "reason": "personal-page-occupies-name"})
-                continue
-            current_path = vault / str(existing.get("path") or name)
+            name = self._safe_name(str(payload.get("name") or ""), str(payload.get("kind") or "wiki"))
+            content = str(payload.get("content") or "")
+            read_only = bool(payload.get("read_only", True))
+            document_id = f"doc_{uuid.uuid4().hex}"
+            record = {
+                "id": document_id,
+                "owner": args.get("owner"),
+                "workspace_id": args.get("workspace_id"),
+                "kind": str(payload.get("kind") or "wiki"),
+                "corpus": str(payload.get("corpus") or "wiki"),
+                "name": name,
+                "path": name,
+                "head": self._fingerprint(content),
+                "createdAt": time.time(),
+                "updatedAt": time.time(),
+                "readOnly": read_only,
+                "trashed": False,
+            }
+            documents[document_id] = record
+            self._atomic_write(vault / name, content)
             try:
-                current_content = self._read_content(current_path)
+                record["mtime_ns"] = (vault / name).stat().st_mtime_ns
+            except OSError:
+                pass
+            self._operation(manifest, "create", f"create {name}", document_id=document_id)
+            created.append(name)
+
+        for item in plan.get("update") or []:
+            if not isinstance(item, dict):
+                raise CopalBridgeError("official article must be an object")
+            record = documents.get(str(item.get("existingId") or ""))
+            if not isinstance(record, dict) or record.get("trashed"):
+                continue
+            name = self._safe_name(str(item.get("name") or ""), str(item.get("kind") or "wiki"))
+            content = str(item.get("content") or "")
+            read_only = bool(item.get("read_only", True))
+            old_path = vault / str(record.get("path") or record.get("name") or "")
+            try:
+                current_content = self._read_content(old_path)
             except FileNotFoundError as exc:
                 raise CopalBridgeError("loose Copal document file is missing") from exc
             if is_user_modified_content(current_content):
-                skipped.append({"name": name, "id": existing.get("id"), "reason": "user-modified"})
+                skipped.append({
+                    "name": str(record.get("name") or name),
+                    "id": record.get("id"),
+                    "reason": "user-modified",
+                })
                 continue
-            if current_content == content:
-                continue
-            result = self._write_record(vault, manifest, existing, content, operation="write")
-            existing["readOnly"] = read_only
-            updated.append(name)
-            del result
+            new_path = vault / name
+            rename_from = item.get("renameFrom")
+            renamed = False
+            if rename_from or str(record.get("name") or "") != name:
+                if old_path != new_path:
+                    if new_path.exists() or any(
+                        other.get("path") == name and other.get("id") != record.get("id") and not other.get("trashed")
+                        for other in documents.values() if isinstance(other, dict)
+                    ):
+                        skipped.append({
+                            "name": name,
+                            "id": record.get("id"),
+                            "reason": "personal-page-occupies-name",
+                        })
+                        continue
+                    new_path.parent.mkdir(parents=True, exist_ok=True)
+                    if old_path.exists():
+                        os.replace(old_path, new_path)
+                    renamed = True
+                record["name"] = name
+                record["path"] = name
+                self._operation(manifest, "rename", f"rename {name}", document_id=str(record.get("id") or ""))
+            if current_content != content:
+                # Provisioning is the maintainer path: official records stay
+                # read-only to everyone else but must accept a newer seed body.
+                record["readOnly"] = False
+                try:
+                    result = self._write_record(vault, manifest, record, content, operation="write")
+                finally:
+                    record["readOnly"] = read_only
+                del result
+                updated.append(name)
+            elif renamed:
+                record["readOnly"] = read_only
+                try:
+                    record["mtime_ns"] = new_path.stat().st_mtime_ns
+                except OSError:
+                    pass
+                updated.append(name)
+            else:
+                # Already current: idempotent no-op, not an update.
+                record["readOnly"] = read_only
+
         self._save(vault, manifest)
         return {"created": created, "updated": updated, "skipped": skipped}
 

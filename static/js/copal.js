@@ -340,10 +340,16 @@ async function openClankHandbook() {
     const response = await fetch('/api/copal/official/home', { headers: { Accept: 'application/json' } });
     if (response.ok) {
       const home = await response.json();
-      const byId = home?.id && state.docs.find((item) => item.id === home.id);
-      if (byId) {
-        openDocument(byId.id, 'notes', true);
-        return byId.id;
+      // Article ids are `openclank-docs-*`; provisioned document ids are
+      // `doc_*`. Match the article's name and known aliases instead — those
+      // are the names actually present in `state.docs`.
+      const candidates = [home?.name, ...(Array.isArray(home?.aliases) ? home.aliases : [])].filter(Boolean);
+      for (const candidate of candidates) {
+        const hit = state.docs.find((item) => item.name === candidate || item.path === candidate);
+        if (hit) {
+          openDocument(hit.id, 'notes', true);
+          return hit.id;
+        }
       }
     }
   } catch {
