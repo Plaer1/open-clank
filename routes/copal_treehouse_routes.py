@@ -26,7 +26,12 @@ from src.openclank.copal_treehouse import (
 )
 from src.openclank.copal_treehouse_repository import TreeHouseRepository, TreeHouseRepositoryError
 from src.openclank.treehouse_achievements import TreeHouseAchievementEngine
-from src.openclank.treehouse_field_guide import instantiate_field_guide
+from src.openclank.treehouse_field_guide import (
+    FIELD_GUIDE_TEMPLATE_KEY,
+    FIELD_GUIDE_TEMPLATE_VERSION,
+    instantiate_field_guide,
+    upgrade_field_guide,
+)
 from src.openclank.file_policy import FilePolicyRepository
 from src.constants import DATA_DIR
 from src.auth_helpers import require_user
@@ -178,14 +183,24 @@ def setup_treehouse_routes(
         return options
 
     def ensure_account_catalogue(repo: TreeHouseRepository, account_id: str, workspace: str) -> tuple[dict[str, Any], int]:
-        """Create one private Field Guide catalogue for a new account.
+        """Create or version-upgrade one private Field Guide catalogue.
 
         The repository CAS makes this safe when two windows first open
         TreeHouse at the same time; the template itself is idempotent and
-        authored state is preserved on later reads/upgrades.
+        authored state is preserved on later reads/upgrades.  A stale installed
+        template revision is upgraded in place — the previous same-key early
+        return froze old content forever.
         """
         state, revision = repo.get_catalogue(account_id, workspace)
         if state is not None:
+            installed = state.get("fieldGuide") or {}
+            if (
+                installed.get("templateKey") == FIELD_GUIDE_TEMPLATE_KEY
+                and installed.get("templateVersion") != FIELD_GUIDE_TEMPLATE_VERSION
+            ):
+                upgraded = upgrade_field_guide(state, account_id)[0]
+                new_revision = repo.put_catalogue(account_id, workspace, upgraded, expected_revision=revision)
+                return upgraded, new_revision
             return state, revision
         candidate = instantiate_field_guide(new_treehouse_state(account_id), account_id)
         winner, winner_revision, _created = repo.create_catalogue_if_absent(account_id, workspace, candidate)
@@ -1008,6 +1023,25 @@ def setup_treehouse_routes(
             snapshot = public_treehouse_snapshot(next_state, actor_id)
         except TreeHouseError as exc:
             raise fail(exc) from exc
+        # S30: a committed Field Guide lesson completion is the N29 lesson-key
+        # producer.  Achievement ingestion is best-effort and never fails the
+        # learner's completion; the durable record is the domain event above.
+        if changed and command.type == "activity.complete" and not command_payload.get("_achievementIngested"):
+            try:
+                completed_activity = (next_state.get("activities") or {}).get(str(command_payload.get("activityId") or "")) or {}
+                lesson_key = str(completed_activity.get("fieldGuideKey") or "")
+                if lesson_key:
+                    achievement_engine(request).ingest(scope.get("account_id") or actor_id, [{
+                        "source_event_id": f"guide-lesson:{lesson_key}:{command.command_id}",
+                        "event_family": "guide.lesson.completed",
+                        "kind": "R",
+                        "result": "committed",
+                        "actor_kind": "user",
+                        "occurred_at": datetime.now(UTC).isoformat(),
+                        "facts": {"lessonKey": lesson_key, "committed": True, "classKey": completed_activity.get("classKey")},
+                    }], via="live")
+            except Exception:
+                pass
         return {"ok": True, "changed": changed, "result": result, **snapshot, "accountId": scope.get("account_id"), "workspace": scope.get("workspace_id")}
 
     @router.post("/migrate")

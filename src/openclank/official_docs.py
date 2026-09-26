@@ -22,7 +22,10 @@ from typing import Any
 
 # Stable content version. Bump when maintained bodies change so idempotent
 # provisioning can replace prior official revisions in place.
-OFFICIAL_DOCS_SEED_VERSION = 1
+# v2 — S30 reconciliation against the completed S22–S26 theme/effect UI:
+# shipped effect names, typography/accessibility controls, and repaired
+# clank://chat / clank://tasks app-link targets.
+OFFICIAL_DOCS_SEED_VERSION = 2
 
 # Top-level folder that holds every provisioned official page. Derived identity
 # (product/builtin markers) is the real recognition mechanism; this name is the
@@ -118,7 +121,7 @@ Tasks — holds the durable material you produce together.
 3. Capture the durable parts. Notes, tables, images and tasks live in Copal
    rather than only in the transcript.
 
-Open [Editor](clank://editor) to see the documents, or [Chat](clank://) to
+Open [Editor](clank://editor) to see the documents, or [Chat](clank://chat) to
 return to the conversation.
 
 ## Where things live
@@ -545,7 +548,7 @@ the task list opens that chat — the original one — not whichever conversatio
 happens to be in front. Answering a question in the toast resumes the task
 chat without hijacking your foreground chat.
 
-Open [Tasks](clank://tasks) for the full list, or [the task view](clank://todo)
+Open [Meatbag Tasks](clank://tasks) for the full list, or [the task view](clank://tasks)
 inside Copal.
 
 ## Sources
@@ -600,10 +603,26 @@ link focuses it; it never closes a window you already had open.
 
 Themes change colors, backgrounds and effects across the whole shell. The
 theme picker shows live previews. Custom accent colors are available on every
-theme.
+theme, and you can save your own named themes (up to eight) and share them as
+JSON.
+
+Background / Effect chooses the decorative background. The shipped effects
+are: Solid, Clanker Signal Routes, Shipibo Kene-Inspired Signal Weave,
+Clanker LCARS, Clanker Gem Drift, Clanker Emoji Drift, Clanker Matrix Rain,
+Clanker Emoji Rain, Clanker LCARS Status Sweep, Dots, Synapse, Rain,
+Constellations, Perlin Flow, Petals, Sparkles and Embers. Each effect that
+supports it exposes an effect color, an Intensity slider and a Size slider;
+effects without those controls hide them.
 
 Background effects are decorative. On machines where an effect is too heavy
 it can be turned off without changing the rest of the theme.
+
+## Typography and accessibility
+
+Appearance also controls typography: a font choice, a density setting
+(comfortable, compact, spacious) and a UI text-size scale that is independent
+of the active theme. A frosted-glass toggle softens panels where the theme
+supports it. These are readability controls, not decoration.
 
 ## What settings does not do
 

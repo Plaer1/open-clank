@@ -5,29 +5,17 @@ import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 import { withCopalBrowser } from './helpers/copal_browser_fixture.mjs';
 
-// This is a disposable mounted exercise for the published Field Guide.  It
-// deliberately checks the learner-facing rows and links for every course,
-// instead of treating a manifest or a single representative lesson as
-// coverage for the catalogue.
-const SURFACES = [
-  ['fg-orientation', 'treehouse', '/treehouse'],
-  ['fg-assistant', 'assistant', '/'],
-  ['fg-editor', 'editor', '/editor'],
-  ['fg-files', 'files', '/files'],
-  ['fg-wiki', 'wiki', '/wiki'],
-  ['fg-bases', 'bases', '/editor?open=bases'],
-  ['fg-timeline', 'timeline', '/timeline'],
-  ['fg-connections', 'graph', '/graph'],
-  ['fg-tasks', 'tasks', '/todo'],
-  ['fg-settings', 'settings', '/settings'],
-  ['fg-continuity', 'continuity', '/'],
-  ['fg-teaching', 'teaching', '/treehouse'],
-  ['fg-models', 'models', '/settings'],
-  ['fg-automation', 'automation', '/'],
-  ['fg-research-media', 'research', '/'],
-  ['fg-communications', 'communications', '/'],
-  ['fg-operations', 'operations', '/settings'],
-];
+// Mounted exercise for the published S30 Field Guide: five free-exploration
+// Classes, thirty unique lessons, shared app-link destinations and disposable
+// practice.  This checks learner-facing rows and links for every lesson.  It
+// is rendering-and-destination evidence, not proof that each advertised
+// Editor/Files/Imps exercise was executed against a live engine — that
+// boundary is recorded honestly in the S30 receipt.
+const guide = JSON.parse(execFileSync(process.env.PYTHON_BIN || 'python3', ['-c', [
+  'import json',
+  'from src.openclank.treehouse_field_guide import field_guide_manifest',
+  'print(json.dumps(field_guide_manifest()))',
+].join('\n')], { cwd: process.cwd(), encoding: 'utf8' }));
 
 const fieldGuideState = JSON.parse(execFileSync(process.env.PYTHON_BIN || 'python3', ['-c', [
   'import json',
@@ -59,24 +47,42 @@ const page = `<!doctype html><html><body><main id="treehouse"></main><script typ
 } catch (error) { window.__renderError = error.stack || String(error); } })();
 </script></body></html>`;
 
-test('mounted Field Guide exposes all 17 disposable course journeys', async () => {
+test('mounted Field Guide exposes five classes and thirty unique lessons', async () => {
+  assert.equal(guide.courses.length, 5);
+  assert.equal(guide.lessons.length, 30);
+  assert.equal(new Set(guide.lessonKeys).size, 30);
   await withCopalBrowser({ page }, async ({ evaluate, until }) => {
-    await until("window.__renderError || document.querySelectorAll('.copal-treehouse-course').length === 17", '17 Field Guide courses');
+    await until("window.__renderError || document.querySelectorAll('.copal-treehouse-course').length === 5", '5 Field Guide classes');
     assert.equal(await evaluate('window.__renderError'), undefined);
-    for (const [courseKey, surface, href] of SURFACES) {
-      const course = Object.values(fieldGuideState.courses).find(item => item.fieldGuideKey === courseKey);
-      assert(course, `Python Field Guide manifest has ${courseKey} course`);
+    for (const courseSpec of guide.courses) {
+      const course = Object.values(fieldGuideState.courses).find(item => item.fieldGuideKey === courseSpec.key);
+      assert(course, `Python Field Guide manifest has ${courseSpec.key} class`);
       await evaluate(`document.querySelector('[data-treehouse-id="${course.id}"] button')?.click()`);
-      await until(`document.querySelector('[data-field-guide-surface="${surface}"]')`, `${courseKey} practice`);
-      const result = await evaluate(`(() => { const row=document.querySelector('[data-field-guide-surface="${surface}"]'); const link=row?.querySelector('a'); return { fixture:row?.querySelector('.copal-treehouse-practice')?.textContent || '', href:link?.getAttribute('href') || '', lesson:row?.dataset?.fieldGuideLesson || '' }; })()`);
-      const expected = fieldGuideLessons[`${courseKey}:lesson-1`];
-      assert(expected, `Python Field Guide manifest has ${courseKey} lesson`);
-      assert(result.fixture.includes(expected.practice.title), `${courseKey} practice title is rendered`);
-      assert(result.fixture.includes(expected.practice.expectedEvidence), `${courseKey} verifier evidence is rendered`);
-      assert.equal(result.href, expected.surface.href);
-      assert.equal(result.href, href);
-      assert.equal(result.lesson, expected.fieldGuideKey);
-      assert.equal(result.lesson, `${courseKey}:lesson-1`);
+      for (const lessonSpec of courseSpec.lessons) {
+        const activity = fieldGuideLessons[lessonSpec.key];
+        assert(activity, `Python Field Guide manifest has ${lessonSpec.key} lesson`);
+        await until(`document.querySelector('[data-field-guide-lesson="${lessonSpec.key}"]')`, `${lessonSpec.key} row`);
+        const result = await evaluate(`(() => { const row=document.querySelector('[data-field-guide-lesson="${lessonSpec.key}"]'); const link=row?.querySelector('a[data-app-destination]'); return { fixture:row?.querySelector('.copal-treehouse-practice')?.textContent || '', destination:link?.getAttribute('data-app-destination') || '', href:link?.getAttribute('href') || '', surface:row?.dataset?.fieldGuideSurface || '' }; })()`);
+        assert.equal(result.destination, lessonSpec.surface.appLink, `${lessonSpec.key} app link`);
+        assert.equal(result.surface, lessonSpec.surface.key, `${lessonSpec.key} surface key`);
+        assert.equal(result.href, lessonSpec.surface.href, `${lessonSpec.key} canonical href`);
+        assert(!result.href.includes('/copal/'), `${lessonSpec.key} avoids legacy /copal/*`);
+        if (lessonSpec.practice) {
+          assert(result.fixture.includes(lessonSpec.practice.title), `${lessonSpec.key} practice title is rendered`);
+          assert(result.fixture.includes(lessonSpec.practice.expectedEvidence), `${lessonSpec.key} verifier evidence is rendered`);
+        }
+      }
     }
   });
+});
+
+test('built-in classes carry no prerequisite locks and hide ultra-rares', async () => {
+  for (const course of guide.courses) {
+    assert.deepEqual(course.prerequisites, [], `${course.key} has no prerequisite lock`);
+    assert.equal(course.freeExploration, true);
+  }
+  const ultraIds = guide.lessons.flatMap((lesson) => (lesson.achievementHints || []).filter((hint) => hint.rarity === 'ultra').map((hint) => hint.id));
+  assert.deepEqual(ultraIds, [], 'no ultra-rare name leaks through a lesson hint');
+  const secretHints = guide.lessons.flatMap((lesson) => (lesson.achievementHints || []).filter((hint) => hint.secret));
+  for (const hint of secretHints) assert.equal(hint.rarity, 'mystery');
 });

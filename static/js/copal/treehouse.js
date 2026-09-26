@@ -1,6 +1,7 @@
 import { copalStorageKey } from './storage.js';
 import { filesFacadeClient } from '../filesFacadeClient.js';
 import { FILES_TRANSFER_MIME, parseInternalDragPayload } from '../filesSelectionModel.js';
+import { openAppDestination } from './markdownRenderer.js';
 
 // Resolve the shared dialog lazily. TreeHouse is also a small standalone
 // surface in the browser and its pure state tests should not need to evaluate
@@ -643,9 +644,44 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
           if (practice.seed) practiceBody.append(h('pre', { class: 'copal-treehouse-practice-seed', tabindex: '0' }, practice.seed));
           row.append(practiceBody);
         }
+        // Hidden achievement-linked components.  Learner mode never names an
+        // unearned ultra rare and shows mystery entries as ???.  Ultra-rares
+        // are omitted entirely so no empty secret container is rendered.
+        const adminSpoilers = adminMode() && ui.snapshot?.permissions?.admin;
+        const hints = activity.achievementHints || [];
+        const visibleHints = hints.filter((hint) => hint.rarity !== 'ultra' || adminSpoilers);
+        if (visibleHints.length) {
+          row.append(h('div', { class: 'copal-treehouse-lesson-hints', 'aria-label': 'Related achievements' },
+            visibleHints.map((hint) => h('small', {
+              class: `copal-treehouse-lesson-hint copal-treehouse-lesson-hint-${hint.rarity}`,
+              'data-achievement-hint': hint.id,
+              text: hint.secret && !adminSpoilers ? '???' : hint.id,
+            }))));
+        }
         const surface = activity.surface || {};
         const lessonActions = h('div', { class: 'copal-treehouse-actions', 'aria-label': 'Lesson actions' });
-        lessonActions.append(h('a', { class: 'copal-btn', href: surface.href || '#', 'aria-label': `Open ${surface.label || 'lesson'} surface`, title: `Open ${surface.label || 'lesson'} surface`, text: `Open ${surface.label || 'surface'}` }));
+        const openDestination = (event) => {
+          // Shared app-link resolver: focus the destination view while
+          // preserving chat identity and unsaved editor drafts. Never a
+          // full page reload and never a legacy /copal/* route.
+          const target = String(surface.appLink || (surface.key ? `clank://${surface.key}` : '')).trim();
+          if (target) {
+            event?.preventDefault?.();
+            openAppDestination(target, event);
+            return;
+          }
+          if (surface.href && surface.href !== '#') return; // let the anchor navigate
+          event?.preventDefault?.();
+        };
+        lessonActions.append(h('a', {
+          class: 'copal-btn',
+          href: surface.href || '#',
+          'data-app-destination': surface.appLink || (surface.key ? `clank://${surface.key}` : ''),
+          'aria-label': `Open ${surface.label || 'lesson'} destination`,
+          title: `Open ${surface.label || 'lesson'} destination`,
+          text: `Open ${surface.label || 'destination'}`,
+          onclick: openDestination,
+        }));
         lessonActions.append(h('button', { type: 'button', class: 'copal-btn', 'aria-label': `Ask for help with ${activity.title}`, title: 'Attach this lesson and its active workspace context to help', text: 'Ask for help', onclick: () => requestLessonHelp(course, activity) }));
         if (courseCanEdit(course.id)) lessonActions.append(h('button', { type:'button', class:'copal-btn', 'aria-label':`Attach Files resource to ${activity.title}`, title:'Drop one readable Files resource here to attach it to this lesson', text:'Attach Files resource', onclick:() => setStatus('Drop one readable Files resource on this lesson to attach it.', false) }));
         row.append(lessonActions);
@@ -1110,10 +1146,13 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     const parent = values(state.courses).find((courseItem) => courseItem.moduleIds?.some((moduleId) => state.modules[moduleId]?.activityIds?.includes(activity.id)));
     if (parent) { ui.section = 'courses'; ui.selectedCourse = parent.id; persistContext(); renderLoaded(); }
     const href = String(activity.surface?.href || '').trim();
-    if (href && href !== '#') {
-      // Surface links are published routes owned by their destination. Invoke
-      // the route directly so context-menu activation has the same destination
-      // as the visible lesson action without synthesizing a click.
+    const appLink = String(activity.surface?.appLink || (activity.surface?.key ? `clank://${activity.surface.key}` : '')).trim();
+    if (appLink) {
+      // Surface destinations resolve through the shared app-link registry so
+      // context-menu activation focuses the same view as the lesson action,
+      // preserving chat identity and unsaved drafts.
+      openAppDestination(appLink, null);
+    } else if (href && href !== '#') {
       window.location.assign(href);
     }
     return true;

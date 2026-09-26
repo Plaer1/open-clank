@@ -546,9 +546,16 @@ def _require_skills_unlocked(state: dict[str, Any], actor_id: str, skill_ids: li
 
 
 def _require_module_order(state: dict[str, Any], actor_id: str, module_id: str, item_id: str, item_type: str) -> None:
-    """Gate completion/submit on sequential module progress."""
+    """Gate completion/submit on sequential module progress.
+
+    Built-in free-exploration Classes (the Field Guide) never lock: suggested
+    order is a navigation hint only.  User-authored Classes keep this gate.
+    """
     module = state["modules"].get(module_id)
     if not module:
+        return
+    course = state["courses"].get(str(module.get("courseId") or ""))
+    if course and course.get("freeExploration"):
         return
     projection = compute_treehouse_projections(state)["learners"].get(actor_id, {})
     completed_activities = set(projection.get("completedActivityIds", []))
@@ -886,12 +893,14 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         _require_role(state, actor_id, "learner")
         course_id = _id(payload.get("courseId"), "courseId"); _published_course(state, course_id); _require_course_access(state, actor_id, course_id, "learn")
         course = state["courses"][course_id]
-        unmet = [
-            prerequisite for prerequisite in course.get("prerequisites", [])
-            if state["enrollments"].get(_enrollment_key(prerequisite, actor_id), {}).get("status") != "completed"
-        ]
-        if unmet:
-            raise TreeHouseError("Complete prerequisite courses first", code="course_prerequisites_unmet", status=409, details={"courseIds": unmet})
+        # Built-in free-exploration Classes carry no prerequisite locks.
+        if not course.get("freeExploration"):
+            unmet = [
+                prerequisite for prerequisite in course.get("prerequisites", [])
+                if state["enrollments"].get(_enrollment_key(prerequisite, actor_id), {}).get("status") != "completed"
+            ]
+            if unmet:
+                raise TreeHouseError("Complete prerequisite courses first", code="course_prerequisites_unmet", status=409, details={"courseIds": unmet})
         key = _enrollment_key(course_id, actor_id)
         existing = state["enrollments"].get(key)
         if existing and existing.get("status") == "active":
@@ -920,7 +929,20 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
         _require_role(state, actor_id, "learner")
         activity_id = _id(payload.get("activityId"), "activityId")
         activity = _entity(state, "activities", activity_id, "Activity")
-        _published_course(state, activity["courseId"]); _require_course_access(state, actor_id, activity["courseId"], "learn"); _require_enrollment(state, activity["courseId"], actor_id)
+        _published_course(state, activity["courseId"]); _require_course_access(state, actor_id, activity["courseId"], "learn")
+        course = state["courses"].get(str(activity["courseId"])) or {}
+        if course.get("freeExploration"):
+            # Free exploration: let people learn from their own work without a
+            # formal enrollment step.  A completion implicitly enrolls.
+            key = _enrollment_key(activity["courseId"], actor_id)
+            if key not in state["enrollments"]:
+                state["enrollments"][key] = {
+                    "id": key, "courseId": activity["courseId"], "profileId": actor_id,
+                    "status": "active", "enrolledAt": at, "updatedAt": at,
+                }
+                emit("enrollment.created", actor_id, "enrollment", key, {"courseId": activity["courseId"], "implicit": True})
+        else:
+            _require_enrollment(state, activity["courseId"], actor_id)
         if activity.get("status") != "published": raise TreeHouseError("Activity is not published", code="activity_not_published", status=409)
         course_generation = _attempt_generation(state, actor_id, activity["courseId"], payload)
         reset_cutoff = max((index for index, event in enumerate(state["events"]) if event.get("type") == "progress.reset" and event.get("subjectId") == actor_id and event.get("data", {}).get("courseId") in {None, activity["courseId"]}), default=-1)

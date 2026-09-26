@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from src.openclank.copal_treehouse import new_treehouse_state
+from src.openclank.copal_treehouse import apply_treehouse_command, new_treehouse_state
 from src.openclank.copal_treehouse_repository import TreeHouseRepository, TreeHouseRepositoryError
 from src.openclank.treehouse_field_guide import instantiate_field_guide
 
@@ -159,13 +159,30 @@ def test_accepted_share_reset_order_is_fenced_after_restart(tmp_path):
 def test_non_first_field_guide_share_grants_prerequisite_closure_and_revoke_closes_it(tmp_path):
     repo = TreeHouseRepository(tmp_path / "treehouse.sqlite3")
     state = instantiate_field_guide(new_treehouse_state("acct-owner"), "acct-owner")
+    # Built-in Field Guide Classes are free exploration: no prerequisite locks,
+    # so a share grants exactly the shared Class (no closure to walk).
+    assert all(not course.get("prerequisites") for course in state["courses"].values() if course.get("fieldGuideKey"))
+    first = next(course_id for course_id, course in state["courses"].items() if course.get("fieldGuideKey") == "house-collaborate")
+    second = next(course_id for course_id, course in state["courses"].items() if course.get("fieldGuideKey") == "house-documents")
     repo.put_catalogue("acct-owner", "school", state, expected_revision=None)
-    first = next(course_id for course_id, course in state["courses"].items() if course.get("fieldGuideKey") == "fg-orientation")
-    second = next(course_id for course_id, course in state["courses"].items() if course.get("fieldGuideKey") == "fg-assistant")
     share = repo.create_share(owner_account_id="acct-owner", workspace_id="school", course_id=second, recipient_account_id="acct-learner", role="learn", access_revision=state["revision"], now="now", command_id="share-non-first", payload={"courseId": second})
     repo.accept_share(recipient_account_id="acct-learner", workspace_id="school", token=share["shareToken"], now="now")
-    assert {ref["courseId"] for ref in repo.accessible_course_refs("acct-learner", "school")} == {first, second}
+    assert {ref["courseId"] for ref in repo.accessible_course_refs("acct-learner", "school")} == {second}
     grant = repo.grant(share["grantId"])
     assert grant is not None
+    repo.revoke_share(owner_account_id="acct-owner", workspace_id="school", grant_id=share["grantId"], expected_revision=grant["revision"], now="now")
+    assert repo.accessible_course_refs("acct-learner", "school") == []
+    # User-authored Classes keep prerequisite support; sharing one still grants
+    # its prerequisite closure and revoke closes the whole closure.
+    state, _, _ = apply_treehouse_command(state, {"type": "course.create", "payload": {"id": "course:authored-base", "title": "Authored base"}}, actor_id="acct-owner", command_id="ac-1", expected_revision=state["revision"])
+    state, _, _ = apply_treehouse_command(state, {"type": "course.create", "payload": {"id": "course:authored-next", "title": "Authored next"}}, actor_id="acct-owner", command_id="ac-2", expected_revision=state["revision"])
+    state["courses"]["course:authored-next"]["prerequisites"] = ["course:authored-base"]
+    state["courses"]["course:authored-base"]["status"] = "published"
+    state["courses"]["course:authored-next"]["status"] = "published"
+    repo.put_catalogue("acct-owner", "school", state, expected_revision=None)
+    share = repo.create_share(owner_account_id="acct-owner", workspace_id="school", course_id="course:authored-next", recipient_account_id="acct-learner", role="learn", access_revision=state["revision"], now="now", command_id="share-authored", payload={"courseId": "course:authored-next"})
+    repo.accept_share(recipient_account_id="acct-learner", workspace_id="school", token=share["shareToken"], now="now")
+    assert {ref["courseId"] for ref in repo.accessible_course_refs("acct-learner", "school")} == {"course:authored-base", "course:authored-next"}
+    grant = repo.grant(share["grantId"])
     repo.revoke_share(owner_account_id="acct-owner", workspace_id="school", grant_id=share["grantId"], expected_revision=grant["revision"], now="now")
     assert repo.accessible_course_refs("acct-learner", "school") == []

@@ -706,6 +706,17 @@ const { renderMarkdown, renderPreview, renderReference } = markdownRenderer;
 
 // Register the default app destinations. Screens open/focus and preserve
 // drafts; they never toggle a window closed or start an unrelated chat.
+registerAppDestination('chat', () => {
+  // Focus the existing conversation. Never start a new chat and never close
+  // an open Copal window — app links preserve chat identity and drafts.
+  const input = document.getElementById('message');
+  if (input && typeof input.focus === 'function') {
+    input.focus({ preventScroll: true });
+    input.scrollIntoView?.({ block: 'nearest' });
+    return;
+  }
+  setStatus('Chat is still loading.', true);
+});
 registerAppDestination('settings', ({ panel }) => {
   const open = window.settingsModule?.open;
   if (typeof open === 'function') open(panel || 'appearance');
