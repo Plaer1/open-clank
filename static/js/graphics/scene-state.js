@@ -206,8 +206,14 @@ export function createDrawBatch() {
     circle(x, y, r, color, alpha = 1, stroke = null, strokeWidth = 1) {
       circles.push({ x, y, r, color, alpha, stroke, strokeWidth });
     },
-    glyph(text, x, y, size, weight, color, alpha = 1, align, baseline, font) {
-      glyphs.push({ text, x, y, size, weight, color, alpha, align, baseline, font });
+    /**
+     * @param {object|null} [glow] Optional head-glyph glow (pre-S24 shadowBlur
+     *   look): `{ color, blur }`. Backends interpret it — Canvas2D uses a real
+     *   shadow; WebGL2 approximates with a translucent halo (no shadow in the
+     *   batched atlas path).
+     */
+    glyph(text, x, y, size, weight, color, alpha = 1, align, baseline, font, glow) {
+      glyphs.push({ text, x, y, size, weight, color, alpha, align, baseline, font, glow: glow || null });
     },
     /** Flush the batch into a backend adapter and clear. */
     flush(backend) {

@@ -144,7 +144,17 @@ export function createCanvas2DBackend({ canvas, limits }) {
         ctx.font = `${glyph.weight || 400} ${glyph.size || 12}px ${family}`;
         if (glyph.align) ctx.textAlign = glyph.align;
         if (glyph.baseline) ctx.textBaseline = glyph.baseline;
+        // Head-glyph glow: pre-S24 shadowBlur on the leading glyph only.
+        const glow = glyph.glow;
+        if (glow && glow.blur > 0) {
+          ctx.shadowColor = glow.color || glyph.color || '#fff';
+          ctx.shadowBlur = glow.blur;
+        }
         ctx.fillText(glyph.text, glyph.x, glyph.y);
+        if (glow && glow.blur > 0) {
+          ctx.shadowBlur = 0;
+          ctx.shadowColor = 'transparent';
+        }
       }
       ctx.globalAlpha = 1;
       ctx.textAlign = 'start';

@@ -3737,6 +3737,10 @@ function _drawClankerCodeRain(batch, { width, height, time, scene, intensity, si
       const y = stream.y - stream.direction * index * glyphStep;
       if (y < -rain.glyphSize * 2 || y > height + rain.glyphSize * 2 || stream.x < -rain.glyphSize || stream.x > width + rain.glyphSize) continue;
       const tailAlpha = (1 - index / (stream.trailLength + 1)) * stream.opacity * (stream.behind ? .66 : 1);
+      // Head-glyph glow (pre-S24 shadowBlur): only the leading glyph glows.
+      const glow = index === 0
+        ? { color: colors[streamColor], blur: ((rain.mode === 'emoji' ? 8 : 5) * size) }
+        : null;
       batch.glyph(
         stream.chars[(charStart + index) % stream.chars.length],
         stream.x,
@@ -3748,6 +3752,7 @@ function _drawClankerCodeRain(batch, { width, height, time, scene, intensity, si
         'center',
         'middle',
         font,
+        glow,
       );
     }
   }

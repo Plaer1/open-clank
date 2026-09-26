@@ -569,6 +569,27 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
         else if (glyph.align === 'right') x -= uv.w;
         if (glyph.baseline === 'middle') y -= uv.h / 2;
         else if (glyph.baseline === 'bottom' || glyph.baseline === 'alphabetic') y -= uv.h;
+        // Head-glyph glow. The batched atlas path has no shadowBlur, so the
+        // pre-S24 leading-glyph halo is approximated with a slightly larger,
+        // translucent copy underneath (drawn first).
+        const glow = glyph.glow;
+        if (glow && glow.blur > 0) {
+          const glowRgb = hexToRgb(glow.color || glyph.color);
+          const pad = Math.max(1, Math.round(glow.blur * 0.35));
+          pushTexturedQuad(
+            atlasTexture,
+            x - pad,
+            y - pad,
+            uv.w + pad * 2,
+            uv.h + pad * 2,
+            uv.u0,
+            uv.v0,
+            uv.u1,
+            uv.v1,
+            glowRgb,
+            alpha * 0.35,
+          );
+        }
         pushTexturedQuad(atlasTexture, x, y, uv.w, uv.h, uv.u0, uv.v0, uv.u1, uv.v1, rgb, alpha);
       }
     },

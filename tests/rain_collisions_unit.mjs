@@ -283,26 +283,53 @@ test('collision: hit cooldown suppresses per-frame restrikes', () => {
   assert.equal(response.hit, false);
 });
 
-test('collision: top/bottom edge deflection stays lateral, not a vertical reverse', () => {
-  const obstacle = { left: 0, top: 100, right: 100, bottom: 110, maskAlpha: 255 };
-  const response = resolveCollision({
-    x: 200,
-    y: 108,
+test('collision: top/bottom edge hit sticks-and-slides along the leading edge', () => {
+  // Wide panel: a drop overlapping the top edge takes the vertical
+  // (least-penetration) axis, snaps to the edge, and slides laterally —
+  // it does NOT reverse vertical travel (Junction motion).
+  const bar = { left: 0, top: 100, right: 400, bottom: 140, maskAlpha: 255 };
+  const topHit = resolveCollision({
+    x: 250,
+    y: 105,
     radius: 8,
-    obstacle,
-    glyphSize: 12,
+    obstacle: bar,
+    glyphSize: 14,
     scale: 1,
-    collisionForce: 1,
-    bounce: 1,
-    random: 0.4,
-    time: 5,
+    collisionForce: 2.2,
+    bounce: 1.3,
+    random: 0.5,
+    time: 1000,
     lastHitAt: -Infinity,
   });
-  // Narrow horizontal miss overlapping vertically → still a hit via radius.
-  // If it hits, the shove is lateral with at most a small edge clear.
-  if (response.hit) {
-    assert.ok(Math.abs(response.y - 108) <= 20, 'edge clear is bounded, not a bounce');
-  }
+  assert.equal(topHit.hit, true, 'top-edge overlap must actually hit (not vacuous)');
+  // Stick-and-slide: y is snapped to just clear the top edge (top - radius = 92)
+  // and the drop is not launched away from the panel.
+  assert.equal(topHit.y, 92, 'drop snaps to the top leading edge, clear of the panel');
+  assert.equal(100 - topHit.y, 8, 'edge clear equals the drop radius — bounded, not a bounce');
+  // Visible deflection is the lateral shove along the edge (x right of panel
+  // center pushes further right); vertical direction is untouched.
+  assert.notEqual(topHit.lateral, 0, 'deflection must be visible');
+  assert.ok(topHit.lateral > 0, 'lateral shove continues along the edge');
+  assert.ok(Math.abs(topHit.lateral) < 4, 'shove stays a few px step, not a launch');
+
+  // Bottom-edge counterpart: same stick-and-slide, snapped below the panel.
+  const bottomHit = resolveCollision({
+    x: 150,
+    y: 135,
+    radius: 8,
+    obstacle: bar,
+    glyphSize: 14,
+    scale: 1,
+    collisionForce: 2.2,
+    bounce: 1.3,
+    random: 0.5,
+    time: 1000,
+    lastHitAt: -Infinity,
+  });
+  assert.equal(bottomHit.hit, true);
+  assert.equal(bottomHit.y, 148, 'drop snaps to the bottom leading edge, clear of the panel');
+  assert.equal(bottomHit.y - 140, 8, 'edge clear equals the drop radius');
+  assert.ok(bottomHit.lateral < 0, 'bottom-edge slide shoves toward the nearer side');
 });
 
 // ── Obstacle field: painted alpha, clipping, ancestor opacity ─────────────
@@ -479,6 +506,21 @@ test('theme.js: direction composes normal → reverse → rare; sample is per sp
     themeSource.indexOf('function _drawClankerCodeRain'),
   );
   assert.doesNotMatch(advance, /shouldRareUpward|composeRainDirection/);
+});
+
+test('theme.js: head-glyph glow restored on the batch.glyph path', () => {
+  // The batch.glyph migration must not drop the leading-glyph shadowBlur glow.
+  assert.match(themeSource, /index === 0\s*\?\s*\{ color: colors\[streamColor\], blur:/);
+  const draw = themeSource.slice(
+    themeSource.indexOf('function _drawClankerCodeRain'),
+    themeSource.indexOf('function _mountClankerCodeRain'),
+  );
+  assert.match(draw, /batch\.glyph\([\s\S]*?glow,/);
+  // Backends interpret the glow: Canvas2D real shadow, WebGL2 halo.
+  const canvas2d = readFileSync(join(ROOT, 'static/js/graphics/backend-canvas2d.js'), 'utf8');
+  const webgl2 = readFileSync(join(ROOT, 'static/js/graphics/backend-webgl2.js'), 'utf8');
+  assert.match(canvas2d, /ctx\.shadowBlur = glow\.blur/);
+  assert.match(webgl2, /glow\.blur > 0/);
 });
 
 test('theme.js: existing direction controls and saved keys are preserved', () => {

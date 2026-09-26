@@ -60,6 +60,8 @@ function mockCanvas2d() {
     set font(v) { calls.push(['font', v]); },
     set textAlign(v) { calls.push(['textAlign', v]); },
     set textBaseline(v) { calls.push(['textBaseline', v]); },
+    set shadowColor(v) { calls.push(['shadowColor', v]); },
+    set shadowBlur(v) { calls.push(['shadowBlur', v]); },
     setLineDash(v) { calls.push(['setLineDash', v]); },
   };
   return {
@@ -658,4 +660,26 @@ test('webgl2 and canvas2d adapters share the consumer-facing method surface', ()
   webgl.endFrame();
   webgl.dispose();
   assert.equal(webgl.disposed, true);
+});
+
+test('canvas2d drawGlyphs applies head-glyph glow and clears the shadow after', () => {
+  const canvas = mockCanvas2d();
+  const backend = createCanvas2DBackend({ canvas, limits: DEFAULT_LIMITS });
+  backend.resize(40, 20, 1);
+  backend.beginFrame();
+  backend.drawGlyphs([
+    { text: 'H', x: 10, y: 10, size: 14, weight: 400, color: '#0f0', alpha: 1, align: 'center', baseline: 'middle', glow: { color: '#0f0', blur: 5 } },
+    { text: 't', x: 10, y: 24, size: 14, weight: 400, color: '#0f0', alpha: 0.72, align: 'center', baseline: 'middle' },
+  ]);
+  const calls = canvas.__ctx.calls;
+  const shadowColor = calls.filter(c => Array.isArray(c) && c[0] === 'shadowColor');
+  const shadowBlur = calls.filter(c => Array.isArray(c) && c[0] === 'shadowBlur');
+  // Glow set once for the head glyph, then reset so later glyphs are clean.
+  assert.equal(shadowColor[0]?.[1], '#0f0', 'glow uses the head-glyph glow color');
+  assert.equal(shadowBlur[0]?.[1], 5, 'glow blur is passed through');
+  assert.ok(shadowBlur.some(c => c[1] === 0), 'shadow is cleared after the glowing glyph');
+  // Only one glyph carried glow, so only one non-zero blur is set.
+  assert.equal(shadowBlur.filter(c => c[1] > 0).length, 1);
+  backend.endFrame();
+  backend.dispose();
 });
