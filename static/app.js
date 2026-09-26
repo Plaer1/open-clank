@@ -179,7 +179,7 @@ function initRailHoverLabels() {
     'rail-email': 'Email',
     'rail-gallery': 'Gallery',
     'rail-archive': 'Library',
-    'rail-memory': 'Brain',
+    'rail-memory': 'Menmery',
     'rail-notes': 'Editor',
     'rail-tasks': 'Tasks',
     'rail-theme': 'Theme',
