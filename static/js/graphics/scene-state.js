@@ -206,8 +206,8 @@ export function createDrawBatch() {
     circle(x, y, r, color, alpha = 1, stroke = null, strokeWidth = 1) {
       circles.push({ x, y, r, color, alpha, stroke, strokeWidth });
     },
-    glyph(text, x, y, size, weight, color, alpha = 1, align, baseline) {
-      glyphs.push({ text, x, y, size, weight, color, alpha, align, baseline });
+    glyph(text, x, y, size, weight, color, alpha = 1, align, baseline, font) {
+      glyphs.push({ text, x, y, size, weight, color, alpha, align, baseline, font });
     },
     /** Flush the batch into a backend adapter and clear. */
     flush(backend) {

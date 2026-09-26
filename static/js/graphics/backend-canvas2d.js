@@ -140,7 +140,8 @@ export function createCanvas2DBackend({ canvas, limits }) {
         if (!glyph || glyph.text == null) continue;
         ctx.globalAlpha = glyph.alpha == null ? 1 : Math.max(0, Math.min(1, glyph.alpha));
         ctx.fillStyle = glyph.color || '#fff';
-        ctx.font = `${glyph.weight || 400} ${glyph.size || 12}px sans-serif`;
+        const family = glyph.font || 'sans-serif';
+        ctx.font = `${glyph.weight || 400} ${glyph.size || 12}px ${family}`;
         if (glyph.align) ctx.textAlign = glyph.align;
         if (glyph.baseline) ctx.textBaseline = glyph.baseline;
         ctx.fillText(glyph.text, glyph.x, glyph.y);

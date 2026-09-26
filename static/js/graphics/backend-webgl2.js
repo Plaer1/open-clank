@@ -310,8 +310,9 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
     if (!atlasCtx || !atlasTexture) return null;
     const size = glyphAtlas.quantizeSize(glyph.size || 12);
     const weight = glyph.weight || 400;
+    const family = glyph.font || 'sans-serif';
     const text = String(glyph.text);
-    const font = `${weight} ${size}px sans-serif`;
+    const font = `${weight} ${size}px ${family}`;
     atlasCtx.font = font;
     const metrics = atlasCtx.measureText(text);
     const w = Math.max(1, Math.ceil(metrics.width || size * 0.6 * text.length));
@@ -552,7 +553,7 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
       ensureAtlas();
       for (const glyph of glyphs) {
         if (!glyph || glyph.text == null) continue;
-        const key = glyphAtlas.key(glyph.text, glyph.size, glyph.weight);
+        const key = glyphAtlas.key(glyph.text, glyph.size, glyph.weight, glyph.font);
         let entry = glyphAtlas.get(key);
         if (!entry || !entry.uv) {
           const uv = rasterizeGlyph(glyph);

@@ -657,11 +657,24 @@ try {
 
     await choose('clanker-matrix-rain');
     const matrixAdvancedOff=enableAdvanced('clanker-matrix-rain');
-    const rainKeys=['splashQuantity','splashRainSpeed','splashRainFlicker','splashRainSpread','splashRainDown','splashRainReverseChance','splashRainWaves','splashCharVariety','splashMinOpacity','splashMaxOpacity','splashSizeVariance','splashColorVarianceEnabled','splashColorVariance','splashBounce','splashGravity','splashCollisionForce'];
-    rainKeys.filter(key=>key!=='splashRainDown' && key!=='splashRainWaves' && key!=='splashColorVarianceEnabled').forEach((key,index)=>setRange(control('clanker-matrix-rain',key), [2.2,1.8,.45,2.3,12.5,.5,.1,.9,.75,.7,2,1.2,3.1][index]));
+    const rainToggleKeys=new Set(['splashRainDown','splashRainWaves','splashColorVarianceEnabled','splashRareUpward']);
+    const rainKeys=['splashQuantity','splashRainSpeed','splashRainFlicker','splashRainSpread','splashRainDown','splashRainReverseChance','splashRainWaves','splashCharVariety','splashMinOpacity','splashMaxOpacity','splashSizeVariance','splashColorVarianceEnabled','splashColorVariance','splashRareUpward','splashBounce','splashGravity','splashCollisionForce'];
+    // Rare upward toggle defaults ON (S24). Capture scene identity across the
+    // advanced-settings toggle — UI-only controls must not reset droplets.
+    const rareToggle=control('clanker-matrix-rain','splashRareUpward');
+    const rareDefaultOn=!!(rareToggle && rareToggle.checked);
+    const rainSceneBefore=document.getElementById('clanker-matrix-rain-canvas')?.__backgroundScene;
+    setToggle(control('clanker-matrix-rain','advancedSettings'), false);
+    await pause();
+    setToggle(control('clanker-matrix-rain','advancedSettings'), true);
+    await pause();
+    const rainSceneAfterAdvanced=document.getElementById('clanker-matrix-rain-canvas')?.__backgroundScene;
+    const rainAdvancedStable=!!rainSceneBefore && rainSceneBefore===rainSceneAfterAdvanced;
+    rainKeys.filter(key=>!rainToggleKeys.has(key)).forEach((key,index)=>setRange(control('clanker-matrix-rain',key), [2.2,1.8,.45,2.3,12.5,.5,.1,.9,.75,.7,2,1.2,3.1][index]));
     setToggle(control('clanker-matrix-rain','splashRainDown'), false);
     setToggle(control('clanker-matrix-rain','splashRainWaves'), true);
     setToggle(control('clanker-matrix-rain','splashColorVarianceEnabled'), true);
+    setToggle(control('clanker-matrix-rain','splashRareUpward'), true);
     setToggle(control('clanker-matrix-rain','splashEmojiMix'), true);
     setRange(control('clanker-matrix-rain','splashEmojiRarity'), 1000);
     await pause();
@@ -669,6 +682,10 @@ try {
       controls:rainKeys.every(key=>!!control('clanker-matrix-rain',key)),
       emojiControls:!!control('clanker-matrix-rain','splashEmojiMix') && !!control('clanker-matrix-rain','splashEmojiRarity'),
       advancedOff:matrixAdvancedOff,
+      rareDefaultOn,
+      rainAdvancedStable,
+      owner:!!window.__openClankBackgroundOwner,
+      sceneStreams:document.getElementById('clanker-matrix-rain-canvas')?.__backgroundScene?.streams?.length||0,
       stable:document.getElementById('clanker-matrix-rain-canvas')?.isConnected,
     };
 
@@ -677,13 +694,14 @@ try {
     const emojiRainValues={splashQuantity:1.6,splashRainSpeed:1.4,splashRainFlicker:.3,splashRainSpread:1.7,splashRainDown:true,splashRainReverseChance:78,splashRainWaves:true,splashCharVariety:.55,splashMinOpacity:.5,splashMaxOpacity:.9,splashSizeVariance:.8,splashColorVarianceEnabled:true,splashColorVariance:.8,splashBounce:2.4,splashGravity:.8,splashCollisionForce:2.4};
     rainKeys.forEach(key=>{
       const value=emojiRainValues[key];
-      if (key==='splashRainDown' || key==='splashRainWaves' || key==='splashColorVarianceEnabled') setToggle(control('clanker-emoji-rain',key), value > .5);
+      if (rainToggleKeys.has(key)) setToggle(control('clanker-emoji-rain',key), key==='splashRareUpward' ? true : value > .5);
       else setRange(control('clanker-emoji-rain',key), value);
     });
     await pause();
     const emojiRain={
       controls:rainKeys.every(key=>!!control('clanker-emoji-rain',key)),
       advancedOff:emojiRainAdvancedOff,
+      rareDefaultOn:!!control('clanker-emoji-rain','splashRareUpward')?.checked !== false,
       stable:document.getElementById('clanker-emoji-rain-canvas')?.isConnected,
     };
 
@@ -706,6 +724,10 @@ try {
   assert(effectControlResults.emoji.draws > 8, 'Emoji Drift did not draw cached emoji sprites');
   assert(effectControlResults.matrixRain.controls && effectControlResults.matrixRain.emojiControls && effectControlResults.matrixRain.stable, 'Matrix Rain controls remounted or went missing');
   assert(effectControlResults.matrixRain.advancedOff, 'Matrix Rain advanced settings defaulted on');
+  assert(effectControlResults.matrixRain.rareDefaultOn, 'Rare upward drop toggle must default ON');
+  assert(effectControlResults.matrixRain.rainAdvancedStable, 'Toggling Advanced settings reset droplets / replaced the rain scene');
+  assert(effectControlResults.matrixRain.owner, 'Matrix Rain lost its single background owner');
+  assert(effectControlResults.matrixRain.sceneStreams > 0, 'Matrix Rain scene exposed no streams');
   assert(effectControlResults.emojiRain.controls && effectControlResults.emojiRain.stable, 'Emoji Rain controls remounted or went missing');
   assert(effectControlResults.emojiRain.advancedOff, 'Emoji Rain advanced settings defaulted on');
   assert(effectControlResults.hidden, 'effects without controls left a stale control panel visible');

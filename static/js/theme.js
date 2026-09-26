@@ -7,6 +7,13 @@ import { initColorPickers, attachColorPicker } from './colorPicker.js';
 import { hexToRgb } from './color/hex.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
+import { createGraphicsConsumer } from './graphics/consumer.js';
+import { createObstacleField, PAINTED_ALPHA_THRESHOLD } from './graphics/obstacle-field.js';
+import {
+  composeRainDirection,
+  resolveCollision,
+  spawnPosition,
+} from './graphics/rain-physics.js';
 
 export const THEMES = {
   'clanker-dark': {
@@ -927,8 +934,13 @@ const _CLANKER_CODE_RAIN_CONTROLS = [
   { key: 'splashMinOpacity', label: 'Minimum opacity', min: .02, max: 1, step: .02, default: .2 },
   { key: 'splashMaxOpacity', label: 'Maximum opacity', min: .02, max: 1, step: .02, default: 1 },
   { key: 'splashSizeVariance', label: 'Size variance', min: 0, max: 1.4, step: .05, default: .45 },
-  { key: 'splashColorVarianceEnabled', label: 'Enable color variance', type: 'toggle', default: false },
-  { key: 'splashColorVariance', label: 'Color variance', min: 0, max: 1, step: .05, default: .32 },
+  // S24: full-palette rain stays on; this control only adds extra variation
+  // on top of the palette (renamed from the older "Color variance" label).
+  { key: 'splashColorVarianceEnabled', label: 'Extra color variation', type: 'toggle', default: false },
+  { key: 'splashColorVariance', label: 'Extra color variation amount', min: 0, max: 1, step: .05, default: .32 },
+  // S24: separate rare-effect toggle. Default ON. Sampled once per spawn at
+  // 1/10,000 — never the coarse reverse-chance slider.
+  { key: 'splashRareUpward', label: 'Rare upward drop (1 in 10,000)', type: 'toggle', default: true },
   { key: 'splashBounce', label: 'Bounce force', min: 0, max: 3, step: .1, default: 1.3 },
   { key: 'splashGravity', label: 'Gravity', min: .1, max: 4, step: .1, default: .2 },
   { key: 'splashCollisionForce', label: 'Collision force', min: 0, max: 4, step: .1, default: 2.2 },
@@ -3466,6 +3478,7 @@ function _clankerCodeRainControls(mode) {
     spread: getBackgroundEffectControlValue(pattern, 'splashRainSpread', 1),
     rainDown: getBackgroundEffectControlValue(pattern, 'splashRainDown', true),
     reverseChance: getBackgroundEffectControlValue(pattern, 'splashRainReverseChance', 0),
+    rareUpward: getBackgroundEffectControlValue(pattern, 'splashRareUpward', true),
     waves: getBackgroundEffectControlValue(pattern, 'splashRainWaves', false),
     charVariety: getBackgroundEffectControlValue(pattern, 'splashCharVariety', 1),
     minOpacity: getBackgroundEffectControlValue(pattern, 'splashMinOpacity', .2),
@@ -3481,9 +3494,27 @@ function _clankerCodeRainControls(mode) {
   };
 }
 
-function _clankerCodeRainDirection(seed, controls) {
-  const direction = controls.rainDown ? 1 : -1;
-  return _clankerNoise(seed) < controls.reverseChance / 100 ? -direction : direction;
+// Topology keys rebuild the droplet set. UI-only keys (advanced settings,
+// direction, rare toggle, speed, bounce, …) are read live and must not reset
+// droplets or the running simulation.
+const _RAIN_TOPOLOGY_FIELDS = [
+  'quantity', 'charVariety', 'sizeVariance', 'minOpacity', 'maxOpacity', 'emojiMix', 'emojiRarity',
+];
+
+function _clankerCodeRainTopologyKey(mode, width, height, size) {
+  const controls = _clankerCodeRainControls(mode);
+  const parts = _RAIN_TOPOLOGY_FIELDS.map(field => `${field}=${controls[field]}`);
+  return `${mode}:${width}:${height}:${size}:${parts.join(':')}`;
+}
+
+function _clankerCodeRainDirection(seed, controls, rareSeed = seed + 59) {
+  return composeRainDirection({
+    rainDown: controls.rainDown,
+    reverseChance: controls.reverseChance,
+    rareUpward: controls.rareUpward,
+    noise: _clankerNoise(seed),
+    rareNoise: _clankerNoise(rareSeed),
+  }).direction;
 }
 
 function _buildClankerCodeRainScene({ width, height, size, mode }) {
@@ -3505,11 +3536,34 @@ function _buildClankerCodeRainScene({ width, height, size, mode }) {
     const seed = index * 71 + (emoji ? 307 : 113);
     const trailLength = emoji ? 2 + Math.floor(_clankerNoise(seed + 3) * 3) : 5 + Math.floor(_clankerNoise(seed + 3) * 9);
     const x = ((index + .5) / streamCount) * width + (_clankerNoise(seed + 5) - .5) * cell * (.8 + controls.spread * .2);
-    const direction = _clankerCodeRainDirection(seed + 31, controls);
-    const entryBand = height * .25 * controls.spread;
-    const y = controls.waves
-      ? direction > 0 ? -glyphSize - _clankerNoise(seed + 7) * entryBand : height + glyphSize + _clankerNoise(seed + 7) * entryBand
-      : _clankerNoise(seed + 7) * height;
+    const rareNoise = _clankerNoise(seed + 59);
+    const composed = composeRainDirection({
+      rainDown: controls.rainDown,
+      reverseChance: controls.reverseChance,
+      rareUpward: controls.rareUpward,
+      noise: _clankerNoise(seed + 31),
+      rareNoise,
+    });
+    const direction = composed.direction;
+    const spawn = spawnPosition({
+      direction,
+      rare: composed.rare,
+      waves: controls.waves,
+      width,
+      height,
+      radius: 0,
+      entryNoise: _clankerNoise(seed + 7),
+      lateralNoise: 0.5,
+      spread: controls.spread,
+      cell,
+      initialX: x,
+    });
+    // Non-rare random placement still uses the full-height scatter unless waves.
+    const y = controls.waves || composed.rare
+      ? spawn.y
+      : direction > 0
+        ? _clankerNoise(seed + 7) * height
+        : height - _clankerNoise(seed + 7) * height;
     const initialSpeed = (emoji ? 44 : 74) * (0.72 + _clankerNoise(seed + 11) * .72) * Math.max(.65, size) * controls.speed;
     const chars = Array.from({ length: trailLength + 6 }, (_, charIndex) => pickChar(seed, charIndex * 13) || glyphPool[0]);
     return {
@@ -3519,6 +3573,7 @@ function _buildClankerCodeRainScene({ width, height, size, mode }) {
       initialSpeed,
       speed: initialSpeed,
       direction,
+      rare: composed.rare,
       lateral: 0,
       trailLength,
       chars,
@@ -3550,33 +3605,18 @@ function _buildClankerCodeRainScene({ width, height, size, mode }) {
   };
 }
 
-function _clankerCodeRainObstacles(scene, time) {
+function _clankerCodeRainObstacles(scene, time, field = null) {
+  // Shared obstacle-field helper: cached painted-alpha field, refreshed on
+  // geometry/style/scroll/resize rather than an expensive DOM scan per frame.
+  if (field) {
+    scene.obstacles = field.obstacles;
+    scene.obstacleTime = time;
+    return scene.obstacles;
+  }
   if (time - scene.obstacleTime < 110) return scene.obstacles;
   scene.obstacleTime = time;
-  const seen = new Set();
-  const obstacles = [];
-  for (const selector of _CLANKER_CODE_RAIN_COLLISION_SELECTORS) {
-    document.querySelectorAll(selector).forEach(element => {
-      if (seen.has(element)) return;
-      seen.add(element);
-      const style = getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      const opacity = Number(style.opacity);
-      // Junction samples painted pixels at alpha > 24/255. DOM surfaces do
-      // not expose a portable pixel mask, so computed element opacity is the
-      // bounded adapter; transparent/near-transparent surfaces are passable.
-      if (style.display === 'none' || style.visibility === 'hidden' || !Number.isFinite(opacity) || opacity <= 24 / 255 || rect.width < 8 || rect.height < 8) return;
-      obstacles.push({
-        left: rect.left - 4,
-        top: rect.top - 4,
-        right: rect.right + 4,
-        bottom: rect.bottom + 4,
-        maskAlpha: Math.round(opacity * 255),
-      });
-    });
-  }
-  scene.obstacles = obstacles;
-  return obstacles;
+  scene.obstacles = [];
+  return scene.obstacles;
 }
 
 function _clankerCodeRainHit(stream, x, y, radius, obstacles) {
@@ -3586,11 +3626,31 @@ function _clankerCodeRainHit(stream, x, y, radius, obstacles) {
 
 function _resetClankerCodeRainStream(stream, scene, controls, width, height, radius) {
   stream.resetCount += 1;
-  stream.direction = _clankerCodeRainDirection(stream.seed + stream.resetCount * 31, controls);
-  const band = height * (controls.waves ? .25 : 1) * controls.spread;
-  const offset = _clankerNoise(stream.seed + stream.resetCount * 43) * band;
-  stream.y = stream.direction > 0 ? -radius - offset : height + radius + offset;
-  stream.x = stream.initialX + (_clankerNoise(stream.seed + stream.resetCount * 47) - .5) * scene.cell * controls.spread;
+  const rareNoise = _clankerNoise(stream.seed + stream.resetCount * 59);
+  const composed = composeRainDirection({
+    rainDown: controls.rainDown,
+    reverseChance: controls.reverseChance,
+    rareUpward: controls.rareUpward,
+    noise: _clankerNoise(stream.seed + stream.resetCount * 31),
+    rareNoise,
+  });
+  stream.direction = composed.direction;
+  stream.rare = composed.rare;
+  const spawn = spawnPosition({
+    direction: stream.direction,
+    rare: composed.rare,
+    waves: controls.waves,
+    width,
+    height,
+    radius,
+    entryNoise: _clankerNoise(stream.seed + stream.resetCount * 43),
+    lateralNoise: _clankerNoise(stream.seed + stream.resetCount * 47),
+    spread: controls.spread,
+    cell: scene.cell,
+    initialX: stream.initialX,
+  });
+  stream.y = spawn.y;
+  stream.x = spawn.x;
   stream.speed = stream.initialSpeed;
   stream.lateral = 0;
   stream.lastCell = Math.floor(stream.y / scene.glyphSize);
@@ -3603,16 +3663,31 @@ function _advanceClankerCodeRainStream(stream, scene, controls, time, delta, wid
   const hit = time - stream.lastHitAt > 130 ? _clankerCodeRainHit(stream, nextX, nextY, radius, obstacles) : null;
   if (hit) {
     // Junction collision is light: preserve nextY/vy/direction and sidestep
-    // only. The .04 term is intentional and remains when both sliders are 0.
-    const side = nextX < (hit.left + hit.right) / 2 ? -1 : 1;
-    const random = _clankerNoise(stream.seed + Math.floor(time / 160) * 17);
-    const shove = scene.glyphSize * stream.scale * (
-      .04 + controls.collisionForce * .02 + controls.bounce * (.03 + random * .05)
-    );
-    stream.x = nextX + side * shove;
-    stream.y = nextY;
-    stream.lateral = side * shove * 3;
-    stream.lastHitAt = time;
+    // along the obstacle edge. The .04 term is intentional and remains when
+    // both sliders are 0.
+    const response = resolveCollision({
+      x: nextX,
+      y: nextY,
+      radius,
+      obstacle: hit,
+      glyphSize: scene.glyphSize,
+      scale: stream.scale,
+      collisionForce: controls.collisionForce,
+      bounce: controls.bounce,
+      random: _clankerNoise(stream.seed + Math.floor(time / 160) * 17),
+      behind: stream.behind,
+      lastHitAt: stream.lastHitAt,
+      time,
+    });
+    if (response.hit) {
+      stream.x = response.x;
+      stream.y = response.y;
+      stream.lateral = response.lateral;
+      stream.lastHitAt = time;
+    } else {
+      stream.x = nextX;
+      stream.y = nextY;
+    }
   } else {
     stream.x = nextX;
     stream.y = nextY;
@@ -3643,60 +3718,224 @@ function _advanceClankerCodeRainStream(stream, scene, controls, time, delta, wid
   stream.x = Math.max(-scene.cell, Math.min(width + scene.cell, stream.x));
 }
 
-function _drawClankerCodeRain(ctx, { width, height, time, scene, intensity, size, colors, outline, reduced }) {
-  const controls = _clankerCodeRainControls(scene.mode);
-  const previousTime = scene.lastTime;
-  scene.lastTime = time;
+function _drawClankerCodeRain(batch, { width, height, time, scene, intensity, size, colors, outline, reduced, rain, field, font }) {
+  const controls = _clankerCodeRainControls(scene.mode || rain.mode);
+  const previousTime = rain.lastTime;
+  rain.lastTime = time;
   const delta = reduced || previousTime === null ? 0 : Math.min(48, Math.max(0, time - previousTime)) / 1000;
-  const obstacles = _clankerCodeRainObstacles(scene, time);
-  const font = scene.mode === 'emoji' ? _CLANKER_EMOJI_FONT : "'Liga Comic Mono', 'Fira Code', monospace";
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
+  const obstacles = _clankerCodeRainObstacles(rain, time, field);
   // Match Junction's compositing order: behind rain first, foreground rain
   // second. The Open Clank canvas remains behind arbitrary DOM by design.
-  const streams = scene.streams.slice().sort((a, b) => Number(b.behind) - Number(a.behind));
+  const streams = rain.streams.slice().sort((a, b) => Number(b.behind) - Number(a.behind));
   for (const stream of streams) {
-    if (delta) _advanceClankerCodeRainStream(stream, scene, controls, time, delta, width, height, obstacles);
-    ctx.font = `${scene.glyphSize * stream.scale}px ${font}`;
+    if (delta) _advanceClankerCodeRainStream(stream, rain, controls, time, delta, width, height, obstacles);
+    const glyphStep = rain.glyphSize * stream.scale * .92;
+    const charStart = stream.flickerCharIndex || stream.charIndex;
     const colorOffset = Math.floor(stream.colorNoise * colors.length * controls.colorVariance);
     const streamColor = (stream.color + colorOffset) % colors.length;
-    const glyphStep = scene.glyphSize * stream.scale * .92;
-    const charStart = stream.flickerCharIndex || stream.charIndex;
     for (let index = 0; index <= stream.trailLength; index += 1) {
       const y = stream.y - stream.direction * index * glyphStep;
-      if (y < -scene.glyphSize * 2 || y > height + scene.glyphSize * 2 || stream.x < -scene.glyphSize || stream.x > width + scene.glyphSize) continue;
+      if (y < -rain.glyphSize * 2 || y > height + rain.glyphSize * 2 || stream.x < -rain.glyphSize || stream.x > width + rain.glyphSize) continue;
       const tailAlpha = (1 - index / (stream.trailLength + 1)) * stream.opacity * (stream.behind ? .66 : 1);
-      ctx.save();
-      ctx.globalAlpha = Math.min(1, intensity * tailAlpha * (index === 0 ? 1 : .72));
-      ctx.fillStyle = colors[(streamColor + index) % colors.length];
-      if (index === 0) {
-        ctx.shadowColor = colors[streamColor];
-        ctx.shadowBlur = (scene.mode === 'emoji' ? 8 : 5) * size;
-      }
-      ctx.fillText(stream.chars[(charStart + index) % stream.chars.length], stream.x, y);
-      ctx.restore();
+      batch.glyph(
+        stream.chars[(charStart + index) % stream.chars.length],
+        stream.x,
+        y,
+        rain.glyphSize * stream.scale,
+        400,
+        colors[(streamColor + index) % colors.length],
+        Math.min(1, intensity * tailAlpha * (index === 0 ? 1 : .72)),
+        'center',
+        'middle',
+        font,
+      );
     }
   }
-  ctx.strokeStyle = outline;
+  return outline;
+}
+
+function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
+  if (document.getElementById(id)) return;
+  const host = document.getElementById('chat-container') || document.body;
+  const chatPane = host.id === 'chat-container';
+  const canvas = document.createElement('canvas');
+  canvas.id = id;
+  canvas.style.cssText = chatPane
+    ? 'position:absolute;left:0;top:0;pointer-events:none;z-index:-1;'
+    : 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.setAttribute('aria-hidden', 'true');
+  if (chatPane) host.classList.add('background-effect-host');
+  host.prepend(canvas);
+
+  // ONE scene owner via the graphics substrate consumer. theme.js must not
+  // also run _runBackgroundCanvas for this canvas (hex: duplicate loop = flicker).
+  const field = createObstacleField({
+    selectors: _CLANKER_CODE_RAIN_COLLISION_SELECTORS,
+    minAlpha: PAINTED_ALPHA_THRESHOLD,
+    cacheMs: 110,
+    win: window,
+    root: document,
+  });
+
+  let width = 0;
+  let height = 0;
+  let dpr = 1;
+  let topologyKey = '';
+
+  function updateCanvasLayout() {
+    if (!chatPane) return;
+    const rect = host.getBoundingClientRect();
+    canvas.style.left = `${-Math.round(rect.left)}px`;
+    canvas.style.top = `${-Math.round(rect.top)}px`;
+    canvas.style.width = `${window.innerWidth}px`;
+    canvas.style.height = `${window.innerHeight}px`;
+  }
+
+  function measure() {
+    const rect = host.getBoundingClientRect();
+    const nextWidth = chatPane ? Math.max(1, window.innerWidth) : Math.max(1, Math.round(rect.width));
+    const nextHeight = chatPane ? Math.max(1, window.innerHeight) : Math.max(1, Math.round(rect.height));
+    const nextDpr = Math.min(window.devicePixelRatio || 1, 2);
+    return { nextWidth, nextHeight, nextDpr };
+  }
+
+  function ensureRain(scene, nextWidth, nextHeight, nextDpr) {
+    const size = _getEffectSize();
+    const key = typeof getSceneKey === 'function'
+      ? `${nextWidth}:${nextHeight}:${nextDpr}:${size}:${getSceneKey()}`
+      : _clankerCodeRainTopologyKey(mode, nextWidth, nextHeight, size);
+    const existing = scene.documentState.rain;
+    if (existing && topologyKey === key && existing.width === nextWidth && existing.height === nextHeight) {
+      return existing;
+    }
+    const rain = _buildClankerCodeRainScene({
+      width: nextWidth,
+      height: nextHeight,
+      size,
+      mode,
+    });
+    rain.width = nextWidth;
+    rain.height = nextHeight;
+    topologyKey = key;
+    scene.resetTopology({ documentState: { rain } });
+    return rain;
+  }
+
+  const consumer = createGraphicsConsumer({
+    canvas,
+    id,
+    draw: ({ backend, batch, scene, time, reduced }) => {
+      if (!canvas.isConnected || !document.body.classList.contains(bodyClass)) {
+        return;
+      }
+      const measured = measure();
+      const geometryChanged = width !== measured.nextWidth || height !== measured.nextHeight || dpr !== measured.nextDpr;
+      width = measured.nextWidth;
+      height = measured.nextHeight;
+      dpr = measured.nextDpr;
+      updateCanvasLayout();
+      if (geometryChanged) {
+        consumer.resize(width, height, dpr);
+        field.invalidate();
+      }
+      const config = _readClankerEffectConfig(true);
+      const rain = ensureRain(scene, width, height, dpr);
+      // Test/diagnostics seam: expose current scene state without a second owner.
+      canvas.__backgroundScene = rain;
+      const font = rain.mode === 'emoji' ? _CLANKER_EMOJI_FONT : "'Liga Comic Mono', 'Fira Code', monospace";
+      _drawClankerCodeRain(batch, {
+        width,
+        height,
+        time,
+        scene,
+        rain,
+        field,
+        font,
+        intensity: config.intensity,
+        size: config.size,
+        colors: config.colors,
+        outline: config.outline,
+        reduced,
+      });
+    },
+    allowWebGL2: true,
+    win: window,
+    doc: document,
+    ownerHost: window,
+  });
+
+  // Reconcile the substrate owner with the theme background owner key so
+  // applyBgPattern/dispose see exactly one running owner (S23 nit N6).
+  const bodyWatcher = new MutationObserver(() => {
+    if (!document.body.classList.contains(bodyClass)) dispose();
+  });
+  bodyWatcher.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  const resizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(() => {
+      field.invalidate();
+      consumer.invalidate();
+    })
+    : null;
+  if (resizeObserver && chatPane) resizeObserver.observe(host);
+  const handleWindowResize = () => {
+    field.invalidate();
+    consumer.invalidate();
+  };
+  window.addEventListener('resize', handleWindowResize, { passive: true });
+
+  function dispose() {
+    try { bodyWatcher.disconnect(); } catch (_) { /* already gone */ }
+    if (resizeObserver) resizeObserver.disconnect();
+    window.removeEventListener('resize', handleWindowResize);
+    field.dispose();
+    consumer.dispose();
+    if (_activeBackgroundEffectDispose === dispose) _activeBackgroundEffectDispose = null;
+    if (window[_BACKGROUND_OWNER_KEY] === dispose) window[_BACKGROUND_OWNER_KEY] = null;
+    if (chatPane) host.classList.remove('background-effect-host');
+    canvas.remove();
+  }
+
+  const activeDispose = window[_BACKGROUND_OWNER_KEY] || _activeBackgroundEffectDispose;
+  if (activeDispose) activeDispose();
+  _activeBackgroundEffectDispose = dispose;
+  window[_BACKGROUND_OWNER_KEY] = dispose;
+  canvas.dataset.backgroundEffectCanvas = 'true';
+  canvas.__disposeEffect = dispose;
+
+  // Diagnostics seam matching _mountClankerEffect: one paint without a second loop.
+  canvas.__backgroundPaint = () => {
+    const measured = measure();
+    width = measured.nextWidth;
+    height = measured.nextHeight;
+    dpr = measured.nextDpr;
+    consumer.resize(width, height, dpr);
+    field.invalidate();
+    consumer.invalidate();
+  };
+
+  const start = measure();
+  width = start.nextWidth;
+  height = start.nextHeight;
+  dpr = start.nextDpr;
+  updateCanvasLayout();
+  consumer.resize(width, height, dpr);
 }
 
 function _initClankerMatrixRain() {
-  _mountClankerEffect({
+  _mountClankerCodeRain({
     id: 'clanker-matrix-rain-canvas',
     bodyClass: 'bg-pattern-clanker-matrix-rain',
-    build: args => _buildClankerCodeRainScene({ ...args, mode: 'matrix' }),
-    draw: _drawClankerCodeRain,
-    getSceneKey: () => JSON.stringify(_backgroundEffectControlValues['clanker-matrix-rain'] || {}),
+    mode: 'matrix',
+    getSceneKey: () => _clankerCodeRainTopologyKey('matrix', 0, 0, 0),
   });
 }
 
 function _initClankerEmojiRain() {
-  _mountClankerEffect({
+  _mountClankerCodeRain({
     id: 'clanker-emoji-rain-canvas',
     bodyClass: 'bg-pattern-clanker-emoji-rain',
-    build: args => _buildClankerCodeRainScene({ ...args, mode: 'emoji' }),
-    draw: _drawClankerCodeRain,
-    getSceneKey: () => JSON.stringify(_backgroundEffectControlValues['clanker-emoji-rain'] || {}),
+    mode: 'emoji',
+    getSceneKey: () => _clankerCodeRainTopologyKey('emoji', 0, 0, 0),
   });
 }
 

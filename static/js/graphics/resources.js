@@ -84,8 +84,8 @@ export function createGlyphAtlas({ maxEntries = 512, maxPixels = 1024 * 1024 } =
       }
       return best;
     },
-    key(ch, cssSize, weight) {
-      return `${this.quantizeSize(cssSize)}:${weight || 400}:${ch}`;
+    key(ch, cssSize, weight, font) {
+      return `${this.quantizeSize(cssSize)}:${weight || 400}:${font || 'sans-serif'}:${ch}`;
     },
     get(key) { return cache.get(key); },
     set(key, entry, entryPixels = 0) {
