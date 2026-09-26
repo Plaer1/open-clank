@@ -18,12 +18,61 @@ def load(name):
 def test_registry_has_exact_supported_locale_set_and_rtl_metadata():
     registry = load("registry.json")
     assert registry["default_locale"] == "en"
-    assert len(LOCALES) == 68
+    # 68 canonical selections + the approved French-backed
+    # “Canadian English” display alias (en-CA). Coverage is additive only.
+    assert len(LOCALES) == 69
     assert {key for key, value in registry["locales"].items() if value["dir"] == "rtl"} == {"ar", "ur", "fa", "pa-Arab", "dv"}
     assert registry["aliases"]["zh-TW"] == "zh-Hant"
     assert registry["aliases"]["pa-PK"] == "pa-Arab"
     assert registry["aliases"]["br"] == "pt-BR"
+    assert registry["aliases"]["ms-MY"] == "ms"
+    assert registry["aliases"]["ms-BN"] == "ms"
+    assert registry["aliases"]["fr-CA"] == "fr"
     assert registry["do_not_auto_map"] == []
+
+
+def test_canadian_english_is_french_backed_display_alias_without_duplicate_catalog():
+    registry = load("registry.json")
+    alias = registry["locales"]["en-CA"]
+    assert alias["name"] == "Canadian English"
+    assert alias["catalog"] == "fr"
+    assert alias["html_lang"] == "fr"
+    assert alias.get("alias_of") == "fr"
+    # Real French selection stays first-class with its own catalog file.
+    assert registry["locales"]["fr"]["name"] == "Français"
+    assert registry["locales"]["fr"]["catalog"] == "fr"
+    assert (I18N / "fr.json").exists()
+    assert not (I18N / "en-CA.json").exists()
+    # Malay is reused, never duplicated.
+    assert registry["locales"]["ms"]["name"] == "Bahasa Melayu"
+    assert registry["locales"]["ms"]["catalog"] == "ms"
+    assert (I18N / "ms.json").exists()
+    assert not (I18N / "ms-MY.json").exists()
+
+
+def test_freeze_manifests_inventory_every_advertised_locale_with_explicit_fallbacks():
+    freeze = json.loads((I18N / "freeze" / "manifest.json").read_text(encoding="utf-8"))
+    locales = json.loads((I18N / "freeze" / "locales.json").read_text(encoding="utf-8"))
+    assert freeze["translations_authored"] is False
+    assert freeze["advertised_locales"] == 69
+    assert freeze["english_fallback_locales"] == 31
+    assert freeze["display_alias_locales"] == 1
+    assert freeze["malay"]["locale"] == "ms"
+    assert freeze["canadian_english"]["catalog"] == "fr"
+    by_id = {item["id"]: item for item in locales["locales"]}
+    assert set(by_id) == set(LOCALES)
+    fallbacks = [item for item in locales["locales"] if item["kind"] == "english-fallback"]
+    assert len(fallbacks) == 31
+    for item in fallbacks:
+        assert item["catalog"] == "en"
+        assert item["english_fallback"] is True
+        assert item["complete_translation"] is False
+    ms = by_id["ms"]
+    assert ms["counts"]["keys"] == freeze["english_keys"]
+    assert ms["counts"]["translated"] > 0
+    assert ms["counts"]["english_fallback"] > 0
+    batches = json.loads((I18N / "freeze" / "batches.json").read_text(encoding="utf-8"))
+    assert batches["entry_count"] == freeze["english_keys"]
 
 
 def test_every_catalog_has_parity_safe_placeholders_and_locked_brands():

@@ -1,0 +1,2565 @@
+{
+  "id": "batch-060",
+  "group": "treehouse",
+  "surface": "treehouse",
+  "entry_count": 201,
+  "character_count": 17962,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.1.system.orientation",
+      "source": "1. System Orientation",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:49"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.2.models.auth.providers",
+      "source": "2. Models, Auth & Providers",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:60"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.3.agent.tools.mcp",
+      "source": "3. Agent, Tools & MCP",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:69"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.4.memory.trust.review",
+      "source": "4. Memory, Trust & Review",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:80"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.5.copal.views",
+      "source": "5. Copal Views",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:89"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.6.security.privacy",
+      "source": "6. Security & Privacy",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:99"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.7.capstone.project",
+      "source": "7. Capstone Project",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:108"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.a.dependent.service.embedding.vector.db.calendar.sync.is.unavailable",
+      "source": "A dependent service (embedding, vector DB, calendar sync) is unavailable.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:30"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.a.hands.on.course.teaching.you.to.understand.operate.troubleshoot.46123ac3",
+      "source": "A hands-on course teaching you to understand, operate, troubleshoot, and safely extend Open Clank and Copal. Every lesson maps to the actual current app.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:12"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.access",
+      "source": "Access",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:411",
+        "static/js/fileLocationWizard.js:109"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.active.completed.withdrawn",
+      "source": "active → completed/withdrawn",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.activities.from.tasks",
+      "source": "Activities from tasks",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TreehouseView.tsx:111"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.activity.completion.blocked.by.prerequisites",
+      "source": "Activity completion blocked by prerequisites",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:89"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.activity.f13785d8",
+      "source": "+ Activity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:523"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.activity.ids",
+      "source": "Activity IDs",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:624"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.activity.ids.value",
+      "source": "Activity IDs · {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:613"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.activity.title",
+      "source": "Activity title",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:383",
+        "static/js/copal/treehouse.js:393"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.activity",
+      "source": "Add activity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:388"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.course.frontmatter.or.course.name.tags",
+      "source": "Add `course:` frontmatter or `#course/name` tags.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TreehouseView.tsx:107"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.course.module",
+      "source": "Add course module",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:367"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.learning.activity",
+      "source": "Add learning activity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:382"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.module",
+      "source": "Add module",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:370"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.skill.frontmatter.or.skill.name.tags",
+      "source": "Add `skill:` frontmatter or `#skill/name` tags.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TreehouseView.tsx:88"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.admin.instructor.learner",
+      "source": "admin,instructor,learner",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:331"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.administrator",
+      "source": "Administrator",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:331"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.core.src",
+      "source": "Agent Core (src/)",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:46"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.loop",
+      "source": "Agent Loop",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:16"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.loop.py.execution.engine",
+      "source": "agent_loop.py — Execution engine",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:48"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.runs.py.run.management",
+      "source": "agent_runs.py — Run management",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:49"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.tools.4440d7dd",
+      "source": "Agent & Tools",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:130",
+        "static/treehouse-course-overview.html:29"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.allow.retries.after.grading",
+      "source": "Allow retries after grading",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:708"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.and.copied",
+      "source": "and copied",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:420"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.another.process.is.using.the.configured.port",
+      "source": "Another process is using the configured port.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:24"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.key.management.secure.storage.atomic.save.env.var.overrides",
+      "source": "API Key Management — Secure storage, atomic save, env var overrides",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:64"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.key.manager.py.key.storage",
+      "source": "api_key_manager.py — Key storage",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:75"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.routes.routes",
+      "source": "API Routes (routes/)",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:35"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.app.won.t.start",
+      "source": "App won't start",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:111"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.app.won.t.start.modulenotfounderror.no.module.named.sqlalchemy",
+      "source": "App won't start — \"ModuleNotFoundError: No module named 'sqlalchemy'\"",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:17"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.approved",
+      "source": "approved",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:664"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.approved.evidence.points",
+      "source": "Approved evidence points",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:547"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archive.2621c6fd",
+      "source": "Archive",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:468",
+        "static/js/documentLibrary.js:1294",
+        "static/js/documentLibrary.js:1726",
+        "static/js/documentLibrary.js:1751",
+        "static/js/documentLibrary.js:1759",
+        "static/js/documentLibrary.js:1805",
+        "static/js/documentLibrary.js:1972",
+        "static/js/documentLibrary.js:2378",
+        "static/js/documentLibrary.js:3214",
+        "static/js/documentLibrary.js:3266",
+        "static/js/documentLibrary.js:3609",
+        "static/js/documentLibrary.js:844",
+        "static/js/documentLibrary.js:940",
+        "static/js/emailInbox.js:1073",
+        "static/js/emailLibrary.js:7756",
+        "static/js/emailLibrary.js:7784",
+        "static/js/files.js:2332",
+        "static/js/files.js:795",
+        "static/js/notes.js:1242",
+        "static/js/notes.js:1259",
+        "static/js/notes.js:1327",
+        "static/js/notes.js:1328",
+        "static/js/notes.js:3029",
+        "static/js/notes.js:3030",
+        "static/js/notes.js:3787",
+        "static/js/notes.js:3788",
+        "static/js/sessions.js:1629",
+        "static/js/sessions.js:3236",
+        "static/js/sessions.js:3290",
+        "static/js/sessions.js:3299",
+        "static/js/sessions.js:3406",
+        "static/js/sessions.js:3599",
+        "static/js/sessions.js:699",
+        "static/js/slashCommands.js:3773",
+        "static/js/slashCommands.js:4629",
+        "static/style.css:35365"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archived",
+      "source": "archived",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:397",
+        "static/js/documentLibrary.js:2696",
+        "static/js/util/memoryTrust.js:98"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ask.for.help",
+      "source": "Ask for help",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:513"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ask.for.help.with.value",
+      "source": "Ask for help with {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:513"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.assignment",
+      "source": "Assignment",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:101",
+        "static/treehouse-course-overview.html:127"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.assignment.153abe0d",
+      "source": "+ Assignment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:523",
+        "static/js/copal/treehouse.js:739"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.assignment.ids",
+      "source": "Assignment IDs",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:625"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.assignment.ids.value",
+      "source": "Assignment IDs · {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:614"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.assignment.title",
+      "source": "Assignment title",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:703",
+        "static/js/copal/treehouse.js:715"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.assignments",
+      "source": "Assignments",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:738",
+        "static/treehouse-course-overview.html:125",
+        "static/treehouse-course-overview.html:17"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attach.this.lesson.and.its.active.workspace.context.to.help",
+      "source": "Attach this lesson and its active workspace context to help",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:513"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.author.publish.enroll.navigate.and.complete.durable.learning.paths",
+      "source": "Author, publish, enroll, navigate, and complete durable learning paths.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:530"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.available.value",
+      "source": "· available: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:387"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.backup.needed",
+      "source": "Backup needed",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:117"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.backup.routes.admin.wipe.routes",
+      "source": "backup_routes, admin_wipe_routes",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:42"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.badge",
+      "source": "Badge",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:106"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.badge.a3f3914f",
+      "source": "+ Badge",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:633"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.badge.title",
+      "source": "Badge title",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:569",
+        "static/js/copal/treehouse.js:590"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.badges",
+      "source": "Badges",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:305",
+        "static/js/copal/treehouse.js:670",
+        "static/treehouse-course-overview.html:117",
+        "static/treehouse-course-overview.html:19"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.bases.custom.field.containers",
+      "source": "Bases — Custom field containers",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:118"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.bases.tasks.calendar.structured.data.task.management.caldav.sync",
+      "source": "Bases, Tasks & Calendar — Structured data, task management, CalDAV sync",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:94"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browser.shows.connection.refused",
+      "source": "Browser shows \"connection refused\"",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:35"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.build.a.copal.knowledge.base",
+      "source": "Build a Copal Knowledge Base",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:132"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.build.copal.knowledge.documents.bases.timeline.verification",
+      "source": "Build Copal Knowledge — Documents, Bases, Timeline verification",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:112"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.built.in.tools.file.shell.knowledge.orchestration.tools",
+      "source": "Built-in Tools — File, shell, knowledge, orchestration tools",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:73"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.builtin.mcp.py.built.in.servers",
+      "source": "builtin_mcp.py — Built-in servers",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:77"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.calendar.caldav.sync",
+      "source": "Calendar — CalDAV sync",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:118"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.capstone",
+      "source": "Capstone",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:134"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.capstone.mastery",
+      "source": "Capstone Mastery",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:43"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.capture.review.promote.and.recall.memory.understand.trust.boundaries",
+      "source": "Capture, review, promote, and recall memory. Understand trust boundaries.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:81"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.centurion.earn.100.points",
+      "source": "Centurion — Earn 100+ points",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:120"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.routes.agent.conversation",
+      "source": "chat_routes — Agent conversation",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:37"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.claude.projects.for.files",
+      "source": "Check ~/.claude/projects/ for files",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:114"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.for.valid.json.if.corrupted.restore.from.backup.or",
+      "source": "Check for valid JSON. If corrupted, restore from backup or create a fresh state.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:79"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.open.clank.copal.treehouse.state.json",
+      "source": "Check ~/.open-clank/.copal/treehouse-state.json",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:115"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.or.change.the.port.in.or.via.env.var",
+      "source": "Check or change the port in or via env var.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:25"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.provider.status.try.a.different.model.check.the.diagnostics",
+      "source": "Check provider status. Try a different model. Check the Diagnostics view for errors.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:51"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.settings.tool.permissions",
+      "source": "Check Settings → Tool Permissions",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:113"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.terminal.for.error.messages",
+      "source": "Check terminal for error messages",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:111"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.terminal.output.for.startup.errors.verify.the.url.matches",
+      "source": "Check terminal output for startup errors. Verify the URL matches the configured port.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:37"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.check.tool.permissions.in.settings.for.mcp.tools.verify.the",
+      "source": "Check tool permissions in Settings. For MCP tools, verify the server is running and connected.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:57"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.an.existing.account.by.username.or.account.id",
+      "source": "Choose an existing account by username or account ID",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/copal_treehouse_routes.py:742"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.common.issues.and.their.solutions.organized.by.severity",
+      "source": "Common issues and their solutions. Organized by severity.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:12"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.complete",
+      "source": "complete",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:498",
+        "static/js/editor/ai-tool-runner.js:102",
+        "static/js/researchSynapse.js:17",
+        "static/js/researchSynapse.js:216"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.complete.the.exercise.and.inspect.the.saved.result",
+      "source": "Complete the exercise and inspect the saved result.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:506"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.complete.the.required.prerequisite.activities.first.check.the.skill.prer",
+      "source": "Complete the required prerequisite activities first. Check the skill prerequisite tree and module order.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:91"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.completed",
+      "source": "completed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:307",
+        "static/js/tasks.js:2945",
+        "static/js/tasks.js:3056"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.completed.1798b3ba",
+      "source": "Completed",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:500",
+        "static/js/tasks.js:2061",
+        "static/js/tasks.js:2979"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.completed.evidence.task",
+      "source": "completed evidence task",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TreehouseView.tsx:84"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.completion.points",
+      "source": "Completion points",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:386",
+        "static/js/copal/treehouse.js:395"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.computed.from.durable.events.no.browser.only.counters",
+      "source": "Computed from durable events; no browser-only counters.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:768"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.configure.a.provider",
+      "source": "Configure a Provider",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:129"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.configure.llm.providers.manage.api.keys.and.understand.model.routing",
+      "source": "Configure LLM providers, manage API keys, and understand model routing.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:61"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.consecutive.learning.days",
+      "source": "consecutive learning days",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:306"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.context.compactor.py.budget.mgmt",
+      "source": "context_compactor.py — Budget mgmt",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:52"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.bases.py.structured.data",
+      "source": "copal_bases.py — Structured data",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:67"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.bridge.py.copal.api",
+      "source": "copal_bridge.py — Copal API",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:66"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.btn.copal.treehouse.expand.editor",
+      "source": "copal-btn copal-treehouse-expand-editor",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:172"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.card.copal.treehouse.course",
+      "source": "copal-card copal-treehouse-course",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:456"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.card.copal.treehouse.events",
+      "source": "copal-card copal-treehouse-events",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:775",
+        "static/js/copal/treehouse.js:779"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.card.copal.treehouse.evidence",
+      "source": "copal-card copal-treehouse-evidence",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:660"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.card.copal.treehouse.grading",
+      "source": "copal-card copal-treehouse-grading",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:755"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.card.copal.treehouse.module",
+      "source": "copal-card copal-treehouse-module",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:493"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.card.copal.treehouse.skill.map",
+      "source": "copal-card copal-treehouse-skill-map",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:635"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.card.copal.treehouse.skill.value",
+      "source": "copal-card copal-treehouse-skill{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:646"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.codemirror.host.copal.treehouse.expanded.host",
+      "source": "copal-codemirror-host copal-treehouse-expanded-host",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:121"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.dialog.copal.treehouse.dialog",
+      "source": "copal-dialog copal-treehouse-dialog",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:152"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.dialog.copal.treehouse.expanded.editor",
+      "source": "copal-dialog copal-treehouse-expanded-editor",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:118"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.documents.missing.after.restart",
+      "source": "Copal documents missing after restart",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:69"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.treehouse.activity.value",
+      "source": "copal-treehouse-activity{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:498"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.treehouse.py.lms.domain",
+      "source": "copal_treehouse.py — LMS domain",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:65"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.treehouse.routes.lms",
+      "source": "copal_treehouse_routes — LMS",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:38"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.treehouse.state.value",
+      "source": "copal-treehouse-state {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:457"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.views",
+      "source": "Copal Views",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:110",
+        "static/treehouse-course-overview.html:132",
+        "static/treehouse-course-overview.html:33",
+        "static/treehouse-course-overview.html:40"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.views.settings.diagnostics",
+      "source": "Copal views, settings, diagnostics",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:30"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.course.557b1439",
+      "source": "+ Course",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:531"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.course.completion",
+      "source": "Course completion",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:573",
+        "static/js/copal/treehouse.js:594"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.course.export.failed.value",
+      "source": "Course export failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:437"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.course.import.failed.value",
+      "source": "Course import failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:448"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.course.opener.complete.the.first.module",
+      "source": "Course Opener — Complete the first module",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:119"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.course.outcomes",
+      "source": "Course outcomes",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:772"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.course.title",
+      "source": "Course title",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:353",
+        "static/js/copal/treehouse.js:361"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.courses",
+      "source": "courses",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TreehouseView.tsx:38"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.courses.a16536d7",
+      "source": "Courses",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TreehouseView.tsx:92",
+        "static/js/copal/treehouse.js:530"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.a.course.module.before.adding.an.assignment",
+      "source": "Create a course module before adding an assignment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:700"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.assignment",
+      "source": "Create assignment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:701"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.badge",
+      "source": "Create badge",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:577"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.course",
+      "source": "Create course",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:352"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.draft",
+      "source": "Create draft",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:356",
+        "static/js/copal/treehouse.js:710"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.evidence.backed.badge",
+      "source": "Create evidence-backed badge",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:568"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.quest",
+      "source": "Create quest",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:610",
+        "static/js/copal/treehouse.js:616"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.share.link",
+      "source": "Create share link",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:414"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.skill",
+      "source": "Create skill",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:542",
+        "static/js/copal/treehouse.js:548"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.treehouse.profile",
+      "source": "Create TreeHouse profile",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:326"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.update.delete",
+      "source": "create → update → (delete)",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:97"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.update.deleted",
+      "source": "create → update → deleted",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:104",
+        "static/treehouse-architecture-map.html:106"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.update.reorder.deleted",
+      "source": "create → update → reorder → deleted",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:99"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.update.retired.deleted",
+      "source": "create → update → retired/deleted",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:107"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.credential.handling.threat.model.secrets.safety.threat.model.backup",
+      "source": "Credential Handling & Threat Model — Secrets safety, threat model, backup",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.criteria",
+      "source": "Criteria",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:571",
+        "static/js/copal/treehouse.js:592"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.custom.f9ac14b6",
+      "source": "custom",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:384",
+        "static/js/presets.js:974"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.data.directories.startup.open.clank.settings.health.checks",
+      "source": "Data Directories & Startup — ~/.open-clank/, settings, health checks",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:53"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.database.may.not.have.been.properly.persisted",
+      "source": "Database may not have been properly persisted.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:70"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.database.py.sqlalchemy.sqlite",
+      "source": "database.py — SQLAlchemy/SQLite",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:84"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.activity",
+      "source": "Delete activity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:519"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.activity.value",
+      "source": "Delete activity \"{0}\"?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:519"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.assignment",
+      "source": "Delete assignment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:748"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.assignment.value",
+      "source": "Delete assignment \"{0}\"?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:748"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.badge",
+      "source": "Delete badge",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:676"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.badge.value",
+      "source": "Delete badge \"{0}\"?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:676"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.course",
+      "source": "Delete course",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:469"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.module",
+      "source": "Delete module",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:492"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.module.value.and.all.its.content",
+      "source": "Delete module \"{0}\" and all its content?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:492"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.or.reset.this.disposable.fixture.after.the.check",
+      "source": "Delete or reset this disposable fixture after the check.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:135"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.quest",
+      "source": "Delete quest",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:688"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.quest.value",
+      "source": "Delete quest \"{0}\"?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:688"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.skill",
+      "source": "Delete skill",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:654"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.skill.value",
+      "source": "Delete skill \"{0}\"?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:654"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.this.course.and.all.its.content.this.cannot.be",
+      "source": "Delete this course and all its content? This cannot be undone.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:469"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.value.a92ece76",
+      "source": "Delete {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:492",
+        "static/js/copal/treehouse.js:519",
+        "static/js/editor/layer-panel.js:454"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.display.name",
+      "source": "Display name",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:327"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.disposable.exercise",
+      "source": "disposable exercise",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:505"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.disposable.practice.and.verifier",
+      "source": "Disposable practice and verifier",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:504"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.draft",
+      "source": "draft",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:397",
+        "static/js/skills.js:202",
+        "static/js/slashCommands.js:4705"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.draft.publish.submit.retry.grade.and.explain.progress.end.to",
+      "source": "Draft, publish, submit, retry, grade, and explain progress end to end.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:738"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.draft.published.archived.deleted",
+      "source": "draft → published → archived/deleted",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:98"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.draft.published.completed.deleted",
+      "source": "draft → published → completed/deleted",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:100"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.draft.published.graded.deleted",
+      "source": "draft → published → graded/deleted",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:101"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.due.date.time.optional",
+      "source": "Due date/time (optional)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:705",
+        "static/js/copal/treehouse.js:717"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.due.value.800aed15",
+      "source": "· due {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:744"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.durable.events",
+      "source": "durable events",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:138"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.skill",
+      "source": "Edit skill",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:653"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.value.928c15fa",
+      "source": "Edit · {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:360",
+        "static/js/copal/treehouse.js:374",
+        "static/js/copal/treehouse.js:392",
+        "static/js/copal/treehouse.js:552",
+        "static/js/copal/treehouse.js:589",
+        "static/js/copal/treehouse.js:621",
+        "static/js/copal/treehouse.js:714"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.enroll",
+      "source": "Enroll",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:461"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.enrollment",
+      "source": "Enrollment",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.entity",
+      "source": "Entity",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:96"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.event.bus.py.internal.events",
+      "source": "event_bus.py — Internal events",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:86"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.event.ledger",
+      "source": "Event Ledger",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:20"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.events.immutable.audit.trail",
+      "source": "Events — Immutable audit trail",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:122"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.events.timeline.immutable.event.ledger.projections.audit.trail",
+      "source": "Events & Timeline — Immutable event ledger, projections, audit trail",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:93"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.evidence",
+      "source": "Evidence",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:105"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.evidence.review",
+      "source": "Evidence review",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:660"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.expanded.editor.unavailable.value",
+      "source": "Expanded editor unavailable: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:144",
+        "static/js/document.js:65",
+        "static/js/notes.js:61"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.export.value.98e40159",
+      "source": "Export {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:471"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.exported.value",
+      "source": "Exported {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:436"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fastapi.routes",
+      "source": "FastAPI Routes",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:16"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.feedback.c8d7677e",
+      "source": "Feedback",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:732"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.first.step",
+      "source": "First Step",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:110"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fix",
+      "source": "Fix:",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:105",
+        "static/treehouse-troubleshooting.html:19",
+        "static/treehouse-troubleshooting.html:25",
+        "static/treehouse-troubleshooting.html:31",
+        "static/treehouse-troubleshooting.html:37",
+        "static/treehouse-troubleshooting.html:45",
+        "static/treehouse-troubleshooting.html:51",
+        "static/treehouse-troubleshooting.html:57",
+        "static/treehouse-troubleshooting.html:65",
+        "static/treehouse-troubleshooting.html:71",
+        "static/treehouse-troubleshooting.html:79",
+        "static/treehouse-troubleshooting.html:85",
+        "static/treehouse-troubleshooting.html:91",
+        "static/treehouse-troubleshooting.html:99"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.foundation",
+      "source": "· foundation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:639"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.foundation.skill",
+      "source": "Foundation skill",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:648"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.frontend.static",
+      "source": "Frontend (static/)",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:26"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.full.system.walkthrough",
+      "source": "Full System Walkthrough",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:134"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.grade",
+      "source": "Grade",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:759"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.graded",
+      "source": "graded",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:759"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.health.endpoint.returns.degraded.status",
+      "source": "Health endpoint returns degraded status",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:29"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.hide.34d8b60f",
+      "source": "Hide",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/copal/treehouse.js:460",
+        "static/js/editor/build/controls.js:165",
+        "static/js/editor/wire-inpaint-controls.js:108",
+        "static/js/mimoProviders.js:544",
+        "static/js/settings.js:1979"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.high.level.view.of.the.system.layers.data.flow.and",
+      "source": "High-level view of the system layers, data flow, and key components.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:12"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.high.memory.usage",
+      "source": "High memory usage",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-troubleshooting.html:103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.how.it.works",
+      "source": "How It Works",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-course-overview.html:137"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.html.css.js.single.page.app",
+      "source": "HTML/CSS/JS single-page app",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/treehouse-architecture-map.html:28"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

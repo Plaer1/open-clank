@@ -1,0 +1,59 @@
+{
+  "id": "batch-075",
+  "group": "treehouse.section",
+  "surface": "treehouse",
+  "entry_count": 4,
+  "character_count": 486,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "treehouse.section.house-explore.description",
+      "source": "Five freely explorable Classes. Jump anywhere; suggested order is only a hint.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:45"
+      ],
+      "context": "description",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.section.house-explore.title",
+      "source": "Explore the House",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:45"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.section.house-system.description",
+      "source": "Hidden system section. Computes aggregate guide state; never rendered as an empty container.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:53"
+      ],
+      "context": "description",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.section.house-system.title",
+      "source": "House Systems",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:53"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

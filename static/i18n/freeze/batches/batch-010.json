@@ -1,0 +1,1682 @@
+{
+  "id": "batch-010",
+  "group": "compatibility",
+  "surface": "compatibility",
+  "entry_count": 161,
+  "character_count": 17969,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.position.absolute.top.value.px.right.value.px.width.value",
+      "source": "position:absolute;top:{0}px;right:{1}px;width:{2}px;height:{3}px;padding:0 0 0 1px;border:1px solid var(--accent, var(--red));background:#fff;color:var(--accent, var(--red));border-radius:50%;cursor:pointer;font-size:11px;line-height:1;display:{4};font-weight:bold;touch-action:none;",
+      "placeholders": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.position.absolute.visibility.hidden.white.space.pre.font.family.inherit",
+      "source": "position:absolute;visibility:hidden;white-space:pre;font-family:inherit;padding:1px 4px;left:-9999px;top:-9999px;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.absolute.width.1px.height.1px.padding.0.margin.1px",
+      "source": "position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.position.fixed",
+      "source": "position:fixed",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.inset.0.width.100.height.100.pointer.events",
+      "source": "position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.inset.0.z.index.10001.background.transparent.pointer",
+      "source": "position:fixed;inset:0;z-index:10001;background:transparent;pointer-events:auto;touch-action:none;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.inset.0.z.index.2147483646",
+      "source": "position:fixed;inset:0;z-index:2147483646;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.left.0.top.0.right.0.bottom.0",
+      "source": "position:fixed;left:0;top:0;right:0;bottom:0;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.left.0.top.0.width.1px.height.1px",
+      "source": "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.left.0.top.0.width.1px.height.1px.3d87c30c",
+      "source": "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;z-index:-1;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.left.10000px.top.10px",
+      "source": "position: fixed; left: -10000px; top: 10px",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.left.9999px",
+      "source": "position:fixed;left:-9999px",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.left.9999px.top.9999px",
+      "source": "position:fixed; left:-9999px; top:-9999px;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.left.9999px.top.9999px.00d62082",
+      "source": "position:fixed;left:-9999px;top:-9999px",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.left.9999px.top.9999px.opacity.0",
+      "source": "position:fixed;left:-9999px;top:-9999px;opacity:0",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.top.0.left.0.width.100.height.100",
+      "source": "position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.top.0.left.0.width.1px.height.1px",
+      "source": "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.top.0.left.0.width.1px.height.1px.88b2ce8e",
+      "source": "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;border:0;padding:0;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.top.9999px.left.9999px.opacity.0",
+      "source": "position:fixed;top:-9999px;left:-9999px;opacity:0;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.z.index.10001.top",
+      "source": "position:fixed;z-index:10001;top:",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.z.index.value.top.value.px.left.value",
+      "source": "position:fixed;z-index:{0};top:{1}px;left:{2}px;",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.fixed.z.index.value.top.value.px.left.value.605e51a1",
+      "source": "position:fixed;z-index:{0};top:{1}px;left:{2}px;min-width:{3}px;",
+      "placeholders": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.relative.display.inline.flex",
+      "source": "position:relative;display:inline-flex;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.relative.left.8px",
+      "source": ";position:relative;left:-8px;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.position.sticky.top.0.background.var.panel.padding.6px.0",
+      "source": "position:sticky;top:0;background:var(--panel);padding:6px 0;margin-bottom:8px;border-bottom:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:0.72rem;z-index:1;",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.position.value.is.out.of.range.for.changeset.of.length",
+      "source": "Position {0} is out of range for changeset of length {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.post",
+      "source": "POST",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.post.this.url.from.any.external.service.to.trigger.the",
+      "source": "POST this URL from any external service to trigger the task. No auth needed.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pquo.elooqq1g0z1g0zooqq7.j7.jo.uquo7.jo.qvo7.jooqq7.h7.hooqq",
+      "source": "pQUO'#ElOOQQ1G0z1G0zOOQQ7+&j7+&jO*?UQUO7+&jO*@[QVO7+&jOOQQ7+&h7+&hOOQQ,5@],5@]OOQQ-E=o-E=oO*AWQUO1G1TO*AbQUO1G1TO*A{QUO1G0fOOQQ1G0f1G0fO*CRQUO'#LSO*CZQUO1G1ROOQQ",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.pr0f.yq.vis.u.v.is.c.b.cq.e",
+      "source": "PR0f*yQ$viS(u#v+iS)c$b$cQ)e$dQ*[$xS*e${*YQ*t%OQ*u%QQ+Q%^Q+R%_Q+V%cQ.l",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pre",
+      "source": "pre",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.preset.tab.active",
+      "source": ".preset-tab.active",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.preset.tab.data.chartab.group",
+      "source": ".preset-tab[data-chartab=\"group\"]",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.price.avg",
+      "source": "price : avg",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.priority.all",
+      "source": "Priority: all",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.priv.models.list.data.user",
+      "source": ".priv-models-list[data-user]",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.probed.value.endpoints",
+      "source": "Probed {0} endpoints",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.probed.value.value.endpoints.value.failed",
+      "source": "Probed {0}/{1} endpoints; {2} failed",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.probing",
+      "source": "Probing",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.probing.629d0dab",
+      "source": "Probing...",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.probing.models.this.may.take.a.while",
+      "source": "Probing models... this may take a while.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.probing.value.value",
+      "source": "Probing {0}/{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.progress.value",
+      "source": "--progress:{0}%",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.property.name",
+      "source": "Property name:",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.architecture.openai.anthropic.google.local.mimo.dispatch",
+      "source": "Provider Architecture — OpenAI, Anthropic, Google, Local, MiMo dispatch",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ps.q.iq.rq.su.d.sr.r.y.si",
+      "source": "PS&[!Q&iQ&]!RQ&^!SU*}%[%d=sR,R&Y%]%Si#v$b$c$d$x${%O%Q%^%_%c)y*R*T*V*Y*a*g*w*x+f+i,S,V.f/P/d/m/x/y/{0`0b0i0j0o1f1i1q3c4^4_4j4o5Q5[5_6S7W7v8Q8V8[8q9b9p9y:P:`:r;Q;[;d;k",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.psdy.o.oy.jz.s.j.s",
+      "source": "pSdY!o`Oy%jz;'S%j;'S;=`%{",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.put.value.returned.value",
+      "source": "PUT {0} returned {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.python3.c.import.base64.exec.base64.b64decode.value.decode.utf",
+      "source": "python3 -c \"import base64; exec(base64.b64decode('{0}').decode('utf-8'))\"",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.python3.c.import.base64.subprocess.sys.sys.exit.subprocess.run",
+      "source": "python3 -c \"import base64, subprocess, sys; sys.exit(subprocess.run(['bash','-c',base64.b64decode('{0}').decode('utf-8')]).returncode)\"",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.python3.m.pip.install.diffusers.torch",
+      "source": "python3 -m pip install \"diffusers[torch]\"",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.q.o.hao",
+      "source": "}Q`O'#HaO",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.q.o.q.n",
+      "source": "^Q+O%]Q.n",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.q.t.aq.c.oo4o",
+      "source": "^Q+T%aQ/c*Oo4O",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.q.x.o.x.o.s.e.s.v",
+      "source": "Q#X#o;x#o;'S$e;'S;=`/V",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.q.x.q.u.es.i.q.t.pq.p",
+      "source": "^Q&X|Q'U!eS'[%i-`Q+t&PQ,P&WQ,f&gQ0n+SQ1Y+uQ1_+{Q2Q,jQ2R,kQ5f1TQ5o1aQ6[1zQ6_1|Q6`2PQ8`5gQ8c5lQ8|6bQ:X8dQ:f8yQ;V:YR",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.q.y.c.y.o.cw.o.p.dy.p",
+      "source": "|!Q!^!=y!^!_!@c!_!}!=y!}#O!CW#O#P!Dy#P#o!=y#o#p!@c#p;'S!=y;'S;=`!Ek",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.q.z.n.x.s.u.x.v2p4t5w6s.z.m",
+      "source": "Q$Z$n'X)s-U-X/V2p4T5w6s:Z:m",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qdo.5",
+      "source": "[QdO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qdo.ijo.bbq.o.ieo.boq.o.gpo.bwqao.5",
+      "source": "{QdO'#IjO.BbQ`O'#IeO.BoQ`O'#GPO.BwQaO,5:nO.COQ`O,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qdo1g1do.hqdo1g1do.btqdo1g1do.cpqdo1g1do.e.qdo1g1do.fxqdo1g1do.heqdo1g1d",
+      "source": "{QdO1G1dO!@hQdO1G1dO!BTQdO1G1dO!CpQdO1G1dO!E]QdO1G1dO!FxQdO1G1dO!HeQdO1G1dO!JQQdO1G1dO!KmQdO1G1dO!MYQdO1G1dO!NuQdO1G1dOOQT1G0_1G0_O!#[Q`O,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.qo.dq.o.5",
+      "source": "QO!$dQ`O,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qo.x.o.dho.fbo.gco.sdo",
+      "source": "qO#X`O#dhO#fbO#gcO#sdO$[",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qooqo.e",
+      "source": "qOOQO-E",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qooqs1g1y1g1yooqs.5.p.5.pooqv",
+      "source": "qOOQS1G1Y1G1YOOQS,5;p,5;pOOQV",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qr.ers.dsw.ewx.mx.p.e.p.q.v",
+      "source": "`qr$ers%dsw$ewx*mx!P$e!P!Q-V!Q!c$e!c!}&?z!}#O$e#O#P'b#P#R$e#R#S&?z#S#T$e#T#o&?z#o;'S$e;'S;=`/V",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.question.resolved.archived.with.provenance",
+      "source": "Question resolved — archived with provenance",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quo",
+      "source": "}QUO",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quo.5",
+      "source": "{QUO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qxo.5",
+      "source": "|QXO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo",
+      "source": "]QYO",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo.5",
+      "source": "]QYO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo.5.o.d.qyo.h.o.esqwo.5.ooqo1g2e1g2eo",
+      "source": "]QYO,5@^O&D^QYO'#H|O&EsQWO,5@^OOQO1G2e1G2eO%,nQWO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo.5.wo.kuqwo.5.co.k.qwo.5.co",
+      "source": "]QYO,5=WO&KuQWO,5@cO&K}QWO,5@cO&MvQ^O'#IPO&KuQWO,5@cOOQO1G2q1G2qO&NTQWO,5=WO&N]QWO",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo.59fo.2rq.o.iso.2xqyo.5.qooqr1g.p1g.po",
+      "source": "]QYO,59fO&2RQ^O'#ISO&2xQYO,5?QOOQR1G/P1G/PO&3QQ!bO,5:pO&3VQ!fO,5:rOOQS-E;l-E;lOOQV1G0Z1G0ZOOQV1G0g1G0gOOQV1G0h1G0hO&3^QWO'#JTOOQO1G.o1G.oOOQV",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.qyo.guo.sqyo.jkooqq.5",
+      "source": "]QYO'#GUO&,SQYO'#JkOOQQ,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo.jrooqo.jq.jqo.yqwo.5",
+      "source": "]QYO'#JrOOQO'#Jq'#JqO&*YQWO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo1g1jooqo7.s7.sooqo.5",
+      "source": "]QYO1G1jOOQO7+'S7+'SOOQO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo1g2.ooqv",
+      "source": "]QYO1G2^OOQV",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo1g2lo.adqwo1g2looqv1g2y1g2yo.1xqwo1g2yo.3hq.o.gko.3rqwo1g2no.dfqwo1g2",
+      "source": "]QYO1G2lO$AdQWO1G2lOOQV1G2y1G2yO%1xQWO1G2yO%3hQ^O'#GkO%3rQWO1G2nO#DfQWO1G2nO%4QQYO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyo1g4so.nqwo.hyo.7uqwo.5.yo.7dqwo7.vo.yq.o7",
+      "source": "]QYO1G4SO%,nQWO'#HyO'7UQWO,5@YO'7dQWO7+(VO.YQ_O7+(VOOQO1G4T1G4TOOQO1G4V1G4VO'7nQWO1G4VO'7|QWO7+(^OOQVG27WG27WO'8XQWOG27WOOQS",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.qyo7.bo.fyqyo7.bo.yqwo7.bo.cq.o1g.no.hqwo7",
+      "source": "]QYO7+(bO#FYQYO7+(bO&%YQWO7+(bO!.cQ_O1G/nO&%hQWO7+%WO$?[QWO7+'SO&%pQWO'#EhO&%{Q^O'#EhOOQU'#Ho'#HoO&%{Q^O,5;ROOQV,5;R,5;RO&&VQWO,5;RO&&[Q^O,5;RO!0zQWO7+'_OOQV7+'a7+'aO&&iQWO7+'cO&&qQWO7+'cO&&xQWO7+$xO&'TQ!fO7+'fO&'[Q!fO7+'fOOQV7+(o7+(oO!1dQWO7+(oO&'cQYO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.qyo7.uooqo7.u7.uooqr7.i7.io.8cqwo.5.looqo.gm",
+      "source": "]QYO7+(uOOQO7+*U7+*UOOQR7+$i7+$iO&8cQWO,5@lOOQO'#Gm'#GmO&8kQWO'#GmO&8vQYO'#IUO&8cQWO,5@lOOQR1G3]1G3]O&:cQYO,5=vO&;rQYO,5=XO&;|QWO,5=XOOQO,5=X,5=XOOQR7+(u7+(uO&",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.qyo7.yo.0sqyo.hxo.0hqyo1g2wooqq1g2w1g2wooqq.5",
+      "source": "]QYO7+(YO&0SQYO'#HxO&0hQYO1G2WOOQQ1G2W1G2WOOQQ,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyoanavooqr",
+      "source": "]QYOANAvOOQR",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qyog26zo.1.qwog23jooqvg27ag27aooqvg26bg26booqvg26xg26xooqvg27tg27to.5tqw",
+      "source": "]QYOG26zO'1{QWOG23jOOQVG27aG27aOOQVG26bG26bOOQVG26xG26xOOQVG27TG27TO%5tQWOG27TO'2SQWOG27bOOQVG27bG27bO.YQ_OG27bO'2ZQWOG27bOOQO1G4[1G4[OOQO7+(_7+(_OOQRANA{ANA{OOQVG27SG27SO%5tQWOG27SO&0uQWOG27SO'2fQ^O7+&YO'4PQWO7+'^O'4sQ^O7+&YO.YQ_O7+&YP.YQ_O,5;SP'6PQWO,5;SP'6UQWO,5;SOOQV",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.qz.a.y.a.b.b.o.y.o.p",
+      "source": "qZ!a!=y!a!b!?]!b#O!=y#O#P!Au#P#S!=y#S#T!CP#T;'S!=y;'S;=`!Cm",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qz.y.y.o.y.o.p.au.p.s",
+      "source": "qZ!^!=y!^!_!@y!_#O!=y#O#P!Au#P#S!=y#S#T!CP#T;'S!=y;'S;=`!Cm",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.qz.y.y.s.y.s.bd",
+      "source": "qZ!^!=y!^!_!@y!_;'S!=y;'S;=`!Bd;=`",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.r.c.s.y.k.at.az.ai.bo.cs",
+      "source": "{#?R#?]#?c#?s#?y#@k#@}#AT#AZ#Ai#BO#Cs#DR#DY#Et#FS#Gt#HS#HY#H`#Hf#Hp#Hv#H|#IW#Ij#IpPPPPPPPPPPP#IvPPPPPPP#Jk#Mx$ b$ i$ qPPP$']P$'f$*_$0x$0{$1O$1}$2Q$2X$2aP$2g$2jP$3W$3[$4S$5b$5g$5}PP$6S$6Y$6^$6a$6e$6i$7e$7|$8e$8i$8l$8o$8y$8|$9Q$9UR!|RoqOXst!Z#d%m&r&t&u&w,s,x2[2_Y!vQ'`-e1o5{Q%tvQ%|yQ&T|Q&j!VS'W!e-]Q'f!iS'l!r!yU*k$|*Z*oQ+o%}S+|&V&WQ,d&dQ-c'_Q-m'gQ-u'mQ0[*qQ1b,OQ1y,eR",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.r.p",
+      "source": "[ ]*(?:#[^\\r ]*)?)(?P",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rag.c031a5c3",
+      "source": "[RAG]",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ran.out.of.text.content.when.drawing.inline.views",
+      "source": "Ran out of text content when drawing inline views",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ranges.must.be.added.sorted.by.from.position.and.startside",
+      "source": "Ranges must be added sorted by `from` position and `startSide`",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.raw.findings",
+      "source": "--- ## Raw Findings",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reading.the.editor.layout.isn.t.allowed.during.an.update",
+      "source": "Reading the editor layout isn't allowed during an update",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.really.delete.every.one.of.your.value",
+      "source": "Really delete every one of your {0}?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.recent.notes",
+      "source": "Recent notes",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.refreshing.models",
+      "source": "Refreshing models...",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.register.endpoint",
+      "source": "Register endpoint",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.register.failed.value.value",
+      "source": "Register failed: {0} {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reminders.appear.as.browser.notifications.inside.odysseus",
+      "source": "Reminders appear as browser notifications inside Odysseus.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.1.offline.endpoint",
+      "source": "Remove 1 offline endpoint?",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.value.eb253982",
+      "source": "Remove {3}",
+      "placeholders": [
+        "3"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.value.offline.endpoints",
+      "source": "Remove {0} offline endpoints?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.removed.value.offline.endpoint.value",
+      "source": "Removed {0} offline endpoint{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.this.base",
+      "source": "Rename this Base:",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.request.failed.4d0255e8",
+      "source": "request failed",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.required",
+      "source": "required",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resize.value.notes.sidebar",
+      "source": "Resize {0} Notes sidebar",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reveal.in.notes",
+      "source": "Reveal in Notes",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.right.90",
+      "source": "right 90%",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ro.qqpo.d.o.qlo.jvo.sqpo.jvo.qpo.dmo",
+      "source": "rO##QQpO'#D_O%[QlO'#JvO##sQpO'#JvO##}QpO'#DmO#$`QpO'#DmO#&qQlO'#DmO#&xQ`O'#JuO#'QQ`O,5:WO#'VQ`O'#EtO#'eQ`O'#KUO#'mQ`O,5;_O#'rQpO'#DmO#(PQpO'#EVOOQ!0Lf,5:o,5:oO%[QlO,5:oO#(WQ`O,5:oO?YQ`O,5;YO!CUQpO,5;YO!C^QMhO,5;YO:dQMhO,5;YO#(`Q`O,5@bO#(eQ07dO,5:sOOQO-E",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.roe.iopkor",
+      "source": "ROe!iOpkOr",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rooqs.e",
+      "source": "rOOQS-E",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rq.o.iho.qdo.ioo.lqao.5",
+      "source": "rQ`O'#IhO!$[QdO'#IOO%@lQaO,5",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rtl",
+      "source": "rtl",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.mimo.command",
+      "source": "Run MiMo command",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.on.value.value",
+      "source": "Run on {0}: {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s",
+      "source": "S!`",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.i.c.y.e.q.s.u.s.y",
+      "source": "S$i$^c#Y#e%q%s%u(S(Y(t(y)R)S)T)U)V)W)X)Y)Z)[)^)`)b)g)q+d+x-Z-x-}.S.U.s.v.z.|.}/O/b0p2k2n3O3V3k3p3q3r3s3t3u3v3w3x3y3z3{3|4P4Q4X5X5c6u6{7Q7a7b7k7l8k9X9]9g9m9n:o;W;`",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.s.k",
+      "source": "`;'S;=`?k",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.p.53498a79",
+      "source": "[-*+])\\s+\\[(?P",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.s.14230ee1",
+      "source": "[\\s\\S]*?",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.s.nq.r.v.y.z.w.l.m",
+      "source": "S!S!nQ!r!v!y!z$|'W'_'`'l'm'n*k*o*q*r-]-c-e-u0[0_1o5{5}%[$ti#v$b$c$d$x${%O%Q%^%_%c)y*R*T*V*Y*a*g*w*x+f+i,S,V.f/P/d/m/x/y/{0`0b0i0j0o1f1i1q3c4^4_4j4o5Q5[5_6S7W7v8Q8V8[8q9b9p9y:P:`:r;Q;[;d;k",
+      "placeholders": [
+        "5"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.s.xswsoy.sz.s.s.s.e",
+      "source": "`S?XSWSOY?SZ;'S?S;'S;=`?e",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.as.copy.error",
+      "source": "[save-as-copy] error:",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.error",
+      "source": "[save] error:",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.redb.history.updated",
+      "source": "Saved · Redb history updated",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scan.failed",
+      "source": "Scan failed:",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scanning.ports.8000.8020.8080.1234.11434.and.11435.for",
+      "source": "Scanning ports 8000-8020, 8080, 1234, 11434, and 11435 for model servers...",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.failed.value.d359129b",
+      "source": "Search failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.notes",
+      "source": "Search notes",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.notes.30022566",
+      "source": "Search notes…",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.notes.and.properties",
+      "source": "Search notes and properties…",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.people.or.emails",
+      "source": "Search people or emails…",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.text.in.this.thread",
+      "source": "Search text in this thread",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.titles.amp.content",
+      "source": "Search titles &amp; content…",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.value.models",
+      "source": "Search {0} models...",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.81448fe2",
+      "source": "select",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.8c924a72",
+      "source": "select { ${} }",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.a.doc",
+      "source": "select a doc",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.a.provider.or.enter.a.base.url",
+      "source": "Select a provider or enter a base URL",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.a4942c26",
+      "source": "SELECT",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.data.ge.tool.model.style",
+      "source": "select[data-ge-tool-model=\"style\"]",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.data.ge.tool.model.value",
+      "source": "select[data-ge-tool-model=\"{0}\"]",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.preset.input.data.selection.type.character",
+      "source": "select.preset-input[data-selection-type=character]",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.preset.input.data.selection.type.model",
+      "source": "select.preset-input[data-selection-type=model]",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selection.points.outside.of.document",
+      "source": "Selection points outside of document",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.canceled",
+      "source": "Send canceled",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.server.not.responding.it.may.have.crashed",
+      "source": "Server not responding — it may have crashed",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.session.creation.failed",
+      "source": "[Session creation failed]",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.setup.local.url.setup.groq.key.setup.copilot.setup.chatgpt",
+      "source": "/setup local URL · /setup groq KEY · /setup copilot · /setup chatgpt-subscription",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shorter.faster.draft",
+      "source": "Shorter, faster draft",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.should.be.a.primitive.value",
+      "source": ") should be a primitive value.",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.line.numbers",
+      "source": "Show line numbers",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.notes.ribbon",
+      "source": "Show Notes ribbon",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.odysseus.reminder.emails",
+      "source": "Show Odysseus reminder emails",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.optional.notes.ribbon",
+      "source": "Show optional Notes ribbon",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.quick.actions.inside.notes",
+      "source": "Show quick actions inside Notes",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sidebar.panels",
+      "source": "Sidebar panels",
+      "placeholders": [],
+      "kind": "compatibility",
+      "status": "compatibility",
+      "locations": [],
+      "context": "retained catalog key absent from current first-party census",
+      "complexity": "label"
+    }
+  ]
+}

@@ -1,0 +1,1975 @@
+{
+  "id": "batch-058",
+  "group": "tasks",
+  "surface": "tasks",
+  "entry_count": 152,
+  "character_count": 11376,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.output.copied",
+      "source": "Output copied",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2507"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.overdue.07217c77",
+      "source": "Overdue",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TodoListView.tsx:165",
+        "static/js/copal/planning.js:1061"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.parsing",
+      "source": "parsing…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2027"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pause.all",
+      "source": "Pause all",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1985",
+        "static/js/tasks.js:1995",
+        "static/js/tasks.js:2881"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pause.all.active.tasks",
+      "source": "Pause all active tasks",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2881"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pause.ef8d2995",
+      "source": "pause",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:170",
+        "static/js/tasks.js:1945"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pause.every.active.task",
+      "source": "Pause every active task",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1986"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pause.resume.and.schedule.are.controlled.by.this.task.it",
+      "source": "Pause/resume and schedule are controlled by this task. It tags work, personal, urgent, action-needed, finance, legal, travel, newsletter, marketing, spam, and related mail categories. Urgent/reply-soon emails use your reminder settings.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1326"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.paused",
+      "source": "paused",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1952",
+        "static/js/tasks.js:860"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pending",
+      "source": "Pending",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TodoListView.tsx:140",
+        "static/index.html:122",
+        "static/js/copal/planning.js:1047"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.prev",
+      "source": "← Prev",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/CalendarView.tsx:124"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.prompt.is.required",
+      "source": "Prompt is required",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1708"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.prompt.on.event",
+      "source": "Prompt on event",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1139"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.prompt.on.schedule",
+      "source": "Prompt on schedule",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1138"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pulls.events.from.your.caldav.server.to.connect.or.change",
+      "source": "Pulls events from your CalDAV server. To connect or change CalDAV credentials, open",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2572"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.queued.waiting.for.a.free.slot",
+      "source": "_Queued — waiting for a free slot…_",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2023"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quick.add",
+      "source": "Quick add",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:934"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quick.add.7e5de057",
+      "source": "Quick-add:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2042"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quick.add.failed",
+      "source": "Quick-add failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2075"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rarr",
+      "source": "&rarr;",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:914"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.recent.task.runs.across.all.scheduled.tasks",
+      "source": "Recent task runs across all scheduled tasks.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2114"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.refresh.from.database",
+      "source": "Refresh from database",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:921"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reminder",
+      "source": "Reminder",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2875"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reminder.set.for.value",
+      "source": "Reminder set for {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:606",
+        "static/js/emailInbox.js:1202"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reminder.value",
+      "source": "Reminder: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:587"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.to.do",
+      "source": "Remove to-do",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/FloatingTodosPanel.tsx:150"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.required.evidence.value.attached.value",
+      "source": "Required evidence: {0} · attached {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:75"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.research.on.event",
+      "source": "Research on event",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1141"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.research.on.schedule",
+      "source": "Research on schedule",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1140"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.research.question",
+      "source": "Research question",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1297"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resume",
+      "source": "Resume",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:168",
+        "static/js/tasks.js:886"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resume.a2b41bba",
+      "source": "resume",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:168",
+        "static/js/tasks.js:1945"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resume.all",
+      "source": "Resume all",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1990"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resume.every.paused.task",
+      "source": "Resume every paused task",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1991"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.return.home.to.ithaca.1pm.tmrw",
+      "source": "return home to Ithaca 1pm tmrw",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:703",
+        "static/js/calendar.js:934"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.revert.this.built.in.task.to.its.default",
+      "source": "Revert this built-in task to its default?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1910"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.revert.this.built.in.task.to.its.default.schedule.and",
+      "source": "Revert this built-in task to its default schedule and settings?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1909"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.revert.to.default",
+      "source": "Revert to default",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:889"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.a.prompt.daily.weekly.etc",
+      "source": "Run a prompt daily, weekly, etc.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1138"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.deep.research.after.app.events",
+      "source": "Run deep research after app events",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1141"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.deep.research.on.a.topic",
+      "source": "Run deep research on a topic",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1140"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.this.task.again",
+      "source": "Run this task again",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2749"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.tidy.cleanup.every.n.sessions.or.messages",
+      "source": "Run tidy/cleanup every N sessions or messages",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1143"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.tidy.cleanup.on.a.timer",
+      "source": "Run tidy/cleanup on a timer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1142"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.running.3bfce5a4",
+      "source": "_Running…_",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2024"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.objective",
+      "source": "Save objective",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:116"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.9d4af690",
+      "source": "Saved.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:262"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.value.8cc63897",
+      "source": "Saved “{0}”",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2657"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scheduled.prompts.and.actions.that.run.automatically.results.appear.in",
+      "source": "Scheduled prompts and actions that run automatically. Results appear in a dedicated session.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2883"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.ade2e002",
+      "source": "search:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:3559",
+        "static/js/calendar.js:3560"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.all.events",
+      "source": "Search all events…",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1870"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.tasks",
+      "source": "Search tasks…",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TodoListView.tsx:111",
+        "static/js/copal/planning.js:1045",
+        "static/js/tasks.js:2893"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.an.action",
+      "source": "Select an action",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1719"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.an.event",
+      "source": "Select an event",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1768"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.tasks",
+      "source": "Select tasks",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2891"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sender.signatures",
+      "source": "sender signatures",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:792"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.set.up.caldav.sync",
+      "source": "set up CalDAV sync",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:848"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.settings.integrations",
+      "source": "Settings → Integrations",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2572"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.settings.rsaquo.integrations",
+      "source": "Settings &rsaquo; Integrations",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1685",
+        "static/js/emailInbox.js:18",
+        "static/js/emailLibrary.js:1267",
+        "static/js/emailLibrary.js:4774"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shared",
+      "source": "🔗 shared",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:203"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shared.d4f55e6f",
+      "source": "(shared)",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:292"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shared.events.appear.once.and.carry.all.their.tracks.colors",
+      "source": "Shared events appear once and carry all their tracks' colors.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/CalendarView.tsx:185"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shared.one.chip.multi.track",
+      "source": "shared (one chip, multi-track)",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/CalendarView.tsx:183"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shared.value",
+      "source": "· shared: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/CalendarView.tsx:319"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.filters",
+      "source": "Show filters",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:977"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.more",
+      "source": "Show more",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2804",
+        "static/style.css:25312"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.silence.completion.alerts.for.chatty.cron.jobs",
+      "source": "Silence completion alerts for chatty cron jobs.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1264"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.skill",
+      "source": "Skill",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TodoListView.tsx:175",
+        "static/js/copal/planning.js:1063",
+        "static/treehouse-architecture-map.html:104"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.skipped.value",
+      "source": "skipped{9}",
+      "placeholders": [
+        "9"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2785"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.stages.6075ab2b",
+      "source": "stages",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:214"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.2b020927",
+      "source": "start",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/CalendarView.tsx:174",
+        "packages/Copal/src/components/views/CalendarView.tsx:19",
+        "packages/Copal/src/components/views/CalendarView.tsx:311",
+        "packages/Copal/src/components/views/CalendarView.tsx:325",
+        "packages/Copal/src/components/views/CalendarView.tsx:85",
+        "packages/Copal/src/components/views/CalendarView.tsx:88",
+        "packages/Copal/src/components/views/TodoListView.tsx:119",
+        "packages/Copal/src/components/views/TodoListView.tsx:22",
+        "packages/Copal/src/components/views/TodoListView.tsx:38",
+        "src/tool_schemas.py:682",
+        "static/js/copal/planning.js:1020",
+        "static/js/copal/planning.js:1030",
+        "static/js/copal/planning.js:1051",
+        "static/js/copal/planning.js:238",
+        "static/js/copal/planning.js:240",
+        "static/js/copal/planning.js:247",
+        "static/js/document.js:789",
+        "static/js/emailLibrary.js:5205",
+        "static/js/mimoProviders.js:647",
+        "static/js/providerControl.js:2613",
+        "static/js/researchSynapse.js:121",
+        "static/js/sidebar-layout.js:329"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.9be5b8a8",
+      "source": "🛶 start",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/CalendarView.tsx:243"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.and.or.end.are.nebulous.fuzzy.start.tasks.never",
+      "source": "Start and/or end are nebulous (?). Fuzzy-start tasks never show as past/missed. Replace ? with a real date when you know it.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:448"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.start.c6ce18f9",
+      "source": "(start)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/CalendarView.tsx:326"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.now.in.parallel.bypassing.the.queue",
+      "source": "Start now in parallel, bypassing the queue",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2766"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.still.running",
+      "source": "Still running",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2764"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.stop.this.task",
+      "source": "Stop this task",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2767"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.success.no.output",
+      "source": "Success (no output)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:968"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sunday",
+      "source": "Sunday",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2560"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sync",
+      "source": "Sync",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2564"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sync.failed",
+      "source": "Sync failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:223"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sync.failed.value",
+      "source": "Sync failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2738"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sync.now",
+      "source": "Sync now",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2568"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.synced.no.changes",
+      "source": "Synced — no changes",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2743"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.synced.value",
+      "source": "Synced — {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2743"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.syncing",
+      "source": "Syncing…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2735"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.task.created",
+      "source": "Task created",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1784"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.task.deleted",
+      "source": "Task deleted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1901"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.task.paused.1e40bce1",
+      "source": "Task paused",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1858"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.task.resumed",
+      "source": "Task resumed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1867"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.task.stopped",
+      "source": "Task stopped",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2403"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.task.triggered",
+      "source": "Task triggered",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1876"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.task.triggered.in.parallel",
+      "source": "Task triggered in parallel",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1876"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.task.updated",
+      "source": "Task updated",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1781"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.event.only",
+      "source": "This event only",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:457"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.title.required",
+      "source": "Title required",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:3135"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.to",
+      "source": "to",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2846",
+        "static/js/memoryExportDialog.js:153"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.to.dos",
+      "source": "To-Dos",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/FloatingTodosPanel.tsx:64"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.today.ddfcbaae",
+      "source": "(Today)",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1876"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.today.is",
+      "source": "Today is",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2829"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tokens.value",
+      "source": "tokens {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:59"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tool.calls.value",
+      "source": "tool calls {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:60"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.trigger.d3f06a58",
+      "source": "Trigger",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1234"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.turns.value",
+      "source": "turns {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:58"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.undated.45b423c1",
+      "source": "Undated",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TodoListView.tsx:164",
+        "static/js/copal/planning.js:1061"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.undo.39fc7212",
+      "source": "Undo",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2474",
+        "static/js/calendar.js:89",
+        "static/js/custom-context-menu.js:256",
+        "static/js/document.js:4909",
+        "static/js/editor/build/popups.js:38",
+        "static/js/editor/build/topbar.js:17",
+        "static/js/notes.js:2423",
+        "static/js/notes.js:4047",
+        "static/js/notes.js:490",
+        "static/js/signature.js:399"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.undo.failed",
+      "source": "Undo failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1482",
+        "static/js/calendar.js:1540"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.action.value.use.list.events.create.event.update.event",
+      "source": "Unknown action: {action}. Use list_events, create_event, update_event, delete_event, list_calendars",
+      "placeholders": [
+        "action"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tools/calendar.py:556"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.untagged.e303d720",
+      "source": "untagged",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:968"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.update.this.task.s.schedule.prompt.and.output",
+      "source": "Update this task’s schedule, prompt, and output.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1220"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.a.ics.file.to.import.events.google.calendar.apple",
+      "source": "Upload a .ics file to import events. Google Calendar, Apple Calendar, and Outlook all export .ics files.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2547"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.use.session.default",
+      "source": "Use session default",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1251"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.uses.model",
+      "source": "Uses model",
+      "placeholders": [],
+      "kind": "js-string-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:495"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.active.goal",
+      "source": "{0} active goal",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:44"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.all.value.value.task.s",
+      "source": "{0} all {1} {2} task(s)?",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1952"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.d.all.value.task.s",
+      "source": "{0}d all {1} task(s)",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1970"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.event.value.today",
+      "source": "{0} event{1} today",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:662"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.events.imported.to.value",
+      "source": "{0} events imported to \"{1}\"",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2705"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.more",
+      "source": "+ {0} more",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/CalendarView.tsx:331"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.more.61f571ca",
+      "source": "+{0} more",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1081",
+        "static/js/research/panel.js:1138"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.repeats",
+      "source": "+{1} repeats",
+      "placeholders": [
+        "1"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2651"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.result.value",
+      "source": "{0} result{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1889",
+        "static/js/files.js:1821"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.result.value.for.value",
+      "source": "{0} result{1} for \"{2}\"",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1764"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.revision.value",
+      "source": "{0} · revision {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:159",
+        "static/js/goals.js:192",
+        "static/js/goals.js:209"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.run.history",
+      "source": "{0} — Run history",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1810"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.similar.activity.rows",
+      "source": "{0} similar activity rows",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:2651"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.skipped",
+      "source": "({0} skipped)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2705"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.task.value",
+      "source": "{0} task{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:808"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.unlisted.endpoint",
+      "source": "{0} (unlisted endpoint)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1615"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.task.s",
+      "source": "{0} {1} task(s)?",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1956"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.verification.finished",
+      "source": "Verification finished.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:262"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.verify",
+      "source": "verify",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:173",
+        "static/js/goals.js:259",
+        "static/js/goals.js:262"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.verify.now",
+      "source": "Verify now",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:173"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.verifying",
+      "source": "Verifying…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/goals.js:259"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.w.value",
+      "source": "W{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:907"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.webhook.triggered",
+      "source": "Webhook triggered",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1144"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.webhook.url",
+      "source": "Webhook URL",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1491"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.webhook.url.will.be.generated.when.the.task.is.saved",
+      "source": "Webhook URL will be generated when the task is saved.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1503"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.week.starts.on",
+      "source": "Week starts on",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2557"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.weekdays",
+      "source": "Weekdays",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2868"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.weekly",
+      "source": "Weekly",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2867",
+        "static/js/notes.js:3357",
+        "static/js/tasks.js:1376"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.what.s.happening",
+      "source": "What’s happening?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2840"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.what.should.be.researched",
+      "source": "What should be researched?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1284"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.what.should.count.as.urgent.e.g.deadlines.blockers.people",
+      "source": "What should count as urgent? e.g. deadlines, blockers, people waiting outside.",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1325"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.what.should.the.ai.do",
+      "source": "What should the AI do?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/tasks.js:1284"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.yearly",
+      "source": "Yearly",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2870",
+        "static/js/notes.js:3366"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.calendars",
+      "source": "Your calendars",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:2528"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.z",
+      "source": "⌘Z",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:90"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.zoom.in",
+      "source": "Zoom in",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1281",
+        "static/js/copal.js:1306",
+        "static/js/editor/build/topbar.js:37",
+        "static/js/files.js:1576"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.zoom.in.8d3c29fc",
+      "source": "Zoom in (+)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1281"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.zoom.out",
+      "source": "Zoom out",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1280",
+        "static/js/copal.js:1307",
+        "static/js/editor/build/topbar.js:30",
+        "static/js/files.js:1575"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.zoom.out.c07f1691",
+      "source": "Zoom out (–)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/calendar.js:1280"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

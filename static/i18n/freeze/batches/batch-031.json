@@ -1,0 +1,35 @@
+{
+  "id": "batch-031",
+  "group": "docs.openclank-docs-memory-lore",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1666,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-memory-lore.body",
+      "source": "# Memory and Lore\n\nOpen Clank has two related but separate memory systems. **Memory** (the Brain\nsurface) is what the assistant recalls between sessions. **Lore** is the\nrecovery ledger that lets work be undone and reconstructed.\n\n## Memory\n\nMemory capture is optional and per-account. When enabled, the assistant can\nsave short recollections that later sessions can use. You can review, edit and\ndelete saved memories from [Settings](clank://settings) under Brain.\n\nMemory never replaces your documents. It is recall, not storage — the\nauthoritative record of your work is Copal and the chat transcript.\n\n## Lore\n\nLore is the durable preimage and action ledger behind recoverable operations.\nWhen a managed save happens — an Imps project save, a guarded document\ncommit — the previous state is captured first. If capture fails, the save is\nrefused rather than leaving an unrecoverable hole.\n\nYou do not interact with Lore directly. You see it in History and in the\nundo/restore affordances that depend on it.\n\n## History\n\nDocument history lists checkpoints and changes for a single document. From\nthere you can inspect a prior version and restore it. History is scoped to\nthe document and the account.\n\nSee [Settings](clank://settings/history) for retention budgets.\n\n## What memory is not\n\n- It is not a search index over everything you have ever typed.\n- It is not shared between accounts.\n- It is not a substitute for saving a document you care about.\n\n[[Recovery]] covers what to do when something goes wrong.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:487"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-memory-lore.title",
+      "source": "Memory and Lore",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:487"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

@@ -1,0 +1,491 @@
+{
+  "id": "batch-066",
+  "group": "treehouse.lesson.house-connections",
+  "surface": "treehouse",
+  "entry_count": 40,
+  "character_count": 8312,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-connections.bases.body",
+      "source": "Open a Base in [Editor](clank://editor). Add a typed value to a practice row and run the view.\n\n**Observable result:** the typed value is returned by the Base query. Text that merely looks like a status is not a typed value.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:772"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.bases.explanation",
+      "source": "Bases are live queries over typed document content. Open a Base in [Editor](clank://editor) and it evaluates a filter subset against your documents' properties — status values, topics, dates — and returns matching rows as they change.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:772"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.bases.practice.cleanup",
+      "source": "Delete the practice row or document when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:799"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.bases.practice.expectedEvidence",
+      "source": "The Base query returns the row on its typed status value.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:800"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.bases.practice.seed",
+      "source": "status: ready\ntopic: field-guide",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:798"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.bases.practice.title",
+      "source": "Practice Base row",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:797"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.bases.result",
+      "source": "A Base that queries typed values and returns the rows that match.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:772"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.bases.title",
+      "source": "Bases over typed content",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:772"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.bases.whyThisHelps",
+      "source": "A Base is a view you did not have to maintain. When the property is typed, the query is exact; when the row changes, the view is already current.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:772"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.filters-camera.body",
+      "source": "In a populated [Graph](clank://graph) view, apply a filter that names a facet and value from the generated facet list, and confirm the result set changes. Then use the camera gestures to zoom and pan.\n\n**Observable result:** the filter changes the result set, and accepted camera gestures change scale by at least 20% and pan at least 48 CSS pixels from the starting camera.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:738"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.filters-camera.explanation",
+      "source": "Graph filters are programmatic facets — folder, tag and property values generated from the current corpus — not free text guesses. Camera controls let you zoom and pan a populated view; the controls are ordinary gestures with real effect.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:738"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.filters-camera.practice.cleanup",
+      "source": "Clear the filter when finished; nothing is deleted.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:767"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.filters-camera.practice.expectedEvidence",
+      "source": "The result set changes and the camera moves a real distance.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:768"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.filters-camera.practice.seed",
+      "source": "Apply one generated facet/value filter to a populated Graph view.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:766"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.filters-camera.practice.title",
+      "source": "Facet practice filter",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:765"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.filters-camera.result",
+      "source": "A filtered Graph view and a camera you actually moved.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:738"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.filters-camera.title",
+      "source": "Programmatic filters and camera controls in Graph",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:738"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.filters-camera.whyThisHelps",
+      "source": "Filters are how a large house stays navigable. Camera control is how you read one neighbourhood of the graph closely instead of squinting at all of it.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:738"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.graph-modes.body",
+      "source": "Open [Graph](clank://graph) on a corpus with at least two linked documents. View **Documents · links**, then switch to **Structure · headings and bullets**.\n\n**Observable result:** both modes show at least one actual node. Selecting two empty modes is not enough.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:701"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.graph-modes.explanation",
+      "source": "[Graph](clank://graph) has two document modes. **Documents · links** draws the edges between documents. **Structure · headings and bullets** draws the shape inside them. Galaxy is an optional third projection for tracks and events — a related destination, not a replacement for either. (An older name, Mind, referred to structure mode; it is not a separate launcher.)",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:701"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.graph-modes.practice.cleanup",
+      "source": "Delete the practice documents when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:732"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.graph-modes.practice.expectedEvidence",
+      "source": "Both Graph modes render at least one real node from the practice corpus.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:733"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.graph-modes.practice.seed",
+      "source": "Two linked documents with one heading each, then view both Graph modes.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:731"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.graph-modes.practice.title",
+      "source": "Graph practice corpus",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:730"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.graph-modes.result",
+      "source": "Both Graph modes mounted on real content, each showing at least one actual node.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:701"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.graph-modes.title",
+      "source": "Graph: linked-document mode versus structure mode",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:701"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.graph-modes.whyThisHelps",
+      "source": "Links tell you what relates; structure tells you what a document is made of. Switching between them is how you find a missing connection and then find the section that should hold it.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:701"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.links.body",
+      "source": "In [Editor](clank://editor), create a link from one document to a different document. Follow it. On the target, open the backlink and follow it home.\n\n**Observable result:** the link and its navigation resolve to a different document, and the source and target identities match the edge.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:667"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.links.explanation",
+      "source": "Documents link to each other with ordinary references. Following a link resolves the edge to a real document; the target shows the backlink. Graph treats the same edges as structure you can see.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:667"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.links.practice.cleanup",
+      "source": "Delete both practice documents and the link when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:695"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.links.practice.expectedEvidence",
+      "source": "Navigation resolves the edge to the other document with matching identities.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:696"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.links.practice.seed",
+      "source": "Document A links to Document B; follow the edge both ways.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:694"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.links.practice.title",
+      "source": "Practice link pair",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:693"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.links.result",
+      "source": "A link followed to its target and a backlink followed home again.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:667"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.links.title",
+      "source": "Link and backlink navigation",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:667"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.links.whyThisHelps",
+      "source": "Backlinks are how a note becomes a network. The link you leave in one document is the trail someone else — or future you — follows back.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:667"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.research-compare.body",
+      "source": "Open a research note and check that its claims carry source references. Open a Compare result and read the recorded selection and reason.\n\n**What is distinctive:** sources stay attached to the claim, and a comparison leaves a record rather than a vibe. Live inference is optional — recorded fixture responses are enough to learn the workflow, and reading this lesson never starts a paid call.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:843"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.research-compare.explanation",
+      "source": "Research work keeps its sources. A research note records what came from where, so a claim can be checked. Compare sets two recorded responses side by side and records which you chose and why. Both are ordinary content you can open again.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:843"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.research-compare.result",
+      "source": "A research note whose claims can be traced to sources, and a Compare result that records why.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:843"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.research-compare.title",
+      "source": "Research notes and Compare results with attributable sources",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:843"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

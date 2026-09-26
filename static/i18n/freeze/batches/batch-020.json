@@ -1,0 +1,3374 @@
+{
+  "id": "batch-020",
+  "group": "docs",
+  "surface": "docs",
+  "entry_count": 258,
+  "character_count": 17996,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.no.draft.id.returned",
+      "source": "No draft id returned",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:9529"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.edits.applied.blank.find.block.had.no.replacement.text",
+      "source": "No edits applied — blank FIND block had no replacement text",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/document_tools.py:550"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.edits.applied.find.text.cannot.be.blank",
+      "source": "No edits applied — FIND text cannot be blank",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/document_tools.py:584"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.edits.applied.none.of.the.find.blocks.matched.the",
+      "source": "No edits applied — none of the FIND blocks matched the document content (skipped {skipped})",
+      "placeholders": [
+        "skipped"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/document_tools.py:611"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.files.match.your.search",
+      "source": "No files match your search.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:544"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.files.yet",
+      "source": "No files yet",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:549"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.frontmatter",
+      "source": "No frontmatter.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:958"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.headings",
+      "source": "No headings.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2485"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.incoming.graph.edges",
+      "source": "No incoming graph edges.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:286"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.inline.viewer.for.value",
+      "source": "No inline viewer for {0}.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2213"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.linked.mentions",
+      "source": "No linked mentions.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2418"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.markdown.tasks",
+      "source": "No markdown tasks.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:1054"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.match",
+      "source": "No match",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2239",
+        "static/js/copal/notesFeature.js:2240"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.matching.examples",
+      "source": "No matching examples.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1287"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.messages.yet",
+      "source": "No messages yet",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2227"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.note.selected",
+      "source": "no note selected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:744"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.notes",
+      "source": "No notes",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:2018"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.notes.found",
+      "source": "No notes found.",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:737",
+        "src/tools/notes.py:117"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.notes.yet",
+      "source": "No notes yet",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:2027"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.open.documents",
+      "source": "No open documents",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1387",
+        "static/js/copal/notesFeature.js:1388"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.outgoing.graph.edges",
+      "source": "No outgoing graph edges.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:281"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.outgoing.links",
+      "source": "No outgoing links.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2412"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.outline.yet",
+      "source": "No outline yet.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:991"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.past.reminders.to.clear",
+      "source": "No past reminders to clear",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:1567"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.plugin.syntax.detected",
+      "source": "No plugin syntax detected.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:1088"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.preview.available",
+      "source": "No preview available",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3010"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.previous.version.to.compare",
+      "source": "No previous version to compare",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:5846"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.properties.yet",
+      "source": "No properties yet.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2393"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.readable.content",
+      "source": "No readable content",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/document_routes.py:584"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.recent.documents",
+      "source": "No recent documents.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2511"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.recipient",
+      "source": "No recipient",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:2894"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.recipient.no.subject",
+      "source": "No recipient · No subject",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4949"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.report.text.is.available",
+      "source": "No report text is available.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2101"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.research.yet",
+      "source": "No research yet",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3128"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.selection",
+      "source": "no selection",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:245"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.session.context.for.document.creation",
+      "source": "No session context for document creation",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/document_tools.py:379"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.subject",
+      "source": "No subject",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:2895"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.suggestions.matched.the.document.content",
+      "source": "No suggestions matched the document content",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/document_tools.py:689"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.tables.or.query.blocks",
+      "source": "No tables or query blocks.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:1079"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.tags",
+      "source": "No tags.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:1038",
+        "packages/Copal/src/components/views/WikiView.tsx:271"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.tags.in.current.note",
+      "source": "No tags in current note.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:869"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.tags.yet",
+      "source": "No tags yet.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2505"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.templates.yet.set.a.note.s.type.property.to",
+      "source": "No templates yet. Set a note’s type property to template.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1046",
+        "static/js/copal/notesFeature.js:954"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.text.messages.in.this.bounded.view",
+      "source": "No text messages in this bounded view.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2094"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.unlinked.mentions",
+      "source": "No unlinked mentions.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2421"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.uploaded.files.returned",
+      "source": "No uploaded files returned",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3621"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.value",
+      "source": "No {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3430"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.wikilinks",
+      "source": "No wikilinks.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:1030"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.node.value.63d6f00b",
+      "source": "Node {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesModel.js:241"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.none.95b5af4a",
+      "source": "— (none) —",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:903"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.noopener",
+      "source": "noopener",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2817",
+        "static/js/documentLibrary.js:3209"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.normalize",
+      "source": "normalize",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:627"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.normalize.table",
+      "source": "Normalize table",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:102"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.note.actions",
+      "source": "Note actions",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1784"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.note.reminder",
+      "source": "Note reminder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:1022"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.note.request.failed",
+      "source": "note request failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:548"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.note.title",
+      "source": "Note Title",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:461"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.note.title.45e6c4d6",
+      "source": "Note title",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1773"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.notes.request.failed",
+      "source": "notes request failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:265"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nothing.to.solve.item.is.empty",
+      "source": "Nothing to solve — item is empty",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:4608"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nothing.to.solve.note.is.empty",
+      "source": "Nothing to solve — note is empty",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:4546"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nothing.to.tidy",
+      "source": "Nothing to tidy",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2555",
+        "static/js/documentLibrary.js:3312"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nth.weekday",
+      "source": "Nth weekday",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:3391"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nth.weekday.of.month",
+      "source": "Nth weekday of month",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:3396"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.numbered.list",
+      "source": "Numbered list",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:90"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.obsidian.callout",
+      "source": "Obsidian callout",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.odysseus.email.ai.reply.context.v1",
+      "source": "odysseus:email-ai-reply-context:v1:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4149"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.an.editable.document.before.creating.a.template",
+      "source": "Open an editable document before creating a template.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:987"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.an.editable.document.before.inserting.a.template",
+      "source": "Open an editable document before inserting a template.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:950"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.cf9b7706",
+      "source": "Open",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:293",
+        "static/js/codeEditor.js:1588",
+        "static/js/cookbookSchedule.js:366",
+        "static/js/copal/treehouse.js:460",
+        "static/js/documentLibrary.js:2261",
+        "static/js/documentLibrary.js:2376",
+        "static/js/documentLibrary.js:2643",
+        "static/js/documentLibrary.js:2731",
+        "static/js/documentLibrary.js:2817",
+        "static/js/documentLibrary.js:3031",
+        "static/js/documentLibrary.js:3205",
+        "static/js/documentLibrary.js:725",
+        "static/js/documentLibrary.js:793",
+        "static/js/emailInbox.js:1071",
+        "static/js/emailLibrary.js:6379",
+        "static/js/emailLibrary.js:6549",
+        "static/js/emailLibrary.js:7685",
+        "static/js/files.js:3010",
+        "static/js/memory.js:1279",
+        "static/js/notes.js:4504",
+        "static/js/sessions.js:3172",
+        "static/js/sessions.js:3405",
+        "static/js/sessions.js:3474"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.attachments.zip",
+      "source": "open-clank-attachments.zip",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3394"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.editor.tabs",
+      "source": "Open Editor tabs",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1655"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.in.new.tab",
+      "source": "Open in new tab",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1490",
+        "static/js/emailLibrary.js:7447",
+        "static/js/emailLibrary.js:7692"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.in.original.session",
+      "source": "Open in original session",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:916"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.in.the.editor",
+      "source": "Open in the editor",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:799",
+        "static/js/documentLibrary.js:921"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.note",
+      "source": "Open note",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1698",
+        "static/js/copal/notesFeature.js:1718",
+        "static/js/copal/planning.js:483"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.note.in.this.group",
+      "source": "Open note in this group",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1698"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.timeline",
+      "source": "Open Timeline",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1305",
+        "static/js/copal/notesFeature.js:1394",
+        "static/js/copal/notesFeature.js:1569",
+        "static/js/copal/notesFeature.js:2541"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.today.s.note",
+      "source": "Open today’s note",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1299"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.trash",
+      "source": "Open Trash",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1319"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.or.pick.a.specific.time",
+      "source": "Or pick a specific time",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4410"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.outgoing",
+      "source": "Outgoing",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:279"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.outline",
+      "source": "outline",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesWorkspace.js:7"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.outline.cdd6290b",
+      "source": "Outline",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:597",
+        "static/js/copal/notesWorkspace.js:21"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.owner",
+      "source": "Owner",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:432"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.owner.579233b2",
+      "source": "owner",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:440"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.page.value",
+      "source": "Page {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:816"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.path",
+      "source": "Path",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2400"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.path.3150ecd5",
+      "source": "path",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2400"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pdf.ce9f44bc",
+      "source": "pdf",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4941"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.php",
+      "source": "php",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4938"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pick.date.and.time",
+      "source": "Pick date and time",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:3515"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pin.blocks.to.keep.them.in.this.lane",
+      "source": "Pin blocks to keep them in this lane.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:153"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pin.tab",
+      "source": "Pin tab",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1661"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pinned",
+      "source": "pinned",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:122",
+        "packages/Copal/src/components/views/WikiView.tsx:237",
+        "static/js/chatRenderer.js:1701",
+        "static/js/cookbookServe.js:1158",
+        "static/js/cookbookServe.js:2559",
+        "static/js/copal.js:1009",
+        "static/js/copal/notesFeature.js:1659",
+        "static/js/memory.js:2373"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pinned.f9312169",
+      "source": "Pinned",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:138"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.planning",
+      "source": "planning",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/ui/js/views/notes.js:8"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.please.pick.a.time",
+      "source": "Please pick a time",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4474"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.plugin.syntax",
+      "source": "Plugin syntax",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:105",
+        "packages/Copal/src/components/views/NotesView.tsx:106",
+        "packages/Copal/src/components/views/NotesView.tsx:107"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.prepare.signed.reply.failed",
+      "source": "prepare-signed-reply failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:9476"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.preparing.send",
+      "source": "Preparing send",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3907"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.preparing.signed.reply",
+      "source": "Preparing signed reply…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:9462"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.preview.ctrl.alt.m.to.toggle",
+      "source": "Preview (Ctrl+Alt+M to toggle)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4985"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.print.as.pdf",
+      "source": "Print as PDF",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:9820"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.properties.d0449e86",
+      "source": "properties",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesWorkspace.js:219",
+        "static/js/copal/notesWorkspace.js:7",
+        "static/js/editor/entryModel.js:44"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.properties.unavailable",
+      "source": "Properties unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2319"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.property",
+      "source": "property",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2381"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.property.name.10599c49",
+      "source": "Property name",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2298"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.property.name.value",
+      "source": "Property name {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2337"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.property.value",
+      "source": "Property value",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2300"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.public",
+      "source": "public",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:432",
+        "static/js/documentLibrary.js:441"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.public.dc5eb704",
+      "source": "Public",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:432"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.python.4235227b",
+      "source": "python",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4917",
+        "static/js/langIcons.js:346"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.queries.2644b7d9",
+      "source": "Queries",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:600"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.querying.live.redb.base",
+      "source": "Querying live Redb Base…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2182"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quick.presets",
+      "source": "Quick presets",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4403"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quote",
+      "source": "quote",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:88",
+        "static/js/slashCommands.js:5706"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.re.run.agent",
+      "source": "Re-run agent",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:4458"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.read.only",
+      "source": "read only",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:349"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.read.only.601dcc1c",
+      "source": "Read only",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:7532",
+        "static/js/documentLibrary.js:2064",
+        "static/js/documentLibrary.js:2071"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reading",
+      "source": "reading",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1788"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reading.mode",
+      "source": "Reading mode",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1309",
+        "static/js/copal/notesFeature.js:1788"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ready.to.attach",
+      "source": "Ready to attach.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1922"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.recent.7a7d1b8a",
+      "source": "recent",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesWorkspace.js:6",
+        "static/js/gallery.js:2076"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.recent.documents",
+      "source": "Recent documents",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2510"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.refresh.blocks",
+      "source": "Refresh blocks",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:124"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.refresh.notes",
+      "source": "Refresh notes",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:703"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.refresh.vault",
+      "source": "Refresh vault",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:673"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.region",
+      "source": "region",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1387",
+        "static/js/copal/treehouse.js:787"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reject.all",
+      "source": "Reject All",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:8847"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reject.change",
+      "source": "Reject change",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:8890"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.relative",
+      "source": "relative",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:4217"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reload.pdf.view",
+      "source": "Reload PDF view",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:5011"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remind.me.later",
+      "source": "Remind me later",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:3339"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.bookmark",
+      "source": "Remove bookmark",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1767",
+        "static/js/copal/notesFeature.js:1797"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.signature.from.this.field",
+      "source": "Remove signature from this field",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:838"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.value.c9318bc7",
+      "source": "Remove {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2286",
+        "static/js/copal/notesFeature.js:2377"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename",
+      "source": "Rename",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:756",
+        "static/index.html:723",
+        "static/index.html:915",
+        "static/js/admin.js:169",
+        "static/js/admin.js:65",
+        "static/js/copal.js:1676",
+        "static/js/copal.js:1908",
+        "static/js/copal/notesFeature.js:1800",
+        "static/js/custom-context-menu.js:14",
+        "static/js/files.js:2334",
+        "static/js/files.js:775",
+        "static/js/gallery.js:605",
+        "static/js/sessions.js:1280",
+        "static/js/sessions.js:695"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.or.move",
+      "source": "Rename or move",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1489"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reopen.closed",
+      "source": "Reopen closed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1393"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reopen.closed.note",
+      "source": "Reopen closed note",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1317"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.repeat.659eba12",
+      "source": "Repeat",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:3347",
+        "static/js/notes.js:3371",
+        "static/js/notes.js:3382"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.replace",
+      "source": "Replace",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2236",
+        "static/js/copal/notesFeature.js:2240"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.replace.all",
+      "source": "Replace all",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2241"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.replaced",
+      "source": "Replaced",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2240"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.6c2bb735",
+      "source": "Reply",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4358",
+        "static/js/document.js:4991",
+        "static/js/emailLibrary.js:5304",
+        "static/js/emailLibrary.js:6934",
+        "static/js/emailLibrary.js:7089"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.already.has.text",
+      "source": "Reply already has text",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4297"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.body.is.empty",
+      "source": "Reply body is empty",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3933",
+        "static/js/document.js:4384"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.draft.ready.value.attached",
+      "source": "Reply draft ready — \"{0}\" attached",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:9554"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.to.the.sender.with.this.filled.file.attached",
+      "source": "Reply to the sender with this filled file attached",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:2119"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.report",
+      "source": "Report",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3006"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resize.value.editor.sidebar",
+      "source": "Resize {0} Editor sidebar",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1629"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resize.value.split",
+      "source": "Resize {0} split",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1732"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resource.021493f3",
+      "source": "Resource",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2018"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resource.closed",
+      "source": "Resource closed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4670"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resource.save.did.not.return.an.applied.receipt",
+      "source": "resource save did not return an applied receipt",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/documentBuffers.js:106"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restart.recovery.unavailable.save.before.closing",
+      "source": "Restart recovery unavailable — save before closing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2228"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restore.doc.failed",
+      "source": "Restore doc failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:6951"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restore.e08e8491",
+      "source": "restore",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3103",
+        "static/js/documentLibrary.js:857",
+        "static/js/documentLibrary.js:951",
+        "static/js/files.js:2337",
+        "static/js/files.js:2588",
+        "static/js/galleryEditor.js:372"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restore.to.active.documents",
+      "source": "Restore to active documents",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:845",
+        "static/js/documentLibrary.js:941"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restored",
+      "source": "Restored",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3102",
+        "static/js/documentLibrary.js:3222",
+        "static/js/documentLibrary.js:3396",
+        "static/js/documentLibrary.js:856",
+        "static/js/documentLibrary.js:950"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restored.to.v.value",
+      "source": "Restored to v{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:11184"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restored.unsaved.changes",
+      "source": "Restored unsaved changes",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:4725",
+        "static/js/notes.js:4820"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restored.unsaved.note",
+      "source": "Restored unsaved note",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:4423"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reveal.in.editor",
+      "source": "Reveal in Editor",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1768",
+        "static/js/copal/notesFeature.js:1798"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reveal.path",
+      "source": "Reveal path",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1491"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.revoke.e85a0f49",
+      "source": "revoke",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:444"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.right",
+      "source": "right",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1702",
+        "static/js/copal/planning.js:685",
+        "static/js/copal/tableModel.js:822",
+        "static/js/galleryEditor.js:363",
+        "static/js/models.js:219"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.row",
+      "source": "row",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:625",
+        "static/js/copal/planning.js:1180",
+        "static/js/copal/planning.js:1274",
+        "static/js/files.js:1188"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rsaquo",
+      "source": "&rsaquo;",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:8531"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ruby",
+      "source": "ruby",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4937"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.a.command",
+      "source": "Run a command…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1327"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.again",
+      "source": "Run again",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:4508",
+        "static/js/tasks.js:2750"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.agent",
+      "source": "Run Agent",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:4508"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.preview.fee59281",
+      "source": "Run / Preview",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4910",
+        "static/js/document.js:4989",
+        "static/js/document.js:9362"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rust",
+      "source": "rust",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4927"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sad",
+      "source": "sad",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2337"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save",
+      "source": "Save",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:751",
+        "static/index.html:1249",
+        "static/index.html:1374",
+        "static/index.html:1545",
+        "static/index.html:591",
+        "static/js/assistant.js:231",
+        "static/js/chat.js:5814",
+        "static/js/chatRenderer.js:338",
+        "static/js/chatRenderer.js:349",
+        "static/js/codeEditor.js:1252",
+        "static/js/codeEditor.js:1302",
+        "static/js/codeEditor.js:708",
+        "static/js/compare/selector.js:224",
+        "static/js/compare/selector.js:231",
+        "static/js/compare/selector.js:301",
+        "static/js/cookbook.js:2966",
+        "static/js/cookbook.js:2969",
+        "static/js/cookbookSchedule.js:154",
+        "static/js/cookbookServe.js:2491",
+        "static/js/copal.js:2313",
+        "static/js/copal/notesFeature.js:1790",
+        "static/js/copal/notesFeature.js:2278",
+        "static/js/copal/planning.js:485",
+        "static/js/copal/planning.js:566",
+        "static/js/dialogPrimitives.js:15",
+        "static/js/document.js:5056",
+        "static/js/document.js:9372",
+        "static/js/editor/build/popups.js:40",
+        "static/js/editor/build/topbar.js:97",
+        "static/js/emailLibrary.js:169",
+        "static/js/emailLibrary.js:226",
+        "static/js/emailLibrary.js:8413",
+        "static/js/notes.js:3040",
+        "static/js/notes.js:3041",
+        "static/js/notes.js:3521",
+        "static/js/settings.js:3553",
+        "static/js/settings.js:4433",
+        "static/js/settings.js:4580",
+        "static/js/settings.js:4689",
+        "static/js/settings.js:4713",
+        "static/js/settings.js:4909",
+        "static/js/settings.js:5069",
+        "static/js/settings.js:5756",
+        "static/js/settings.js:5941",
+        "static/js/signature.js:402",
+        "static/js/skills.js:1911",
+        "static/js/tasks.js:1270",
+        "static/js/ui.js:712",
+        "static/style.css:4738"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.archive",
+      "source": "Save (archive)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:1995"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.draft",
+      "source": "Save Draft",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:5041"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.new.version",
+      "source": "Save new version",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:2123",
+        "static/js/document.js:5056",
+        "static/js/document.js:7529"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved",
+      "source": "saved",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:897",
+        "packages/Copal/ui/js/sync.js:41",
+        "packages/Copal/ui/js/sync.js:49",
+        "src/openclank/copal_manage.py:404",
+        "static/js/cookbook-hwfit.js:2570",
+        "static/js/cookbook-hwfit.js:2610",
+        "static/js/copal/documentBuffers.js:137",
+        "static/js/copal/documentBuffers.js:15",
+        "static/js/copal/documentBuffers.js:40",
+        "static/js/copal/notesFeature.js:1825",
+        "static/js/copal/notesFeature.js:1957",
+        "static/js/copal/notesFeature.js:2227",
+        "static/js/copal/notesFeature.js:574",
+        "static/js/copal/notesFeature.js:600",
+        "static/js/copal/notesFeature.js:813",
+        "static/js/document.js:1109",
+        "static/js/document.js:1887",
+        "static/js/document.js:1919",
+        "static/js/document.js:2009",
+        "static/js/memory.js:3011",
+        "static/js/memory.js:3833"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.old.recovery.draft.could.not.be.cleared",
+      "source": "Saved; old recovery draft could not be cleared",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2228"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.pdf.could.not.be.located",
+      "source": "Saved PDF could not be located",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/document_routes.py:273"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.value",
+      "source": "Saved {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:288"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.value.backup.value",
+      "source": "Saved {0}; backup {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:288"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.version",
+      "source": "Saved version",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:9579"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saving.draft.timed.out",
+      "source": "Saving draft timed out",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4098"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saving.e7912bf7",
+      "source": "saving",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/documentBuffers.js:93",
+        "static/js/copal/notesFeature.js:2227",
+        "static/js/copal/notesFeature.js:586",
+        "static/js/copal/planning.js:694",
+        "static/js/copal/planning.js:702",
+        "static/js/document.js:1101",
+        "static/js/document.js:1839",
+        "static/js/document.js:1995"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.schedule.0a8adac9",
+      "source": "Schedule",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4415",
+        "static/js/tasks.js:1236"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.schedule.send",
+      "source": "Schedule Send",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4399"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.schedule.send.53d602e4",
+      "source": "Schedule Send...",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:5042"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scheduled",
+      "source": "scheduled",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:93",
+        "static/js/copal/planning.js:1061"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scheduled.for.value",
+      "source": "Scheduled for {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4493"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scheduled.today.marker",
+      "source": "Scheduled today marker",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:93"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scroll.left",
+      "source": "Scroll left",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:335",
+        "static/js/document.js:5017"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scroll.right",
+      "source": "Scroll right",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:369",
+        "static/js/document.js:5018"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.archive",
+      "source": "Search archive…",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:1772"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.attachments",
+      "source": "Search attachments",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3502"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.chats.b0f96562",
+      "source": "Search chats…",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:1745"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.contents",
+      "source": "Search contents",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:679",
+        "packages/Copal/src/components/views/NotesView.tsx:709"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.documents",
+      "source": "Search documents",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1304",
+        "static/js/copal/notesFeature.js:1585"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.documents.5bd83421",
+      "source": "Search documents…",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:1251"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.documents.and.properties",
+      "source": "Search documents and properties…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1585"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.failed.value",
+      "source": "search failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:164"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.files.amp.document.content",
+      "source": "Search files &amp; document content…",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:1829"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.research",
+      "source": "Search research…",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:1800"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.results",
+      "source": "Search results",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:995"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.a.block.to.inspect.it",
+      "source": "Select a block to inspect it.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:309"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.a.note.to.inspect.linked.panes",
+      "source": "Select a note to inspect linked panes.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:1095"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.a.vault.file",
+      "source": "Select a vault file",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:745"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.date.and.time",
+      "source": "Select date and time",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:3280"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.documents",
+      "source": "Select documents",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:1826"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.documents.first",
+      "source": "Select documents first",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3605"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.items.to.attach",
+      "source": "Select items to attach",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.or.create.a.vault.file",
+      "source": "Select or create a vault file.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/NotesView.tsx:888"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selected.9a976fc2",
+      "source": "Selected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2421",
+        "static/js/documentLibrary.js:2855",
+        "static/js/documentLibrary.js:3264"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selected.email.account.is.receive.only.using.your.smtp.account",
+      "source": "Selected email account is receive-only; using your SMTP account.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:160"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selected.regions.type.in.chat.to.edit",
+      "source": "Selected regions — type in chat to edit",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:8111"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.email.ctrl.enter",
+      "source": "Send email (Ctrl+Enter)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:5038"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.failed.value",
+      "source": "Send failed ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3976",
+        "static/js/document.js:3978"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.signed.reply",
+      "source": "Send signed reply",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:9385"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sending.ceafde86",
+      "source": "Sending",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3952",
+        "static/js/document.js:3955",
+        "static/js/settings.js:3326"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.separate",
+      "source": "Separate",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3382"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sessions.into",
+      "source": "sessions into",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2551"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.set.to.today.s.date",
+      "source": "Set to today's date",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:1360",
+        "static/js/document.js:881"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show",
+      "source": "show",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesWorkspace.js:88",
+        "static/js/settings.js:2014",
+        "static/js/settings.js:2085",
+        "static/js/slashCommands.js:1112",
+        "static/js/slashCommands.js:1537",
+        "static/js/slashCommands.js:5540",
+        "static/js/ui.js:253",
+        "static/js/ui.js:286",
+        "static/js/ui.js:357",
+        "static/js/ui.js:387",
+        "static/js/ui.js:397",
+        "static/js/ui.js:404",
+        "static/js/ui.js:427",
+        "static/js/ui.js:445",
+        "static/js/ui.js:467",
+        "static/js/ui.js:474",
+        "static/js/ui.js:846"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.active.documents",
+      "source": "Show active documents",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3507"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.active.research",
+      "source": "Show active research",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3330"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.archived.documents",
+      "source": "Show archived documents",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3507"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.archived.research",
+      "source": "Show archived research",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3330"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.cc.bcc",
+      "source": "Show Cc/Bcc",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4956"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.email.fields",
+      "source": "Show email fields",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:2924"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.hidden.folders",
+      "source": "Show hidden folders",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1549"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.notes.without.tags",
+      "source": "Show notes without tags",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:1597"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.only.goals",
+      "source": "Show only goals",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:1606"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.side.by.side.preview.layout",
+      "source": "Side-by-side preview layout",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1311"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sidebar.19bd1503",
+      "source": "sidebar",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:234"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sign",
+      "source": "sign",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:5010"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sign.here",
+      "source": "Sign here",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:1301",
+        "static/js/document.js:1455",
+        "static/js/document.js:1549",
+        "static/js/document.js:853",
+        "static/js/document.js:855"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.signature.76975a5b",
+      "source": "signature:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:1455"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.signed.reply.b68a6959",
+      "source": "Signed reply",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:9522",
+        "static/js/document.js:9540"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.smooth",
+      "source": "smooth",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:390"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.solve.this.todo.with.the.agent",
+      "source": "Solve this todo with the agent",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/notes.js:1908"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sort.files",
+      "source": "Sort files",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1561"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sort.linked.views",
+      "source": "Sort linked views",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:2400"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sorted",
+      "source": "Sorted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2551"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.source",
+      "source": "source",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1786",
+        "static/js/copal/notesFeature.js:1787"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.source.6da13add",
+      "source": "Source",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:260",
+        "static/js/documentLibrary.js:2124",
+        "static/js/gallery.js:1447"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.source.mode",
+      "source": "Source mode",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1308",
+        "static/js/copal/notesFeature.js:1786",
+        "static/js/copal/notesFeature.js:1787"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.source.value",
+      "source": "Source {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:2993"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sources.bce16dd0",
+      "source": "sources",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/WikiView.tsx:165",
+        "static/js/researchSynapse.js:42",
+        "static/js/sessions.js:3511"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sources.value",
+      "source": "Sources ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/documentLibrary.js:3000"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.spinner",
+      "source": "spinner",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:3955",
+        "static/js/emailInbox.js:817",
+        "static/js/memory.js:3078"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.split.below",
+      "source": "Split below",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1094",
+        "static/js/copal/notesFeature.js:1313",
+        "static/js/copal/notesFeature.js:1700",
+        "static/js/copal/notesFeature.js:1766",
+        "static/js/copal/notesFeature.js:1794"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.split.right",
+      "source": "Split right",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/notesFeature.js:1094",
+        "static/js/copal/notesFeature.js:1312",
+        "static/js/copal/notesFeature.js:1699",
+        "static/js/copal/notesFeature.js:1765",
+        "static/js/copal/notesFeature.js:1793"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sql",
+      "source": "sql",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:4926",
+        "static/js/langIcons.js:348"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.typing.or.paste.text.to.create.a.document",
+      "source": "Start typing or paste text to create a document...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/document.js:604"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

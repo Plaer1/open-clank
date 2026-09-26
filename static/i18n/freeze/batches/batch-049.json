@@ -1,0 +1,2819 @@
+{
+  "id": "batch-049",
+  "group": "providers",
+  "surface": "providers",
+  "entry_count": 219,
+  "character_count": 17996,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.account.value",
+      "source": "Account {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1411",
+        "static/js/providerControl.js:1574",
+        "static/js/providerControl.js:1705"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.account",
+      "source": "Add account",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1565"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.api.key",
+      "source": "Add API key",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1570"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.login",
+      "source": "Add login",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1615"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.models.706d2509",
+      "source": "Add models",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2302"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.optional.api.key",
+      "source": "Add optional API key",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1570"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.to.favorites",
+      "source": "Add to favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:764",
+        "static/js/modelPicker.js:765"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.to.my.models",
+      "source": "Add to my models",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:206"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.value.api.key",
+      "source": "Add {0} API key",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:217"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.value.login",
+      "source": "Add {0} login",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1711"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.value.submit",
+      "source": "add:{0}:submit",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1209"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.value.to.my.models",
+      "source": "Add {0} to my models",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:210"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.added.models.snapshot",
+      "source": "Added Models snapshot",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:897"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.added.models.snapshot.loaded",
+      "source": "Added Models snapshot loaded.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2549"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.admin.empty.provider.control.empty",
+      "source": "admin-empty provider-control-empty",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2300"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.admin.toggle.sub.provider.control.add.description",
+      "source": "admin-toggle-sub provider-control-add-description",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1160"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.also.available.through.value",
+      "source": "· also available through “{0}”",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:417"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.key.for.a.protected.server",
+      "source": "API key for a protected server",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1326"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.key.optional",
+      "source": "API key (optional)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1201"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.model.provider",
+      "source": "API model provider",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1167"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ask.an.admin.to.configure.model.endpoints",
+      "source": "Ask an admin to configure model endpoints",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:643"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.authorization.code.if.provided",
+      "source": "Authorization code (if provided)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1722"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.available.in.the.model.picker",
+      "source": "· available in the model picker",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:419"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.aws.bedrock",
+      "source": "AWS Bedrock",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providers.js:131"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browser.account",
+      "source": "Browser account",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1321"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browser.login",
+      "source": "Browser login",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:601"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browser.login.or.api.key",
+      "source": "Browser login or API key",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:599"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.btn.secondary",
+      "source": "btn secondary",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:109"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cancel.login",
+      "source": "Cancel login",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1747"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.catalog",
+      "source": "catalog",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2547"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.center",
+      "source": "center",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:822",
+        "static/js/memory.js:1672",
+        "static/js/theme.js:3253",
+        "static/js/theme.js:3384",
+        "static/js/theme.js:3635"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose",
+      "source": "Choose…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:91"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.an.exact.start.date.in.the.event.popup",
+      "source": "Choose an exact start date in the event popup.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/planningModel.js:206"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.an.option",
+      "source": "Choose an option",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:109"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.mode.and.thinking.for.value",
+      "source": "Choose mode and thinking for {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:666"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.who.can.use.value",
+      "source": "Choose who can use {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:300",
+        "static/js/providerControl.js:1790"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.collapsed",
+      "source": "collapsed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:884"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connect.ollama.or.another.model.server.running.on.your.network",
+      "source": "Connect Ollama or another model server running on your network.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1162"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connect.openai.anthropic.deepseek.openrouter.or.another.provider",
+      "source": "Connect OpenAI, Anthropic, DeepSeek, OpenRouter, or another provider.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1163"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connect.with",
+      "source": "Connect with",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1194"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connected.c2f9b7b4",
+      "source": "Connected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:410",
+        "static/js/mimoProviders.js:412",
+        "static/js/settings.js:4556",
+        "static/js/settings.js:4673"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connected.c5e23457",
+      "source": "connected",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:891",
+        "routes/mimo_provider_routes.py:943",
+        "src/mcp_manager.py:200",
+        "static/js/admin.js:702",
+        "static/js/admin.js:703",
+        "static/js/admin.js:704",
+        "static/js/admin.js:705",
+        "static/js/mimoProviders.js:159",
+        "static/js/settings.js:4250",
+        "static/js/settings.js:5653",
+        "static/js/settings.js:5677",
+        "static/js/settings.js:5678",
+        "static/js/settings.js:5679",
+        "static/js/settings.js:5716",
+        "static/js/settings.js:5794"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connected.free.access",
+      "source": "Connected · Free access",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:412"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connection",
+      "source": "connection",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2395"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connection.model.health",
+      "source": "Connection model health",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:946"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.continue.with.value",
+      "source": "Continue with {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1342"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cooling.down",
+      "source": "Cooling down",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:798"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.load.value.accounts.value",
+      "source": "Could not load {0} accounts: {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2130"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.load.value.model.health.value",
+      "source": "Could not load {0} model health: {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1987"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.refresh.value.models.value",
+      "source": "Could not refresh {0} models: {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1910"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.databricks",
+      "source": "Databricks",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:466"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.deepseek.61e7a9a4",
+      "source": "deepseek",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:113"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.column",
+      "source": "Delete column",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:874",
+        "static/js/custom-context-menu.js:21"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.row",
+      "source": "Delete row",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:879",
+        "static/js/custom-context-menu.js:21"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.value.and.its.accounts",
+      "source": "Delete {0} and its accounts?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2067"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.denied",
+      "source": "denied",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerDeviceFlow.js:122"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.enter.an.api.key",
+      "source": "Enter an API key.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:347"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.enter.the.authorization.code",
+      "source": "Enter the authorization code.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:281"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.existing.provider.connections",
+      "source": "Existing provider connections",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1104"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.extra.high",
+      "source": "Extra high",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:47"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.extra.high.reasoning",
+      "source": "Extra-high reasoning",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:102"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.get.response.from.value.value",
+      "source": "Failed to get response from {model_spec}: {e}",
+      "placeholders": [
+        "e",
+        "model_spec"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/model_interaction_tools.py:72"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.set.model",
+      "source": "Failed to set model",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:985"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.start.value.sign.in",
+      "source": "Failed to start {0} sign-in",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerDeviceFlow.js:93"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fast.preset",
+      "source": "Fast preset",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:36"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.finish.value.in.the.opened.window",
+      "source": "Finish {0} in the opened window.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1420"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fireworks.4f8ff80c",
+      "source": "Fireworks",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providers.js:136"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.high.reasoning",
+      "source": "High reasoning",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:101"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.f878c410",
+      "source": "+ Image",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:165"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.generation.model",
+      "source": "Image generation model",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:158"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.included",
+      "source": "Included",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:407"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.insert.column.left",
+      "source": "Insert column left",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:872",
+        "static/js/custom-context-menu.js:21"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.insert.column.right",
+      "source": "Insert column right",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:873",
+        "static/js/custom-context-menu.js:21"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.insert.row.above",
+      "source": "Insert row above",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:877",
+        "static/js/custom-context-menu.js:21"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.insert.row.below",
+      "source": "Insert row below",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:878",
+        "static/js/custom-context-menu.js:21"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.load.this.provider.s.sign.in.methods.before.adding.it",
+      "source": "Load this provider’s sign-in methods before adding it.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1320"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loaded.available.provider.data.value.section.value.still.retrying",
+      "source": "Loaded available provider data; {0} section{1} still retrying.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2550"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.account.details",
+      "source": "Loading account details…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2124"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.model",
+      "source": "Loading model",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/model_routes.py:1915"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.model.routing",
+      "source": "Loading model routing…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2591"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.people",
+      "source": "Loading people…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1851",
+        "static/js/providerControl.js:1870"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.provider.control.plane",
+      "source": "Loading provider control plane…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2527"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.providers",
+      "source": "Loading providers…",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:710",
+        "static/js/models.js:685"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.providers.your.existing.models.are.already.available.under.added",
+      "source": "Loading providers… Your existing models are already available under Added Models. Use Refresh if this does not clear.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1121"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.sign.in.methods",
+      "source": "Loading sign-in methods…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1282"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.local.model.provider",
+      "source": "Local model provider",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1167"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.local.model.server.url",
+      "source": "Local model server URL",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1183"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.local.server.appears.offline.value.click.to.try.anyway.or",
+      "source": "Local server appears offline: {0}. Click to try anyway, or relaunch in Cookbook.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:617"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.login.value.value",
+      "source": "Login {0}{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1673"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.low.reasoning",
+      "source": "Low reasoning",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:99"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.maximum",
+      "source": "Maximum",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:48"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.maximum.reasoning",
+      "source": "Maximum reasoning",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.medium.reasoning",
+      "source": "Medium reasoning",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:100"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mimo",
+      "source": "mimo",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:112"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mimo.83bebdb3",
+      "source": "MiMo",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:112"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mimo.auto.included",
+      "source": "MiMo Auto included",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:408"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.minimal",
+      "source": "Minimal",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:43"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.minimal.reasoning",
+      "source": "Minimal reasoning",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:98"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.model.refresh.failed",
+      "source": "Model refresh failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:1116"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.account.connected",
+      "source": "No account connected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1955"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.account.fields.were.provided",
+      "source": "No account fields were provided",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/provider_v1_routes.py:1777"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.accounts.yet.add.account.remains.available.so.credentials.never",
+      "source": "No accounts yet. Add account remains available so credentials never overwrite one another.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2116"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.api.key",
+      "source": "No API key",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1242",
+        "static/js/providerControl.js:729",
+        "static/js/providerControl.js:748"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.api.key.is.required.add.one.only.if.this",
+      "source": "No API key is required. Add one only if this local server is protected.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1567"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.connected.api.providers",
+      "source": "No connected API providers.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:683"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.connection.fields.were.provided",
+      "source": "No connection fields were provided",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/provider_v1_routes.py:1508"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.credential",
+      "source": "No credential",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/openclank/provider_family_catalog.py:147"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.data.rows",
+      "source": "No data rows",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:423"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.enabled.openai.model.route",
+      "source": "(No enabled OpenAI model route)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:710"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.key.required",
+      "source": "No key required",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2025",
+        "static/js/providerControl.js:2027"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.live.models.are.available.in.this.share",
+      "source": "No live models are available in this share.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2215"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.matching.options",
+      "source": "No matching options.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:311"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.matching.providers",
+      "source": "No matching providers.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:612"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.message.provided.line.2.is.the.message",
+      "source": "No message provided (line 2+ is the message)",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/model_interaction_tools.py:50"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.model.health.yet",
+      "source": "No model health yet",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:790"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.model.routes.are.published.for.this.connection.yet",
+      "source": "No model routes are published for this connection yet.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1938"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.model.specified",
+      "source": "No model specified",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/model_routes.py:3081"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.models.added.yet.connect.an.api.provider.or.local",
+      "source": "No models added yet. Connect an API provider or local model server to get started.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2301"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.models.connected",
+      "source": "No models connected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:554"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.models.found",
+      "source": "No models found",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/model_interaction_tools.py:161",
+        "static/js/models.js:638",
+        "static/js/slashCommands.js:1369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.models.have.been.shared.directly.with.you",
+      "source": "No models have been shared directly with you.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:174"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.models.match",
+      "source": "No models match \"",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:627"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.more.providers.to.connect",
+      "source": "No more providers to connect.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:612",
+        "static/js/mimoProviders.js:677"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.other.users.are.available",
+      "source": "No other users are available.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:311",
+        "static/js/providerControl.js:1805"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.problem.description.provided",
+      "source": "No problem description provided",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/model_interaction_tools.py:96"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.provider.selected",
+      "source": "No provider selected.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:643"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.reasoning",
+      "source": "No reasoning",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:97"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.teacher.model.configured.specify.a.model.name.or.set",
+      "source": "No teacher model configured. Specify a model name or set teacher_model in settings.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/model_interaction_tools.py:101"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.not.connected",
+      "source": "Not connected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:403",
+        "static/js/mimoProviders.js:405"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.not.selected",
+      "source": "Not selected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2391"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.oauth",
+      "source": "oauth",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:598",
+        "static/js/mimoProviders.js:600",
+        "static/js/providerControl.js:1321",
+        "static/js/providerControl.js:1333",
+        "static/js/providerControl.js:1341"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.official.provider.api",
+      "source": "Official provider API",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1321"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.offline.5c6e0a00",
+      "source": "(offline)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:460"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.offline.e01fa717",
+      "source": "Offline",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:165"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.admin.to.add.endpoints",
+      "source": "Open Admin to add endpoints",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:639"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.acp.is.unavailable",
+      "source": "Open Clank agent ACP is unavailable",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/model_dispatch.py:197"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.did.not.accept.the.authorization",
+      "source": "Open Clank agent did not accept the authorization",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:553"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.did.not.remove.the.credential",
+      "source": "Open Clank agent did not remove the credential",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:1012"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.did.not.save.the.credential",
+      "source": "Open Clank agent did not save the credential",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:942"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.is.not.running",
+      "source": "Open Clank agent is not running",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:233"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.provider.operation.failed",
+      "source": "Open Clank agent provider operation failed",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:480"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.returned.an.invalid.authorization.response",
+      "source": "Open Clank agent returned an invalid authorization response",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:748"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.returned.an.invalid.provider.catalog",
+      "source": "Open Clank agent returned an invalid provider catalog",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:489"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.runtime.is.unavailable",
+      "source": "Open Clank agent runtime is unavailable",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/model_routes.py:3373"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.provider.login",
+      "source": "Open Clank provider login",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:122"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.provider.login",
+      "source": "Open provider login",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:134",
+        "static/js/providerControl.js:1714"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.to.load.account.details",
+      "source": "Open to load account details.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2104"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.options.513f8de9",
+      "source": "options",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:127",
+        "static/js/providerControl.js:129"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.perplexity",
+      "source": "Perplexity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providers.js:137"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pro.preset",
+      "source": "Pro preset",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:37"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.base.url",
+      "source": "Provider base URL",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1182",
+        "static/js/providerControl.js:1183"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.catalog",
+      "source": "Provider catalog",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:875",
+        "static/js/providerControl.js:893"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.catalog.loaded.loading.your.models",
+      "source": "Provider catalog loaded. Loading your models…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2548"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.control.connection.body.value",
+      "source": "provider-control-connection-body-{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2011"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.control.picker.menu.value.hidden",
+      "source": "provider-control-picker-menu{0} hidden",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:119"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.control.route.hint.hidden",
+      "source": "provider-control-route-hint hidden",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1187"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.login",
+      "source": "Provider login",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:730"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.login.bf6b5a99",
+      "source": "provider login",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1342",
+        "static/js/providerControl.js:1420"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.request",
+      "source": "Provider request",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:618"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.shares",
+      "source": "Provider shares",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1002"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.provider.sign.in.methods",
+      "source": "Provider sign-in methods",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1287"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.refresh.models",
+      "source": "Refresh models",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1899"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.refreshing.models.5a99f1ae",
+      "source": "Refreshing models…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:446"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.from.favorites",
+      "source": "Remove from favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:764",
+        "static/js/modelPicker.js:765"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.value.from.this.account.pool",
+      "source": "Remove {0} from this account pool?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1538"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.render.failed",
+      "source": "(render failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:676"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.request.failed.http.value",
+      "source": "Request failed (HTTP {0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerDeviceFlow.js:60"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retry.sign.in.methods",
+      "source": "Retry sign-in methods",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1304"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scan.failed.1d929b60",
+      "source": "(scan failed)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:253"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.models.from.value",
+      "source": "Search models from {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1923"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.value.models.8e2b1c13",
+      "source": "Search {0} models…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1922"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.session.module.not.loaded.209a371c",
+      "source": "Session module not loaded",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:114"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.setup",
+      "source": "/setup",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:648",
+        "static/js/slashCommands.js:5439",
+        "static/js/slashCommands.js:6047"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.share.recipients",
+      "source": "Share recipients",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1001"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.share.value.with.value",
+      "source": "Share {0} with {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1812"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shared.model.update.failed.value",
+      "source": "Shared model update failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:230"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shared.value.with.value",
+      "source": "Shared {0} with {1}.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1833"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shared.with.value",
+      "source": "Shared with {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1799"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sharing.update.failed.value",
+      "source": "Sharing update failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:337"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.models.value",
+      "source": "Show models ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:462"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.value.more.model.value",
+      "source": "Show {0} more model{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:518"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sign.in.ada2e9e9",
+      "source": "Sign in",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1333"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sign.in.methods.unavailable",
+      "source": "Sign-in methods unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1241"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sign.in.required",
+      "source": "Sign-in required",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1332",
+        "static/js/providerControl.js:792"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.starting.provider.login",
+      "source": "Starting provider login…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:123"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.starting.value",
+      "source": "Starting {0}…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:248"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.state.from.the.callback.url",
+      "source": "State from the callback URL",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1721"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.status.value",
+      "source": "Status: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1665",
+        "static/js/providerControl.js:1733"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.stopped.sharing.value.with.value",
+      "source": "Stopped sharing {0} with {1}.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1833"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.thinking",
+      "source": "Thinking",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:695"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.provider.does.not.offer.a.login.method",
+      "source": "This provider does not offer a login method.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1691"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.together",
+      "source": "Together",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providers.js:135"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.toggle.favorite",
+      "source": "Toggle favorite",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:143"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.type.setup.for.local.models.or.api.setup",
+      "source": "Type /setup for Local models or API setup.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:640"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.type.setup.then.choose.local.models.or.api",
+      "source": "Type /setup, then choose Local models or API.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:650"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ultra",
+      "source": "Ultra",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:49"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unavailable.for.current.models",
+      "source": "Unavailable for current models",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:803"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.device.flow.provider.value",
+      "source": "Unknown device-flow provider: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerDeviceFlow.js:75"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.function.value",
+      "source": "Unknown function: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:608"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.lane",
+      "source": "Unknown lane",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:704"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.moved.track.value",
+      "source": "Unknown moved track: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/planningModel.js:123"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.open.clank.agent.provider",
+      "source": "Unknown Open Clank agent provider",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:500"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.provider.family",
+      "source": "Unknown provider family",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/provider_v1_routes.py:1325"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.provider.login.flow",
+      "source": "Unknown provider login flow",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:128",
+        "routes/mimo_provider_routes.py:132",
+        "routes/mimo_provider_routes.py:134",
+        "routes/mimo_provider_routes.py:136"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.provider.route.purpose",
+      "source": "Unknown provider route purpose",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/provider_v1_routes.py:2382",
+        "routes/provider_v1_routes.py:2404",
+        "routes/provider_v1_routes.py:2465"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.target.parent.value",
+      "source": "Unknown target parent: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/planningModel.js:126"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.token.value",
+      "source": "Unknown token: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/tableModel.js:583"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.track.value",
+      "source": "Unknown track: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal/planningModel.js:100",
+        "static/js/copal/planningModel.js:147",
+        "static/js/copal/planningModel.js:160"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.use",
+      "source": "Use",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:703"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.using.value",
+      "source": "Using {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:944"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.v.value.ea7528f8",
+      "source": "V{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:114"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.accounts",
+      "source": "{0} accounts",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:977"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.chat.model.value",
+      "source": "· {0} chat model{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:414"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.loaded.available.data.but.value.refresh.to.retry",
+      "source": "{0} loaded available data, but {1}. Refresh to retry.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2562"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.menu",
+      "source": "{0}-menu",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:118"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.mode",
+      "source": "{0} mode",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:679"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.model.value",
+      "source": "{0} model{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:1137",
+        "static/js/providerControl.js:2457"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.model.value.shared.with.you",
+      "source": "{0} model{1} shared with you",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelSharing.js:239"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.models.value",
+      "source": "{0} models ({1})",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:544"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

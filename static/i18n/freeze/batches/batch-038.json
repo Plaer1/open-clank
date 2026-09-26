@@ -1,0 +1,3243 @@
+{
+  "id": "batch-038",
+  "group": "email",
+  "surface": "email",
+  "entry_count": 253,
+  "character_count": 17952,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.999.unread",
+      "source": "999+ unread",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4457",
+        "static/js/emailLibrary.js:912"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.account.ca20728d",
+      "source": "account",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:198",
+        "static/js/emailLibrary.js:2993"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.action.needed.c9232862",
+      "source": "Action needed",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2397",
+        "static/js/emailLibrary.js:3477"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.action.needed.ec58e709",
+      "source": "action needed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3477"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.active.email.for.all.email.settings",
+      "source": "Active email for all email settings",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:202"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.unsubscribe",
+      "source": "Agent Unsubscribe",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1626"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.flagged.as.spam.click.to.unflag",
+      "source": "AI flagged as spam — click ✓ to unflag",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:617"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.reply.921d7da8",
+      "source": "AI Reply",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6936"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.reply.a2f7ca70",
+      "source": "AI reply",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5303",
+        "static/js/emailLibrary.js:6933",
+        "static/js/emailLibrary.js:7088"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.reply.cached.draft.ready",
+      "source": "AI Reply (cached draft ready)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5306",
+        "static/js/emailLibrary.js:6936",
+        "static/js/emailLibrary.js:7091"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.reply.failed",
+      "source": "AI reply failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:853",
+        "static/js/emailInbox.js:859"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.reply.suggest.a.draft",
+      "source": "AI Reply (suggest a draft)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5306",
+        "static/js/emailLibrary.js:7091"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.all.343c9118",
+      "source": "All...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6326"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.already.in.contacts",
+      "source": "Already in contacts",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7554"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.amp",
+      "source": "&amp;",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:430"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.analyzing.sent.emails",
+      "source": "Analyzing sent emails…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:396",
+        "static/js/emailLibrary.js:398"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.and.cffa50a3",
+      "source": "and",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "routes/email_helpers.py:1854",
+        "routes/email_pollers.py:951",
+        "routes/email_routes.py:4984",
+        "routes/email_routes.py:5090",
+        "routes/email_routes.py:5384",
+        "services/search/content.py:432",
+        "src/builtin_actions.py:779",
+        "static/js/slashCommands.js:3771"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.any.reasoning.must.come.before",
+      "source": "Any reasoning must come BEFORE",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:4980"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.any.reasoning.or.planning.must.come.before",
+      "source": "Any reasoning or planning must come BEFORE",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/email_pollers.py:950"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.applies.to",
+      "source": "Applies to",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:144"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attach.13ce071f",
+      "source": "attach",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3467"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attachment.as.doc.error",
+      "source": "attachment-as-doc error",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6425"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attachment.download.error",
+      "source": "attachment download error",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6497"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attachment.download.failed",
+      "source": "attachment download failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6483"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attachments",
+      "source": "attachments",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3467"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attachments.value",
+      "source": "Attachments ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6566"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attachments.zip.download.error",
+      "source": "attachments zip download error",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6348"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attachments.zip.download.failed",
+      "source": "attachments zip download failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6333"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.auto.reply",
+      "source": "Auto Reply",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:120"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.auto.reply.is.enabled",
+      "source": "Auto reply is enabled",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4437"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.auto.unsubscribe.all",
+      "source": "Auto Unsubscribe All",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1552",
+        "static/js/emailLibrary.js:1574",
+        "static/js/emailLibrary.js:1641"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.away",
+      "source": "Away",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4436"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.back.b52b36b7",
+      "source": "Back",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2364",
+        "static/js/notes.js:4807"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.bill",
+      "source": "bill",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3478"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.billing",
+      "source": "billing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3478"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.bills",
+      "source": "Bills",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2398",
+        "static/js/emailLibrary.js:3478"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.bills.7e2960d8",
+      "source": "bills",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3478"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.booking",
+      "source": "booking",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3480"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cancel.scheduled.email.value",
+      "source": "Cancel scheduled email \"{0}\"?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4663"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cancel.scheduled.send",
+      "source": "Cancel scheduled send",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4658"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cancel.send",
+      "source": "Cancel Send",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4663"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cc.9d0e3171",
+      "source": "Cc:",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5303",
+        "static/js/emailLibrary.js:6933",
+        "static/js/emailLibrary.js:7088"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clean.fa893d87",
+      "source": "Clean",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:187"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.filter",
+      "source": "Clear filter",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:523"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compose.could.not.obtain.a.session.id",
+      "source": "compose: could not obtain a session_id",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1361"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compose.post.failed",
+      "source": "compose POST failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1382"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.contact",
+      "source": "contact",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3662"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.email",
+      "source": "Copy email",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:694",
+        "static/js/emailLibrary.js:726",
+        "static/js/emailLibrary.js:789"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.failed.ff790176",
+      "source": "copy failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:748",
+        "static/js/emailLibrary.js:783"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.download.attachments",
+      "source": "Could not download attachments",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6349"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.load.email",
+      "source": "Could not load email",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:472"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.load.settings",
+      "source": "Could not load settings.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:268",
+        "static/js/emailLibrary.js:290"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.start.a.new.email.no.session",
+      "source": "Could not start a new email (no session).",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1362"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.start.a.reply.chat",
+      "source": "Could not start a reply chat.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1000"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.couldn.t.open.value.value",
+      "source": "Couldn't open {0}: {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6397"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.date.81b7d2ea",
+      "source": "Date:",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/email_pollers.py:1356"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.default.account",
+      "source": "Default account",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3002",
+        "static/js/settings.js:2905"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.permanently",
+      "source": "Delete Permanently",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7593"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.value.reviewed.email.value",
+      "source": "Delete {0} reviewed email{1}?",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1514"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.value.selected.email.value",
+      "source": "Delete {0} selected email{1}?",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7943"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.deleted.value.reminder.email.value",
+      "source": "Deleted {0} reminder email{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2626"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.document.opened.but.panel.could.not.mount",
+      "source": "Document opened but panel could not mount",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6422"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.done.mark.all.value.of.these.email.value.as.spam",
+      "source": "Done. Mark all {0} of these email{1} as spam?",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1499"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.all.attachments",
+      "source": "Download all attachments",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6572"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.downloading.value.attachments",
+      "source": "Downloading {0} attachments",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6346"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.drafting.ai.reply",
+      "source": "Drafting AI reply",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:817"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.eager",
+      "source": "eager",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5660"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.email.chat.create.failed",
+      "source": "email chat create failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1334"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.email.reminder",
+      "source": "email reminder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:8462"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.email.reply.writing.style",
+      "source": "Email Reply Writing Style",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:210"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.email.value",
+      "source": "Email: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1296",
+        "static/js/tasks.js:1576"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.enabled.df174a3f",
+      "source": "Enabled",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:307"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.end.date",
+      "source": "End date",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:133"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.every.3.days",
+      "source": "Every 3 days",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:152"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.every.7.days",
+      "source": "Every 7 days",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:153"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.every.day",
+      "source": "Every day",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:151"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.extract",
+      "source": "Extract",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:221"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.extract.failed",
+      "source": "Extract failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:417"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.extracted.e75fa4bf",
+      "source": "Extracted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:413"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.8d33f306",
+      "source": "FAILED",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4646"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.archive",
+      "source": "Failed to archive:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1219"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.clear.reminder.emails",
+      "source": "Failed to clear reminder emails",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2641"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.create.document",
+      "source": "Failed to create document",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:3653",
+        "static/js/document.js:221",
+        "static/js/document.js:7135",
+        "static/js/documentLibrary.js:1217",
+        "static/js/documentLibrary.js:3497"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.create.new.email",
+      "source": "Failed to create new email (",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1383"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.create.reply.draft",
+      "source": "Failed to create reply draft (",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1027"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.delete.email.66d65958",
+      "source": "Failed to delete email",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1172",
+        "static/js/emailLibrary.js:7585",
+        "static/js/emailLibrary.js:7610",
+        "static/js/emailLibrary.js:7825"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.extract.email.writing.style",
+      "source": "Failed to extract email writing style",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:418"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.fetch.email.headers",
+      "source": "Failed to fetch email headers",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:2624"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.email",
+      "source": "Failed to load email",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:473",
+        "static/js/emailLibrary.js:5235",
+        "static/js/emailLibrary.js:5439",
+        "static/js/emailLibrary.js:6891",
+        "static/js/emailLibrary.js:6982"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.email.value",
+      "source": "Failed to load email: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5253",
+        "static/js/emailLibrary.js:5439",
+        "static/js/emailLibrary.js:6909",
+        "static/js/emailLibrary.js:6982"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.move.to.value",
+      "source": "Failed to move to {dest}",
+      "placeholders": [
+        "dest"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:3943"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.read.docx.value",
+      "source": "Failed to read docx: {e}",
+      "placeholders": [
+        "e"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:3699"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.read.email.attachment",
+      "source": "Failed to read email attachment",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:3686"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.read.text.file.value",
+      "source": "Failed to read text file: {e}",
+      "placeholders": [
+        "e"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:3735"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.contact",
+      "source": "Failed to save contact",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7556",
+        "static/js/emailLibrary.js:7559"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.email.settings",
+      "source": "Failed to save email settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:343"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.email.writing.style",
+      "source": "Failed to save email writing style",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:377"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.scan.email.headers",
+      "source": "Failed to scan email headers",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1597",
+        "static/js/emailLibrary.js:1743"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.send.email",
+      "source": "Failed to send email",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:4740",
+        "static/js/document.js:4044"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.summarize",
+      "source": "Failed to summarize",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7259",
+        "static/js/emailLibrary.js:7265"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.translate",
+      "source": "Failed to translate",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7341",
+        "static/js/emailLibrary.js:7346"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.update.value.email.value",
+      "source": "Failed to update {0} email{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:8100"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.value.value",
+      "source": "Failed to {0} {1}:",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:8030"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.favorite.pin.to.top",
+      "source": "Favorite (pin to top)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7486",
+        "static/js/emailLibrary.js:7740",
+        "static/js/emailLibrary.js:7768"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.favorited",
+      "source": "Favorited",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4987",
+        "static/js/gallery.js:1383",
+        "static/js/modelPicker.js:783",
+        "static/js/models.js:148"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.favorites",
+      "source": "Favorites",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2388",
+        "static/js/emailLibrary.js:3469",
+        "static/js/files.js:2981",
+        "static/js/gallery.js:393",
+        "static/js/models.js:347"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.favorites.aee20c6a",
+      "source": "favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3469"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.filtered.inline.images.signature.files",
+      "source": "Filtered inline images / signature files",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6563"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.find.newsletter.and.ad.emails.with.unsubscribe.options",
+      "source": "Find newsletter and ad emails with unsubscribe options.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:183"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.flagged",
+      "source": "flagged",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3469"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.follow.up",
+      "source": "follow up",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3476"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.forward.ba4e7226",
+      "source": "Forward",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5306",
+        "static/js/emailLibrary.js:6936",
+        "static/js/emailLibrary.js:7091"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.from.c4d63e4c",
+      "source": "From:",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "routes/email_pollers.py:1354",
+        "static/js/emailLibrary.js:5298",
+        "static/js/emailLibrary.js:6928",
+        "static/js/emailLibrary.js:7083"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.from.earlier.in.this.thread",
+      "source": "From earlier in this thread",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6560"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.from.value.142e2e66",
+      "source": "From: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:523"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.generate.now",
+      "source": "Generate now",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7179"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.go.2e0b45f2",
+      "source": "Go",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:8289"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.has.attachment",
+      "source": "has attachment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3467"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.has.attachments",
+      "source": "Has attachments",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:585",
+        "static/js/emailLibrary.js:3467",
+        "static/js/emailLibrary.js:4907"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.hidden.inline.attachments.value",
+      "source": "Hidden inline attachments ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6569"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.holiday.or.away.replies.for.incoming.mail",
+      "source": "Holiday or away replies for incoming mail.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:121"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ideally.inside",
+      "source": "(ideally inside",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/email_pollers.py:950",
+        "routes/email_routes.py:4980"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.failed.to.load",
+      "source": "Image failed to load",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5686"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.failed.value",
+      "source": "Image failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5686"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.unavailable.f2cca83a",
+      "source": "Image unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5609"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.inbox",
+      "source": "INBOX",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1549",
+        "static/js/emailLibrary.js:1571",
+        "static/js/emailLibrary.js:5638",
+        "static/js/emailLibrary.js:7450",
+        "static/js/emailLibrary.js:7696"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.inbox.44caf746",
+      "source": "Inbox",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2382"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.inline.image",
+      "source": "Inline image",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5594"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.inline.image.hidden",
+      "source": "Inline image hidden",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5609"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.integrations.a2e1a877",
+      "source": "integrations",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1277",
+        "static/js/emailLibrary.js:4780",
+        "static/js/settings.js:60"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.junk",
+      "source": "junk",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3481"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.keep",
+      "source": "Keep",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1503",
+        "static/js/emailLibrary.js:4663",
+        "static/js/files.js:795"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.later.today",
+      "source": "Later today",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1121",
+        "static/js/emailLibrary.js:8352",
+        "static/js/notes.js:3277"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.link.unsubscribe",
+      "source": "Link Unsubscribe",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1625"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.load.all",
+      "source": "Load all",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5755"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loaded.email.image",
+      "source": "Loaded email image",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5659"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.8f26c652",
+      "source": "Loading",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:97"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.email",
+      "source": "Loading email",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4365"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.emails",
+      "source": "Loading emails",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4348"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.image",
+      "source": "Loading image...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5654"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mark.as.done",
+      "source": "Mark as Done",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7503"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mark.as.not.done",
+      "source": "Mark as Not Done",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7503"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mark.as.read",
+      "source": "Mark as Read",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7466"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mark.as.spam",
+      "source": "Mark as spam",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1501"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mark.as.unread",
+      "source": "Mark as Unread",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7466"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mark.done",
+      "source": "Mark done",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4942",
+        "static/js/emailLibrary.js:4953",
+        "static/js/notes.js:1913",
+        "static/js/notes.js:1969"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mark.not.done",
+      "source": "Mark not done",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4942",
+        "static/js/emailLibrary.js:4953"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mark.read",
+      "source": "Mark Read",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7884"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.message.68f4145f",
+      "source": "Message",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:140"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.move.to.archive",
+      "source": "Move to Archive",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7524"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.move.to.spam",
+      "source": "Move to Spam",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7565"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.moved.to.trash",
+      "source": "Moved to Trash",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1182"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.n.s",
+      "source": "|\\n)\\s*((?:",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6229"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.needs.action",
+      "source": "needs action",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3477"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.needs.reply.now",
+      "source": "needs reply now",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:602"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.email",
+      "source": "New Email",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1296",
+        "static/js/emailInbox.js:1370"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.email.b07e22b0",
+      "source": "New email",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2453"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.newsletter.unsubscribe",
+      "source": "Newsletter Unsubscribe",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:182"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.next.email",
+      "source": "Next email",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5000"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.next.week",
+      "source": "Next week",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1123",
+        "static/js/emailLibrary.js:8354",
+        "static/js/notes.js:3279"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.ai.summary.generated",
+      "source": "No AI summary generated.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7179"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.body",
+      "source": "No body",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5578"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.body.provided",
+      "source": "No body provided",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:4952",
+        "routes/email_routes.py:5048"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.downloadable.attachments",
+      "source": "No downloadable attachments",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:3377",
+        "routes/email_routes.py:3401"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.email.body.provided",
+      "source": "No email body provided",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:5193"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.email.body.to.translate",
+      "source": "No email body to translate",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7290"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.email.uids.provided",
+      "source": "No email UIDs provided",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:2773"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.emails",
+      "source": "No emails",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:531"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.emails.from.value",
+      "source": "No emails from {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:531"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.emails.to.update",
+      "source": "No emails to update",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1443"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.llm.endpoint.configured",
+      "source": "No LLM endpoint configured",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:4997",
+        "routes/email_routes.py:5111",
+        "routes/email_routes.py:5359"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.reply",
+      "source": "no reply",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3472"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.safe.mail.unsubscribe.actions.found",
+      "source": "No safe mail unsubscribe actions found",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1637"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.scheduled.emails",
+      "source": "No scheduled emails",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4625"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.sender.address",
+      "source": "No sender address",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7541"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.subject.49b20da0",
+      "source": "(no subject)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1186",
+        "static/js/emailLibrary.js:4896",
+        "static/js/emailLibrary.js:6766",
+        "static/js/emailLibrary.js:7006",
+        "static/js/emailLibrary.js:7597",
+        "static/js/emailLibrary.js:7815"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.unsubscribe.candidates.found.in.value.recent.emails",
+      "source": "No unsubscribe candidates found in {0} recent emails.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1604"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.unsubscribe.header.found.for.this.email",
+      "source": "No unsubscribe header found for this email",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:2710"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.unsubscribe.method",
+      "source": "No unsubscribe method",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1287"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.valid.attachments",
+      "source": "No valid attachments",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:4215"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.not.done.80693856",
+      "source": "Not Done",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7710"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.not.spam",
+      "source": "Not spam",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:617"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.note.2c924e30",
+      "source": "Note",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:8393",
+        "static/js/notes.js:2158",
+        "static/js/notes.js:3002"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.note.about.value",
+      "source": "Note about {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:8409"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.old",
+      "source": "old",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3474"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.once.while.active",
+      "source": "Once while active",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:150"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.only.the.text.between",
+      "source": "). Only the text between",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/email_helpers.py:1854"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.calendar.event",
+      "source": "Open calendar event",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:75",
+        "static/js/emailLibrary.js:532"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.document.failed",
+      "source": "Open document failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6421"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.email.value",
+      "source": "Open email: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:8461"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.in.document.editor",
+      "source": "Open in document editor",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6549"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pause.email.notifications.while.active",
+      "source": "Pause email notifications while active",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:162"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pending.0a7b38b7",
+      "source": "PENDING",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4646"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pending.30d",
+      "source": "Pending · 30d",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2392",
+        "static/js/emailLibrary.js:3473"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pending.30d.04a865cd",
+      "source": "pending 30d",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3473"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.permanently.delete.all.open.clank.reminder.emails",
+      "source": "Permanently delete all Open Clank reminder emails?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2614"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.permanently.delete.open.clank.reminder.emails",
+      "source": "Permanently delete Open Clank reminder emails",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2415"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.permanently.delete.value.this.cannot.be.undone",
+      "source": "Permanently delete \"{0}\"? This cannot be undone.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7599"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pick.date.and.time.a287c5a0",
+      "source": "Pick date and time…",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1138",
+        "static/js/emailLibrary.js:8369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.previous.email",
+      "source": "Previous email",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4999"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.purchase",
+      "source": "purchase",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3479"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quot",
+      "source": "&quot;",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3656"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.read",
+      "source": "read",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7884"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reason",
+      "source": "Reason:",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/email_pollers.py:1350"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.receipt",
+      "source": "Receipt",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2399",
+        "static/js/emailLibrary.js:3479"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.receipt.14e60ace",
+      "source": "receipt",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3479"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.receipts",
+      "source": "receipts",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3479"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.recent.pending",
+      "source": "recent pending",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3473"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rel",
+      "source": "rel",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary/utils.js:207"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remind",
+      "source": "remind",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1072",
+        "static/js/emailLibrary.js:7457",
+        "static/js/emailLibrary.js:7699"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remind.me",
+      "source": "Remind me",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1107",
+        "static/js/emailLibrary.js:8339",
+        "static/js/notes.js:2987"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remind.to.reply",
+      "source": "Remind to reply",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1072",
+        "static/js/emailLibrary.js:7455",
+        "static/js/emailLibrary.js:7699"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reminder.348be0ed",
+      "source": "reminder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3471"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remote.image",
+      "source": "Remote image",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5594"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remote.image.blocked",
+      "source": "Remote image blocked",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5609"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.all.84c27c09",
+      "source": "Reply all",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5308",
+        "static/js/emailLibrary.js:6938",
+        "static/js/emailLibrary.js:7093"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.all.a7590ab3",
+      "source": "Reply All",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5308",
+        "static/js/emailLibrary.js:6938",
+        "static/js/emailLibrary.js:7093"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.could.not.obtain.a.session.id",
+      "source": "reply: could not obtain a session_id",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:999"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.failed",
+      "source": "Reply failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1054"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.note.saved",
+      "source": "Reply note saved",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:8478"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.soon.13618b22",
+      "source": "reply soon",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3476"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.soon.1a627dd3",
+      "source": "Reply soon —",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:603"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.soon.b8a4adb1",
+      "source": "Reply soon",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2396",
+        "static/js/emailLibrary.js:3476"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.to.value.value",
+      "source": "Reply to {0}: {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:8454"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reply.value",
+      "source": "Reply: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:1186",
+        "static/js/emailLibrary.js:8456"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.request.timed.out",
+      "source": "request timed out",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5738"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restore.email",
+      "source": "Restore Email",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:919"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.s.df70c78f",
+      "source": "\\s*(.*?)\\s*",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/email_routes.py:5138",
+        "src/agent_tools/document_tools.py:341",
+        "src/agent_tools/document_tools.py:342",
+        "src/agent_tools/document_tools.py:343",
+        "src/builtin_actions.py:804"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.value.s.s",
+      "source": "\\s*)*{0}\\s*:\\s*[^",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:6229"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.sender.to.contacts",
+      "source": "Save sender to contacts",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7536"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.to.contacts",
+      "source": "Saved to contacts",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:7555"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scanning.36c4a06f",
+      "source": "Scanning…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1339"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scanning.recent.value.headers",
+      "source": "Scanning recent {0} headers…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1549",
+        "static/js/emailLibrary.js:1571"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.score.value",
+      "source": "score {4}",
+      "placeholders": [
+        "4"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1620"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.by.name.or.text",
+      "source": "Search by name or text",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2425",
+        "static/js/emailLibrary.js:3650"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.failed",
+      "source": "Search failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4237",
+        "static/js/files.js:1825",
+        "static/js/slashCommands.js:1836"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.searching.1a6a5ba8",
+      "source": "Searching…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4089"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.searching.more.mail",
+      "source": "Searching more mail...",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4402"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.emails.first",
+      "source": "Select emails first",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2838",
+        "static/js/emailLibrary.js:2846"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selected.account",
+      "source": "selected account",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:114",
+        "static/js/emailLibrary.js:115"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.to.same.sender",
+      "source": "Send to same sender",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:148"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.unsubscribe.email.to.value",
+      "source": "Send unsubscribe email to {0}?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1705"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.unsubscribe.emails.for.value.target.value",
+      "source": "Send unsubscribe emails for {0} target{1}?",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1640"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sender.details",
+      "source": "Sender details",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:720"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sent",
+      "source": "Sent",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1676",
+        "static/js/emailLibrary.js:1729",
+        "static/js/emailLibrary.js:5029"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sent.email",
+      "source": "Sent email",
+      "placeholders": [],
+      "kind": "js-string-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:5029"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.services",
+      "source": "services",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:1261",
+        "static/js/settings.js:59",
+        "static/js/settings.js:7084"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.set.as.default",
+      "source": "Set as default",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:3002"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.setup.c85112ad",
+      "source": "Setup:",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:18"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.all.emails",
+      "source": "Show all emails",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:4447",
+        "static/js/emailLibrary.js:4452"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.all.emails.from.value",
+      "source": "Show all emails from {5}",
+      "placeholders": [
+        "5"
+      ],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:625"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.all.tags",
+      "source": "Show all tags",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailInbox.js:87",
+        "static/js/emailLibrary.js:544"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.email.tags",
+      "source": "Show email tags",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/emailLibrary.js:2437"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

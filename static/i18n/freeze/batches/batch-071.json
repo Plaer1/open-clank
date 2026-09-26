@@ -1,0 +1,83 @@
+{
+  "id": "batch-071",
+  "group": "treehouse.lesson.house-making",
+  "surface": "treehouse",
+  "entry_count": 6,
+  "character_count": 933,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-making.scoped-exports.practice.expectedEvidence",
+      "source": "The export completes and its manifest validates against the selected scope.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1074"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.scoped-exports.practice.seed",
+      "source": "Export only the disposable practice project and read its manifest.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1072"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.scoped-exports.practice.title",
+      "source": "Scoped practice export",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1071"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.scoped-exports.result",
+      "source": "An export limited to what you chose, with a manifest that proves it.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1045"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.scoped-exports.title",
+      "source": "Scoped exports and checking their manifests",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1045"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.scoped-exports.whyThisHelps",
+      "source": "Exports are how work leaves the house. A manifest is the packing list — check it and you know what the recipient received.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1045"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    }
+  ]
+}

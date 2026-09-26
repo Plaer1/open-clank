@@ -1,0 +1,19 @@
+{
+  "id": "fi",
+  "name": "Suomi",
+  "dir": "ltr",
+  "catalog": "fi",
+  "html_lang": "fi",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 4849,
+    "english_fallback": 4773
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

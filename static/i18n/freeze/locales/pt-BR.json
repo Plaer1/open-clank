@@ -1,0 +1,19 @@
+{
+  "id": "pt-BR",
+  "name": "Português (Brasil)",
+  "dir": "ltr",
+  "catalog": "pt-BR",
+  "html_lang": "pt-BR",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 4900,
+    "english_fallback": 4722
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

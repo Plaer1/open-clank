@@ -45,12 +45,15 @@ const chromium = spawn(chrome, [
 let socket;
 try {
   const debuggerBase = `http://127.0.0.1:${port}`;
-  let targets;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    try { targets = await fetch(`${debuggerBase}/json`).then(response => response.json()); break; }
-    catch { await new Promise(resolve => setTimeout(resolve, 50)); }
+  let target;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      const targets = await fetch(`${debuggerBase}/json`).then(response => response.json());
+      target = targets?.find(item => item.type === 'page' && item.webSocketDebuggerUrl);
+      if (target) break;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
-  const target = targets?.find(item => item.type === 'page');
   assert(target?.webSocketDebuggerUrl, 'Chromium page target is unavailable');
   socket = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
@@ -167,7 +170,48 @@ try {
   assert.equal(await evaluate("document.querySelector('.i18n-offer').lang"), 'zh-Hant');
   await evaluate("document.querySelector('.i18n-offer [data-decline]').click()");
 
-  console.log(JSON.stringify({ offer, matrix, contentSafety, traditionalChineseAlias: 'zh-TW→zh-Hant' }, null, 2));
+  // French-backed “Canadian English” display alias: selection label is the
+  // joke, catalog bytes are French, html lang is French, and real fr remains.
+  const canadian = await evaluate(`(async () => {
+    await window.openClankI18n.setLocale('en-CA');
+    const descriptor = window.openClankI18n.locales['en-CA'];
+    await window.openClankI18n.setLocale('fr');
+    const french = window.openClankI18n.locales.fr;
+    return {
+      aliasName: descriptor.name,
+      aliasCatalog: descriptor.catalog,
+      aliasHtmlLang: descriptor.html_lang || descriptor.catalog,
+      frenchName: french.name,
+      frenchCatalog: french.catalog,
+      locale: window.openClankI18n.locale,
+      dir: document.documentElement.dir,
+    };
+  })()`);
+  assert.equal(canadian.aliasName, 'Canadian English');
+  assert.equal(canadian.aliasCatalog, 'fr');
+  assert.equal(canadian.aliasHtmlLang, 'fr');
+  assert.equal(canadian.frenchName, 'Français');
+  assert.equal(canadian.frenchCatalog, 'fr');
+  assert.equal(canadian.locale, 'fr');
+
+  // Malay stays a dedicated catalog selection, not a duplicate or English stub.
+  const malay = await evaluate(`(async () => {
+    await window.openClankI18n.setLocale('ms');
+    return {
+      locale: window.openClankI18n.locale,
+      name: window.openClankI18n.locales.ms.name,
+      catalog: window.openClankI18n.locales.ms.catalog,
+      lang: document.documentElement.lang,
+      dir: document.documentElement.dir,
+    };
+  })()`);
+  assert.equal(malay.locale, 'ms');
+  assert.equal(malay.name, 'Bahasa Melayu');
+  assert.equal(malay.catalog, 'ms');
+  assert.equal(malay.lang, 'ms');
+  assert.equal(malay.dir, 'ltr');
+
+  console.log(JSON.stringify({ offer, matrix, contentSafety, traditionalChineseAlias: 'zh-TW→zh-Hant', canadian, malay }, null, 2));
 } finally {
   try { socket?.close(); } catch {}
   chromium.kill('SIGTERM');

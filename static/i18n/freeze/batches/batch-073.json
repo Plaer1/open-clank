@@ -1,0 +1,83 @@
+{
+  "id": "batch-073",
+  "group": "treehouse.lesson.house-stewardship",
+  "surface": "treehouse",
+  "entry_count": 6,
+  "character_count": 1028,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-stewardship.theme-effects.practice.expectedEvidence",
+      "source": "The same theme and effect values rehydrate after a new settings load.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1166"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.theme-effects.practice.seed",
+      "source": "Pick a theme and one background effect; note the intensity and size.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1164"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.theme-effects.practice.title",
+      "source": "Appearance preference",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1163"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.theme-effects.result",
+      "source": "A theme and background effect you chose, rehydrating after a reload.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1127"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.theme-effects.title",
+      "source": "Theme, effect and accessibility controls in Settings",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1127"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.theme-effects.whyThisHelps",
+      "source": "Appearance is not decoration for its own sake — it is how the house stays readable for your eyes. Effects are optional and heavy ones can be turned off without losing the rest of the theme.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1127"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    }
+  ]
+}

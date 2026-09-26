@@ -1,0 +1,35 @@
+{
+  "id": "batch-025",
+  "group": "docs.openclank-docs-files-imps",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1695,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-files-imps.body",
+      "source": "# Files and Imps\n\nFiles is the file tree for your account: documents, folders, media and the\nmanaged image projects that Imps produces.\n\n## The file tree\n\nOpen [Files](clank://files) to browse. Files and Editor share one resource\nidentity: a document opened from Files is the same document, with the same\ndraft and history. Moving a document keeps its links and attachments.\n\nFiles exposes capabilities explicitly — read, edit, write — so a read-only\nresource says so instead of failing later on save.\n\n## Imps managed projects\n\nImps is the image editor. Its projects are managed records: every save\ncaptures a recovery preimage first, and the save is refused if that capture\nfails. You can undo a save by restoring the captured preimage.\n\nProject endpoints live under `/api/imps/projects/*`. A project binds to a\nprovider image resource and keeps its own revision counter so concurrent\nsaves cannot silently clobber each other.\n\n## Gallery\n\nThe separate Gallery applet is retired. Provisioned image content now lives\nin the **Photos** folder under Files. Legacy `gallery:` links resolve to\nFiles, and image editing opens the Imps editor. Album management is gone with\nthe applet; the folder is an ordinary folder you can move and rename.\n\nOpen [Files](clank://files) to see Photos.\n\n## Media in documents\n\nMedia attached to documents is stored with the document and moves with it.\nEmbedding an image in Markdown renders it inline; a PDF embed shows a viewer;\naudio and video embed their player.\n\nSee [[Editor]] for attaching media to a document.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:391"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-files-imps.title",
+      "source": "Files and Imps",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:391"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

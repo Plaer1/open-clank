@@ -1,0 +1,19 @@
+{
+  "id": "pt",
+  "name": "Português",
+  "dir": "ltr",
+  "catalog": "pt",
+  "html_lang": "pt",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 7090,
+    "english_fallback": 2532
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

@@ -1,0 +1,35 @@
+{
+  "id": "batch-023",
+  "group": "docs.openclank-docs-chat-workspaces",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1727,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-chat-workspaces.body",
+      "source": "# Chat and Workspaces\n\nChat is the conversational surface. Copal is the document surface. They share\none account and one set of resources, but they have different rules.\n\n## Chat\n\nEach conversation is its own transcript with its own history, attachments and\ntask list. You can keep many conversations open and switch between them from\nthe sidebar.\n\nChats can reference Copal documents by name. When the assistant quotes or\nlinks a document, opening that link goes to the document in Editor — it does\nnot fork the chat or lose your draft.\n\n## Workspaces and drafts\n\nEditor keeps drafts. If you type into a document and navigate away, the draft\nis kept and restored when you come back. Saving is guarded: if the stored\nversion moved underneath you, the save is refused rather than silently\noverwriting newer work.\n\nWindows in Copal (Editor, Graph, Timeline and the rest) keep their own\nposition and selection. Closing a window does not delete anything.\n\n## Identity in links\n\nDocument links carry the document identity, not just a title. Renaming a\ndocument keeps its links working. Sharing a link to someone on another account\nof the same installation resolves inside their own scope — they see their\ncopy of the target, not yours.\n\n## Preserving your work\n\n- Drafts survive navigation and window management.\n- Answering a task toast resumes in the original task chat, not whichever\n  chat happens to be in front.\n- Nothing in chat rewrites a Copal document without going through the normal\n  guarded save.\n\nContinue with [[Editor]] or [[Tasks and Continuations]].",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:203"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-chat-workspaces.title",
+      "source": "Chat and Workspaces",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:203"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

@@ -10,9 +10,16 @@ import { createRequire } from 'node:module';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const I18N_DIR = path.join(ROOT, 'static', 'i18n');
 const require = createRequire(import.meta.url);
-const babelParser = require(path.join(ROOT, 'packages', 'Copal', 'node_modules', '@babel', 'parser'));
-const traverseModule = require(path.join(ROOT, 'packages', 'Copal', 'node_modules', '@babel', 'traverse'));
-const traverse = traverseModule.default || traverseModule;
+// Babel is only required for JavaScript AST extraction. Validation, freeze and
+// structured extraction must run without installing Copal's node_modules.
+let babelParser = null;
+let traverse = null;
+function loadBabel() {
+  if (babelParser && traverse) return;
+  babelParser = require(path.join(ROOT, 'packages', 'Copal', 'node_modules', '@babel', 'parser'));
+  const traverseModule = require(path.join(ROOT, 'packages', 'Copal', 'node_modules', '@babel', 'traverse'));
+  traverse = traverseModule.default || traverseModule;
+}
 
 const LOCALE_SEEDS = {
   en: { name: 'English', target: 'English', dir: 'ltr' },
@@ -42,19 +49,26 @@ const existingRegistry = (() => {
     return value && typeof value === 'object' ? value : {};
   } catch (_) { return {}; }
 })();
+const pickLocaleMeta = (meta = {}) => ({
+  name: meta.name || meta.id || undefined,
+  target: meta.target || meta.name || undefined,
+  dir: meta.dir || 'ltr',
+  ...(meta.catalog ? { catalog: meta.catalog } : {}),
+  ...(meta.html_lang ? { html_lang: meta.html_lang } : {}),
+  ...(meta.alias_of ? { alias_of: meta.alias_of } : {}),
+  ...(meta.display_only ? { display_only: true } : {}),
+});
 const LOCALES = Object.freeze({
   ...Object.fromEntries(Object.entries(LOCALE_SEEDS).map(([id, item]) => [id, {
     ...item,
     ...(existingRegistry.locales?.[id]?.catalog ? { catalog: existingRegistry.locales[id].catalog } : {}),
+    ...(existingRegistry.locales?.[id]?.html_lang ? { html_lang: existingRegistry.locales[id].html_lang } : {}),
+    ...(existingRegistry.locales?.[id]?.alias_of ? { alias_of: existingRegistry.locales[id].alias_of } : {}),
+    ...(existingRegistry.locales?.[id]?.display_only ? { display_only: true } : {}),
   }])),
   ...Object.fromEntries(Object.entries(existingRegistry.locales || {})
     .filter(([id]) => !LOCALE_SEEDS[id])
-    .map(([id, meta]) => [id, {
-      name: meta.name || id,
-      target: meta.target || meta.name || id,
-      dir: meta.dir || 'ltr',
-      ...(meta.catalog ? { catalog: meta.catalog } : {}),
-    }])),
+    .map(([id, meta]) => [id, { id, ...pickLocaleMeta(meta) }])),
 });
 
 const BRANDS = Object.freeze([
@@ -333,6 +347,7 @@ function isLikelyStandaloneMessage(value) {
 }
 
 function extractJavaScript(file, collector) {
+  loadBabel();
   const code = fs.readFileSync(file, 'utf8');
   let ast;
   try {
@@ -506,6 +521,33 @@ function extract() {
     if (fs.existsSync(file)) extractCss(file, collector);
   }
 
+  // Structured first-party content (TreeHouse lessons/awards, official docs)
+  // is data in Python modules. Fold it into the live census so extract() does
+  // not demote those keys to compatibility.
+  try {
+    const structured = JSON.parse(execFileSync('python3', [path.join(ROOT, 'scripts', 'i18n_structured_extract.py')], {
+      encoding: 'utf8',
+      cwd: ROOT,
+    }));
+    for (const record of structured.records || []) {
+      const existing = collector.entries.get(record.key);
+      if (existing) {
+        if (!existing.locations.includes(...record.locations)) {
+          for (const location of record.locations) if (!existing.locations.includes(location)) existing.locations.push(location);
+        }
+        continue;
+      }
+      collector.entries.set(record.key, {
+        key: record.key,
+        source: record.source,
+        kind: record.kind || 'structured-prose',
+        locations: [...(record.locations || [])],
+      });
+    }
+  } catch (error) {
+    process.stderr.write(`warning: structured extraction skipped: ${error.message}\n`);
+  }
+
   const liveRecords = [...collector.entries.values()]
     .map(record => ({ ...record, status: 'live', locations: record.locations.sort() }))
     .sort((a, b) => a.key.localeCompare(b.key));
@@ -543,11 +585,18 @@ function extract() {
   const registry = {
     version: 2,
     default_locale: 'en',
-    locales: Object.fromEntries(Object.entries(LOCALES).map(([id, item]) => [id, {
-      name: item.name,
-      dir: item.dir,
-      ...(item.catalog ? { catalog: item.catalog } : {}),
-    }])),
+    locales: Object.fromEntries(Object.entries(LOCALES).map(([id, item]) => {
+      const meta = {
+        name: item.name,
+        dir: item.dir,
+        ...(item.catalog ? { catalog: item.catalog } : {}),
+        ...(item.html_lang ? { html_lang: item.html_lang } : {}),
+        ...(item.alias_of ? { alias_of: item.alias_of } : {}),
+        ...(item.display_only ? { display_only: true } : {}),
+      };
+      if (item.target) meta.target = item.target;
+      return [id, meta];
+    })),
     aliases: existingRegistry.aliases || {
       zh: 'zh-Hans', 'zh-CN': 'zh-Hans', 'zh-SG': 'zh-Hans',
       in: 'id', 'pa-IN': 'pa-Guru',
@@ -557,6 +606,9 @@ function extract() {
 
   writeJson(englishFile, english);
   for (const locale of Object.keys(LOCALES).filter(id => id !== 'en')) {
+    // Display aliases (en-CA → fr) reuse the donor catalog file. Do not
+    // duplicate French bytes into an en-CA.json catalog.
+    if (LOCALES[locale]?.catalog && LOCALES[locale].catalog !== locale) continue;
     const file = path.join(I18N_DIR, `${locale}.json`);
     if (!fs.existsSync(file)) continue;
     const catalog = readJson(file, {});
@@ -819,14 +871,22 @@ function validate() {
   const warnings = [];
   const untranslatedAllowed = new Set([...BRANDS, ...STABLE_TOKENS, 'English']);
 
+  const validatedCatalogFiles = new Set();
   for (const [locale, meta] of Object.entries(LOCALES)) {
-    if (meta.catalog === 'en') {
+    const catalogName = meta.catalog || locale;
+    if (catalogName === 'en') {
       process.stdout.write(`${locale}: fallback catalog=en dir=${meta.dir}\n`);
       continue;
     }
-    const file = path.join(I18N_DIR, `${locale}.json`);
+    const file = path.join(I18N_DIR, `${catalogName}.json`);
+    // Display aliases such as en-CA share the donor catalog (fr). Validate the
+    // donor file once and report the alias as covered by it.
+    if (validatedCatalogFiles.has(catalogName)) {
+      process.stdout.write(`${locale}: alias catalog=${catalogName} dir=${meta.dir}\n`);
+      continue;
+    }
     if (!fs.existsSync(file)) {
-      errors.push(`${locale}: missing catalog`);
+      errors.push(`${locale}: missing catalog ${catalogName}.json`);
       continue;
     }
     const catalog = readJson(file, null);
@@ -834,6 +894,7 @@ function validate() {
       errors.push(`${locale}: invalid catalog`);
       continue;
     }
+    validatedCatalogFiles.add(catalogName);
     const keys = Object.keys(catalog).sort();
     const missing = englishKeys.filter(key => !(key in catalog));
     const extra = keys.filter(key => !(key in english));
@@ -859,7 +920,7 @@ function validate() {
         warnings.push(`${locale}:${key}: unchanged English: ${source}`);
       }
     }
-    process.stdout.write(`${locale}: keys=${keys.length} dir=${meta.dir}\n`);
+    process.stdout.write(`${locale}: keys=${keys.length} catalog=${catalogName} dir=${meta.dir}\n`);
   }
 
   for (const warning of warnings.slice(0, 80)) process.stderr.write(`warning: ${warning}\n`);
@@ -1068,11 +1129,18 @@ function generateLocalizedManifests() {
   const sourceManifest = readJson(path.join(ROOT, 'static', 'manifest.json'), {});
   const english = readJson(path.join(I18N_DIR, 'en.json'), {});
   const descriptionKey = Object.keys(english).find(key => english[key] === sourceManifest.description);
-  for (const locale of Object.keys(LOCALES)) {
-    const catalog = readJson(path.join(I18N_DIR, `${locale}.json`), {});
+  const cache = new Map();
+  const loadCatalog = name => {
+    if (!cache.has(name)) cache.set(name, readJson(path.join(I18N_DIR, `${name}.json`), {}));
+    return cache.get(name);
+  };
+  for (const [locale, meta] of Object.entries(LOCALES)) {
+    const catalogName = meta.catalog || locale;
+    const catalog = catalogName === 'en' ? english : loadCatalog(catalogName);
     writeJson(path.join(ROOT, 'static', `manifest.${locale}.json`), {
       ...sourceManifest,
-      lang: locale,
+      lang: meta.html_lang || catalogName,
+      name: meta.name,
       description: catalog[descriptionKey] || sourceManifest.description,
     });
   }
@@ -1096,8 +1164,12 @@ async function main() {
   } else if (command === 'repair-google-all') {
     for (const id of Object.keys(GOOGLE_CODES)) await repairLocaleGoogle(id);
   } else if (command === 'manifests') generateLocalizedManifests();
-  else {
-    throw new Error('usage: node scripts/i18n-catalog.mjs extract|import-donor [DONOR]|validate|translate LOCALE|translate-all|translate-google LOCALE|translate-google-all|repair-google-all|manifests');
+  else if (command === 'freeze' || command === 'structured-extract') {
+    const script = path.join(ROOT, 'scripts', command === 'freeze' ? 'i18n_freeze.py' : 'i18n_structured_extract.py');
+    const extra = process.argv.slice(3);
+    execFileSync('python3', [script, ...extra], { stdio: 'inherit', cwd: ROOT });
+  } else {
+    throw new Error('usage: node scripts/i18n-catalog.mjs extract|import-donor [DONOR]|validate|freeze|structured-extract|translate LOCALE|translate-all|translate-google LOCALE|translate-google-all|repair-google-all|manifests');
   }
 }
 

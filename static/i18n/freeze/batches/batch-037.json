@@ -1,0 +1,2743 @@
+{
+  "id": "batch-037",
+  "group": "editor",
+  "surface": "editor",
+  "entry_count": 195,
+  "character_count": 15105,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.reload.from.disk",
+      "source": "Reload from disk",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1376"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reloaded.value.from.disk",
+      "source": "Reloaded {0} from disk",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1402"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rembg.not.installed",
+      "source": "rembg not installed.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:299"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.background",
+      "source": "Remove background",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:368"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.background.5bd994d6",
+      "source": "remove background",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:368"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.bg",
+      "source": "remove bg",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:368"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.stage",
+      "source": "Remove stage",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:397",
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:425",
+        "static/js/copal/planning.js:417"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.the.masked.area.fill.seamlessly.with.the.surrounding.background",
+      "source": "Remove the masked area. Fill seamlessly with the surrounding background, photorealistic, no objects, no people.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/ai-inpaint.js:273"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.value.fill.seamlessly.with.the.surrounding.background.photorealis",
+      "source": "Remove {0}. Fill seamlessly with the surrounding background, photorealistic, no objects, no people.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/editor/ai-inpaint.js:272"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.removing",
+      "source": "Removing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/ai-inpaint.js:279"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.removing.579d7e74",
+      "source": "Removing…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:250"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.04a26d6f",
+      "source": "rename",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:802",
+        "static/js/files.js:2334",
+        "static/js/files.js:2398",
+        "static/js/files.js:2399",
+        "static/js/files.js:2588"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rendered.source.comment.press.enter.to.edit.raw.comment",
+      "source": "Rendered source comment; press Enter to edit raw comment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/openclank-codemirror.ts:737"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reopened.value",
+      "source": "Reopened {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1450"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.replace.selection",
+      "source": "Replace selection",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:108"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.replace.selection.on.each.click",
+      "source": "Replace selection on each click",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:58"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reset.this.slider",
+      "source": "Reset this slider",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/fx/adj-popup.js:442",
+        "static/js/editor/fx/adj-popup.js:500"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resize.workspace.explorer",
+      "source": "Resize workspace explorer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1576"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resource.could.not.be.opened.in.editor",
+      "source": "Resource could not be opened in Editor",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1707",
+        "static/js/codeEditor.js:1761"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restore.portrait.and.skin.detail",
+      "source": "Restore portrait and skin detail",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:372"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resumed.draft",
+      "source": "Resumed draft",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:4147"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resumed.previous.edit",
+      "source": "Resumed previous edit",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:4218"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resuming.draft",
+      "source": "Resuming draft…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:4201"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retune.selection.while.dragging.tolerance",
+      "source": "Retune selection while dragging tolerance",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:65"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.revalidating.workspace.access",
+      "source": "Revalidating workspace access…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:257"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rich.comments",
+      "source": "Rich comments",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1337"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rich.comments.are.unavailable.until.this.parser.has.a.qualified",
+      "source": "Rich comments are unavailable until this parser has a qualified source map",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1338"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rich.comments.enabled.for.this.file",
+      "source": "Rich comments enabled for this file",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1348"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rich.comments.unavailable",
+      "source": "Rich comments unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1337"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ro",
+      "source": "ro",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate",
+      "source": "rotate",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.1",
+      "source": "Rotate -1°",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/transform-popup.js:47"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.1.d604e11a",
+      "source": "Rotate +1°",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/transform-popup.js:48"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.180",
+      "source": "Rotate 180°",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:65"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.180.4c37704c",
+      "source": "rotate 180",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:365"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.180.f54cad74",
+      "source": "Rotate 180",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:365"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.90",
+      "source": "Rotate 90",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.90.bc81e864",
+      "source": "rotate 90",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.90.cw",
+      "source": "Rotate 90° CW",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:61"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.left.e1d0813b",
+      "source": "rotate left",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:364"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotated.180",
+      "source": "Rotated 180.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:496"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotated.90",
+      "source": "Rotated 90.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:508"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotated.left",
+      "source": "Rotated left.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:502"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotating",
+      "source": "Rotating…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/canvas-transforms.js:36",
+        "static/js/editor/tools/transform-session.js:206",
+        "static/js/gallery.js:1809"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ruby.b217e98c",
+      "source": "Ruby",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/entryModel.js:52",
+        "static/js/editor/entryModel.js:53"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.ai.edit",
+      "source": "Run AI edit",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:344"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.inpaint.first",
+      "source": "Run inpaint first",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:2313"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.runs.an.ml.model.that.keeps.whatever.it.learned.to",
+      "source": "Runs an ML model that keeps whatever it learned to call the foreground (usually a person, product, or animal). If you have a Lasso or Wand selection active, it's used as a hint — the model only looks inside that region and anything outside is forced transparent.",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:296"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.sam",
+      "source": "SAM",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:106",
+        "static/js/editor/build/toolbar.js:30"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sam.f16bed56",
+      "source": "sam",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/toolbar.js:58"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sam.query.cancelled",
+      "source": "SAM query cancelled",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:133"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sam.selection.help",
+      "source": "SAM selection help",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:106"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saturation",
+      "source": "saturation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/fx/adj-popup.js:457"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saturation.20a32bc8",
+      "source": "Saturation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/fx/adj-popup.js:457"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.13a4a113",
+      "source": "save",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/editor/LiveMarkdownEditor.tsx:902",
+        "packages/Copal/src/openclank-codemirror.ts:891",
+        "static/js/codeEditor.js:1325",
+        "static/js/cookbookRunning.js:2654",
+        "static/js/copal/notesFeature.js:2025",
+        "static/js/memory.js:2671",
+        "static/js/memory.js:2731",
+        "static/js/memory.js:3000",
+        "static/js/memory.js:3529",
+        "static/js/memory.js:3819"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.as.a.new.image.in.the.gallery",
+      "source": "Save as a new image in the gallery",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:107"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.as.copy",
+      "source": "Save as copy",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:109"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.failed.your.edits.remain.unsaved",
+      "source": "Save failed; your edits remain unsaved.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1509"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.layered.project.json.keeps.every.layer.editable.for.later",
+      "source": "Save layered project (.json) — keeps every layer editable for later",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:118"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.options",
+      "source": "Save options",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:97"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.over.original",
+      "source": "Save over original",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:104"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.project.json",
+      "source": "Save project (.json)",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:120"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.to.gallery",
+      "source": "Save to Gallery",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/popups.js:41"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.copy.to.gallery.value.mb.value.s",
+      "source": "Saved copy to gallery ({0}MB · {1}s)",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:3699"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.instantly.to",
+      "source": "Saved instantly to",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:168"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.over.original.value.mb.value.s",
+      "source": "Saved over original ({0}MB · {1}s)",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:3306"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.revision.newer.edits.remain",
+      "source": "Saved revision; newer edits remain",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1505"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saving.copy",
+      "source": "Saving copy…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:3669"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saving.value",
+      "source": "Saving {0}…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1488"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scale",
+      "source": "SCALE",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:45"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.seam.fix",
+      "source": "Seam fix",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:351"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.3559d7ac",
+      "source": "search",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/openclank-codemirror.ts:894",
+        "src/tool_schemas.py:780",
+        "src/tool_schemas.py:881",
+        "static/js/compare/index.js:1204",
+        "static/js/compare/index.js:211",
+        "static/js/compare/index.js:270",
+        "static/js/compare/index.js:619",
+        "static/js/compare/models.js:49",
+        "static/js/compare/panes.js:103",
+        "static/js/compare/scoreboard.js:25",
+        "static/js/compare/scoreboard.js:74",
+        "static/js/compare/selector.js:1001",
+        "static/js/compare/selector.js:1128",
+        "static/js/compare/selector.js:1180",
+        "static/js/compare/selector.js:1187",
+        "static/js/compare/selector.js:1188",
+        "static/js/compare/selector.js:356",
+        "static/js/compare/selector.js:393",
+        "static/js/compare/selector.js:563",
+        "static/js/compare/selector.js:889",
+        "static/js/compare/selector.js:901",
+        "static/js/cookbook-hwfit.js:808",
+        "static/js/copal.js:1331",
+        "static/js/copal.js:2379",
+        "static/js/copal/notesFeature.js:1223",
+        "static/js/copal/notesFeature.js:1327",
+        "static/js/copal/notesFeature.js:1358",
+        "static/js/copal/notesFeature.js:1584",
+        "static/js/copal/notesFeature.js:1585",
+        "static/js/copal/notesFeature.js:2028",
+        "static/js/copal/notesFeature.js:2179",
+        "static/js/copal/notesFeature.js:2399",
+        "static/js/copal/notesFeature.js:2683",
+        "static/js/copal/notesFeature.js:2692",
+        "static/js/copal/notesFeature.js:847",
+        "static/js/copal/notesWorkspace.js:476",
+        "static/js/copal/notesWorkspace.js:6",
+        "static/js/copal/planning.js:1045",
+        "static/js/document.js:3419",
+        "static/js/documentLibrary.js:330",
+        "static/js/files.js:3023",
+        "static/js/files.js:3037",
+        "static/js/files.js:3038",
+        "static/js/files.js:3039",
+        "static/js/gallery.js:100",
+        "static/js/providerControl.js:126",
+        "static/js/providerControl.js:1921",
+        "static/js/sessions.js:3073",
+        "static/js/sessions.js:3419",
+        "static/js/sessions.js:3450",
+        "static/js/sessions.js:3488",
+        "static/js/settings.js:1042",
+        "static/js/settings.js:2103",
+        "static/js/settings.js:2213",
+        "static/js/slashCommands.js:1517",
+        "static/js/slashCommands.js:3346",
+        "static/js/slashCommands.js:5363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.section",
+      "source": "section",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/openclank-codemirror.ts:341",
+        "static/js/copal.js:1063",
+        "static/js/copal.js:1886",
+        "static/js/copal.js:418",
+        "static/js/copal.js:419",
+        "static/js/copal/notesFeature.js:1387",
+        "static/js/copal/notesFeature.js:1709",
+        "static/js/copal/notesFeature.js:2402",
+        "static/js/copal/planning.js:1037",
+        "static/js/copal/planning.js:406",
+        "static/js/copal/planning.js:421",
+        "static/js/copal/planning.js:884",
+        "static/js/copal/treehouse.js:304",
+        "static/js/copal/treehouse.js:305",
+        "static/js/copal/treehouse.js:306",
+        "static/js/copal/treehouse.js:307",
+        "static/js/copal/treehouse.js:483",
+        "static/js/copal/treehouse.js:635",
+        "static/js/copal/treehouse.js:660",
+        "static/js/copal/treehouse.js:670",
+        "static/js/copal/treehouse.js:682",
+        "static/js/copal/treehouse.js:755",
+        "static/js/copal/treehouse.js:770",
+        "static/js/copal/treehouse.js:772",
+        "static/js/copal/treehouse.js:775",
+        "static/js/copal/treehouse.js:779",
+        "static/js/copal/treehouse.js:789",
+        "static/js/copal/windows.js:28",
+        "static/js/documentLibrary.js:2080"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.all",
+      "source": "Select All",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/popups.js:48"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.an.unlocked.layer",
+      "source": "Select an unlocked layer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/tools/transform-session.js:45",
+        "static/js/editor/wire-topbar.js:151",
+        "static/js/galleryEditor.js:1923",
+        "static/js/galleryEditor.js:1957",
+        "static/js/galleryEditor.js:2679"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.extra.tracks.to.make.this.event.shared.e.g",
+      "source": "Select extra tracks to make this event shared (e.g. the same car ride for Leia & Chewie).",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:301"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selected",
+      "source": "Selected:",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TrackEditorDialog.tsx:128"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selected.value.value",
+      "source": "Selected {0}{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:2056"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selecting",
+      "source": "Selecting...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:2071"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selection.added.to.mask",
+      "source": "Selection added to mask",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:2306",
+        "static/js/galleryEditor.js:2598"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selection.copied.to.new.layer",
+      "source": "Selection copied to new layer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:2562"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selection.deleted",
+      "source": "Selection deleted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:2524"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selection.inverted",
+      "source": "Selection inverted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:2195"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selection.inverted.converted.to.wand",
+      "source": "Selection inverted (converted to wand)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:2220"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selfie",
+      "source": "selfie",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:372"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.serve.a.model.in.cookbook",
+      "source": "+ Serve a model in Cookbook…",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:184"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shadows",
+      "source": "shadows",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/fx/adj-popup.js:516"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shadows.446d99fc",
+      "source": "Shadows",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/fx/adj-popup.js:516"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shared.pluralistic",
+      "source": "(shared / pluralistic)",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:269"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sharp",
+      "source": "sharp",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:371"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sharpen",
+      "source": "Sharpen",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:292",
+        "static/js/editor/build/popups.js:34",
+        "static/js/editor/build/toolbar.js:34",
+        "static/js/galleryEditor.js:371"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sharpen.7829636f",
+      "source": "sharpen",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:371"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sharpening",
+      "source": "Sharpening…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:251"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shift",
+      "source": "Shift",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/popups.js:39",
+        "static/js/editor/build/popups.js:41",
+        "static/js/editor/build/popups.js:44",
+        "static/js/editor/build/popups.js:49",
+        "static/js/settings.js:2224"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.adjustment",
+      "source": "Show adjustment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/layer-panel.js:407"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.d97d1ee3",
+      "source": "Show",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/wire-inpaint-controls.js:108",
+        "static/js/mimoProviders.js:544"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.in.files",
+      "source": "Show in Files",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1300",
+        "static/js/copal/notesFeature.js:1764",
+        "static/js/document.js:7497",
+        "static/js/documentLibrary.js:2051",
+        "static/js/gallery.js:1483"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.layer",
+      "source": "Show layer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/layer-panel.js:139"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.mask",
+      "source": "Show mask",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/layer-panel.js:494",
+        "static/js/editor/wire-inpaint-controls.js:109"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.selection.overlay",
+      "source": "Show selection overlay",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/wire-selection-controls.js:145",
+        "static/js/galleryEditor.js:3456"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.source.comments",
+      "source": "Show source comments",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1338"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shown.in.files.value",
+      "source": "Shown in Files: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1538",
+        "static/js/files.js:3189",
+        "static/js/files.js:3249"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.skin",
+      "source": "skin",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:372"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.soft.brush.edge.blurs.each.stamp.for.a.feathered.fade",
+      "source": "Soft brush edge — blurs each stamp for a feathered fade.",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:246"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.soft.brush.edge.blurs.the.stroke.s.alpha.for.a",
+      "source": "Soft brush edge — blurs the stroke's alpha for a feathered fade at the perimeter.",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:264"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.soft.brush.edge.blurs.the.stroke.s.alpha.so.the",
+      "source": "Soft brush edge — blurs the stroke's alpha so the eraser fades out at the perimeter.",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:282"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.soften.the.selection.edge.feathers.the.mask.alpha",
+      "source": "Soften the selection edge — feathers the mask alpha.",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:29",
+        "static/js/editor/build/controls.js:71"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.softness",
+      "source": "Softness",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:245",
+        "static/js/editor/build/controls.js:263",
+        "static/js/editor/build/controls.js:281"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.source.editor.unavailable",
+      "source": "Source editor unavailable.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1306"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.stages",
+      "source": "Stages",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:350",
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:370",
+        "static/js/copal/planning.js:251"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.date",
+      "source": "Start date",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:200",
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:224",
+        "static/js/copal/planning.js:375",
+        "static/js/emailLibrary.js:132"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.writing",
+      "source": "Start writing…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/openclank-codemirror.ts:849"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.status",
+      "source": "Status",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:320",
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:334",
+        "static/js/copal/planning.js:245",
+        "static/js/copal/planning.js:399",
+        "static/js/copal/planning.js:404",
+        "static/js/copal/treehouse.js:397",
+        "static/js/tasks.js:2889"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.strength.24d3e4fd",
+      "source": "Strength",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:141",
+        "static/js/editor/build/controls.js:189",
+        "static/js/editor/build/controls.js:371",
+        "static/js/galleryEditor.js:2722"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.strength.help",
+      "source": "Strength help",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:189"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.strength.of.the.narrow.inpaint.pass.on.the.alpha.edge",
+      "source": "Strength of the narrow inpaint pass on the alpha edge band. 0 = off, 1 = max blend at boundary.",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:352"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.strong",
+      "source": "strong",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/openclank-codemirror.ts:343",
+        "packages/Copal/src/openclank-codemirror.ts:416",
+        "static/js/admin.js:1792",
+        "static/js/copal.js:1013",
+        "static/js/copal.js:1054",
+        "static/js/copal.js:1108",
+        "static/js/copal.js:1113",
+        "static/js/copal.js:1899",
+        "static/js/copal.js:612",
+        "static/js/copal.js:680",
+        "static/js/copal/notesFeature.js:1282",
+        "static/js/copal/notesFeature.js:1548",
+        "static/js/copal/notesFeature.js:1568",
+        "static/js/copal/notesFeature.js:1603",
+        "static/js/copal/notesFeature.js:1769",
+        "static/js/copal/notesFeature.js:1833",
+        "static/js/copal/notesFeature.js:1842",
+        "static/js/copal/notesFeature.js:1856",
+        "static/js/copal/notesFeature.js:2189",
+        "static/js/copal/notesFeature.js:2274",
+        "static/js/copal/notesFeature.js:2319",
+        "static/js/copal/notesFeature.js:2323",
+        "static/js/copal/notesFeature.js:2410",
+        "static/js/copal/notesFeature.js:2417",
+        "static/js/copal/notesFeature.js:2420",
+        "static/js/copal/notesFeature.js:2499",
+        "static/js/copal/notesFeature.js:2510",
+        "static/js/copal/notesFeature.js:925",
+        "static/js/copal/planning.js:1039",
+        "static/js/copal/planning.js:406",
+        "static/js/copal/treehouse.js:277",
+        "static/js/copal/treehouse.js:304",
+        "static/js/copal/treehouse.js:305",
+        "static/js/copal/treehouse.js:306",
+        "static/js/copal/treehouse.js:307",
+        "static/js/copal/treehouse.js:499",
+        "static/js/copal/treehouse.js:505",
+        "static/js/copal/treehouse.js:639",
+        "static/js/copal/treehouse.js:771",
+        "static/js/mimoProviders.js:398"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.style.applied",
+      "source": "Style applied",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/ai-tools-misc.js:194"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.style.edit",
+      "source": "Style edit",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:373"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.style.f579cb3f",
+      "source": "style:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:373"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.style.font.size.14px",
+      "source": "style=\"font-size:14px\"",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/toolbar.js:64"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.style.prompt",
+      "source": "Style prompt",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:367"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.style.transfer.failed",
+      "source": "Style transfer failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/ai-tools-misc.js:201"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.styling",
+      "source": "Styling…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:255"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sub.events",
+      "source": "(sub-events)",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:351",
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:371"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.subtract",
+      "source": "− Subtract",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:110",
+        "static/js/editor/build/controls.js:60"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.subtract.from.selection",
+      "source": "Subtract from selection",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:110"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.subtract.from.selection.alt",
+      "source": "Subtract from selection (Alt)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:60"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.summary",
+      "source": "summary",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/editor/LiveMarkdownEditor.tsx:246",
+        "static/js/chat.js:3272",
+        "static/js/chat.js:3723",
+        "static/js/chatRenderer.js:2559",
+        "static/js/copal/notesFeature.js:1494",
+        "static/js/copal/notesFeature.js:1682",
+        "static/js/copal/notesFeature.js:1763",
+        "static/js/copal/notesFeature.js:1784",
+        "static/js/copal/notesFeature.js:2501",
+        "static/js/copal/planning.js:468",
+        "static/js/copal/planning.js:827",
+        "static/js/copal/treehouse.js:501",
+        "static/js/settings.js:2930",
+        "static/js/settings.js:6392"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tab.actions.for.value",
+      "source": "Tab actions for {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1223"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tablist",
+      "source": "tablist",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1266",
+        "static/js/copal/notesFeature.js:1550",
+        "static/js/copal/notesFeature.js:1655",
+        "static/js/copal/notesFeature.js:2517"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tags",
+      "source": "Tags",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:336",
+        "packages/Copal/src/components/views/TagFilterPanel.tsx:40",
+        "packages/Copal/src/components/views/TaskDetailSheet.tsx:351",
+        "packages/Copal/src/components/views/WikiView.tsx:268",
+        "static/index.html:212",
+        "static/index.html:213",
+        "static/js/copal/bases.js:8",
+        "static/js/copal/notesFeature.js:2499",
+        "static/js/copal/notesWorkspace.js:16",
+        "static/js/copal/planning.js:250",
+        "static/js/copal/planning.js:402",
+        "static/js/emailLibrary.js:2438",
+        "static/js/gallery.js:1446"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.task",
+      "source": "task",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/editor/LiveMarkdownEditor.tsx:906",
+        "packages/Copal/src/components/views/NotesView.tsx:91",
+        "static/js/copal/planning.js:1180"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tbody",
+      "source": "tbody",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/editor/LiveMarkdownEditor.tsx:191",
+        "static/js/compare/scoreboard.js:132",
+        "static/js/copal.js:2034",
+        "static/js/copal.js:547",
+        "static/js/copal.js:690",
+        "static/js/copal/notesFeature.js:2193"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.text.preview.byte.limit.reached",
+      "source": "text preview byte limit reached",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/previewModel.js:110",
+        "static/js/editor/previewModel.js:117",
+        "static/js/editor/previewModel.js:127"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.that.edit.is.not.available.in.this.editor.state",
+      "source": "That edit is not available in this editor state.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:307"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.file.changed.on.disk.reload.to.update.this.buffer",
+      "source": "The file changed on disk. Reload to update this buffer.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:958"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.file.changed.on.disk.your.edits.remain.unsaved",
+      "source": "The file changed on disk. Your edits remain unsaved.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1353"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.file.changed.on.disk.your.local.edits.remain.unsaved",
+      "source": "The file changed on disk; your local edits remain unsaved.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:958"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.file.is.no.longer.available.at.this.path",
+      "source": "The file is no longer available at this path.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:962"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.host.item.moved.to.trash.while.newer.local.edits",
+      "source": "The host item moved to Trash while newer local edits were being made. The local buffer was retained.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:593"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.thead",
+      "source": "thead",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/editor/LiveMarkdownEditor.tsx:178",
+        "static/js/compare/scoreboard.js:129",
+        "static/js/copal.js:2033",
+        "static/js/copal.js:547",
+        "static/js/copal.js:689",
+        "static/js/copal/notesFeature.js:2192"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.editor.is.in.active.development.expect.rough.edges",
+      "source": "This editor is in active development — expect rough edges",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:16"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.file.is.not.bound.to.a.workspace.yet",
+      "source": "This file is not bound to a Workspace yet",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1529"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.folder.is.empty",
+      "source": "This folder is empty",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:878"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.title",
+      "source": "Title",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/EventEditorDialog.tsx:177",
+        "static/index.html:201",
+        "static/js/copal/planning.js:244",
+        "static/js/notes.js:2986"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.to.mask",
+      "source": "To Mask",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:128",
+        "static/js/editor/build/controls.js:50",
+        "static/js/editor/build/controls.js:99"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.to.set.source.drag.to.paint",
+      "source": "to set source · drag to paint",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:231"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.toggle.selection.overlay",
+      "source": "Toggle selection overlay",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:120",
+        "static/js/editor/build/controls.js:79"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tolerance",
+      "source": "Tolerance",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:64"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tracks.are.lanes.on.the.timeline.new.tracks.start.empty",
+      "source": "Tracks are lanes on the timeline. New tracks start empty — add events to them from the Add-event button or the To-do view.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TrackEditorDialog.tsx:88"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.transform.applied",
+      "source": "Transform applied",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/tools/transform-session.js:363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.transform.dea51bb1",
+      "source": "Transform",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/popups.js:25",
+        "static/js/editor/build/toolbar.js:22",
+        "static/js/editor/build/topbar.js:58",
+        "static/js/editor/build/transform-popup.js:16"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.transparent",
+      "source": "transparent",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:368"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.trash.failed",
+      "source": "Trash failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:839"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.true",
+      "source": "true",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/editor/LiveMarkdownEditor.tsx:182",
+        "packages/Copal/src/components/editor/LiveMarkdownEditor.tsx:197",
+        "packages/Copal/src/openclank-codemirror.ts:923",
+        "static/app.js:2698",
+        "static/app.js:4281",
+        "static/app.js:4405",
+        "static/app.js:4561",
+        "static/js/a11y.js:82",
+        "static/js/calendar.js:2843",
+        "static/js/calendar.js:3219",
+        "static/js/calendar.js:3262",
+        "static/js/chat.js:1948",
+        "static/js/chat.js:4347",
+        "static/js/chat.js:4838",
+        "static/js/chatRenderer.js:1190",
+        "static/js/codeEditor.js:1270",
+        "static/js/cookbook-hwfit.js:2045",
+        "static/js/cookbook-hwfit.js:2057",
+        "static/js/cookbook-hwfit.js:2109",
+        "static/js/cookbook-hwfit.js:2121",
+        "static/js/cookbook-hwfit.js:72",
+        "static/js/cookbook.js:1650",
+        "static/js/cookbook.js:1692",
+        "static/js/cookbook.js:2164",
+        "static/js/cookbookServe.js:2205",
+        "static/js/cookbookServe.js:2443",
+        "static/js/cookbookServe.js:3170",
+        "static/js/copal/notesFeature.js:1479",
+        "static/js/copal/notesFeature.js:1659",
+        "static/js/copal/notesFeature.js:2476",
+        "static/js/copal/planning.js:1293",
+        "static/js/copal/planning.js:1296",
+        "static/js/copal/planning.js:694",
+        "static/js/copal/planning.js:879",
+        "static/js/copal/planning.js:891",
+        "static/js/copal/planning.js:892",
+        "static/js/document.js:10197",
+        "static/js/document.js:3738",
+        "static/js/document.js:3778",
+        "static/js/document.js:5402",
+        "static/js/document.js:7508",
+        "static/js/document.js:7819",
+        "static/js/editor/explorerTree.js:455",
+        "static/js/editor/explorerTree.js:456",
+        "static/js/editor/explorerTree.js:487",
+        "static/js/editor/explorerTree.js:492",
+        "static/js/editor/resizablePane.js:99",
+        "static/js/editor/tools/transform-session.js:102",
+        "static/js/editor/tools/transform-session.js:167",
+        "static/js/editor/wire-selection-controls.js:115",
+        "static/js/emailInbox.js:655",
+        "static/js/emailLibrary.js:1423",
+        "static/js/emailLibrary.js:2001",
+        "static/js/emailLibrary.js:4317",
+        "static/js/emailLibrary.js:4930",
+        "static/js/files.js:1352",
+        "static/js/files.js:1583",
+        "static/js/files.js:1585",
+        "static/js/files.js:1635",
+        "static/js/files.js:241",
+        "static/js/files.js:929",
+        "static/js/gallery.js:1373",
+        "static/js/gallery.js:1633",
+        "static/js/galleryEditor.js:2784",
+        "static/js/galleryEditor.js:2788",
+        "static/js/goals.js:135",
+        "static/js/memory.js:104",
+        "static/js/mimoProviders.js:543",
+        "static/js/modelPicker.js:744",
+        "static/js/modelPicker.js:766",
+        "static/js/modelSharing.js:301",
+        "static/js/modelSharing.js:351",
+        "static/js/notes.js:2183",
+        "static/js/notes.js:2588",
+        "static/js/providerControl.js:1791",
+        "static/js/providerControl.js:1852",
+        "static/js/providerControl.js:1866",
+        "static/js/providerControl.js:1871",
+        "static/js/providerControl.js:2010",
+        "static/js/providerControl.js:211",
+        "static/js/providerControl.js:2163",
+        "static/js/providerControl.js:275",
+        "static/js/research/panel.js:1192",
+        "static/js/sessions.js:1038",
+        "static/js/settings.js:277",
+        "static/js/settings.js:6009",
+        "static/js/tasks.js:2011",
+        "static/js/theme.js:1382",
+        "static/js/theme.js:2423",
+        "static/js/theme.js:3694",
+        "static/js/theme.js:3787",
+        "static/js/theme.js:3838",
+        "static/js/theme.js:3928",
+        "static/js/theme.js:3982",
+        "static/js/theme.js:4036",
+        "static/js/theme.js:4088"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tsv",
+      "source": "tsv",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/entryModel.js:44"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.turn",
+      "source": "turn",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.turn.the.image.clockwise",
+      "source": "Turn the image clockwise",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.txt",
+      "source": "txt",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/entryModel.js:44"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.type.an.object.to.find",
+      "source": "Type an object to find",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:1963"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.type.what.you.want.changed",
+      "source": "Type what you want changed.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:487"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.underline",
+      "source": "underline",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/openclank-codemirror.ts:213",
+        "packages/Copal/src/openclank-codemirror.ts:234"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.undo.55ad5927",
+      "source": "UNDO",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:19"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unicode",
+      "source": "Unicode",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TrackEditorDialog.tsx:141"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.file.action",
+      "source": "Unknown file action",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:805"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unsaved.changes",
+      "source": "Unsaved changes",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:708"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upscale",
+      "source": "Upscale",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upscale.2x",
+      "source": "upscale 2x",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upscale.d103ff52",
+      "source": "upscale",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upscaled.value.to.value.value",
+      "source": "Upscaled {0}× to {1}×{2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/editor/ai-tools-misc.js:97"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upscaling",
+      "source": "Upscaling…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/ai-tools-misc.js:114",
+        "static/js/editor/ai-tools-misc.js:116",
+        "static/js/galleryEditor.js:254"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upside.down",
+      "source": "upside down",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:365"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.use.unicode.to.enter.any.character.directly",
+      "source": "Use Unicode to enter any character directly.",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/TrackEditorDialog.tsx:152"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.as.name.only",
+      "source": "{0} as (name only)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:843"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.failed.64e16e18",
+      "source": "{0} failed",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:863",
+        "static/js/files.js:2420"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.preview.truncated.value.total.value",
+      "source": "{0} … [preview truncated; {1} total] … {2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/editor/previewModel.js:47"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.px.5cd0edfe",
+      "source": "{1}px",
+      "placeholders": [
+        "1"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:21"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.px.d40b3b07",
+      "source": "{5}px",
+      "placeholders": [
+        "5"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:159"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.chars",
+      "source": "{0} · {1} chars",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1081",
+        "static/js/codeEditor.js:1177"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.d.value",
+      "source": "{0}{1}d {2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:862"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.file",
+      "source": "{0}{1} file",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:843"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.visible.layers.merged",
+      "source": "Visible layers merged",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/editor/wire-merge-buttons.js:128"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.wand",
+      "source": "Wand",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/popups.js:30",
+        "static/js/editor/build/toolbar.js:29"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.what.this.does",
+      "source": "What this does",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:207",
+        "static/js/editor/build/controls.js:296",
+        "static/js/editor/build/controls.js:312"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.what.to.fill.the.masked.area.with",
+      "source": "What to fill the masked area with...",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/controls.js:178"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.width.a58ddf50",
+      "source": "Width",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/popups.js:96",
+        "static/js/galleryEditor.js:1571"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.wikilink",
+      "source": "wikilink",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/editor/LiveMarkdownEditor.tsx:905",
+        "packages/Copal/src/components/views/NotesView.tsx:97"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.working.13b7bfca",
+      "source": "Working…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:798",
+        "static/js/memory.js:450"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.70398828",
+      "source": "WORKSPACE",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1564"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.access.could.not.be.revalidated.unsaved.changes.were.retained",
+      "source": "Workspace access could not be revalidated; unsaved changes were retained",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:263",
+        "static/js/codeEditor.js:291",
+        "static/js/codeEditor.js:304"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.files",
+      "source": "Workspace files",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:1575",
+        "static/js/codeEditor.js:877"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.refresh.failed.unsaved.changes.were.retained",
+      "source": "Workspace refresh failed; unsaved changes were retained",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/codeEditor.js:344"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.zoom.blur",
+      "source": "Zoom Blur…",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/editor/build/topbar.js:87"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.zoom.blur.d630e42d",
+      "source": "Zoom Blur",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/galleryEditor.js:2720",
+        "static/js/galleryEditor.js:2721"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

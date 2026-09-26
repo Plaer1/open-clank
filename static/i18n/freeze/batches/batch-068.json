@@ -1,0 +1,491 @@
+{
+  "id": "batch-068",
+  "group": "treehouse.lesson.house-documents",
+  "surface": "treehouse",
+  "entry_count": 40,
+  "character_count": 9166,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-documents.images-attached.body",
+      "source": "Prepare an image in [Files](clank://files) and insert it into a document in [Editor](clank://editor). Save, reload, and confirm the image still resolves. Then move the document to another folder and confirm the reference remains intact.\n\n**Observable result:** the clipboard image attachment preparation and the document insertion commit together, with an owned asset in the required media location.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:616"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.images-attached.explanation",
+      "source": "Images live in [Files](clank://files) and are inserted into documents through the shared attachment adapter. The document keeps a real reference to the asset: move the document and the known references are checked, not left dangling. Gallery assets are Files assets — there is no separate gallery to manage.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:616"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.images-attached.practice.cleanup",
+      "source": "Delete the practice document and its owned image asset when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:647"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.images-attached.practice.expectedEvidence",
+      "source": "The image resolves from its Files asset after reload and after a document move.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:648"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.images-attached.practice.seed",
+      "source": "Insert one small image into a practice document and save.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:646"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.images-attached.practice.title",
+      "source": "Attached practice image",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:645"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.images-attached.result",
+      "source": "An image inserted into a document that still resolves to its Files asset after a reload.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:616"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.images-attached.title",
+      "source": "Images and links that stay attached to their source",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:616"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.images-attached.whyThisHelps",
+      "source": "Attachments that survive a reload and a move are what make a document portable. A picture that evaporates when the folder changes is a broken document.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:616"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.new-documents.body",
+      "source": "Open [Editor](clank://editor) and create a new document. Use the template section inserter to add one supplied section. Edit the inserted text and save.\n\n**Observable result:** the document reopens with your edited section text and the revision marker advanced. The template itself is unchanged.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:436"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.new-documents.explanation",
+      "source": "Create a document in [Editor](clank://editor). Templates are stored in [Settings](clank://settings) and inserting one copies its assets and sections into the document you are writing. Inserting is a copy: editing the inserted section never rewrites the template.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:436"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.new-documents.practice.cleanup",
+      "source": "Delete this practice document when you are done, or keep it — it is ordinary content.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:466"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.new-documents.practice.expectedEvidence",
+      "source": "The document reopens with the edited section and a newer revision marker.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:467"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.new-documents.practice.seed",
+      "source": "Create a document and insert one template section; change one line and save.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:465"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.new-documents.practice.title",
+      "source": "Template-backed practice note",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:464"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.new-documents.result",
+      "source": "A document built from a template section, ready to edit.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:436"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.new-documents.title",
+      "source": "New documents and insertable template sections",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:436"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.new-documents.whyThisHelps",
+      "source": "Templates turn the structure you reuse — meeting shape, review checklist, research frame — into something you can drop in without retyping. Because insertion copies, your edits stay yours.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:436"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.rich-markdown.body",
+      "source": "Open a document that contains a supported programming language with a comment or docstring. Render it richly, then use **See source** on the official Markdown Formatting Demo to inspect the source lines behind a block, and return with **Back to rendered**.\n\n**Observable result:** a supported comment or docstring region renders as nonempty Markdown and saves against the source revision. The source-reveal inspector is a formatting-demo feature; ordinary documents keep their own source as the single record.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:506"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.rich-markdown.explanation",
+      "source": "Editor renders Markdown richly, including comment and docstring regions inside programming source. A **See source** action on the official formatting demo reveals the exact source lines behind each rendered block; on ordinary documents the rendered view and the stored source stay one document.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:506"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.rich-markdown.practice.cleanup",
+      "source": "Delete this practice document when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:540"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.rich-markdown.practice.expectedEvidence",
+      "source": "The docstring region renders as Markdown and the source revision saves.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:541"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.rich-markdown.practice.seed",
+      "source": "def summarize(rows):\n    \"\"\"Return a two-line summary.\n\n    Keeps the header and the count.\n    \"\"\"\n    # Count first; sort later.\n    return len(rows)",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:539"
+      ],
+      "context": "practice",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.rich-markdown.practice.title",
+      "source": "Sample programming comments",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:538"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.rich-markdown.result",
+      "source": "A comment or docstring over real code, rendered as Markdown and traceable to its exact source.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:506"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.rich-markdown.title",
+      "source": "Rich Markdown and code comments with See source",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:506"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.rich-markdown.whyThisHelps",
+      "source": "Documentation that lives with the code is documentation that survives the refactor. Seeing the exact source behind a rendered comment is how you edit it precisely instead of guessing at the Markdown.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:506"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.tabs-and-splits.body",
+      "source": "Open two documents in [Editor](clank://editor). Split the view so both are mounted at once. In one document, use an in-place link to the other.\n\n**Observable result:** two distinct document panes are mounted simultaneously and the link resolves to the other document. Clicking a split button that is not available does not count.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:472"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.tabs-and-splits.explanation",
+      "source": "Editor keeps documents in tabs and can split the view into two panes. In-place links open a document in the other pane rather than replacing what you are reading. Unsaved drafts stay in their buffer while you navigate.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:472"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.tabs-and-splits.practice.cleanup",
+      "source": "Delete both practice documents when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:500"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.tabs-and-splits.practice.expectedEvidence",
+      "source": "Two panes are mounted at once and the in-place link opens the second document.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:501"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.tabs-and-splits.practice.seed",
+      "source": "Create two short documents; open both in a split and link one to the other.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:499"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.tabs-and-splits.practice.title",
+      "source": "Two-pane practice pair",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:498"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.tabs-and-splits.result",
+      "source": "Two documents open side by side, with a link that moves between them without losing your place.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:472"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.tabs-and-splits.title",
+      "source": "Tabs, in-place links and splits",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:472"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.tabs-and-splits.whyThisHelps",
+      "source": "Comparison is a real workflow: source and summary, brief and draft, spec and implementation. Splits make it a layout rather than a memory exercise.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:472"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.typed-tables.body",
+      "source": "Open a table in [Editor](clank://editor). Give one column a date type and another a currency type. Add a formula column that totals the currency column. Save and reopen.\n\n**Observable result:** the saved table revision contains a typed date or currency column and a successfully evaluated formula or total.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:546"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.typed-tables.explanation",
+      "source": "Tables carry column types: dates, money, plain text and formulas. A typed date or currency column sorts and formats as that type, and a formula column evaluates against the row. Error-valued formulas stay visible as errors — they never quietly become zero.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:546"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.typed-tables.practice.cleanup",
+      "source": "Delete this practice table when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:575"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.typed-tables.practice.expectedEvidence",
+      "source": "The saved table revision has a typed date/currency column and an evaluated total.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:576"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    }
+  ]
+}

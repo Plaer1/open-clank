@@ -1,0 +1,23 @@
+{
+  "id": "batch-074",
+  "group": "treehouse.manifest",
+  "surface": "treehouse",
+  "entry_count": 1,
+  "character_count": 151,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "treehouse.manifest.field-guide.audience",
+      "source": "Assumes basic ChatGPT familiarity; teaches what is distinctive about Open Clank.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1395"
+      ],
+      "context": "audience",
+      "complexity": "label"
+    }
+  ]
+}

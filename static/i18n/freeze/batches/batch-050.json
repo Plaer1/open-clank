@@ -1,0 +1,121 @@
+{
+  "id": "batch-050",
+  "group": "providers",
+  "surface": "providers",
+  "entry_count": 8,
+  "character_count": 630,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.value.provider.value",
+      "source": "{0} provider{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2455"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.provider.value.available",
+      "source": "{0} provider{1} available",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2449"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.selected.model",
+      "source": "{0} selected model",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/providerControl.js:2387"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.thinking",
+      "source": "{0} thinking",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/modelPicker.js:697"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.models.enabled",
+      "source": "{0}/{1} models enabled",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/mimoProviders.js:515"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.wave",
+      "source": "wave",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:219"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.you.can.close.this.tab.and.return.to.open.clank",
+      "source": "You can close this tab and return to Open Clank.",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/mimo_provider_routes.py:458",
+        "routes/provider_v1_routes.py:1032"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.yours.for.the.clanking",
+      "source": "Yours for the clanking.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/models.js:654"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

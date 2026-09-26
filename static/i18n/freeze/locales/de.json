@@ -1,0 +1,19 @@
+{
+  "id": "de",
+  "name": "Deutsch",
+  "dir": "ltr",
+  "catalog": "de",
+  "html_lang": "de",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 4814,
+    "english_fallback": 4808
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

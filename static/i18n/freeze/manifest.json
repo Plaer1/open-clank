@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "slice": "S27",
+  "operation": "final-string-inventory-and-locale-infrastructure",
+  "translations_authored": false,
+  "translation_lane": "S28-gpt-5.6-sol",
+  "source_hash": "e4eb86793347ea199d18b4516563effb540f122af6107914ae58ba06572dd771",
+  "english_keys": 9622,
+  "ledger_source_count": 9622,
+  "ledger_current_source_count": 8416,
+  "ledger_compatibility_count": 1206,
+  "advertised_locales": 69,
+  "dedicated_catalogs_including_english": 37,
+  "english_fallback_locales": 31,
+  "display_alias_locales": 1,
+  "malay": {
+    "locale": "ms",
+    "name": "Bahasa Melayu",
+    "catalog_file": "ms.json",
+    "reuse": "existing dedicated catalog; no duplicate",
+    "aliases": [
+      "ms-MY",
+      "ms-BN"
+    ]
+  },
+  "canadian_english": {
+    "id": "en-CA",
+    "display_name": "Canadian English",
+    "catalog": "fr",
+    "html_lang": "fr",
+    "note": "Humorous display alias over French data; no separate prose/dialect catalog. Real fr/Français remains selectable with its own keys."
+  },
+  "batches": 83,
+  "files": {
+    "registry": "static/i18n/registry.json",
+    "runtime": "static/js/i18n.js",
+    "extractor": "scripts/i18n-catalog.mjs",
+    "structured_extract": "scripts/i18n_structured_extract.py",
+    "freeze": "static/i18n/freeze"
+  }
+}

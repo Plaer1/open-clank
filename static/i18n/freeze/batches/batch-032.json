@@ -1,0 +1,35 @@
+{
+  "id": "batch-032",
+  "group": "docs.openclank-docs-recovery",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1599,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-recovery.body",
+      "source": "# Recovery\n\nMost of the time nothing goes wrong. When it does, this page is the map.\n\n## A save was refused\n\nGuarded saves refuse to overwrite newer work. Reopen the document and merge —\nthe version you were editing is still in your draft buffer, and the stored\nversion is intact.\n\n## A document looks wrong\n\nIf a document shows a recovery panel instead of its content, the stored bytes\ncould not be decoded. The original source is preserved. Use the recovery\npanel to inspect the preserved source, or restore from history.\n\nNothing silently rewrites a document that failed to decode.\n\n## Undo a managed save\n\nImps project saves capture a preimage first. Restore from the project's\nhistory to replay that preimage and undo the save.\n\n## Restore a document version\n\nDocument history lists checkpoints. Pick a version and restore it. The\nrestore is itself recorded, so you can go forward again.\n\n## Start over on official pages\n\nOfficial handbook pages like this one are read-only and update with the\nproduct. If you made an editable copy and want a fresh original, delete your\ncopy and reopen the official page — the original is still there.\n\n## When to ask for help\n\n- A scheduled task ran but produced nothing: its task chat has the transcript.\n- Files are missing: check [Files](clank://files) trash before assuming loss.\n- Settings look wrong: [Settings](clank://settings) panels are per account.\n\nSee [[Memory and Lore]] for the history and retention side.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:638"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-recovery.title",
+      "source": "Recovery",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:638"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "id": "batch-033",
+  "group": "docs.openclank-docs-settings-themes",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 2239,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-settings-themes.body",
+      "source": "# Settings and Themes\n\nSettings owns configuration and appearance. Theme lives here — there is no\nseparate theme applet.\n\nOpen [Settings](clank://settings).\n\n## Panels\n\n| Panel | What it holds |\n| --- | --- |\n| [Appearance](clank://settings/appearance) | Theme, colors, background effects |\n| [Providers](clank://settings/providers) | Model providers and keys |\n| [History](clank://settings/history) | Memory and retention budgets |\n| [File access](clank://settings/file-access) | What the assistant may touch |\n\nSettings panels are reachable by direct navigation. Opening a panel from a\nlink focuses it; it never closes a window you already had open.\n\n## Themes\n\nThemes change colors, backgrounds and effects across the whole shell. The\ntheme picker shows live previews. Custom accent colors are available on every\ntheme, and you can save your own named themes (up to eight) and share them as\nJSON.\n\nBackground / Effect chooses the decorative background. The shipped effects\nare: Solid, Clanker Signal Routes, Shipibo Kene-Inspired Signal Weave,\nClanker LCARS, Clanker Gem Drift, Clanker Emoji Drift, Clanker Matrix Rain,\nClanker Emoji Rain, Clanker LCARS Status Sweep, Dots, Synapse, Rain,\nConstellations, Perlin Flow, Petals, Sparkles and Embers. Each effect that\nsupports it exposes an effect color, an Intensity slider and a Size slider;\neffects without those controls hide them.\n\nBackground effects are decorative. On machines where an effect is too heavy\nit can be turned off without changing the rest of the theme.\n\n## Typography and accessibility\n\nAppearance also controls typography: a font choice, a density setting\n(comfortable, compact, spacious) and a UI text-size scale that is independent\nof the active theme. A frosted-glass toggle softens panels where the theme\nsupports it. These are readability controls, not decoration.\n\n## What settings does not do\n\n- It does not migrate your documents.\n- It does not change other accounts' settings.\n- It does not require a restart for appearance changes.\n\n[[Accounts and Models]] covers provider setup in more detail.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:579"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-settings-themes.title",
+      "source": "Settings and Themes",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:579"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

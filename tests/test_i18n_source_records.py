@@ -53,7 +53,17 @@ def test_live_census_excludes_css_selectors_protocols_and_templates():
             )
             for part in declarations
         )
-        if css or selector.search(source) or protocol.search(source) or code_id.fullmatch(source) or re.fullmatch(r"\{\{[\s\S]*\}\}", source):
+        # Structured first-party prose (Field Guide lessons, official docs,
+        # award summaries) is UI copy and may contain markdown links such as
+        # [Graph](clank://graph). Those are not CSS attribute selectors.
+        markdown_link = re.match(r"^\[[^\]]+\]\([^)]+\)", source)
+        if entry.get("kind", "").startswith("structured"):
+            if protocol.search(source) or re.fullmatch(r"\{\{[\s\S]*\}\}", source):
+                bad.append((entry["key"], source))
+            continue
+        if markdown_link and not selector.search(source[len(source.split("]")[0]) + 1 :]):
+            pass  # markdown UI prose, not a bare selector
+        elif css or selector.search(source) or protocol.search(source) or code_id.fullmatch(source) or re.fullmatch(r"\{\{[\s\S]*\}\}", source):
             bad.append((entry["key"], source))
     assert not bad, bad[:10]
 

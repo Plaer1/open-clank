@@ -213,7 +213,11 @@ async function setLocale(next, { persist = true } = {}) {
   locale = next;
   catalog = nextCatalog;
   rebuildIndex();
-  document.documentElement.lang = next;
+  // Content language follows the catalog actually rendered. Display aliases
+  // (Canadian English over French) must not claim an English lang for French
+  // text; English-fallback catalogs must not claim the fallback selection's
+  // language for English strings.
+  document.documentElement.lang = descriptor.html_lang || catalogName;
   document.documentElement.dir = registry.locales[next].dir;
   const manifest = document.querySelector('link[rel="manifest"]');
   if (manifest && !manifest.href.startsWith('blob:')) {
@@ -233,7 +237,7 @@ async function setLocale(next, { persist = true } = {}) {
       status.style.cssText = 'position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0';
       document.body.appendChild(status);
     }
-    status.lang = next;
+    status.lang = descriptor.html_lang || catalogName;
     status.dir = registry.locales[next].dir;
     status.textContent = LANGUAGE_CHANGED[next] || `Language changed to ${descriptor.name}.`;
   }

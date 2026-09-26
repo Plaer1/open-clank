@@ -1,0 +1,2781 @@
+{
+  "id": "batch-047",
+  "group": "memory",
+  "surface": "memory",
+  "entry_count": 213,
+  "character_count": 17981,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.about.value",
+      "source": "about {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3514"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.already.represented.in.memory.kept.this.source.receipt",
+      "source": "Already represented in Memory; kept this source receipt",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3538"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.answer.this.question.in.the.same.memory.block",
+      "source": "Answer this question in the same memory block",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2483"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.append.an.owner.trust.revision",
+      "source": "Append an owner Trust revision",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2113"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archived.excluded.from.recall",
+      "source": "Archived — excluded from recall",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:98"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.available.model",
+      "source": "available model",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3122"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.back",
+      "source": "back",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2983",
+        "static/js/memory.js:3425",
+        "static/js/memory.js:3743"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.batch.import.failed",
+      "source": "Batch import failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3647"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.brain.reset.was.only.partially.completed",
+      "source": "Brain reset was only partially completed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:645"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.bundle.zip",
+      "source": "bundle (zip)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:97"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.by.value",
+      "source": "by {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:119"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cancel.7a5a1595",
+      "source": "✕ Cancel",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2514"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.candidate.category",
+      "source": "Candidate category",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1076"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.candidate.edit.failed",
+      "source": "Candidate edit failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1105",
+        "static/js/memory.js:1109"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.candidate.promoted.to.curated",
+      "source": "Candidate promoted to Curated",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1136"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.candidate.rejected",
+      "source": "Candidate rejected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1136"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.candidate.text",
+      "source": "Candidate text",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1073"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.candidate.text.cannot.be.empty",
+      "source": "Candidate text cannot be empty",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1095"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.candidate.updated",
+      "source": "Candidate updated",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1106"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.captured.by.value.value",
+      "source": "Captured by: {0}{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:90"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.carries.force.at.injection.endorsed.by.you.or.by.your",
+      "source": "Carries force at injection (endorsed by you or by your trust toggles)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:76"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.changes.applied",
+      "source": "changes applied",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1472"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.a.dedicated.memory.model.and.retry.this.file",
+      "source": "Choose a dedicated Memory model and retry this file",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3128"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.and.save.a.memory.model.route.this.file.will",
+      "source": "Choose and save a Memory model route; this file will retry automatically.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3111"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.at.least.one.file.to.import",
+      "source": "Choose at least one file to import.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/memory/memory_routes.py:2502"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.no.more.than.value.files.per.import",
+      "source": "Choose no more than {MAX_BATCH_FILES} files per import.",
+      "placeholders": [
+        "MAX_BATCH_FILES"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/memory/memory_routes.py:2508"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.export.dialog",
+      "source": "Close export dialog",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:74"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.commit",
+      "source": "commit",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:629"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.configuring.value.for.memory",
+      "source": "Configuring {0} for Memory…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3076"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.content.contains",
+      "source": "Content contains…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:160"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.add.profile.question",
+      "source": "Could not add profile question",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:376"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.nuke.brain.data",
+      "source": "Could not nuke Brain data",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:648"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.prepare.handler.profile.questions",
+      "source": "Could not prepare Handler profile questions",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:397"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.save.trust.setting",
+      "source": "Could not save trust setting",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:748"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.defaults.export.everything.as.the.canonical.v3.bundle.narrow.it",
+      "source": "Defaults export everything as the canonical v3 bundle — narrow it only if you need to.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:83"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.457f8b58",
+      "source": "✕ Delete",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2492"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.this.memory.value",
+      "source": "Delete this memory? \"{0}\"",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2931"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.value.value",
+      "source": "Delete {0} {1}?",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1376"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.deleted.value.value.43fcfb5f",
+      "source": "Deleted {0} {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1395"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.details.7741a0c4",
+      "source": "☰ Details",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2469"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.digest.unavailable.is.the.frankenmemory.provider.running",
+      "source": "Digest unavailable — is the frankenmemory provider running?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1981"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.dismiss.2f029c7f",
+      "source": "dismiss",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3243"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.just.the.photo.assets.as.a.restorable.bundle",
+      "source": "Download just the photo assets as a restorable bundle",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:199"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.79cae479",
+      "source": "✎ Edit",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2462"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.memory",
+      "source": "Edit memory:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2871"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.engine.kind.value",
+      "source": "Engine kind: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:85"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.error.adding.memory",
+      "source": "Error adding memory:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2861"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.error.updating.memory",
+      "source": "Error updating memory:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2793"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.exempt.from.decay",
+      "source": "Exempt from decay",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:99"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.exempt.from.dedup",
+      "source": "Exempt from dedup",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:100"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.export.memories.recorded.from.this.date",
+      "source": "Export memories recorded from this date",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:146"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.export.memories.recorded.until.this.date",
+      "source": "Export memories recorded until this date",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:150"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.export.memory",
+      "source": "Export Memory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:63",
+        "static/js/memoryExportDialog.js:71"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.export.only.memories.containing.this.text",
+      "source": "Export only memories containing this text",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:161"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.export.only.these.memory.kinds",
+      "source": "Export only these memory kinds",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:131"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.extracted",
+      "source": "_extracted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2256"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.add.memory",
+      "source": "Failed to add memory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2858",
+        "static/js/memory.js:2862",
+        "static/js/slashCommands.js:1439"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.delete.memory.6abf5ef8",
+      "source": "Failed to delete memory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2946"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.extract.memory.suggestions",
+      "source": "Failed to extract memory suggestions",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2956"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.value.pref",
+      "source": "Failed to load {0} pref:",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:792",
+        "static/js/memory.js:836",
+        "static/js/memory.js:921"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.reject.import.suggestion",
+      "source": "Failed to reject import suggestion",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3558"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.resolve.question",
+      "source": "Failed to resolve question",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2901",
+        "static/js/memory.js:2905"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.memory",
+      "source": "Failed to save memory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3009",
+        "static/js/memory.js:3015",
+        "static/js/memory.js:3414",
+        "static/js/memory.js:3540",
+        "static/js/memory.js:3828",
+        "static/js/memory.js:3842"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.mobile.control.preference",
+      "source": "Failed to save mobile control preference",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:296",
+        "static/js/memory.js:305"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.preference",
+      "source": "Failed to save preference",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:807",
+        "static/js/memory.js:811",
+        "static/js/memory.js:849",
+        "static/js/memory.js:853",
+        "static/js/memory.js:904",
+        "static/js/memory.js:938",
+        "static/js/memory.js:946"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.value.pref",
+      "source": "Failed to save {0} pref:",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:810",
+        "static/js/memory.js:852",
+        "static/js/memory.js:943"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.update.memory",
+      "source": "Failed to update memory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2790",
+        "static/js/memory.js:2794"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.update.pin",
+      "source": "Failed to update pin",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2923"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.frankenmemory.keeps.raw.evidence.separate",
+      "source": "Frankenmemory keeps raw evidence separate.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2314"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.generated.value",
+      "source": "Generated {0}.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1951"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.graph.unavailable.is.the.frankenmemory.provider.running",
+      "source": "Graph unavailable — is the frankenmemory provider running?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1633"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.handler.identity.is.unavailable",
+      "source": "Handler identity is unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:331"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.healthy.de18ccfa",
+      "source": "healthy",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1305"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.how.much.do.i.trust.this.information",
+      "source": "How much do I trust this information?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2092",
+        "static/js/memory.js:2095"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.human",
+      "source": "human",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:61"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.images.only",
+      "source": "Images only",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:198"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.finished.ready.for.review",
+      "source": "Import finished — ready for review",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3230"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.in.add.tab",
+      "source": "Import in Add tab",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2316"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.is.still.processing.watching.for.it.to.finish",
+      "source": "Import is still processing — watching for it to finish…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3190"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.retry.failed",
+      "source": "Import retry failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3596",
+        "static/js/memory.js:3599"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.still.processing.value.review.opens.when.it.finishes",
+      "source": "Import still processing{0} — review opens when it finishes…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3227"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.suggestion.rejected",
+      "source": "Import suggestion rejected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3556"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.importance.score",
+      "source": "importance score",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:135"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.from.value.value.review",
+      "source": "Imported from {0} ({1}) Review",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3736"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.memory.category",
+      "source": "Imported memory category",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3803"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.memory.category.from.value",
+      "source": "Imported memory category from {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3493"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.memory.review.failed",
+      "source": "Imported-memory review failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3338"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.memory.text",
+      "source": "Imported memory text",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3796"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.memory.text.from.value",
+      "source": "Imported memory text from {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3489"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.value.suggestions.value.remaining",
+      "source": "Imported {0} suggestions ({1} remaining)",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3396"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.value.suggestions.value.remaining.value.file.value.need.attenti",
+      "source": "Imported {0} suggestions ({1} remaining; {2} file{3} need attention)",
+      "placeholders": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3395"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.importing.90ab5ed3",
+      "source": "Importing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3684"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.importing.value",
+      "source": "Importing {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3626"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.in.review",
+      "source": "in review",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3011",
+        "static/js/memory.js:3833"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.include.archived",
+      "source": "Include archived",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:178"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.include.archived.memories",
+      "source": "Include archived memories",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:167"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.injected.into.chat.context.value.time.value",
+      "source": "Injected into chat context {0} time{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2411"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.json.031a4e76",
+      "source": "JSON",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.keep.my.data",
+      "source": "Keep my data",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:618"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.kinds.none.selected.all",
+      "source": "Kinds (none selected = all)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:127"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.memories",
+      "source": "Loading memories...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2295"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.manual",
+      "source": "manual",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2402"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.max.injected.skills.value",
+      "source": "Max injected skills: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:850"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memories.24214765",
+      "source": "memories",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1376",
+        "static/js/memory.js:1395",
+        "static/js/memory.js:2824",
+        "static/js/memory.js:3776",
+        "static/js/slashCommands.js:5576"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.81c5d49b",
+      "source": "memory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1376",
+        "static/js/memory.js:1395",
+        "static/js/memory.js:2824",
+        "static/js/memory.js:3776",
+        "static/js/tasks.js:2638"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.added",
+      "source": "Memory added",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2854"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.bank.is.empty",
+      "source": "(memory bank is empty)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1947"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.deleted",
+      "source": "Memory deleted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2941"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.export.failed",
+      "source": "Memory export failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:288"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.inspection.unavailable",
+      "source": "Memory inspection unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1310"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.list.element.not.found",
+      "source": "Memory list element not found",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2283"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.mode.value",
+      "source": "Memory mode: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:899"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.model.setup.failed",
+      "source": "Memory model setup failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3093"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.provider.unavailable",
+      "source": "Memory provider unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1000"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.provider.unavailable.http.value",
+      "source": "Memory provider unavailable (HTTP {0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:961"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.retracted",
+      "source": "Memory retracted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1246"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.text.cannot.be.empty",
+      "source": "Memory text cannot be empty",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2834"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.updated",
+      "source": "Memory updated",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2786"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.value.failed",
+      "source": "Memory {0} failed",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1059"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.middle",
+      "source": "middle",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1673",
+        "static/js/researchSynapse.js:122",
+        "static/js/researchSynapse.js:66",
+        "static/js/theme.js:3254",
+        "static/js/theme.js:3385",
+        "static/js/theme.js:3636"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mobile.controls.follow.the.device.setting",
+      "source": "Mobile controls follow the device setting",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:300"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mobile.controls.value",
+      "source": "Mobile controls: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:301"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.needs.rebuild",
+      "source": "needs rebuild",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1305"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.attributable.owner.trust.assignment.producer.signals.cannot.set.trust",
+      "source": "No attributable owner Trust assignment; producer signals cannot set Trust",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:125"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.curated.memories.yet",
+      "source": "No curated memories yet",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2313"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.edges.loaded.click.again.to.expand",
+      "source": "No edges loaded — click again to expand.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1904"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.embedding.lanes.available",
+      "source": "No embedding lanes available",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/memory_vector.py:42",
+        "src/rag_vector.py:96",
+        "src/tool_index.py:166"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.matches.0be6a257",
+      "source": "No matches.",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2309",
+        "static/js/settings.js:4882"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.memories.yet",
+      "source": "No memories yet",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2313"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.path.found",
+      "source": "No path found.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1845"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.readable.content.found",
+      "source": "No readable content found",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/memory/memory_routes.py:2029"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.saved.memories.are.available.in.this.scope.yet",
+      "source": "No saved memories are available in this scope yet.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1876"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.saved.memories.here.yet",
+      "source": "No saved memories here yet",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1675"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.skills.injected",
+      "source": "No skills injected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:850"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.threads.yet.clusters.appear.as.the.memory.graph.grows",
+      "source": "No threads yet — clusters appear as the memory graph grows.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1963"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.useful.information.detected",
+      "source": "No useful information detected.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2976"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.useful.information.found.in.file",
+      "source": "No useful information found in file.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3722"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.useful.information.found.in.the.selected.files",
+      "source": "No useful information found in the selected files.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3382"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.value.records",
+      "source": "No {0} records.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1152"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nothing.endorsed.yet.write.or.pin.a.memory.or.enable",
+      "source": "(nothing endorsed yet — write or pin a memory, or enable the trust toggles)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1946"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nuke.all.my.brain.data",
+      "source": "Nuke all my Brain data",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:451"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nuke.selected.brain.data",
+      "source": "Nuke selected Brain data?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:616"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nuke.selected.data",
+      "source": "Nuke selected data",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:617"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.5fc7e38b",
+      "source": "open",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "src/memory_versioned.py:631",
+        "static/app.js:407",
+        "static/app.js:427",
+        "static/app.js:428",
+        "static/app.js:436",
+        "static/app.js:439",
+        "static/app.js:441",
+        "static/app.js:442",
+        "static/app.js:520",
+        "static/app.js:534",
+        "static/app.js:548",
+        "static/app.js:556",
+        "static/app.js:562",
+        "static/app.js:573",
+        "static/app.js:600",
+        "static/app.js:612",
+        "static/app.js:749",
+        "static/app.js:750",
+        "static/js/chat.js:116",
+        "static/js/chat.js:133",
+        "static/js/chat.js:200",
+        "static/js/chat.js:277",
+        "static/js/chat.js:3252",
+        "static/js/chat.js:3253",
+        "static/js/chat.js:6182",
+        "static/js/compare/stream.js:341",
+        "static/js/compare/stream.js:400",
+        "static/js/cookbook-diagnosis.js:49",
+        "static/js/cookbookServe.js:1604",
+        "static/js/copal/notesFeature.js:1479",
+        "static/js/copal/overlays.js:46",
+        "static/js/custom-context-menu.js:276",
+        "static/js/document.js:184",
+        "static/js/document.js:4840",
+        "static/js/document.js:6719",
+        "static/js/document.js:6736",
+        "static/js/document.js:6859",
+        "static/js/document.js:6876",
+        "static/js/document.js:7438",
+        "static/js/documentLibrary.js:3611",
+        "static/js/documentLibrary.js:439",
+        "static/js/editor/fx/adj-popup.js:467",
+        "static/js/emailLibrary.js:6044",
+        "static/js/emailLibrary.js:684",
+        "static/js/files.js:1224",
+        "static/js/files.js:1247",
+        "static/js/files.js:2578",
+        "static/js/files.js:2608",
+        "static/js/files.js:727",
+        "static/js/filesFacadeClient.js:168",
+        "static/js/memory.js:1238",
+        "static/js/memory.js:1279",
+        "static/js/modelSharing.js:186",
+        "static/js/notes.js:4833",
+        "static/js/notes.js:5002",
+        "static/js/slashCommands.js:1132",
+        "static/js/slashCommands.js:4644",
+        "static/js/theme.js:1670"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.memory.bundle.v3.zip",
+      "source": "open-clank-memory-bundle-v3.zip",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryExport.js:127"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.in.the.graph",
+      "source": "Open in the graph",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1970"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.model.settings",
+      "source": "Open model settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3125"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.question",
+      "source": "open question",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2256",
+        "static/js/memory.js:54",
+        "static/js/util/memoryTrust.js:83"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.question.you.want.answered.the.ai.weaves.it.into",
+      "source": "Open question you want answered — the AI weaves it into relevant conversations",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:83"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.the.chat.this.memory.came.from",
+      "source": "Open the chat this memory came from",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2178"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.owner.trust.assignment.value.value.value",
+      "source": "Owner Trust assignment: {0}{1}{2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:119"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.paths.value.value",
+      "source": "Paths: {0} → {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1842"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.photo.assets",
+      "source": "Photo assets",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:186"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.photo.assets.to.include.in.the.bundle",
+      "source": "Photo assets to include in the bundle",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:189"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.photo.download.failed",
+      "source": "Photo download failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:46"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pinned.always.in.context",
+      "source": "Pinned — always in context",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2919"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.preview.1aa787fe",
+      "source": "preview",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:611"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.procedural",
+      "source": "procedural",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:64"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.profile.questions.already.exist",
+      "source": "Profile questions already exist.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:392"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.promote",
+      "source": "Promote",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1202"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quality.4ff18f00",
+      "source": "quality",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:135"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.question.answered.in.the.same.memory",
+      "source": "Question answered in the same memory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2898"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.question.reopened",
+      "source": "Question reopened",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1233"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.question.subject.from.value",
+      "source": "Question subject from {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3506"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.raw",
+      "source": "raw",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1152"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.raw.trajectory.4fc825da",
+      "source": "raw trajectory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1152"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.raw.value.candidates.value.curated.value.quarantined.value.index.value",
+      "source": "Raw {0} · Candidates {1} · Curated {2} · Quarantined {3} · Index {4} ({5}/{6}, {7} orphans)",
+      "placeholders": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1305"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reference",
+      "source": "reference",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:77"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reopen",
+      "source": "reopen",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1232"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reopen.question",
+      "source": "Reopen question",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1229"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resolve",
+      "source": "✓ Resolve",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2482"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restore.revision.value",
+      "source": "Restore revision {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1256"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.restored.revision.value",
+      "source": "Restored revision {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1260"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retract",
+      "source": "Retract",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1242"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retract.f80442e8",
+      "source": "retract",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1245"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retracted.by.user",
+      "source": "retracted by user",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1245"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retry.file",
+      "source": "retry file",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3585"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reused",
+      "source": "reused",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3538"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.revert.486766b6",
+      "source": "revert",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1259"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.review",
+      "source": "review",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3239"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.review.failed",
+      "source": "Review failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1139"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.review.it.in.inspect",
+      "source": "Review it in Inspect",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2314"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.all",
+      "source": "save all",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3403",
+        "static/js/memory.js:3751"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.candidate",
+      "source": "Save candidate",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1087"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.or.approve.a.memory.and.it.will.appear.here",
+      "source": "Save or approve a memory and it will appear here.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1679"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.trust",
+      "source": "Save Trust",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2112"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.to.memory",
+      "source": "Saved to memory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3012",
+        "static/js/memory.js:3538",
+        "static/js/memory.js:3839"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.value.imported.memories",
+      "source": "Saved {0} imported memories",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3421"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.value.memories",
+      "source": "Saved {0} memories",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3777"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.value.value.still.need.attention",
+      "source": "Saved {0}; {1} still need attention",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3421"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.scoped.to.workspace.value",
+      "source": "Scoped to workspace {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:95"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sections",
+      "source": "Sections",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryExportDialog.js:110"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.selected.brain.data.deleted",
+      "source": "Selected Brain data deleted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:642"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sent.to.candidates.for.review",
+      "source": "Sent to Candidates for review",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2854",
+        "static/js/memory.js:3012",
+        "static/js/memory.js:3839"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sent.value.value.to.review",
+      "source": "Sent {0} {1} to review",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3776"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.server.error.details",
+      "source": "Server error details:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2857"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.set.value.as.the.dedicated.memory.model.and.retry.this",
+      "source": "Set {0} as the dedicated Memory model and retry this file",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3127"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shown.to.the.ai.as.untrusted.reference.data.only",
+      "source": "Shown to the AI as untrusted reference data only",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:77"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.skill.confidence.all",
+      "source": "Skill confidence: All",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:808"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.skill.confidence.value",
+      "source": "Skill confidence ≥ {0}%",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:808"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.suggested.memories",
+      "source": "Suggested memories",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2980"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.technical.producer.quality.legacy.confidence.score",
+      "source": "technical producer quality (legacy confidence_score)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:135"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.the.selected.model",
+      "source": "the selected model",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3076"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.file.could.not.be.imported",
+      "source": "This file could not be imported.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3363",
+        "static/js/memory.js:3364"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tidied.value.value.value",
+      "source": "Tidied: {0} ({1} → {2})",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1472"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tidy.failed.3b4217c3",
+      "source": "Tidy failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1474"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tidying.memories",
+      "source": "Tidying memories",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1458"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.trace.failed",
+      "source": "Trace failed.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1861"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.trust",
+      "source": "Trust",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2091"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.trust.saved.as.an.owner.revision",
+      "source": "Trust saved as an owner revision",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2131"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.trust.update.failed",
+      "source": "Trust update failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2128",
+        "static/js/memory.js:2134"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.trust.value",
+      "source": "trust:{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:117"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.trusted",
+      "source": "trusted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:76"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

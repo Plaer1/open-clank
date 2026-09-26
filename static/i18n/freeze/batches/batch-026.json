@@ -1,0 +1,35 @@
+{
+  "id": "batch-026",
+  "group": "docs.openclank-docs-formatting-demo",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1518,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-formatting-demo.body",
+      "source": "# Markdown Formatting Demo\n\nThis page is the formatting demonstration. Click any rendered element below to\nreveal the exact Markdown source that produced it. The source inspector is\nread-only — you can select and copy from it, but it never edits this page and\nnever starts a save. Use **Back to rendered** to return.\n\n## Headings\n\n### A level-three heading\n\n#### A level-four heading\n\n## Emphasis and marks\n\nSome **bold text**, some *italic text*, some ~~struck-through text~~, and some\n==highlighted text==.\n\nInline `code spans` look like this.\n\n## Lists\n\n- First bullet\n- Second bullet\n  - A nested bullet\n- Third bullet\n\n1. First step\n2. Second step\n3. Third step\n\n## Task list\n\n- [x] A finished item\n- [ ] An open item\n\n## Quote\n\n> A quoted line.\n> It can span more than one line.\n\n## Code\n\n```\nfunction hello() {\n  return 'world';\n}\n```\n\n## Rule\n\n---\n\n## Table\n\n| Column | Meaning |\n| --- | --- |\n| Name | What it is called |\n| Value | What it holds |\n\n## Links and references\n\nA [standard link](clank://settings) opens a real app screen.\n\nA wikilink target such as [[Editor]] opens another document in this Editor.\n\n## Footnote-style note\n\nEverything on this page is ordinary Markdown. The only special behavior is\nthe read-only source reveal above, and it exists for this demonstration alone\n— normal documentation pages simply stay rendered.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:311"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-formatting-demo.title",
+      "source": "Markdown Formatting Demo",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:311"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

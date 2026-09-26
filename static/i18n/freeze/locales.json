@@ -1,0 +1,1359 @@
+{
+  "schema": 1,
+  "advertised_count": 69,
+  "dedicated_catalog_locales": 37,
+  "english_fallback_locales": 31,
+  "display_alias_locales": 1,
+  "catalog_files": [
+    "ar",
+    "bg",
+    "bn",
+    "cs",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "es-419",
+    "fa",
+    "fi",
+    "fr",
+    "hi",
+    "hu",
+    "id",
+    "it",
+    "ja",
+    "ko",
+    "ms",
+    "nl",
+    "no",
+    "pa-Guru",
+    "pl",
+    "pt",
+    "pt-BR",
+    "ro",
+    "ru",
+    "sv",
+    "sw",
+    "th",
+    "tr",
+    "uk",
+    "ur",
+    "vi",
+    "zh-Hans",
+    "zh-Hant"
+  ],
+  "locales": [
+    {
+      "id": "en",
+      "name": "English",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-source",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "zh-Hans",
+      "name": "简体中文",
+      "dir": "ltr",
+      "catalog": "zh-Hans",
+      "html_lang": "zh-Hans",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 7273,
+        "english_fallback": 2349
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ja",
+      "name": "日本語",
+      "dir": "ltr",
+      "catalog": "ja",
+      "html_lang": "ja",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 7187,
+        "english_fallback": 2435
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ko",
+      "name": "한국어",
+      "dir": "ltr",
+      "catalog": "ko",
+      "html_lang": "ko",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 7222,
+        "english_fallback": 2400
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "es",
+      "name": "Español",
+      "dir": "ltr",
+      "catalog": "es",
+      "html_lang": "es",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 7161,
+        "english_fallback": 2461
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "hi",
+      "name": "हिन्दी",
+      "dir": "ltr",
+      "catalog": "hi",
+      "html_lang": "hi",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 6675,
+        "english_fallback": 2947
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ar",
+      "name": "العربية",
+      "dir": "rtl",
+      "catalog": "ar",
+      "html_lang": "ar",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 7277,
+        "english_fallback": 2345
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ru",
+      "name": "Русский",
+      "dir": "ltr",
+      "catalog": "ru",
+      "html_lang": "ru",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 7228,
+        "english_fallback": 2394
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "pt",
+      "name": "Português",
+      "dir": "ltr",
+      "catalog": "pt",
+      "html_lang": "pt",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 7090,
+        "english_fallback": 2532
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "id",
+      "name": "Bahasa Indonesia",
+      "dir": "ltr",
+      "catalog": "id",
+      "html_lang": "id",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 7070,
+        "english_fallback": 2552
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "pa-Guru",
+      "name": "ਪੰਜਾਬੀ",
+      "dir": "ltr",
+      "catalog": "pa-Guru",
+      "html_lang": "pa-Guru",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 6434,
+        "english_fallback": 3188
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "bn",
+      "name": "বাংলা",
+      "dir": "ltr",
+      "catalog": "bn",
+      "html_lang": "bn",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 6533,
+        "english_fallback": 3089
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "sw",
+      "name": "Kiswahili",
+      "dir": "ltr",
+      "catalog": "sw",
+      "html_lang": "sw",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 6426,
+        "english_fallback": 3196
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ur",
+      "name": "اردو",
+      "dir": "rtl",
+      "catalog": "ur",
+      "html_lang": "ur",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 6432,
+        "english_fallback": 3190
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "fa",
+      "name": "فارسی",
+      "dir": "rtl",
+      "catalog": "fa",
+      "html_lang": "fa",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 6429,
+        "english_fallback": 3193
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "zh-Hant",
+      "name": "繁體中文",
+      "dir": "ltr",
+      "catalog": "zh-Hant",
+      "html_lang": "zh-Hant",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 5011,
+        "english_fallback": 4611
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "es-419",
+      "name": "Español latinoamericano",
+      "dir": "ltr",
+      "catalog": "es-419",
+      "html_lang": "es-419",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4910,
+        "english_fallback": 4712
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "pt-BR",
+      "name": "Português (Brasil)",
+      "dir": "ltr",
+      "catalog": "pt-BR",
+      "html_lang": "pt-BR",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4900,
+        "english_fallback": 4722
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "pa-Arab",
+      "name": "پنجابی",
+      "dir": "rtl",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "de",
+      "name": "Deutsch",
+      "dir": "ltr",
+      "catalog": "de",
+      "html_lang": "de",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4814,
+        "english_fallback": 4808
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "fr",
+      "name": "Français",
+      "dir": "ltr",
+      "catalog": "fr",
+      "html_lang": "fr",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4835,
+        "english_fallback": 4787
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "en-CA",
+      "name": "Canadian English",
+      "dir": "ltr",
+      "catalog": "fr",
+      "html_lang": "fr",
+      "kind": "display-alias",
+      "alias_of": "fr",
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4835,
+        "english_fallback": 4787
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "da",
+      "name": "Dansk",
+      "dir": "ltr",
+      "catalog": "da",
+      "html_lang": "da",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4800,
+        "english_fallback": 4822
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "pl",
+      "name": "Polski",
+      "dir": "ltr",
+      "catalog": "pl",
+      "html_lang": "pl",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4886,
+        "english_fallback": 4736
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "uk",
+      "name": "Українська",
+      "dir": "ltr",
+      "catalog": "uk",
+      "html_lang": "uk",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4784,
+        "english_fallback": 4838
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "bs",
+      "name": "Bosanski",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "no",
+      "name": "Norsk",
+      "dir": "ltr",
+      "catalog": "no",
+      "html_lang": "no",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4798,
+        "english_fallback": 4824
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "th",
+      "name": "ไทย",
+      "dir": "ltr",
+      "catalog": "th",
+      "html_lang": "th",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4989,
+        "english_fallback": 4633
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "tr",
+      "name": "Türkçe",
+      "dir": "ltr",
+      "catalog": "tr",
+      "html_lang": "tr",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4814,
+        "english_fallback": 4808
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "nl",
+      "name": "Nederlands",
+      "dir": "ltr",
+      "catalog": "nl",
+      "html_lang": "nl",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4845,
+        "english_fallback": 4777
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "vi",
+      "name": "Tiếng Việt",
+      "dir": "ltr",
+      "catalog": "vi",
+      "html_lang": "vi",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4763,
+        "english_fallback": 4859
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "it",
+      "name": "Italiano",
+      "dir": "ltr",
+      "catalog": "it",
+      "html_lang": "it",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4860,
+        "english_fallback": 4762
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "az",
+      "name": "Azərbaycan dili",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "fi",
+      "name": "Suomi",
+      "dir": "ltr",
+      "catalog": "fi",
+      "html_lang": "fi",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4849,
+        "english_fallback": 4773
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "sv",
+      "name": "Svenska",
+      "dir": "ltr",
+      "catalog": "sv",
+      "html_lang": "sv",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4722,
+        "english_fallback": 4900
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "am",
+      "name": "አማርኛ",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "bg",
+      "name": "Български",
+      "dir": "ltr",
+      "catalog": "bg",
+      "html_lang": "bg",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4950,
+        "english_fallback": 4672
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ca",
+      "name": "Català",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "cs",
+      "name": "Čeština",
+      "dir": "ltr",
+      "catalog": "cs",
+      "html_lang": "cs",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4868,
+        "english_fallback": 4754
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "dv",
+      "name": "ދިވެހި",
+      "dir": "rtl",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "dz",
+      "name": "རྫོང་ཁ",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "el",
+      "name": "Ελληνικά",
+      "dir": "ltr",
+      "catalog": "el",
+      "html_lang": "el",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4859,
+        "english_fallback": 4763
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "et",
+      "name": "Eesti",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "fo",
+      "name": "Føroyskt",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "hr",
+      "name": "Hrvatski",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "hu",
+      "name": "Magyar",
+      "dir": "ltr",
+      "catalog": "hu",
+      "html_lang": "hu",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4825,
+        "english_fallback": 4797
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "hy",
+      "name": "Հայերեն",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "is",
+      "name": "Íslenska",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ka",
+      "name": "ქართული",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "km",
+      "name": "ខ្មែរ",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "lo",
+      "name": "ລາວ",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "lt",
+      "name": "Lietuvių",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "lv",
+      "name": "Latviešu",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "mk",
+      "name": "Македонски",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "mn",
+      "name": "Монгол",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ms",
+      "name": "Bahasa Melayu",
+      "dir": "ltr",
+      "catalog": "ms",
+      "html_lang": "ms",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4812,
+        "english_fallback": 4810
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "my",
+      "name": "မြန်မာ",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ne",
+      "name": "नेपाली",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ro",
+      "name": "Română",
+      "dir": "ltr",
+      "catalog": "ro",
+      "html_lang": "ro",
+      "kind": "dedicated",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": false,
+      "counts": {
+        "keys": 9622,
+        "translated": 4748,
+        "english_fallback": 4874
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "si",
+      "name": "සිංහල",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "sk",
+      "name": "Slovenčina",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "sl",
+      "name": "Slovenščina",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "sq",
+      "name": "Shqip",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "sr",
+      "name": "Српски",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "tg",
+      "name": "Тоҷикӣ",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "tk",
+      "name": "Türkmençe",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "uz",
+      "name": "O‘zbekcha",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "af",
+      "name": "Afrikaans",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    },
+    {
+      "id": "ga",
+      "name": "Gaeilge",
+      "dir": "ltr",
+      "catalog": "en",
+      "html_lang": "en",
+      "kind": "english-fallback",
+      "alias_of": null,
+      "advertised": true,
+      "english_fallback": true,
+      "counts": {
+        "keys": 9622,
+        "translated": 0,
+        "english_fallback": 9622
+      },
+      "missing_keys": 0,
+      "extra_keys": 0,
+      "complete_translation": false
+    }
+  ]
+}

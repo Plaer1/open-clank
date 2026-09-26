@@ -1,0 +1,35 @@
+{
+  "id": "batch-034",
+  "group": "docs.openclank-docs-tasks",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1525,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-tasks.body",
+      "source": "# Tasks and Continuations\n\nTasks are durable follow-through items. They are the bridge between \"the\nassistant said it would do X\" and \"X actually happened, and here is where.\"\n\n## Task chats\n\nEach task keeps one durable chat. Opening a task from the toast, the badge or\nthe task list opens that chat — the original one — not whichever conversation\nhappens to be in front. Answering a question in the toast resumes the task\nchat without hijacking your foreground chat.\n\nOpen [Meatbag Tasks](clank://tasks) for the full list, or [the task view](clank://tasks)\ninside Copal.\n\n## Sources\n\nTasks can come from a chat, from a checkbox in a document, or from a\nscheduled run. A checkbox task in a document carries the document identity,\nso the task and the line it came from stay connected.\n\n## Continuations\n\nA continuation is a resumed run of the same task chat. Context accumulates in\nthat task's transcript rather than scattering across new conversations. When\na task is done, its chat remains as the record of what happened.\n\n## Practical habits\n\n- Ask the assistant to create a task when work will outlive the current\n  conversation.\n- Keep one task per outcome; the chat under it holds the detail.\n- Use checkboxes in documents for work that belongs to that document.\n\nNext: [[Memory and Lore]] for what survives a restart, or [[Recovery]] for\nwhat to do when a run goes wrong.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:535"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-tasks.title",
+      "source": "Tasks and Continuations",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:535"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

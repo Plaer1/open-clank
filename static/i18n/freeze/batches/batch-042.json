@@ -1,0 +1,2902 @@
+{
+  "id": "batch-042",
+  "group": "html-shell",
+  "surface": "html-shell",
+  "entry_count": 228,
+  "character_count": 17921,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.1x.normal",
+      "source": "1x (normal)",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1526"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.8593.8595.rearrange",
+      "source": "&#8593;&#8595; Rearrange",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:701",
+        "static/index.html:781"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.a.z",
+      "source": "A-Z",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:236",
+        "static/index.html:73",
+        "static/index.html:778"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.aa",
+      "source": "Aa",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1821"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.accent",
+      "source": "Accent",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:423"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.accent.color",
+      "source": "Accent Color",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:478"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.accepted",
+      "source": "Accepted",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:123"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.account",
+      "source": "Account",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1333",
+        "static/index.html:1956"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.across.all.accounts.chats.skills.notes.tasks.documents.gallery.and",
+      "source": "Across all accounts: chats, skills, notes, tasks, documents, gallery, and calendar. Memories, graph, and ingest data are excluded; use the account-owned Brain reset for those.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2648"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.active.a733b809",
+      "source": "Active",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1203",
+        "static/js/cookbookRunning.js:2133",
+        "static/js/cookbookRunning.js:2154",
+        "static/js/settings.js:4277"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add",
+      "source": "Add",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1225",
+        "static/index.html:2189",
+        "static/index.html:2274",
+        "static/index.html:54",
+        "static/js/compare/index.js:361",
+        "static/js/cookbook.js:3271",
+        "static/js/copal/notesFeature.js:2300",
+        "static/js/copal/notesFeature.js:2384",
+        "static/js/copal/planning.js:390",
+        "static/js/gallery.js:2780",
+        "static/js/providerControl.js:1333",
+        "static/js/settings.js:5021",
+        "static/js/slashCommands.js:3965",
+        "static/js/slashCommands.js:4217",
+        "static/js/tasks.js:2983"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.a.goal",
+      "source": "Add a goal",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1222"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.a.local.model.server.ollama.llama.cpp.vllm",
+      "source": "Add a local model server (Ollama, llama.cpp, vLLM).",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2177"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.a.location.first",
+      "source": "Add a Location first",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2442"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.a.memory",
+      "source": "Add a memory",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:181"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.a.search.provider.to.try.if.the.primary.fails",
+      "source": "Add a search provider to try if the primary fails",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1612"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.api.models",
+      "source": "Add API Models",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2202",
+        "static/js/providerControl.js:1156"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.browser.email.ntfy.or.webhook.destinations.empty.list.uses",
+      "source": "Add browser, email, ntfy, or webhook destinations. Empty list uses the selected channel above.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2062"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.edit.delete.and.test.accounts.in.integrations",
+      "source": "Add, edit, delete, and test accounts in Integrations.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2006"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.endpoint",
+      "source": "+ Add endpoint",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2061"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.fallback",
+      "source": "+ Add fallback",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1612"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.integration",
+      "source": "Add Integration",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2395",
+        "static/js/settings.js:4010"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.local.models",
+      "source": "Add Local Models",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2157",
+        "static/js/providerControl.js:1156"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.location",
+      "source": "Add Location…",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2427"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.memory",
+      "source": "Add Memory",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:169"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.model.chat",
+      "source": "Add model chat",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:790"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.model.endpoints",
+      "source": "Add model endpoints",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:964"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.models",
+      "source": "Add Models",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1283",
+        "static/js/slashCommands.js:3327"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.ollama",
+      "source": "Add Ollama",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2170"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.participant",
+      "source": "+ Add participant",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1178"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.profile.questions",
+      "source": "Add profile questions",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:337"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.provider.account",
+      "source": "Add Provider Account",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2286"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.skill",
+      "source": "Add Skill",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:188",
+        "static/index.html:216"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.user",
+      "source": "Add User",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2126",
+        "static/index.html:2133"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.added.after.your.message",
+      "source": "Added after your message",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1126"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.added.before.your.message",
+      "source": "Added before your message",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1124"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.added.models",
+      "source": "Added Models",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1287",
+        "static/index.html:2324",
+        "static/index.html:2348"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.adds.reviewable.open.questions.for.your.handler.s.preferred.name",
+      "source": "Adds reviewable open questions for your Handler's preferred name and mobile-control preference. Nothing is added until you choose this button.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:340"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.admin",
+      "source": "Admin",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1336",
+        "static/index.html:2130",
+        "static/js/copal/treehouse.js:282",
+        "static/js/settings.js:2474"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent",
+      "source": "Agent",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1028",
+        "static/index.html:1034",
+        "static/index.html:2480",
+        "static/js/compare/scoreboard.js:75",
+        "static/js/interaction-mode.js:7",
+        "static/js/slashCommands.js:2573",
+        "static/js/slashCommands.js:5373"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.approvals",
+      "source": "Agent approvals",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2460"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.mode.use.the.enabled.agent.tools",
+      "source": "Agent mode — Use the enabled agent tools",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1027"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.tools",
+      "source": "Agent Tools",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1339"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.chat.bubble",
+      "source": "AI Chat Bubble",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:434",
+        "static/js/theme.js:405"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.defaults",
+      "source": "AI Defaults",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1291",
+        "static/js/slashCommands.js:3330"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.defaults.43cbbc4e",
+      "source": "AI Defaults →",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1622"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.expand.turn.your.notes.into.a.full.system.prompt",
+      "source": "AI expand — turn your notes into a full system prompt",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1163"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.synthesis",
+      "source": "AI Synthesis",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2071"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.all",
+      "source": "all",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:92",
+        "static/js/assistant.js:218",
+        "static/js/copal/planning.js:1047",
+        "static/js/copal/planning.js:1049",
+        "static/js/copal/planning.js:1059",
+        "static/js/copal/planning.js:1061",
+        "static/js/copal/planning.js:1063",
+        "static/js/emailLibrary.js:4766",
+        "static/js/emailLibrary.js:6346",
+        "static/js/files.js:2191",
+        "static/js/memory.js:207",
+        "static/js/memory.js:2254",
+        "static/js/tasks.js:1953",
+        "static/js/tasks.js:2199"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.all.candidate.states",
+      "source": "All candidate states",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:121"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.all.external.service.connections.in.one.place",
+      "source": "All external service connections in one place.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2391"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.all.levels",
+      "source": "All Levels",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2529"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.all.skills",
+      "source": "All skills",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:240"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.allow.anyone.to.create.an.account.from.the.login.page",
+      "source": "Allow anyone to create an account from the login page",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2106"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.alloy",
+      "source": "Alloy",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1509"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.analogous",
+      "source": "Analogous",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:488"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.anthropic",
+      "source": "Anthropic",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2249",
+        "static/js/providers.js:128"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api",
+      "source": "api",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2245",
+        "static/js/mimoProviders.js:598",
+        "static/js/settings.js:6250"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.d93d10ff",
+      "source": "API",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2366",
+        "static/js/models.js:388",
+        "static/js/settings.js:4098"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.direct",
+      "source": "API (direct)",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2221"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.key",
+      "source": "API key",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1601",
+        "static/index.html:2172",
+        "static/js/mimoProviders.js:602",
+        "static/js/providerControl.js:1201",
+        "static/js/providerControl.js:1202",
+        "static/js/providerControl.js:1326",
+        "static/js/providerControl.js:1575",
+        "static/js/providerControl.js:728",
+        "static/js/settings.js:1401"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.key.47acd202",
+      "source": "API Key",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1598"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.key.e.g.sk.proj.abcdef",
+      "source": "API key, e.g. sk-proj-AbCdEf…",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:2271"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.api.key.optional.for.protected.local.endpoints",
+      "source": "API key (optional — for protected local endpoints)",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:2193"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.appearance",
+      "source": "Appearance",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1323",
+        "static/js/slashCommands.js:3348"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.apply",
+      "source": "Apply",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:600",
+        "static/js/copal/treehouse.js:123",
+        "static/js/document.js:45",
+        "static/js/editor/build/transform-popup.js:52",
+        "static/js/editor/fx/adj-popup.js:309",
+        "static/js/editor/wire-topbar-menus.js:83",
+        "static/js/galleryEditor.js:1574",
+        "static/js/galleryEditor.js:2634",
+        "static/js/notes.js:41"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archive.selected",
+      "source": "Archive selected",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:713"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ash",
+      "source": "Ash",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1510"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attach.files",
+      "source": "Attach files",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:987"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attach.files.cb1f2c97",
+      "source": "Attach Files",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1862"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.audit",
+      "source": "Audit",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:251",
+        "static/index.html:261",
+        "static/js/skills.js:1477"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.audit.all.publishes.passing.necessary.skills.at.or.above.this",
+      "source": "Audit all publishes passing, necessary skills at or above this confidence. Off = keep audit results as drafts unless manually approved.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:305"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.audit.selected.draft.skills",
+      "source": "Audit selected draft skills",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:261"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.auto.approve.skills",
+      "source": "Auto-approve skills",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:302"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.auto.detect",
+      "source": "Auto-detect",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1439",
+        "static/index.html:1471"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.auto.extract.skills",
+      "source": "Auto-extract skills",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:294"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.auto.poll",
+      "source": "Auto-poll",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2556"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.auto.reply.newsletter.unsubscribe.and.writing.style.live.in.the",
+      "source": "Auto reply, newsletter unsubscribe, and writing style live in the Email window.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1998"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.automatic",
+      "source": "Automatic",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:275"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.automatically.draft.reusable.skills.from.your.workflows.audit.all.can",
+      "source": "Automatically draft reusable skills from your workflows. Audit all can publish passing skills using the threshold below.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:297"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.avatar.name",
+      "source": "Avatar & name",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1787"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.background",
+      "source": "Background",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:418"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.background.effect",
+      "source": "Background / Effect",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:546"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.bahasa.indonesia",
+      "source": "Bahasa Indonesia",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1685"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.balanced",
+      "source": "Balanced",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1134"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.base.url.or.pick.provider",
+      "source": "Base URL or pick provider",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:2236"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.blur.emails.tokens.and.secrets.in.ai.output",
+      "source": "Blur emails, tokens, and secrets in AI output",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1832"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.border",
+      "source": "Border",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:422"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.border.chat.bubble",
+      "source": "Border Chat Bubble",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:435",
+        "static/js/theme.js:406"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.brand.name",
+      "source": "Brand name",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1707"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.brave",
+      "source": "Brave",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1632",
+        "static/js/search.js:31"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.brave.search",
+      "source": "Brave Search",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1570",
+        "static/js/settings.js:1362"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browse.download",
+      "source": "Browse / download",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2446"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browser.built.in",
+      "source": "Browser (built-in)",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1493"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browser.notification.default",
+      "source": "Browser notification (default)",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2030"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browser.provider",
+      "source": "browser→provider",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2222"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.built.in.tools",
+      "source": "Built-in Tools",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2495"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.by.folder",
+      "source": "By Folder",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:693"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cancel.esc",
+      "source": "Cancel (Esc)",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:264",
+        "static/index.html:99",
+        "static/js/cookbook.js:3216",
+        "static/js/documentLibrary.js:1753",
+        "static/js/documentLibrary.js:1780",
+        "static/js/documentLibrary.js:1807",
+        "static/js/documentLibrary.js:1837",
+        "static/js/emailLibrary.js:2448",
+        "static/js/gallery.js:1120",
+        "static/js/gallery.js:2086",
+        "static/js/gallery.js:470",
+        "static/js/tasks.js:2899"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.candidate.status",
+      "source": "Candidate status",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:120"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.candidates",
+      "source": "Candidates",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:115"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.capabilities",
+      "source": "Capabilities",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2445"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.capture.useful.memories.automatically.agent.saves.are.admitted.immediate",
+      "source": "Capture useful memories automatically. Agent saves are admitted immediately.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:280"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.change.password",
+      "source": "Change Password",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1970"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.change.the.session.name",
+      "source": "Change the session name",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:724"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.channel",
+      "source": "Channel",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2028"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat",
+      "source": "+ Chat",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:790",
+        "static/js/models.js:165"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.area",
+      "source": "Chat area",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:910"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.area.5ce6e6af",
+      "source": "Chat Area",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1798"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.bar",
+      "source": "Chat Bar",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1838"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.bubbles",
+      "source": "Chat Bubbles",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:431"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.history.list",
+      "source": "Chat history list",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1722"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.input.prompt.area",
+      "source": "Chat Input / Prompt Area",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:446"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.ready",
+      "source": "Chat ready",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:622"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chatgpt.subscription",
+      "source": "ChatGPT Subscription",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2253",
+        "static/js/providerDeviceFlow.js:13",
+        "static/js/providers.js:126"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chats",
+      "source": "Chats",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1722",
+        "static/index.html:674",
+        "static/js/documentLibrary.js:1723",
+        "static/js/documentLibrary.js:1731",
+        "static/js/documentLibrary.js:1960",
+        "static/js/documentLibrary.js:2025",
+        "static/js/sessions.js:3234",
+        "static/js/slashCommands.js:4629",
+        "static/js/slashCommands.js:5337"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.a.location",
+      "source": "Choose a location",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2469",
+        "static/js/settings.js:6438"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.a.preset.or.customize.the.colors.typography.and.background",
+      "source": "Choose a preset or customize the colors, typography, and background for this account.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1667"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.one.model.for.each.purpose",
+      "source": "Choose one model for each purpose.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2339"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.the.language.used.by.open.clank.your.choice.is",
+      "source": "Choose the language used by Open Clank. Your choice is saved in this browser.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1672"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.which.copal.launchers.appear.in.the.sidebar.hiding.a",
+      "source": "Choose which Copal launchers appear in the sidebar. Hiding a launcher never removes its data or Clanker access.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1920"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.emoji.drift",
+      "source": "Clanker Emoji Drift",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:553"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.emoji.rain",
+      "source": "Clanker Emoji Rain",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:555"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.gem.drift",
+      "source": "Clanker Gem Drift",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:552"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.lcars.status.sweep",
+      "source": "Clanker LCARS Status Sweep",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:556"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.matrix.rain",
+      "source": "Clanker Matrix Rain",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:554"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.signal.routes",
+      "source": "Clanker Signal Routes",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:549"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.tasks",
+      "source": "Clanker Tasks",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1777",
+        "static/index.html:646",
+        "static/index.html:879",
+        "static/js/modalManager.js:141",
+        "static/js/tasks.js:2880",
+        "static/js/tasks.js:2965",
+        "static/js/tasks.js:2971"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.advanced.overrides",
+      "source": "Clear Advanced Overrides",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:471"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.history.53b5158b",
+      "source": "Clear history",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1213"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.offline",
+      "source": "Clear offline",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2354"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.workspace",
+      "source": "Clear workspace",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1055"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.click.a.shortcut.to.rebind.press.escape.to.cancel",
+      "source": "Click a shortcut to rebind. Press Escape to cancel.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1943"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.click.to.launch.setup",
+      "source": "Click to launch setup",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:918",
+        "static/js/models.js:648"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.cookbook",
+      "source": "Close cookbook",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1261"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.goals",
+      "source": "Close goals",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1199"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.memory.modal",
+      "source": "Close memory modal",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:45"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.prompt",
+      "source": "Close prompt",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1112"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.rename.session.modal",
+      "source": "Close rename session modal",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1235"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.settings",
+      "source": "Close settings",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1276"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.theme",
+      "source": "Close theme",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:393"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.code.bg",
+      "source": "Code Bg",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:457",
+        "static/js/theme.js:415"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.code.blocks",
+      "source": "Code Blocks",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:455"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.code.text",
+      "source": "Code Text",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:458",
+        "static/js/theme.js:416"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cog.next.to.user.re.open.with",
+      "source": "Cog next to user — re-open with",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1792"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.color.harmony",
+      "source": "Color Harmony",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:475"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.colors",
+      "source": "Colors",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:416"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.comfortable",
+      "source": "Comfortable",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:525"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.comma.separated.e.g.python.build.vllm",
+      "source": "— comma-separated, e.g. python, build, vllm",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:213"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compact",
+      "source": "Compact",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:524",
+        "static/js/chat.js:180"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compare.active.click.to.deactivate",
+      "source": "Compare active — click to deactivate",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1088"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.complementary",
+      "source": "Complementary",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:487"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compose.email",
+      "source": "Compose email",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:739"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confidence",
+      "source": "Confidence",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:234"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confidence.70",
+      "source": "Confidence ≤ 70%",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:248"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confidence.75",
+      "source": "Confidence ≤ 75%",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:247"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confidence.80",
+      "source": "Confidence ≤ 80%",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:246"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confidence.85",
+      "source": "Confidence ≤ 85%",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:245"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confidence.90",
+      "source": "Confidence ≤ 90%",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:244"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confidence.95",
+      "source": "Confidence ≤ 95%",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:243"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.configure.email.account.ntfy.server.etc.in",
+      "source": "Configure email account, ntfy server, etc. in",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2067"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.configure.which.model.to.use.for.image.generation",
+      "source": "Configure which model to use for image generation.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1467"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confirm.new.password",
+      "source": "Confirm new password",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1974"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connect.an.api.provider.browser.account.or.custom.endpoint",
+      "source": "Connect an API provider, browser account, or custom endpoint.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2227"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connecting",
+      "source": "connecting…",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/ui/index.html:15"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.connection.mode",
+      "source": "Connection mode",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2213"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.constellations",
+      "source": "Constellations",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:560"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.context.menu",
+      "source": "Context menu",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1695"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.controls",
+      "source": "Controls",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:462"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.controls.for.the.agent.tool.loop",
+      "source": "Controls for the agent tool loop.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2481"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.controls.how.fired.note.reminders.are.delivered",
+      "source": "Controls how fired note reminders are delivered.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2025"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.controls.how.many.relevant.published.or.approved.skills.are.added",
+      "source": "Controls how many relevant published or approved skills are added to each agent request.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:318"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.controls.randomness.lower.values.give.focused.deterministic.answers.good",
+      "source": "Controls randomness. Lower values give focused, deterministic answers (good for code). Higher values give more creative, varied responses.",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1128"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.copal.appearance",
+      "source": "Copal appearance",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:751"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.destinations",
+      "source": "Copal destinations",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:628"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.navigation",
+      "source": "Copal navigation",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1919"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.vault",
+      "source": "Copal · Vault",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/ui/index.html:6"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.chat",
+      "source": "Copy Chat",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:915",
+        "static/js/sessions.js:732"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.coral",
+      "source": "Coral",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1511"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.create.a.new.persona",
+      "source": "Create a new persona",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1150",
+        "static/index.html:1363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.creative",
+      "source": "Creative",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1135"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.curated",
+      "source": "Curated",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:116"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.current.open.clank.model.memory.provider.and.integration.state",
+      "source": "Current Open Clank model, memory, provider, and integration state.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2506"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.current.password",
+      "source": "Current password",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1972"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.custom",
+      "source": "Custom",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1588",
+        "static/js/admin.js:452"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.custom.fonts",
+      "source": "Custom Fonts",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:468"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.custom.url",
+      "source": "Custom URL",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2248"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.customize",
+      "source": "Customize",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:398",
+        "static/js/slashCommands.js:3105"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cx.id",
+      "source": "CX ID",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1605"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.daily.template.id",
+      "source": "Daily template ID",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1892"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.danger.zone",
+      "source": "Danger Zone",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2577"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.dark",
+      "source": "Dark",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:498"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.data.backup",
+      "source": "Data Backup",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2567"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.debug",
+      "source": "DEBUG",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2533"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.deep.research.active.click.to.deactivate",
+      "source": "Deep Research active — click to deactivate",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1069"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.deep.research.runtime.settings.default.model.is.picked.in",
+      "source": "Deep Research runtime settings. Default Model is picked in",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1622"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.deepseek",
+      "source": "DeepSeek",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2250",
+        "static/js/modelSharing.js:113",
+        "static/js/providers.js:132"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.default",
+      "source": "Default",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:532",
+        "static/js/modelPicker.js:41",
+        "static/js/notes.js:1597",
+        "static/js/research/panel.js:401",
+        "static/js/research/panel.js:405",
+        "static/js/research/panel.js:660",
+        "static/js/settings.js:3455"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.default.chat.model",
+      "source": "Default Chat Model",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1382",
+        "static/js/slashCommands.js:3333"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.default.persona",
+      "source": "Default persona",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2077"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.default.themes",
+      "source": "Default Themes",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:404"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.calendar",
+      "source": "Delete all calendar",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2638",
+        "static/index.html:2641"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.chats",
+      "source": "Delete all chats",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2582",
+        "static/index.html:2585"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.documents",
+      "source": "Delete all documents",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2622",
+        "static/index.html:2625"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.gallery",
+      "source": "Delete all gallery",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2630",
+        "static/index.html:2633"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.notes",
+      "source": "Delete all notes",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2606",
+        "static/index.html:2609"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.remaining",
+      "source": "Delete All Remaining",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2650"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.remaining.categories",
+      "source": "Delete all remaining categories",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:2650"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.seven.global.categories",
+      "source": "Delete all seven global categories",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2647"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.skills",
+      "source": "Delete all skills",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2598",
+        "static/index.html:2601"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.all.tasks",
+      "source": "Delete all tasks",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:2614",
+        "static/index.html:2617"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.non.passing",
+      "source": "Delete non passing",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:262",
+        "static/js/skills.js:1831"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.selected",
+      "source": "Delete selected",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:714",
+        "static/js/cookbookServe.js:1002",
+        "static/js/gallery.js:1119",
+        "static/js/gallery.js:469"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.selected.duplicates.generic.irrelevant.skills.failed.audits.and.s",
+      "source": "Delete selected duplicates, generic/irrelevant skills, failed audits, and skills below threshold",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:262"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.selected.live.brain.data.owned.by.your.account.rag",
+      "source": "Delete selected live Brain data owned by your account. RAG documents, chunks, indexes, exports, backups, and source files are retained. Other users and built-in or shared skills stay untouched. Memory capture remains enabled, so future chats can create new memories.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:347"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.delete.session",
+      "source": "Delete session",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:619",
+        "static/js/settings.js:2194",
+        "static/js/slashCommands.js:4922"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.this.persona.and.its.memories",
+      "source": "Delete this persona and its memories",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1156"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.this.saved.persona",
+      "source": "Delete this saved persona",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/index.html:1376"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.density",
+      "source": "Density",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:522",
+        "static/index.html:523"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.digest",
+      "source": "Digest",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:52"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.disabled",
+      "source": "Disabled",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1492",
+        "static/index.html:1574",
+        "static/js/emailLibrary.js:307",
+        "static/js/providerControl.js:789",
+        "static/js/settings.js:1363",
+        "static/js/settings.js:3456",
+        "static/js/settings.js:4278",
+        "static/js/settings.js:951",
+        "static/style.css:11816"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.document",
+      "source": "document",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:856",
+        "static/js/document.js:9650",
+        "static/js/document.js:9661",
+        "static/js/document.js:9864"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.document.editor",
+      "source": "Document Editor",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1847",
+        "static/js/admin.js:1387"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.drafts.only",
+      "source": "Drafts only",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:241"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.drop.or.files.into.and.reload.they.ll.appear.in",
+      "source": "Drop , , or files into and reload — they'll appear in the Font dropdown above.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:469"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.drops.data.skills.all.skill.md.files.memory.not.affected",
+      "source": "Drops `data/skills/` (all SKILL.md files). Memory not affected.",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:2599"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.duckduckgo",
+      "source": "DuckDuckGo",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/index.html:1630",
+        "static/js/search.js:31",
+        "static/js/settings.js:1362"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.duckduckgo.free.no.key",
+      "source": "DuckDuckGo (free, no key)",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/index.html:1569"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

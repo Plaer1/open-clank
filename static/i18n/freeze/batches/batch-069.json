@@ -1,0 +1,179 @@
+{
+  "id": "batch-069",
+  "group": "treehouse.lesson.house-documents",
+  "surface": "treehouse",
+  "entry_count": 14,
+  "character_count": 2757,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-documents.typed-tables.practice.seed",
+      "source": "| Date | Item | Amount |\n| --- | --- | --- |\n| 2026-09-01 | Supplies | 12.50 |\n| 2026-09-08 | Filing | 40.00 |\n\nTotal formula column: sum(Amount)",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:574"
+      ],
+      "context": "practice",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.typed-tables.practice.title",
+      "source": "Typed practice table",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:573"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.typed-tables.result",
+      "source": "A table whose date and currency columns compute a real total.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:546"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.typed-tables.title",
+      "source": "Typed dates, money and formulas in readable tables",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:546"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.typed-tables.whyThisHelps",
+      "source": "A table that computes is a small model of your numbers. When the total is a formula rather than a typed-in figure, it stays true when the rows change.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:546"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.wiki-within.body",
+      "source": "Open the [Wiki library](clank://wiki) and create a Wiki-type page. Write a short chunk and link it to another readable document. Reopen the link, then check the backlink on the target.\n\n**Observable result:** the Wiki page commits its Markdown chunk and a valid link/backlink pair with another document.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:581"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.wiki-within.explanation",
+      "source": "A Wiki page is a document type, not a separate application. Create one from the [Wiki library](clank://wiki) and it opens in the same Editor as everything else. Wiki pages hold Markdown chunks and link to other documents; the link is real, and the backlink shows up on the target.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:581"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.wiki-within.practice.cleanup",
+      "source": "Delete this practice page and remove its link when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:610"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.wiki-within.practice.expectedEvidence",
+      "source": "The Wiki page saves its chunk and a resolving link/backlink to the note.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:611"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.wiki-within.practice.seed",
+      "source": "A short Wiki chunk that links to one existing note.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:609"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.wiki-within.practice.title",
+      "source": "Linked practice notebook page",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:608"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.wiki-within.result",
+      "source": "A Wiki-type page linked to a note, both opened and edited in one Editor.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:581"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.wiki-within.title",
+      "source": "Wiki pages and Markdown chunks in the same Editor",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:581"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-documents.wiki-within.whyThisHelps",
+      "source": "One editor means one set of habits: the same shortcuts, the same links, the same search. The Wiki library is a filtered shelf of page types — the writing model does not change.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:581"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    }
+  ]
+}
