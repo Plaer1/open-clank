@@ -21,7 +21,7 @@ async function sharedSourceEditor() {
   return sharedEditorPromise;
 }
 
-const SECTIONS = [['courses', 'Courses'], ['skills', 'Skills'], ['assignments', 'Assignments'], ['analytics', 'Analytics']];
+const SECTIONS = [['courses', 'Courses'], ['skills', 'Skills'], ['assignments', 'Assignments'], ['analytics', 'Analytics'], ['achievements', 'Achievements']];
 
 export function treeHouseCommandId(prefix = 'command') {
   const random = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -356,6 +356,8 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     if (!snapshot.state.profiles[ui.actorId]) {
       ui.actorId = 'owner'; localStorage.setItem(copalStorageKey('odysseus-treehouse-actor'), ui.actorId); return load();
     }
+    // Best-effort toast drain after a successful load (S12 task-identity).
+    void pollAchievementNotifications();
     return true;
   }
 
@@ -407,7 +409,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
           ui.selectedCourse = localStorage.getItem(contextKey('odysseus-treehouse-course', snapshot.accountId, mode)) || null;
         }
         else localStorage.setItem(copalStorageKey('odysseus-treehouse-mode'), mode);
-        if (mode === 'learner' && !['courses', 'analytics'].includes(ui.section)) ui.section = 'courses';
+        if (mode === 'learner' && !['courses', 'analytics', 'achievements'].includes(ui.section)) ui.section = 'courses';
         renderLoaded();
       } }));
     }
@@ -428,7 +430,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     const visibleCourseCount = values(ui.snapshot?.state?.courses).filter((course) => !course.deletedAt).length;
     const resetScope = ui.snapshot?.accountId ? `${ui.snapshot.actor?.displayName || ui.snapshot.accountId} in ${ui.snapshot.workspace || 'this workspace'}` : `${ui.actorId} in this workspace`;
     const reset = h('button', { class: 'copal-btn danger', text: 'Reset my progress', onclick: async () => {
-      if (!await styledConfirm(`Reset progress and awards for ${visibleCourseCount} visible course${visibleCourseCount === 1 ? '' : 's'} for ${resetScope}? This clears your learner progress, submissions, evidence, and completion awards; curricula and other learners stay intact.`, { title: 'Reset TreeHouse progress', confirmText: 'Reset progress', danger: true })) return;
+      if (!await styledConfirm(`Reset Class progress for ${visibleCourseCount} visible course${visibleCourseCount === 1 ? '' : 's'} for ${resetScope}? This clears your learner progress, submissions, evidence, and course completion awards. Account-wide achievements earned in the House are lifetime records and stay with you. Curricula and other learners stay intact.`, { title: 'Reset TreeHouse progress', confirmText: 'Reset progress', danger: true })) return;
       await command('progress.reset');
     } });
     root.append(cards, h('div', { class: 'copal-treehouse-actions' }, reset));
@@ -436,7 +438,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
 
   function navigation(root) {
     const nav = h('nav', { class: 'copal-treehouse-nav', 'aria-label': 'TreeHouse sections' });
-    const allowed = ui.mode === 'admin' ? SECTIONS : SECTIONS.filter(([id]) => ['courses', 'analytics'].includes(id));
+    const allowed = ui.mode === 'admin' ? SECTIONS : SECTIONS.filter(([id]) => ['courses', 'analytics', 'achievements'].includes(id));
     for (const [id, label] of allowed) nav.append(h('button', { type: 'button', class: `copal-btn${ui.section === id ? ' primary' : ''}`, text: label, 'aria-current': ui.section === id ? 'page' : false, onclick: () => { ui.section = id; persistContext(); renderLoaded(); } }));
     root.append(nav);
   }
@@ -898,6 +900,119 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     }
   }
 
+  // -- Achievements (S29) ------------------------------------------------
+
+  async function achievementApi(path, options = {}) {
+    return api(`/treehouse/achievements${path}`, options);
+  }
+
+  async function showAchievementToast(note) {
+    // S12 task-identity: when the award evidence names an original task chat,
+    // the toast action opens that durable session — never a substitute chat.
+    const openOriginal = () => {
+      if (note.sessionId && window.sessionModule?.selectSession) {
+        window.sessionModule.selectSession(note.sessionId);
+      }
+    };
+    let showToast = window.uiModule?.showToast;
+    if (!showToast) {
+      try {
+        const ui = await import('../ui.js');
+        showToast = ui.showToast;
+      } catch (_) { showToast = null; }
+    }
+    const label = note.title || note.achievementKey || 'Achievement';
+    const body = note.rarity === 'ultra' ? `Ultra rare earned: ${label}` : `Achievement earned: ${label}`;
+    if (showToast) {
+      showToast(body, {
+        duration: 12000,
+        action: note.sessionId ? { label: 'Open task', onClick: openOriginal } : undefined,
+      });
+    }
+    // Also fire a browser Notification when permitted; clicking opens the
+    // same original task chat when the award names one.
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        const ntf = new Notification(body, {
+          tag: 'achievement-' + (note.achievementId || note.outboxId || label),
+          icon: '/static/favicon.ico',
+        });
+        if (note.sessionId) ntf.onclick = () => { window.focus(); openOriginal(); };
+      }
+    } catch (_) {}
+  }
+
+  async function pollAchievementNotifications() {
+    // Dedupe by award ID across reconnects/tabs via the durable outbox.
+    // Grouped bursts (historical backfill) emit one summary toast.
+    if (!ui.snapshot?.accountId) return;
+    if (ui._achievementPolling) return;
+    ui._achievementPolling = true;
+    try {
+      const data = await achievementApi('/notifications?limit=20');
+      const notes = data.notifications || [];
+      if (!notes.length) return;
+      const batches = new Map();
+      for (const note of notes) batches.set(note.batchId || note.achievementId, note);
+      if (batches.size === 1 && (notes[0].batchId === 'backfill' || notes.length > 1)) {
+        // One catch-up summary rather than dozens of toasts.
+        if (notes.length > 1) {
+          await showAchievementToast({ title: `${notes.length} achievements from earlier activity`, achievementId: 'batch', outboxId: notes[0].outboxId });
+          for (const note of notes) {
+            try { await achievementApi(`/notifications/${encodeURIComponent(note.outboxId)}/delivered`, { method: 'POST' }); } catch (_) {}
+          }
+          return;
+        }
+      }
+      for (const note of notes) {
+        await showAchievementToast(note);
+        try { await achievementApi(`/notifications/${encodeURIComponent(note.outboxId)}/delivered`, { method: 'POST' }); }
+        catch (_) {
+          // A failed toast cannot erase the durable award; leave the outbox
+          // row for retry rather than marking delivered.
+          try { await achievementApi(`/notifications/${encodeURIComponent(note.outboxId)}/failed`, { method: 'POST' }); } catch (_) {}
+        }
+      }
+    } catch (_) {
+      // Polling is best-effort; the achievements view remains the durable record.
+    } finally {
+      ui._achievementPolling = false;
+    }
+  }
+
+  function renderAchievements(root) {
+    const toolbar = h('div', { class: 'copal-treehouse-section-head' }, h('div', {}, h('h2', { text: 'Achievements' }), h('p', { text: 'Account-wide lifetime awards earned from real activity. Deterministic receipts only — no model judges your work.' })));
+    const host = h('div', { class: 'copal-empty', text: 'Loading achievements…' });
+    root.append(toolbar, host);
+    const adminSpoilers = adminMode() && ui.snapshot?.permissions?.admin;
+    achievementApi(`?admin=${adminSpoilers ? 'true' : 'false'}`).then((presentation) => {
+      const counter = h('section', { class: 'copal-card' },
+        h('h3', { text: 'Progress' }),
+        h('strong', { text: presentation.counter || '0/34' }),
+        h('small', { text: adminSpoilers ? 'admin spoilers on' : 'mystery entries show ??? until earned' }),
+      );
+      const list = h('div', { class: 'copal-treehouse-achievements', role: 'list', 'aria-label': 'Achievement catalog' });
+      for (const entry of presentation.entries || []) {
+        const locked = entry.locked && !entry.earned;
+        const title = entry.earned ? entry.title : (entry.rarity === 'mystery' ? '???' : (adminSpoilers ? entry.title : entry.title));
+        const item = h('article', {
+          class: `copal-card copal-achievement copal-achievement-${entry.rarity}${entry.earned ? ' earned' : ''}`,
+          role: 'listitem',
+          'data-achievement-id': entry.id,
+        },
+          h('h4', { text: title }),
+          h('p', { text: entry.earned || adminSpoilers || entry.rarity === 'normal' ? (entry.summary || '') : '' }),
+          h('small', { text: entry.earned ? 'Earned' : (entry.rarity === 'ultra' ? 'Ultra rare' : (entry.rarity === 'mystery' ? '???' : 'Locked')) }),
+        );
+        list.append(item);
+      }
+      host.replaceChildren(counter, list);
+      void pollAchievementNotifications();
+    }).catch((error) => {
+      host.replaceChildren(h('div', { class: 'copal-empty' }, h('p', { text: error.message || 'Achievements unavailable' })));
+    });
+  }
+
   function renderAnalytics(root) {
     const state = ui.snapshot.state; const projection = ui.snapshot.projection; const mine = learnerProjection();
     root.append(h('div', { class: 'copal-treehouse-section-head' }, h('div', {}, h('h2', { text: analyticsMode() ? 'Instructor analytics' : 'My progress evidence' }), h('p', { text: 'Computed from durable events; no browser-only counters.' }))));
@@ -962,6 +1077,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     if (ui.section === 'courses') renderCourses(content);
     else if (ui.section === 'skills') renderSkills(content);
     else if (ui.section === 'assignments') renderAssignments(content);
+    else if (ui.section === 'achievements') renderAchievements(content);
     else renderAnalytics(content);
     root.append(content); ui.body.replaceChildren(root);
   }

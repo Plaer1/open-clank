@@ -107,6 +107,23 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         features = _sanitize_export(features, removed_secret_fields, "features")
         preferences = _sanitize_export(preferences, removed_secret_fields, "preferences")
 
+        # S29: account-wide achievement ledger (lifetime awards, receipts,
+        # predicate state, backfill cursors). Keyed by immutable account id.
+        achievement_ledger = {"awards": [], "receipts": [], "predicateState": None, "backfillCursors": []}
+        try:
+            from src.openclank.copal_treehouse_repository import TreeHouseRepository
+            from src.constants import DATA_DIR
+            from src.memory_scope import memory_owner as _resolve_account_id
+            th_path = os.environ.get("TREEHOUSE_REPOSITORY_PATH") or os.path.join(str(DATA_DIR), "treehouse.sqlite3")
+            th_repo = TreeHouseRepository(th_path)
+            auth_manager = getattr(request.app.state, "auth_manager", None)
+            account_id = auth_manager.account_id(user) if auth_manager is not None and hasattr(auth_manager, "account_id") else memory_owner
+            if account_id:
+                achievement_ledger = th_repo.export_achievement_ledger(str(account_id))
+        except Exception:
+            logger.exception("Failed to export TreeHouse achievement ledger")
+        achievement_ledger = _sanitize_export(achievement_ledger, removed_secret_fields, "achievementLedger")
+
         export_data = {
             "version": 2,
             "exported_at": datetime.now().isoformat(),
@@ -129,6 +146,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
             "settings": settings,
             "features": features,
             "preferences": preferences,
+            "achievementLedger": achievement_ledger,
         }
 
         filename = f"open-clank-backup-{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -308,6 +326,21 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
             current.update(body["preferences"])
             _save_for_user(user, current)
             imported.append("preferences")
+
+        # ── S29 achievement ledger ──
+        if "achievementLedger" in body and isinstance(body["achievementLedger"], dict):
+            try:
+                from src.openclank.copal_treehouse_repository import TreeHouseRepository
+                from src.constants import DATA_DIR
+                th_path = os.environ.get("TREEHOUSE_REPOSITORY_PATH") or os.path.join(str(DATA_DIR), "treehouse.sqlite3")
+                th_repo = TreeHouseRepository(th_path)
+                auth_manager = getattr(request.app.state, "auth_manager", None)
+                account_id = auth_manager.account_id(user) if auth_manager is not None and hasattr(auth_manager, "account_id") else memory_owner
+                if account_id:
+                    counts = th_repo.restore_achievement_ledger(str(account_id), body["achievementLedger"])
+                    imported.append(f"achievementLedger (+{counts.get('awards', 0)} awards)")
+            except Exception:
+                logger.exception("Failed to restore TreeHouse achievement ledger")
 
         if not imported:
             return {"ok": False, "message": "No recognized data found in the file"}

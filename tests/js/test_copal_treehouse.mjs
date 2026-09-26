@@ -92,7 +92,7 @@ test('mounted authenticated UI restores account and mode context and previews sc
   const labels = () => walk(body).filter((node) => node.tagName === 'BUTTON').map((node) => node.textContent);
   assert.equal(labels().includes('Edit'), false); assert.equal(labels().includes('Delete'), false); assert.equal(labels().includes('Share'), false);
   const reset = walk(body).find((node) => node.textContent === 'Reset my progress'); await reset.click();
-  assert.match(confirms[0], /1 visible course/); assert.match(confirms[0], /Bob in school/); assert.match(confirms[0], /curricula and other learners stay intact/);
+  assert.match(confirms[0], /1 visible course/); assert.match(confirms[0], /Bob in school/); assert.match(confirms[0], /Curricula and other learners stay intact/); assert.match(confirms[0], /Account-wide achievements earned in the House are lifetime records and stay with you/);
 
   await walk(body).find((node) => node.textContent === 'Open').click();
   await walk(body).find((node) => node.textContent === 'Admin').click();

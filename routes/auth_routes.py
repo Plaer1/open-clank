@@ -3386,6 +3386,20 @@ def setup_auth_routes(
                     auth_receipt = True
                 if ok:
                     _checkpoint("auth_deleted", auth_receipt)
+                    # S29: account-wide achievement ledger is keyed by the
+                    # immutable account id (stable across username rename).
+                    # Delete removes it with the account; rename needs no
+                    # move because the id does not change.
+                    try:
+                        from src.openclank.copal_treehouse_repository import TreeHouseRepository
+                        from src.constants import DATA_DIR
+                        import os as _os
+                        from pathlib import Path as _Path
+                        _th_path = _os.environ.get("TREEHOUSE_REPOSITORY_PATH") or str(_Path(DATA_DIR) / "treehouse.sqlite3")
+                        _th_repo = TreeHouseRepository(_th_path)
+                        _th_repo.purge_achievement_ledger(str(target_subject_id or target_owner))
+                    except Exception:
+                        logger.exception("Failed to purge TreeHouse achievement ledger after account delete")
                     if durable:
                         account_lifecycle.set_operation_state(
                             operation_id,

@@ -25,6 +25,7 @@ from src.openclank.copal_treehouse import (
     validate_treehouse_state,
 )
 from src.openclank.copal_treehouse_repository import TreeHouseRepository, TreeHouseRepositoryError
+from src.openclank.treehouse_achievements import TreeHouseAchievementEngine
 from src.openclank.treehouse_field_guide import instantiate_field_guide
 from src.openclank.file_policy import FilePolicyRepository
 from src.constants import DATA_DIR
@@ -1047,5 +1048,144 @@ def setup_treehouse_routes(
         except TreeHouseError as exc:
             raise fail(exc) from exc
         return {"ok": True, "schemaVersion": state["schemaVersion"], "revision": state["revision"], "eventCount": len(state["events"]), "projectionLearners": len(projection["learners"]), "fingerprint": state_fingerprint(state), "accountId": scope.get("account_id"), "workspace": scope.get("workspace_id")}
+
+    # ------------------------------------------------------------------
+    # Account-wide achievements (S29)
+    #
+    # Deterministic receipt predicates only.  Workspace is event context;
+    # the partition is the stable account identity.  These endpoints are
+    # account-scoped and never award installer/maintenance/seed activity.
+    # ------------------------------------------------------------------
+
+    def achievement_engine(request: Request) -> TreeHouseAchievementEngine:
+        return TreeHouseAchievementEngine(repository(request))
+
+    def _require_account(request: Request, scope: dict[str, str]) -> str:
+        if not account_scoped(request, scope):
+            raise HTTPException(401, detail={"code": "not_authenticated", "message": "Achievements require an authenticated account"})
+        return str(scope["account_id"])
+
+    @router.get("/achievements")
+    async def get_achievements(
+        request: Request,
+        workspace: str | None = None,
+        admin: bool = Query(False),
+    ):
+        scope = account_scope(request, scope_for(request, workspace))
+        account_id = _require_account(request, scope)
+        engine = achievement_engine(request)
+        presentation = engine.presentation(account_id, admin=admin)
+        return {**presentation, "accountId": account_id, "workspace": scope["workspace_id"]}
+
+    @router.post("/achievements/events")
+    async def ingest_achievement_events(
+        request: Request,
+        workspace: str | None = None,
+    ):
+        """Ingest committed operation receipts and authenticated UI acks.
+
+        Body: ``{"events": [...]}``.  Each event carries a stable
+        ``source_event_id``, an ``event_family``, ``kind`` (R/U), ``result``,
+        ``actor_kind``, ``occurred_at`` and minimal predicate ``facts``.
+        Duplicate and out-of-order deliveries never double-award.
+        """
+        scope = account_scope(request, scope_for(request, workspace))
+        account_id = _require_account(request, scope)
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, detail={"code": "invalid_json", "message": "Expected a JSON body"})
+        events = body.get("events") if isinstance(body, dict) else None
+        if not isinstance(events, list) or not events:
+            raise HTTPException(400, detail={"code": "missing_events", "message": "Expected a non-empty events list"})
+        if len(events) > 200:
+            raise HTTPException(413, detail={"code": "events_too_many", "message": "Ingest at most 200 events per request"})
+        result = achievement_engine(request).ingest(account_id, events, via="live")
+        return {"ok": True, "accountId": account_id, **result}
+
+    @router.post("/achievements/backfill")
+    async def backfill_achievements(
+        request: Request,
+        workspace: str | None = None,
+    ):
+        """Ingest proven historical structured evidence with resumable cursors.
+
+        Body: ``{"sourceFamily": "...", "records": [...], "cursor": {...}}``.
+        Prose descriptions, digest-only restore claims and ambiguous owners are
+        rejected.  No LLM reads Lore/chat to decide achievements.
+        """
+        scope = account_scope(request, scope_for(request, workspace))
+        account_id = _require_account(request, scope)
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, detail={"code": "invalid_json", "message": "Expected a JSON body"})
+        source_family = str(body.get("sourceFamily") or body.get("source_family") or "").strip()
+        records = body.get("records")
+        if not source_family or not isinstance(records, list):
+            raise HTTPException(400, detail={"code": "bad_backfill", "message": "Expected sourceFamily and records"})
+        if len(records) > 500:
+            raise HTTPException(413, detail={"code": "backfill_too_large", "message": "Backfill at most 500 records per request"})
+        cursor = body.get("cursor") if isinstance(body.get("cursor"), dict) else {}
+        result = achievement_engine(request).backfill(account_id, source_family, records, cursor=cursor)
+        return {"ok": True, "accountId": account_id, "sourceFamily": source_family, **result}
+
+    @router.get("/achievements/notifications")
+    async def pending_achievement_notifications(
+        request: Request,
+        workspace: str | None = None,
+        limit: int = Query(20, ge=1, le=50),
+    ):
+        scope = account_scope(request, scope_for(request, workspace))
+        account_id = _require_account(request, scope)
+        repo = repository(request)
+        pending = repo.list_pending_notifications(account_id, limit=limit)
+        items = []
+        for row in pending:
+            award = repo.get_achievement_award(account_id, str(row["achievement_id"]))
+            evidence = (award or {}).get("evidence") or {}
+            definition = None
+            try:
+                from src.openclank.treehouse_achievements import BY_ID
+                definition = BY_ID.get(str(row["achievement_id"]))
+            except Exception:
+                definition = None
+            items.append({
+                "outboxId": row["outbox_id"],
+                "achievementId": row["achievement_id"],
+                "achievementKey": getattr(definition, "key", ""),
+                "title": getattr(definition, "title", ""),
+                "rarity": getattr(definition, "rarity", "normal"),
+                "summary": getattr(definition, "summary", ""),
+                "batchId": row.get("batch_id"),
+                "state": row["state"],
+                # S12 task-identity: when the award evidence names a task and
+                # its durable session, the toast opens that ORIGINAL task chat.
+                "taskId": evidence.get("taskId") or (award or {}).get("evidence", {}).get("taskId"),
+                "sessionId": evidence.get("sessionId"),
+                "earnedAt": (award or {}).get("earned_at"),
+            })
+        return {"notifications": items, "accountId": account_id}
+
+    @router.post("/achievements/notifications/{outbox_id}/delivered")
+    async def mark_achievement_notification_delivered(outbox_id: str, request: Request, workspace: str | None = None):
+        scope = account_scope(request, scope_for(request, workspace))
+        account_id = _require_account(request, scope)
+        repo = repository(request)
+        for row in repo.list_pending_notifications(account_id, limit=50):
+            if row["outbox_id"] == outbox_id:
+                return {"ok": True, **repo.mark_notification_delivered(outbox_id)}
+        raise HTTPException(404, detail={"code": "notification_not_found", "message": "No pending notification with that id"})
+
+    @router.post("/achievements/notifications/{outbox_id}/failed")
+    async def mark_achievement_notification_failed(outbox_id: str, request: Request, workspace: str | None = None):
+        """Record a toast failure.  The durable award is never erased."""
+        scope = account_scope(request, scope_for(request, workspace))
+        account_id = _require_account(request, scope)
+        repo = repository(request)
+        for row in repo.list_pending_notifications(account_id, limit=50):
+            if row["outbox_id"] == outbox_id:
+                return {"ok": True, **repo.mark_notification_failed(outbox_id)}
+        raise HTTPException(404, detail={"code": "notification_not_found", "message": "No pending notification with that id"})
 
     return router

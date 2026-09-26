@@ -136,6 +136,65 @@ class TreeHouseRepository:
                 );
                 CREATE INDEX IF NOT EXISTS treehouse_attachment_preparations_target
                     ON treehouse_attachment_preparations(caller_account_id, workspace_id, course_id, lesson_id);
+                CREATE TABLE IF NOT EXISTS treehouse_activity_receipts (
+                    account_id TEXT NOT NULL,
+                    source_event_id TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    event_family TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('R','U')),
+                    result TEXT NOT NULL,
+                    actor_kind TEXT NOT NULL,
+                    workspace_id TEXT,
+                    occurred_at TEXT NOT NULL,
+                    facts_json TEXT NOT NULL,
+                    source_hash TEXT,
+                    evidence_digest TEXT NOT NULL,
+                    via TEXT NOT NULL,
+                    ingested_at REAL NOT NULL,
+                    PRIMARY KEY (account_id, source_event_id)
+                );
+                CREATE INDEX IF NOT EXISTS treehouse_activity_receipts_family
+                    ON treehouse_activity_receipts(account_id, event_family);
+                CREATE TABLE IF NOT EXISTS treehouse_achievement_awards (
+                    account_id TEXT NOT NULL,
+                    achievement_id TEXT NOT NULL,
+                    predicate_version TEXT NOT NULL,
+                    catalog_revision TEXT NOT NULL,
+                    earned_at TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    awarded_via TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (account_id, achievement_id)
+                );
+                CREATE TABLE IF NOT EXISTS treehouse_achievement_predicate_state (
+                    account_id TEXT PRIMARY KEY,
+                    state_json TEXT NOT NULL,
+                    predicate_version TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS treehouse_achievement_backfill_cursors (
+                    account_id TEXT NOT NULL,
+                    source_family TEXT NOT NULL,
+                    cursor_json TEXT NOT NULL,
+                    predicate_version TEXT NOT NULL,
+                    catalog_revision TEXT NOT NULL,
+                    processed INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (account_id, source_family)
+                );
+                CREATE TABLE IF NOT EXISTS treehouse_achievement_outbox (
+                    outbox_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    achievement_id TEXT NOT NULL,
+                    batch_id TEXT,
+                    state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')),
+                    created_at REAL NOT NULL,
+                    delivered_at REAL,
+                    UNIQUE(account_id, achievement_id)
+                );
+                CREATE INDEX IF NOT EXISTS treehouse_achievement_outbox_pending
+                    ON treehouse_achievement_outbox(account_id, state);
                 """
             )
             try:
@@ -800,3 +859,439 @@ class TreeHouseRepository:
             )
             db.commit()
         return result
+
+    # ------------------------------------------------------------------
+    # Account-wide built-in achievements (S29)
+    #
+    # These records live outside the 50,000-event course aggregate.  The
+    # partition is the stable account identity; workspace is context only.
+    # All writes use the same immediate-transaction/CAS discipline as the
+    # catalogue so duplicate, out-of-order and backfill/live overlapping
+    # deliveries never double-award.
+    # ------------------------------------------------------------------
+
+    def put_activity_receipt(self, account_id: str, event: Any, *, via: str = "live") -> dict[str, Any]:
+        """Insert one structured activity receipt. Idempotent on source_event_id.
+
+        Returns ``{"inserted": bool}`` — False means the receipt was already
+        present (duplicate delivery).  The caller must not re-score duplicates.
+        """
+        facts = dict(getattr(event, "facts", None) or {})
+        source_event_id = str(getattr(event, "source_event_id", "") or "")
+        event_family = str(getattr(event, "event_family", "") or "")
+        kind = str(getattr(event, "kind", "") or "")
+        result = str(getattr(event, "result", "") or "")
+        actor_kind = str(getattr(event, "actor_kind", "") or "")
+        occurred_at = str(getattr(event, "occurred_at", "") or "")
+        workspace_id = getattr(event, "workspace_id", None)
+        schema_version = int(getattr(event, "schema_version", 1) or 1)
+        source_hash = getattr(event, "source_hash", None)
+        evidence_digest = self._digest({
+            "sourceEventId": source_event_id,
+            "eventFamily": event_family,
+            "kind": kind,
+            "result": result,
+            "actorKind": actor_kind,
+            "occurredAt": occurred_at,
+            "facts": facts,
+            "sourceHash": source_hash,
+        })
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT source_event_id FROM treehouse_activity_receipts WHERE account_id=? AND source_event_id=?",
+                (account_id, source_event_id),
+            ).fetchone()
+            if row is not None:
+                db.commit()
+                return {"inserted": False, "sourceEventId": source_event_id}
+            db.execute(
+                "INSERT INTO treehouse_activity_receipts("
+                "account_id,source_event_id,schema_version,event_family,kind,result,actor_kind,"
+                "workspace_id,occurred_at,facts_json,source_hash,evidence_digest,via,ingested_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    account_id, source_event_id, schema_version, event_family, kind, result, actor_kind,
+                    workspace_id, occurred_at,
+                    json.dumps(facts, ensure_ascii=False, separators=(",", ":"), default=str),
+                    source_hash, evidence_digest, via, time.time(),
+                ),
+            )
+            db.commit()
+        return {"inserted": True, "sourceEventId": source_event_id}
+
+    def put_achievement_award(self, record: Any) -> dict[str, Any]:
+        """Insert one achievement award. Idempotent on (account_id, achievement_id).
+
+        Returns ``{"inserted": bool}`` — False means the account already holds
+        this award.  A failed/pending insert never produces a second award.
+        """
+        account_id = str(getattr(record, "account_id", "") or "")
+        achievement_id = str(getattr(record, "achievement_id", "") or "")
+        predicate_version = str(getattr(record, "predicate_version", "") or "")
+        catalog_revision = str(getattr(record, "catalog_revision", "") or "")
+        earned_at = str(getattr(record, "earned_at", "") or "")
+        evidence_refs = list(getattr(record, "evidence_refs", ()) or ())
+        awarded_via = str(getattr(record, "awarded_via", "") or "")
+        evidence_json = json.dumps({"evidenceRefs": evidence_refs}, ensure_ascii=False, separators=(",", ":"))
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT achievement_id FROM treehouse_achievement_awards WHERE account_id=? AND achievement_id=?",
+                (account_id, achievement_id),
+            ).fetchone()
+            if row is not None:
+                db.commit()
+                return {"inserted": False, "achievementId": achievement_id}
+            db.execute(
+                "INSERT INTO treehouse_achievement_awards("
+                "account_id,achievement_id,predicate_version,catalog_revision,earned_at,evidence_json,awarded_via,created_at"
+                ") VALUES(?,?,?,?,?,?,?,?)",
+                (account_id, achievement_id, predicate_version, catalog_revision, earned_at, evidence_json, awarded_via, time.time()),
+            )
+            db.commit()
+        return {"inserted": True, "achievementId": achievement_id}
+
+    def earned_achievement_ids(self, account_id: str) -> list[str]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT achievement_id FROM treehouse_achievement_awards WHERE account_id=? ORDER BY achievement_id",
+                (account_id,),
+            ).fetchall()
+        return [str(row["achievement_id"]) for row in rows]
+
+    def get_achievement_award(self, account_id: str, achievement_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM treehouse_achievement_awards WHERE account_id=? AND achievement_id=?",
+                (account_id, achievement_id),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = dict(row)
+        try:
+            evidence = json.loads(payload.pop("evidence_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            evidence = {}
+        payload["evidence"] = evidence
+        return payload
+
+    def get_predicate_state(self, account_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT state_json FROM treehouse_achievement_predicate_state WHERE account_id=?",
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["state_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+    def put_predicate_state(self, account_id: str, snapshot: dict[str, Any], *, predicate_version: str = "1") -> None:
+        payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), default=str)
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO treehouse_achievement_predicate_state(account_id,state_json,predicate_version,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(account_id) DO UPDATE SET state_json=excluded.state_json,predicate_version=excluded.predicate_version,updated_at=excluded.updated_at",
+                (account_id, payload, predicate_version, time.time()),
+            )
+            db.commit()
+
+    def put_backfill_cursor(
+        self,
+        account_id: str,
+        source_family: str,
+        payload: dict[str, Any],
+        *,
+        predicate_version: str | None = None,
+        catalog_revision: str | None = None,
+        processed: int | None = None,
+        completed: bool = False,
+    ) -> None:
+        """Persist a resumable per-source backfill cursor.
+
+        Accepts the engine's payload shape ``{"cursor", "predicateVersion",
+        "catalogRevision", "processed"}`` or explicit keyword overrides.
+        """
+        body = dict(payload or {})
+        cursor_body = body.get("cursor") if isinstance(body.get("cursor"), dict) else body
+        version = str(predicate_version if predicate_version is not None else body.get("predicateVersion") or body.get("predicate_version") or "1")
+        revision = str(catalog_revision if catalog_revision is not None else body.get("catalogRevision") or body.get("catalog_revision") or "")
+        count = int(processed if processed is not None else body.get("processed") or 0)
+        encoded = json.dumps(cursor_body, ensure_ascii=False, separators=(",", ":"), default=str)
+        completed_at = _now_iso() if completed else None
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO treehouse_achievement_backfill_cursors("
+                "account_id,source_family,cursor_json,predicate_version,catalog_revision,processed,completed_at,updated_at"
+                ") VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(account_id,source_family) DO UPDATE SET "
+                "cursor_json=excluded.cursor_json,predicate_version=excluded.predicate_version,"
+                "catalog_revision=excluded.catalog_revision,processed=excluded.processed,"
+                "completed_at=COALESCE(excluded.completed_at, treehouse_achievement_backfill_cursors.completed_at),"
+                "updated_at=excluded.updated_at",
+                (account_id, source_family, encoded, version, revision, count, completed_at, time.time()),
+            )
+            db.commit()
+
+    def get_backfill_cursor(self, account_id: str, source_family: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM treehouse_achievement_backfill_cursors WHERE account_id=? AND source_family=?",
+                (account_id, source_family),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = dict(row)
+        try:
+            payload["cursor"] = json.loads(payload.pop("cursor_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload["cursor"] = {}
+        return payload
+
+    def enqueue_award_notification(
+        self,
+        account_id: str,
+        achievement_id: str,
+        *,
+        batch_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically insert the award notification outbox row.
+
+        Unique on (account_id, achievement_id) so reconnects and tabs cannot
+        re-deliver the same award.  A failed toast never erases the award.
+        """
+        outbox_id = f"award:{account_id}:{achievement_id}"
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT outbox_id,state FROM treehouse_achievement_outbox WHERE account_id=? AND achievement_id=?",
+                (account_id, achievement_id),
+            ).fetchone()
+            if row is not None:
+                db.commit()
+                return {"outboxId": row["outbox_id"], "state": row["state"], "inserted": False}
+            db.execute(
+                "INSERT INTO treehouse_achievement_outbox(outbox_id,account_id,achievement_id,batch_id,state,created_at) VALUES(?,?,?,?,?,?)",
+                (outbox_id, account_id, achievement_id, batch_id, "pending", time.time()),
+            )
+            db.commit()
+        return {"outboxId": outbox_id, "state": "pending", "inserted": True}
+
+    def list_pending_notifications(self, account_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT outbox_id,account_id,achievement_id,batch_id,state,created_at,delivered_at "
+                "FROM treehouse_achievement_outbox WHERE account_id=? AND state='pending' ORDER BY created_at LIMIT ?",
+                (account_id, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_notification_delivered(self, outbox_id: str) -> dict[str, Any]:
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE treehouse_achievement_outbox SET state='delivered',delivered_at=? WHERE outbox_id=? AND state='pending'",
+                (time.time(), outbox_id),
+            )
+            db.commit()
+        return {"outboxId": outbox_id, "state": "delivered"}
+
+    def mark_notification_failed(self, outbox_id: str) -> dict[str, Any]:
+        """Record a toast failure without erasing the durable award."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE treehouse_achievement_outbox SET state='failed' WHERE outbox_id=? AND state='pending'",
+                (outbox_id,),
+            )
+            db.commit()
+        return {"outboxId": outbox_id, "state": "failed"}
+
+    # -- account lifecycle (export / purge / restore / rename) ------------
+
+    def export_achievement_ledger(self, account_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            awards = [dict(row) for row in db.execute(
+                "SELECT * FROM treehouse_achievement_awards WHERE account_id=? ORDER BY achievement_id",
+                (account_id,),
+            ).fetchall()]
+            receipts = [dict(row) for row in db.execute(
+                "SELECT * FROM treehouse_activity_receipts WHERE account_id=? ORDER BY source_event_id",
+                (account_id,),
+            ).fetchall()]
+            state_row = db.execute(
+                "SELECT state_json,predicate_version FROM treehouse_achievement_predicate_state WHERE account_id=?",
+                (account_id,),
+            ).fetchone()
+            cursors = [dict(row) for row in db.execute(
+                "SELECT * FROM treehouse_achievement_backfill_cursors WHERE account_id=? ORDER BY source_family",
+                (account_id,),
+            ).fetchall()]
+        return {
+            "accountId": account_id,
+            "awards": awards,
+            "receipts": receipts,
+            "predicateState": (json.loads(state_row["state_json"]) if state_row else None),
+            "predicateVersion": (state_row["predicate_version"] if state_row else None),
+            "backfillCursors": cursors,
+        }
+
+    def purge_achievement_ledger(self, account_id: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for table in (
+                "treehouse_achievement_outbox",
+                "treehouse_achievement_backfill_cursors",
+                "treehouse_achievement_predicate_state",
+                "treehouse_achievement_awards",
+                "treehouse_activity_receipts",
+            ):
+                cur = db.execute(f"DELETE FROM {table} WHERE account_id=?", (account_id,))
+                counts[table] = int(cur.rowcount or 0)
+            db.commit()
+        return counts
+
+    def restore_achievement_ledger(self, account_id: str, payload: dict[str, Any]) -> dict[str, int]:
+        """Restore a previously exported ledger. Awards stay unique per account."""
+        counts = {"awards": 0, "receipts": 0, "cursors": 0, "predicateState": 0}
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for row in payload.get("awards") or []:
+                cur = db.execute(
+                    "INSERT OR IGNORE INTO treehouse_achievement_awards("
+                    "account_id,achievement_id,predicate_version,catalog_revision,earned_at,evidence_json,awarded_via,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        account_id,
+                        str(row.get("achievement_id") or row.get("achievementId") or ""),
+                        str(row.get("predicate_version") or row.get("predicateVersion") or ""),
+                        str(row.get("catalog_revision") or row.get("catalogRevision") or ""),
+                        str(row.get("earned_at") or row.get("earnedAt") or ""),
+                        row.get("evidence_json") if isinstance(row.get("evidence_json"), str) else json.dumps(row.get("evidence") or {}, ensure_ascii=False, separators=(",", ":")),
+                        str(row.get("awarded_via") or row.get("awardedVia") or "restore"),
+                        float(row.get("created_at") or time.time()),
+                    ),
+                )
+                counts["awards"] += int(cur.rowcount or 0)
+            for row in payload.get("receipts") or []:
+                cur = db.execute(
+                    "INSERT OR IGNORE INTO treehouse_activity_receipts("
+                    "account_id,source_event_id,schema_version,event_family,kind,result,actor_kind,"
+                    "workspace_id,occurred_at,facts_json,source_hash,evidence_digest,via,ingested_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        account_id,
+                        str(row.get("source_event_id") or row.get("sourceEventId") or ""),
+                        int(row.get("schema_version") or row.get("schemaVersion") or 1),
+                        str(row.get("event_family") or row.get("eventFamily") or ""),
+                        str(row.get("kind") or ""),
+                        str(row.get("result") or ""),
+                        str(row.get("actor_kind") or row.get("actorKind") or ""),
+                        row.get("workspace_id") if row.get("workspace_id") is not None else row.get("workspaceId"),
+                        str(row.get("occurred_at") or row.get("occurredAt") or ""),
+                        row.get("facts_json") if isinstance(row.get("facts_json"), str) else json.dumps(row.get("facts") or {}, ensure_ascii=False, separators=(",", ":"), default=str),
+                        row.get("source_hash") if row.get("source_hash") is not None else row.get("sourceHash"),
+                        str(row.get("evidence_digest") or row.get("evidenceDigest") or self._digest({"sourceEventId": row.get("source_event_id") or row.get("sourceEventId") or ""})),
+                        str(row.get("via") or "restore"),
+                        float(row.get("ingested_at") or time.time()),
+                    ),
+                )
+                counts["receipts"] += int(cur.rowcount or 0)
+            for row in payload.get("backfillCursors") or payload.get("backfill_cursors") or []:
+                cur = db.execute(
+                    "INSERT OR IGNORE INTO treehouse_achievement_backfill_cursors("
+                    "account_id,source_family,cursor_json,predicate_version,catalog_revision,processed,completed_at,updated_at"
+                    ") VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        account_id,
+                        str(row.get("source_family") or row.get("sourceFamily") or ""),
+                        row.get("cursor_json") if isinstance(row.get("cursor_json"), str) else json.dumps(row.get("cursor") or {}, ensure_ascii=False, separators=(",", ":"), default=str),
+                        str(row.get("predicate_version") or row.get("predicateVersion") or ""),
+                        str(row.get("catalog_revision") or row.get("catalogRevision") or ""),
+                        int(row.get("processed") or 0),
+                        row.get("completed_at") or row.get("completedAt"),
+                        float(row.get("updated_at") or time.time()),
+                    ),
+                )
+                counts["cursors"] += int(cur.rowcount or 0)
+            state_payload = payload.get("predicateState") or payload.get("predicate_state")
+            if state_payload is not None:
+                db.execute(
+                    "INSERT INTO treehouse_achievement_predicate_state(account_id,state_json,predicate_version,updated_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(account_id) DO NOTHING",
+                    (
+                        account_id,
+                        json.dumps(state_payload, ensure_ascii=False, separators=(",", ":"), default=str),
+                        str(payload.get("predicateVersion") or payload.get("predicate_version") or "1"),
+                        time.time(),
+                    ),
+                )
+                counts["predicateState"] = 1
+            db.commit()
+        return counts
+
+    def rename_achievement_owner(self, source_account_id: str, target_account_id: str) -> dict[str, int]:
+        """Preserve the account-wide ledger across an account rename.
+
+        Awards stay unique on the new identity; colliding awards keep the
+        existing row rather than inventing a second record.
+        """
+        counts = {"awards": 0, "receipts": 0, "state": 0, "cursors": 0, "outbox": 0}
+        if source_account_id == target_account_id:
+            return counts
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            # Move awards only where the target does not already hold the id.
+            cur = db.execute(
+                "UPDATE treehouse_achievement_awards SET account_id=? WHERE account_id=? AND achievement_id NOT IN "
+                "(SELECT achievement_id FROM treehouse_achievement_awards WHERE account_id=?)",
+                (target_account_id, source_account_id, target_account_id),
+            )
+            counts["awards"] = int(cur.rowcount or 0)
+            db.execute("DELETE FROM treehouse_achievement_awards WHERE account_id=?", (source_account_id,))
+            cur = db.execute(
+                "UPDATE treehouse_activity_receipts SET account_id=? WHERE account_id=? AND source_event_id NOT IN "
+                "(SELECT source_event_id FROM treehouse_activity_receipts WHERE account_id=?)",
+                (target_account_id, source_account_id, target_account_id),
+            )
+            counts["receipts"] = int(cur.rowcount or 0)
+            db.execute("DELETE FROM treehouse_activity_receipts WHERE account_id=?", (source_account_id,))
+            row = db.execute(
+                "SELECT account_id FROM treehouse_achievement_predicate_state WHERE account_id=?",
+                (target_account_id,),
+            ).fetchone()
+            if row is None:
+                cur = db.execute(
+                    "UPDATE treehouse_achievement_predicate_state SET account_id=? WHERE account_id=?",
+                    (target_account_id, source_account_id),
+                )
+                counts["state"] = int(cur.rowcount or 0)
+            else:
+                db.execute("DELETE FROM treehouse_achievement_predicate_state WHERE account_id=?", (source_account_id,))
+            cur = db.execute(
+                "UPDATE treehouse_achievement_backfill_cursors SET account_id=? WHERE account_id=? AND source_family NOT IN "
+                "(SELECT source_family FROM treehouse_achievement_backfill_cursors WHERE account_id=?)",
+                (target_account_id, source_account_id, target_account_id),
+            )
+            counts["cursors"] = int(cur.rowcount or 0)
+            db.execute("DELETE FROM treehouse_achievement_backfill_cursors WHERE account_id=?", (source_account_id,))
+            cur = db.execute(
+                "UPDATE treehouse_achievement_outbox SET account_id=? WHERE account_id=? AND achievement_id NOT IN "
+                "(SELECT achievement_id FROM treehouse_achievement_outbox WHERE account_id=?)",
+                (target_account_id, source_account_id, target_account_id),
+            )
+            counts["outbox"] = int(cur.rowcount or 0)
+            db.execute("DELETE FROM treehouse_achievement_outbox WHERE account_id=?", (source_account_id,))
+            db.commit()
+        return counts
+
+
+def _now_iso() -> str:
+    import time as _time
+    return _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
