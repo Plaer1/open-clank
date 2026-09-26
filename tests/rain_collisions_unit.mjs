@@ -459,9 +459,9 @@ test('theme.js: rare toggle is default ON and separate from reverse chance', () 
   assert.match(themeSource, /getBackgroundEffectControlValue\(pattern, 'splashRareUpward', true\)/);
 });
 
-test('theme.js: color variance renamed to extra color variation; palette stays full', () => {
-  assert.match(themeSource, /label: 'Extra color variation'/);
-  assert.match(themeSource, /label: 'Extra color variation amount'/);
+test('theme.js: color variance renamed to extra palette variation; palette stays full', () => {
+  assert.match(themeSource, /label: 'Extra palette variation'/);
+  assert.match(themeSource, /label: 'Extra palette variation amount'/);
   assert.doesNotMatch(themeSource, /label: 'Color variance'/);
   assert.match(themeSource, /_readClankerEffectConfig\(true\)/);
 });

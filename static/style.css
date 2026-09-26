@@ -43767,23 +43767,34 @@ body.bg-pattern-embers {
   animation: none;
 }
 
+/* T16: the material pass keeps its intentional multi-color band art, but the
+   exposed effect color and size controls must still do something. The detail
+   textures mix in --bg-effect-color and the grid layers scale with
+   --clanker-grid-size (set from --bg-effect-size). */
 body.bg-pattern-clanker-blueprint {
   animation-duration: 22s;
   background-image:
     linear-gradient(90deg, transparent 0 34%, color-mix(in srgb, var(--clanker-sky, #62C7E8) calc(28% * var(--bg-effect-intensity, 1)), transparent) 39%, color-mix(in srgb, var(--clanker-gold, #F4B827) calc(30% * var(--bg-effect-intensity, 1)), transparent) 46%, color-mix(in srgb, var(--clanker-coral, #EC635C) calc(25% * var(--bg-effect-intensity, 1)), transparent) 53%, color-mix(in srgb, var(--clanker-pink, #D94B9C) calc(22% * var(--bg-effect-intensity, 1)), transparent) 58%, transparent 64%),
-    radial-gradient(circle at 13% 24%, color-mix(in srgb, var(--clanker-coral, #EC635C) calc(48% * var(--bg-effect-intensity, 1)), transparent) 0 2px, transparent 2.5px),
-    radial-gradient(circle at 82% 72%, color-mix(in srgb, var(--clanker-sky, #55BDEA) calc(42% * var(--bg-effect-intensity, 1)), transparent) 0 2px, transparent 2.5px),
-    linear-gradient(142deg, transparent 0 43%, color-mix(in srgb, var(--clanker-lilac, #9C8CCB) calc(22% * var(--bg-effect-intensity, 1)), transparent) 43.2% 43.6%, transparent 43.8% 100%),
-    linear-gradient(326deg, transparent 0 65%, color-mix(in srgb, var(--clanker-lime, #83C83E) calc(18% * var(--bg-effect-intensity, 1)), transparent) 65.2% 65.6%, transparent 65.8% 100%);
-  background-size: 240% 100%, auto, auto, auto, auto;
-  background-position: -135% 0, 0 0, 0 0, 0 0, 0 0;
+    radial-gradient(circle at 13% 24%, color-mix(in srgb, var(--bg-effect-color, var(--clanker-coral, #EC635C)) calc(48% * var(--bg-effect-intensity, 1)), transparent) 0 2px, transparent 2.5px),
+    radial-gradient(circle at 82% 72%, color-mix(in srgb, var(--bg-effect-color, var(--clanker-sky, #55BDEA)) calc(42% * var(--bg-effect-intensity, 1)), transparent) 0 2px, transparent 2.5px),
+    linear-gradient(142deg, transparent 0 43%, color-mix(in srgb, var(--bg-effect-color, var(--clanker-lilac, #9C8CCB)) calc(22% * var(--bg-effect-intensity, 1)), transparent) 43.2% 43.6%, transparent 43.8% 100%),
+    linear-gradient(326deg, transparent 0 65%, color-mix(in srgb, var(--bg-effect-color, var(--clanker-lime, #83C83E)) calc(18% * var(--bg-effect-intensity, 1)), transparent) 65.2% 65.6%, transparent 65.8% 100%),
+    radial-gradient(circle, color-mix(in srgb, var(--bg-effect-color, #1E67D6) calc(16% * var(--bg-effect-intensity, 1)), transparent) 1.5px, transparent 2px),
+    linear-gradient(color-mix(in srgb, var(--bg-effect-color, #1E67D6) calc(5% * var(--bg-effect-intensity, 1)), transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--bg-effect-color, #1E67D6) calc(5% * var(--bg-effect-intensity, 1)), transparent) 1px, transparent 1px);
+  background-size:
+    240% 100%, auto, auto, auto, auto,
+    var(--clanker-grid-size, 32px) var(--clanker-grid-size, 32px),
+    var(--clanker-grid-size, 32px) var(--clanker-grid-size, 32px),
+    var(--clanker-grid-size, 32px) var(--clanker-grid-size, 32px);
+  background-position: -135% 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0;
   background-attachment: fixed;
   animation-name: clanker-lcars-status-sweep;
 }
 
 @keyframes clanker-lcars-status-sweep {
-  0% { background-position: -135% 0, 0 0, 0 0, 0 0, 0 0; }
-  100% { background-position: 135% 0, 0 0, 0 0, 0 0, 0 0; }
+  0% { background-position: -135% 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0; }
+  100% { background-position: 135% 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0; }
 }
 
 @media (max-width: 768px) {

@@ -824,6 +824,7 @@ function _renderBackgroundEffectControls(pattern = _activeBgPattern()) {
         _setBackgroundEffectControlValue(pattern, control.key, input.checked);
         _persistBackgroundEffectControls();
         _renderBackgroundEffectControls(pattern);
+        _invalidateBackgroundPaint();
       });
       group.append(label, toggle);
     } else {
@@ -847,6 +848,7 @@ function _renderBackgroundEffectControls(pattern = _activeBgPattern()) {
       input.addEventListener('input', () => {
         _setBackgroundEffectControlValue(pattern, control.key, input.value);
         output.textContent = _formatBackgroundEffectControlValue(control, input.value);
+        _invalidateBackgroundPaint();
       });
       input.addEventListener('change', _persistBackgroundEffectControls);
       group.append(label, input);
@@ -937,9 +939,10 @@ const _CLANKER_CODE_RAIN_CONTROLS = [
   { key: 'splashMaxOpacity', label: 'Maximum opacity', min: .02, max: 1, step: .02, default: 1 },
   { key: 'splashSizeVariance', label: 'Size variance', min: 0, max: 1.4, step: .05, default: .45 },
   // S24: full-palette rain stays on; this control only adds extra variation
-  // on top of the palette (renamed from the older "Color variance" label).
-  { key: 'splashColorVarianceEnabled', label: 'Extra color variation', type: 'toggle', default: false },
-  { key: 'splashColorVariance', label: 'Extra color variation amount', min: 0, max: 1, step: .05, default: .32 },
+  // on top of the palette (T14: label promises "extra palette variation", not
+  // that disabling it removes color from the rain).
+  { key: 'splashColorVarianceEnabled', label: 'Extra palette variation', type: 'toggle', default: false },
+  { key: 'splashColorVariance', label: 'Extra palette variation amount', min: 0, max: 1, step: .05, default: .32 },
   // S24: separate rare-effect toggle. Default ON. Sampled once per spawn at
   // 1/10,000 — never the coarse reverse-chance slider.
   { key: 'splashRareUpward', label: 'Rare upward drop (1 in 10,000)', type: 'toggle', default: true },
@@ -969,14 +972,27 @@ function _disposeBackgroundEffect() {
   });
 }
 
+// T10: under reduced motion the RAF loop is intentionally stopped, so a style
+// change would otherwise leave a stale painted frame. Ask the active background
+// canvases to paint exactly one frame.
+export function _invalidateBackgroundPaint() {
+  if (typeof document === 'undefined') return;
+  document.querySelectorAll(_BACKGROUND_CANVAS_SELECTOR).forEach(canvas => {
+    if (typeof canvas.__requestBackgroundRepaint === 'function') canvas.__requestBackgroundRepaint();
+    else if (typeof canvas.__backgroundPaint === 'function') canvas.__backgroundPaint();
+  });
+}
+
 export function applyBgEffectColor(color) {
   document.documentElement.style.setProperty('--bg-effect-color', color || '');
+  _invalidateBackgroundPaint();
 }
 
 export function applyBgEffectIntensity(v) {
   // v is 0..1. Default 1 (full intensity) when missing.
   const n = (v === undefined || v === null || isNaN(v)) ? 1 : Math.max(0, Math.min(1, Number(v)));
   document.documentElement.style.setProperty('--bg-effect-intensity', String(n));
+  _invalidateBackgroundPaint();
 }
 
 export function applyBgEffectSize(v) {
@@ -985,6 +1001,7 @@ export function applyBgEffectSize(v) {
   document.documentElement.style.setProperty('--bg-effect-size', String(n));
   document.documentElement.style.setProperty('--clanker-grid-size', `${Math.round(32 * n)}px`);
   document.documentElement.style.setProperty('--clanker-route-size', `${Math.round(160 * n)}px`);
+  _invalidateBackgroundPaint();
 }
 
 /** Toggle the global "frosted glass" look — applies a translucent + blurred
@@ -1000,8 +1017,11 @@ function _getEffectSize() {
   return isNaN(v) ? 1 : v;
 }
 
-// Patterns where the intensity/size sliders have no visible effect.
-const _STATIC_PATTERNS = new Set(['none', 'dots']);
+// T17: dots paints with `--bg-effect-intensity`, so its intensity control must
+// stay discoverable. Size has no visible effect on the fixed dots tile, and
+// "none" has neither — hide only the controls that cannot do anything.
+const _NO_INTENSITY_PATTERNS = new Set(['none']);
+const _NO_SIZE_PATTERNS = new Set(['none', 'dots']);
 
 function _activeBgPattern() {
   const activeClass = _BG_CLASSES.find(className => document.body.classList.contains(className));
@@ -1009,11 +1029,10 @@ function _activeBgPattern() {
 }
 
 function _syncBgPatternControlVisibility(pattern) {
-  const hide = _STATIC_PATTERNS.has(pattern);
   const ig = document.getElementById('theme-bg-intensity-group');
   const sg = document.getElementById('theme-bg-size-group');
-  if (ig) ig.style.display = hide ? 'none' : '';
-  if (sg) sg.style.display = hide ? 'none' : '';
+  if (ig) ig.style.display = _NO_INTENSITY_PATTERNS.has(pattern) ? 'none' : '';
+  if (sg) sg.style.display = _NO_SIZE_PATTERNS.has(pattern) ? 'none' : '';
 }
 
 export function applyBgPattern(pattern) {
@@ -2344,6 +2363,13 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint, resizeTarget =
     document.removeEventListener('visibilitychange', handleVisibilityChange);
     if (_activeBackgroundEffectDispose === dispose) _activeBackgroundEffectDispose = null;
     if (window[_BACKGROUND_OWNER_KEY] === dispose) window[_BACKGROUND_OWNER_KEY] = null;
+    // Release scene-owned raster caches and paint on unmount (T11 / C8).
+    const activeScene = canvas.__backgroundScene;
+    if (activeScene) {
+      if (activeScene.emojiSprites && typeof activeScene.emojiSprites.clear === 'function') activeScene.emojiSprites.clear();
+      if (activeScene.paintField && typeof activeScene.paintField.clear === 'function') activeScene.paintField.clear();
+    }
+    canvas.__backgroundScene = null;
     if (onDispose) onDispose();
     canvas.remove();
   }
@@ -2416,6 +2442,11 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint, resizeTarget =
   document.addEventListener('visibilitychange', handleVisibilityChange);
   resizeIfNeeded(true);
   frame(performance.now());
+
+  // T10: one-shot paint for reduced-motion (and any dirty-style) invalidation.
+  canvas.__requestBackgroundRepaint = () => {
+    if (!disposed) frame(performance.now());
+  };
 }
 
 function _clankerSafeBounds(width, height, size) {
@@ -2619,7 +2650,10 @@ function _initClankerRoutefield() {
   const MAX_ROUTE_BEADS = 48;
   const BEAD_LIFETIME_MS = 42000;
   const BRANCH_COOLDOWN_MS = 5200;
-  const DIRECTION_CHANGE_CHANCE = .16;
+  // Roll weights for the seeded per-frame bead policy. The effective per-frame
+  // direction-change chance is WEIGHT * .02 (≈ 0.0032) — the name says weight,
+  // not chance, so the scale at the use site is not a surprise.
+  const DIRECTION_CHANGE_WEIGHT = .16;
   const COLOR_CHANGE_CHANCE = .12;
   const SPLIT_CHANCE = .10;
   // Sampled polyline segments per quadratic edge — enough for smooth travel
@@ -2745,7 +2779,7 @@ function _initClankerRoutefield() {
         beads,
         beadPolicy: {
           MAX_ROUTE_BEADS, BEAD_LIFETIME_MS, BRANCH_COOLDOWN_MS,
-          DIRECTION_CHANGE_CHANCE, COLOR_CHANGE_CHANCE, SPLIT_CHANCE,
+          DIRECTION_CHANGE_WEIGHT, COLOR_CHANGE_CHANCE, SPLIT_CHANCE,
         },
         stats: { splits: 0, retirements: 0, transitions: 0 },
         lastTime: 0,
@@ -2834,8 +2868,8 @@ function _initClankerRoutefield() {
 
         // Occasional direction / color changes — seeded, not per-frame random.
         const roll = _clankerNoise(now * .0007 + bead.routeIndex * 13 + bead.distance * .001);
-        if (roll < policy.DIRECTION_CHANGE_CHANCE * .02) bead.direction *= -1;
-        else if (roll < (policy.DIRECTION_CHANGE_CHANCE + policy.COLOR_CHANGE_CHANCE) * .02) {
+        if (roll < policy.DIRECTION_CHANGE_WEIGHT * .02) bead.direction *= -1;
+        else if (roll < (policy.DIRECTION_CHANGE_WEIGHT + policy.COLOR_CHANGE_CHANCE) * .02) {
           bead.color = (bead.color + 1) % colors.length;
         }
 
@@ -3662,10 +3696,12 @@ function _clankerNoise(seed) {
   return value - Math.floor(value);
 }
 
-const _CLANKER_EMOJI_RANGES = [
-  [0x1F300, 0x1F5FF], [0x1F600, 0x1F64F], [0x1F680, 0x1F6FF],
-  [0x1F900, 0x1F9FF], [0x1FA70, 0x1FAFF], [0x2600, 0x27BF],
-];
+// T13: curated supported graphemes — not broad code-point ranges. The rain
+// string below is already a curated emoji inventory (including multi-code-point
+// sequences such as ZWJ families and flag-like forms). Drift samples it through
+// the grapheme segmenter so multi-code-point emoji stay intact, and falls back
+// to a single usable glyph if the pool is ever empty.
+const _CLANKER_DRIFT_FALLBACK_GLYPH = '◆';
 const _CLANKER_MATRIX_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$%^&*()_+-=[]{}|;:,.<>?/~`';
 const _CLANKER_RAIN_EMOJI_CHARS = [
   '😀😃😄😁😆😅😂🤣🥲😊😇🙂🙃😉😌😍🥰😘😗😙😚😋😛😝😜🤪🤨🧐🤓😎🥸🤩🥳😏😒😞😔😟😕🙁😣😖😫😩🥺😢😭😤😠😡🤬🤯😳🥵🥶😱😨😰😥😓🤗🤔🫣🤭🫢🫡🤫🫠🤥😶🫥😐🫤😑🙄😯😦😧😮😲🥱😴🤤😪😮‍💨😵😵‍💫🤐🥴🤢🤮🤧😷🤒🤕🤑🤠😈👿👹👺🤡💩👻💀☠👽👾🤖🎃🙈🙉🙊😺😸😹😻😼😽🙀😿😾💋💌💘💝💖💗💓💞💕💟❣💔❤️‍🔥❤️‍🩹❤🩷🧡💛💚💙🩵💜🤎🖤🩶🤍💯💢💥💫💦💨🕳💬👁‍🗨🗨🗯💭💤',
@@ -3674,10 +3710,18 @@ const _CLANKER_RAIN_EMOJI_CHARS = [
 ].join('');
 const _CLANKER_EMOJI_FONT = '"Noto Color Emoji", "Noto Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
 
+let _clankerDriftGlyphPoolCache = null;
+function _clankerDriftGlyphPool() {
+  if (_clankerDriftGlyphPoolCache) return _clankerDriftGlyphPoolCache;
+  const pool = _clankerGraphemes(_CLANKER_RAIN_EMOJI_CHARS).filter(glyph => glyph && glyph.trim());
+  _clankerDriftGlyphPoolCache = pool.length ? pool : [_CLANKER_DRIFT_FALLBACK_GLYPH];
+  return _clankerDriftGlyphPoolCache;
+}
+
 function _clankerEmoji(seed) {
-  const range = _CLANKER_EMOJI_RANGES[Math.floor(_clankerNoise(seed) * _CLANKER_EMOJI_RANGES.length)];
-  const codePoint = range[0] + Math.floor(_clankerNoise(seed + 1) * (range[1] - range[0] + 1));
-  return String.fromCodePoint(codePoint, 0xFE0F);
+  const pool = _clankerDriftGlyphPool();
+  const index = Math.floor(_clankerNoise(seed) * pool.length) % pool.length;
+  return pool[index] || _CLANKER_DRIFT_FALLBACK_GLYPH;
 }
 
 function _buildClankerDriftScene({ width, height, size, safeBounds, dpr }) {
@@ -3696,6 +3740,7 @@ function _buildClankerDriftScene({ width, height, size, safeBounds, dpr }) {
         radiusNoise: _clankerNoise(seed + 9) * 2 - 1,
         stretch: .7 + _clankerNoise(seed + 13) * .55,
         rotation: _clankerNoise(seed + 17) * Math.PI * 2,
+        angle: 0,
         color: index % 6,
         shape: index % 4,
         phase: _clankerNoise(seed + 23) * Math.PI * 2,
@@ -3712,12 +3757,26 @@ function _buildClankerDriftScene({ width, height, size, safeBounds, dpr }) {
   };
 }
 
+// T11: raster cache is quantized (so live size tweaks cannot mint one entry
+// per continuous font size), bounded by an LRU cap, and released on unmount.
+const _EMOJI_SPRITE_MAX_ENTRIES = 48;
+const _EMOJI_SPRITE_SIZE_STEP = 4;
+
+function _quantizeEmojiSpriteSize(pixelFontSize) {
+  return Math.max(12, Math.round(pixelFontSize / _EMOJI_SPRITE_SIZE_STEP) * _EMOJI_SPRITE_SIZE_STEP);
+}
+
 function _clankerEmojiSprite(scene, emoji, fontSize, color) {
   const dpr = scene.spriteDpr || 1;
-  const pixelFontSize = Math.max(12, Math.round(fontSize * dpr));
+  const pixelFontSize = _quantizeEmojiSpriteSize(Math.max(12, Math.round(fontSize * dpr)));
   const key = `${emoji}\u0000${pixelFontSize}\u0000${color}`;
   const cached = scene.emojiSprites.get(key);
-  if (cached) return cached;
+  if (cached) {
+    // LRU touch: re-insert so Map iteration order tracks recency.
+    scene.emojiSprites.delete(key);
+    scene.emojiSprites.set(key, cached);
+    return cached;
+  }
 
   const padding = Math.ceil(pixelFontSize * .28);
   const sprite = document.createElement('canvas');
@@ -3737,6 +3796,11 @@ function _clankerEmojiSprite(scene, emoji, fontSize, color) {
     width: sprite.width / dpr,
     height: sprite.height / dpr,
   };
+  // Bounded LRU: evict the oldest entry before inserting past the cap.
+  if (scene.emojiSprites.size >= _EMOJI_SPRITE_MAX_ENTRIES) {
+    const oldest = scene.emojiSprites.keys().next().value;
+    if (oldest !== undefined) scene.emojiSprites.delete(oldest);
+  }
   scene.emojiSprites.set(key, result);
   return result;
 }
@@ -3759,13 +3823,13 @@ function _clankerDriftControls(pattern) {
 function _clankerDriftFrameLerp(scene, time) {
   const previousTime = scene.driftRenderTime;
   scene.driftRenderTime = time;
-  if (!Number.isFinite(previousTime)) return 1;
-  if (time <= previousTime) return 0;
+  if (!Number.isFinite(previousTime)) return { lerp: 1, elapsed: 0 };
+  if (time <= previousTime) return { lerp: 0, elapsed: 0 };
   const elapsed = Math.min(50, Math.max(0, time - previousTime));
-  return 1 - Math.exp(-elapsed / 48);
+  return { lerp: 1 - Math.exp(-elapsed / 48), elapsed };
 }
 
-function _clankerDriftState(shard, index, time, size, controls, lerpAlpha) {
+function _clankerDriftState(shard, index, time, size, controls, lerpAlpha, elapsedMs = 0) {
   const driftSpeed = controls.driftSpeed * (1 + (shard.driftSpeedNoise * 2 - 1) * controls.driftSpeedVariation * .65);
   const driftX = Math.sin(time * driftSpeed / (5900 + index % 7 * 340) + shard.phase) * shard.drift * driftSpeed;
   const driftY = Math.cos(time * driftSpeed / (7000 + index % 5 * 410) + shard.phase) * shard.drift * .72 * driftSpeed;
@@ -3780,15 +3844,17 @@ function _clankerDriftState(shard, index, time, size, controls, lerpAlpha) {
   }
   const rotationSpeed = controls.rotationSpeed
     * (1 + (shard.rotationSpeedNoise * 2 - 1) * controls.rotationSpeedVariation * .65);
+  // T12: integrate angle over delta time so a speed change does not jump phase.
+  if (shard.rotationNoise < controls.rotationLikelihood && elapsedMs > 0) {
+    shard.angle = (shard.angle || 0) + elapsedMs * .00045 * rotationSpeed * shard.rotationDirection;
+  }
   return {
     x: shard.renderX,
     y: shard.renderY,
     radius: Math.max(1.5 * size, (shard.baseRadius + shard.radiusNoise * 5 * controls.sizeVariation) * size),
     bright: shard.glowNoise < controls.glowLikelihood,
     alphaScale: controls.middleIntensity * Math.max(0, 1 + shard.intensityNoise * .28 * controls.intensityVariation),
-    rotation: shard.rotation + (shard.rotationNoise < controls.rotationLikelihood
-      ? time * .00045 * rotationSpeed * shard.rotationDirection
-      : 0),
+    rotation: shard.rotation + (shard.angle || 0),
   };
 }
 
@@ -3802,12 +3868,12 @@ function _initClankerGemDrift() {
       ctx.lineJoin = 'round';
       const controls = _clankerDriftControls('clanker-gem-drift');
       const renderTime = reduced ? 0 : time;
-      const lerpAlpha = _clankerDriftFrameLerp(scene, renderTime);
+      const driftFrame = _clankerDriftFrameLerp(scene, renderTime);
       const canvasBounds = { left: 0, top: 0, right: width, bottom: height };
       const count = Math.min(scene.shards.length, Math.round(scene.baseCount * controls.totalQuantity));
       for (let index = 0; index < count; index += 1) {
         const shard = scene.shards[index];
-        const { x, y, radius, bright, alphaScale, rotation } = _clankerDriftState(shard, index, renderTime, size, controls, lerpAlpha);
+        const { x, y, radius, bright, alphaScale, rotation } = _clankerDriftState(shard, index, renderTime, size, controls, driftFrame.lerp, driftFrame.elapsed);
         const extent = radius * Math.max(1, shard.stretch) + (bright ? 12 : 3) * size;
         const edgeAlpha = _clankerEdgeAlpha(x, y, extent, canvasBounds);
         if (!edgeAlpha) continue;
@@ -3855,7 +3921,7 @@ function _initClankerEmojiDrift() {
     draw: (ctx, { width, height, time, reduced, scene, intensity, size, colors }) => {
       const controls = _clankerDriftControls('clanker-emoji-drift');
       const renderTime = reduced ? 0 : time;
-      const lerpAlpha = _clankerDriftFrameLerp(scene, renderTime);
+      const driftFrame = _clankerDriftFrameLerp(scene, renderTime);
       const canvasBounds = { left: 0, top: 0, right: width, bottom: height };
       ctx.imageSmoothingEnabled = true;
       const count = Math.min(scene.shards.length, Math.round(scene.baseCount * controls.totalQuantity));
@@ -3863,7 +3929,7 @@ function _initClankerEmojiDrift() {
       ctx.textBaseline = 'middle';
       for (let index = 0; index < count; index += 1) {
         const shard = scene.shards[index];
-        const { x, y, radius, bright, alphaScale, rotation } = _clankerDriftState(shard, index, renderTime, size, controls, lerpAlpha);
+        const { x, y, radius, bright, alphaScale, rotation } = _clankerDriftState(shard, index, renderTime, size, controls, driftFrame.lerp, driftFrame.elapsed);
         const extent = radius * 1.5 + (bright ? 12 : 3) * size;
         const edgeAlpha = _clankerEdgeAlpha(x, y, extent, canvasBounds);
         if (!edgeAlpha) continue;
@@ -4404,7 +4470,7 @@ function _initSynapse() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
   const GRID = 92;
   const MAX_PULSES = 18;
   const TRAIL_LEN = 42;
@@ -4413,6 +4479,9 @@ function _initSynapse() {
 
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
+    // T18: recompute backing scale on every resize so zoom/display changes are
+    // picked up instead of freezing the DPR captured at init.
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     cols = Math.ceil(W / GRID); rows = Math.ceil(H / GRID);
@@ -4447,15 +4516,15 @@ function _initSynapse() {
 
   function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const { colors, intensity, size } = _readClankerEffectConfig();
+    const { colors, size } = _readClankerEffectConfig();
     edges.forEach(edge => {
       ctx.beginPath(); ctx.moveTo(edge.a.x, edge.a.y); ctx.lineTo(edge.b.x, edge.b.y);
-      ctx.strokeStyle = colors[edge.color]; ctx.lineWidth = .7 * size; ctx.globalAlpha = intensity * .12; ctx.stroke();
+      ctx.strokeStyle = colors[edge.color]; ctx.lineWidth = .7 * size; ctx.globalAlpha = .12; ctx.stroke();
     });
     neurons.forEach(node => {
       const pulse = .72 + Math.sin(time / 2600 + node.phase) * .18;
       ctx.beginPath(); ctx.arc(node.x, node.y, node.radius * size * pulse, 0, Math.PI * 2);
-      ctx.fillStyle = colors[node.color]; ctx.globalAlpha = intensity * .34; ctx.fill();
+      ctx.fillStyle = colors[node.color]; ctx.globalAlpha = .34; ctx.fill();
     });
     pulses.forEach(p => {
       const span = (p.horizontal ? W : H) + TRAIL_LEN * 2;
@@ -4468,13 +4537,13 @@ function _initSynapse() {
       grad.addColorStop(0, 'transparent');
       grad.addColorStop(1, colors[p.color]);
       ctx.strokeStyle = grad;
-      ctx.globalAlpha = intensity * .56;
+      ctx.globalAlpha = .56;
       ctx.lineWidth = 1.4 * size;
       ctx.beginPath();
       ctx.moveTo(tx, ty);
       ctx.lineTo(x, y);
       ctx.stroke();
-      ctx.globalAlpha = intensity * .9;
+      ctx.globalAlpha = .9;
       ctx.fillStyle = colors[p.color];
       ctx.beginPath();
       ctx.arc(x, y, 2 * size, 0, Math.PI * 2);
@@ -4497,13 +4566,16 @@ function _initRain() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   let drops = [];
   const MAX_DROPS = 130;
 
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
+    // T18: recompute backing scale on every resize so zoom/display changes are
+    // picked up instead of freezing the DPR captured at init.
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     drops = Array.from({ length: MAX_DROPS }, (_, index) => {
@@ -4516,7 +4588,7 @@ function _initRain() {
 
   function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const { colors, intensity, size } = _readClankerEffectConfig();
+    const { colors, size } = _readClankerEffectConfig();
     drops.forEach(d => {
       const effLen = d.len * size;
       const span = H + effLen * 2;
@@ -4525,7 +4597,7 @@ function _initRain() {
       grad.addColorStop(0, 'transparent');
       grad.addColorStop(1, colors[d.color]);
       ctx.strokeStyle = grad;
-      ctx.globalAlpha = intensity * d.alpha;
+      ctx.globalAlpha = d.alpha;
       ctx.lineWidth = 1.2 * Math.min(2, Math.max(.6, size));
       ctx.beginPath();
       ctx.moveTo(d.x, y - effLen);
@@ -4548,7 +4620,7 @@ function _initConstellations() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   const STAR_COUNT = 88;
   const CONNECT_DIST = 148;
@@ -4556,6 +4628,9 @@ function _initConstellations() {
 
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
+    // T18: recompute backing scale on every resize so zoom/display changes are
+    // picked up instead of freezing the DPR captured at init.
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (stars.length === 0) initStars();
@@ -4578,7 +4653,7 @@ function _initConstellations() {
 
   function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const { colors, intensity, size } = _readClankerEffectConfig();
+    const { colors, size } = _readClankerEffectConfig();
     const points = stars.map(star => ({ ...star,
       drawX: star.x + Math.sin(time / 8500 + star.phase) * star.driftX,
       drawY: star.y + Math.cos(time / 9800 + star.phase) * star.driftY }));
@@ -4591,7 +4666,7 @@ function _initConstellations() {
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist < CONNECT_DIST) {
           ctx.strokeStyle = colors[(points[i].color + points[j].color) % colors.length];
-          ctx.globalAlpha = intensity * (1 - dist / CONNECT_DIST) * .16;
+          ctx.globalAlpha = (1 - dist / CONNECT_DIST) * .16;
           ctx.beginPath();
           ctx.moveTo(points[i].drawX, points[i].drawY);
           ctx.lineTo(points[j].drawX, points[j].drawY);
@@ -4603,7 +4678,7 @@ function _initConstellations() {
     for (const s of points) {
       const twinkle = .5 + .5 * Math.sin(time / 1700 + s.phase);
       ctx.fillStyle = colors[s.color];
-      ctx.globalAlpha = intensity * (.18 + twinkle * .34);
+      ctx.globalAlpha = (.18 + twinkle * .34);
       ctx.beginPath();
       ctx.arc(s.drawX, s.drawY, s.r * size, 0, Math.PI * 2);
       ctx.fill();
@@ -4638,10 +4713,13 @@ function _initPerlinFlow() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H, streams = [];
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
+    // T18: recompute backing scale on every resize so zoom/display changes are
+    // picked up instead of freezing the DPR captured at init.
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     streams = Array.from({ length: Math.max(54, Math.ceil(W * H / 24000)) }, (_, index) => {
@@ -4662,19 +4740,19 @@ function _initPerlinFlow() {
   }
   function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const { colors, intensity, size } = _readClankerEffectConfig();
+    const { colors, size } = _readClankerEffectConfig();
     streams.forEach((stream, index) => {
       ctx.beginPath();
       stream.points.forEach((point, pointIndex) => pointIndex ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y));
       ctx.strokeStyle = colors[stream.color];
       ctx.lineWidth = Math.max(.65, size * .85);
-      ctx.globalAlpha = intensity * .16;
+      ctx.globalAlpha = .16;
       ctx.stroke();
       if (index % 6 !== 0) return;
       const head = _pointOnPolyline(stream.points, time / (10500 + index * 37) + stream.phase);
       ctx.beginPath(); ctx.arc(head.x, head.y, 2.1 * size, 0, Math.PI * 2);
       ctx.fillStyle = colors[(stream.color + 2) % colors.length];
-      ctx.globalAlpha = intensity * .8; ctx.fill();
+      ctx.globalAlpha = .8; ctx.fill();
     });
     ctx.globalAlpha = 1;
   }
@@ -4692,7 +4770,7 @@ function _initPetals() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   let petals = [];
   function makePetal(index) {
@@ -4711,22 +4789,25 @@ function _initPetals() {
   }
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
+    // T18: recompute backing scale on every resize so zoom/display changes are
+    // picked up instead of freezing the DPR captured at init.
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     petals = Array.from({ length:64 }, (_, index) => makePetal(index));
   }
   function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const { colors, intensity, size:sz } = _readClankerEffectConfig();
+    const { colors, size:sz } = _readClankerEffectConfig();
     petals.forEach(p => {
       const progress = (p.phase + time / 1000 * p.speed) % 1;
       const y = progress * (H + 40) - 20;
       const x = p.x + Math.sin(time / 2600 + p.drift) * p.wobble;
       ctx.save(); ctx.translate(x, y); ctx.rotate(p.rot + time * p.vr);
-      ctx.globalAlpha = intensity * .24;
+      ctx.globalAlpha = .24;
       ctx.fillStyle = colors[p.color];
       ctx.beginPath(); ctx.ellipse(-p.size * 0.2 * sz, 0, p.size * 0.6 * sz, p.size * 0.3 * sz, 0.3, 0, Math.PI * 2); ctx.fill();
-      ctx.globalAlpha = intensity * .16;
+      ctx.globalAlpha = .16;
       ctx.beginPath(); ctx.ellipse(p.size * 0.2 * sz, 0, p.size * 0.6 * sz, p.size * 0.3 * sz, -0.3, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     });
@@ -4746,7 +4827,7 @@ function _initSparkles() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   let sparkles = [];
   function makeSpark(index) {
@@ -4758,6 +4839,9 @@ function _initSparkles() {
   }
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
+    // T18: recompute backing scale on every resize so zoom/display changes are
+    // picked up instead of freezing the DPR captured at init.
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     sparkles = Array.from({ length:96 }, (_, index) => makeSpark(index));
@@ -4775,10 +4859,10 @@ function _initSparkles() {
   }
   function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const { colors, intensity, size:sizeMult } = _readClankerEffectConfig();
+    const { colors, size:sizeMult } = _readClankerEffectConfig();
     sparkles.forEach(s => {
       const glow = .5 + .5 * Math.sin(time * s.speed + s.phase);
-      const alpha = intensity * (.06 + glow * (s.bright ? .42 : .2)) * s.life;
+      const alpha = (.06 + glow * (s.bright ? .42 : .2)) * s.life;
       const scale = 0.72 + glow * 0.28;
       drawStar(s.x, s.y, s.size * scale * sizeMult, colors[s.color], alpha);
     });
@@ -4798,7 +4882,7 @@ function _initEmbers() {
   canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   let embers = [];
   function makeEmber(index) {
@@ -4816,13 +4900,16 @@ function _initEmbers() {
   }
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
+    // T18: recompute backing scale on every resize so zoom/display changes are
+    // picked up instead of freezing the DPR captured at init.
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     embers = Array.from({ length:96 }, (_, index) => makeEmber(index));
   }
   function draw(time) {
     ctx.clearRect(0, 0, W, H);
-    const { colors, intensity, size:sz } = _readClankerEffectConfig();
+    const { colors, size:sz } = _readClankerEffectConfig();
     ctx.globalCompositeOperation = 'lighter';
     embers.forEach(e => {
       const lifeRatio = (e.phase + time / 1000 * e.speed) % 1;
@@ -4831,7 +4918,7 @@ function _initEmbers() {
       const y = H + 18 - lifeRatio * (H + 36);
       const r = e.r * sz;
       ctx.fillStyle = colors[e.color];
-      ctx.globalAlpha = intensity * fade * (e.bright ? .82 : .38);
+      ctx.globalAlpha = fade * (e.bright ? .82 : .38);
       ctx.shadowColor = colors[e.color];
       ctx.shadowBlur = (e.bright ? 10 : 4) * sz;
       ctx.beginPath();
