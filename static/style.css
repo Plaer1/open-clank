@@ -21,13 +21,13 @@
   --fg: #FFF4D6;
   --panel: #25272C;
   --border: #555A62;
-  --red: #B83B78;
-  --accent: #B83B78;
-  --accent-primary: #B83B78;
-  --accent-hover: #8E285B;
-  --accent-focus: #D95F9A;
-  --accent-selection: #B83B78;
-  --accent-disabled: #B97A99;
+  --red: #F6BE48;
+  --accent: #F6BE48;
+  --accent-primary: #F6BE48;
+  --accent-hover: #C4922A;
+  --accent-focus: #FFD97A;
+  --accent-selection: #F6BE48;
+  --accent-disabled: #C4A46A;
   --accent-error: #FF776E;
   --font-family: 'Liga Comic Mono', 'Fira Code', monospace;
   /* Were `var(--green)` / `var(--warn)` — self-referential, so they
@@ -59,9 +59,9 @@
   --color-recording-hover: #d63031;
   --color-muted: #C1C5CB;
   --color-muted-alt: #959BA4;
-  --color-accent: #B83B78;
+  --color-accent: #F6BE48;
   --color-agent-active: #8DD85D;
-  --color-brand-blue: #B83B78;
+  --color-brand-blue: #F6BE48;
   --color-blind-orange: #ff9800;
   --color-save-green: var(--color-success);
   --color-link-hover: #62C7E8;
@@ -75,8 +75,8 @@
   --hamburger-color: #FFF4D6;
   --input-bg: #2B2E34;
   --input-border: #555A62;
-  --send-btn-bg: #B83B78;
-  --send-btn-hover: #8E285B;
+  --send-btn-bg: #F6BE48;
+  --send-btn-hover: #C4922A;
   --code-bg: #101114;
   --code-fg: #FFF4D6;
   --toggle-active: #A8DE53;
@@ -43129,13 +43129,13 @@ body.theme-clanker-light {
 
 body.theme-clanker-dark {
   color-scheme: dark;
-  --red: #B83B78;
-  --accent: #B83B78;
-  --accent-primary: #B83B78;
-  --accent-hover: #8E285B;
-  --accent-focus: #D95F9A;
-  --accent-selection: #B83B78;
-  --accent-disabled: #B97A99;
+  --red: #F6BE48;
+  --accent: #F6BE48;
+  --accent-primary: #F6BE48;
+  --accent-hover: #C4922A;
+  --accent-focus: #FFD97A;
+  --accent-selection: #F6BE48;
+  --accent-disabled: #C4A46A;
   --accent-error: #FF776E;
   --green: #A8DE53;
   --warn: #F6BE48;
@@ -43146,7 +43146,7 @@ body.theme-clanker-dark {
   --color-danger: #FF776E;
   --color-muted: #C1C5CB;
   --color-muted-alt: #959BA4;
-  --color-accent: #B83B78;
+  --color-accent: #F6BE48;
   --color-agent-active: #8DD85D;
   --color-link-hover: #62C7E8;
   --accent-warm: #F6BE48;
@@ -43163,13 +43163,13 @@ body.theme-clanker-dark {
 
 body.theme-clanker-light {
   color-scheme: light;
-  --red: #B83B78;
-  --accent: #B83B78;
-  --accent-primary: #B83B78;
-  --accent-hover: #8E285B;
-  --accent-focus: #D95F9A;
-  --accent-selection: #B83B78;
-  --accent-disabled: #B97A99;
+  --red: #F4B827;
+  --accent: #F4B827;
+  --accent-primary: #F4B827;
+  --accent-hover: #C4922A;
+  --accent-focus: #FFD97A;
+  --accent-selection: #F4B827;
+  --accent-disabled: #C4A46A;
   --accent-error: #FF776E;
   --green: #4F9F38;
   --warn: #D88B05;
@@ -43180,7 +43180,7 @@ body.theme-clanker-light {
   --color-danger: #C73D46;
   --color-muted: #60717E;
   --color-muted-alt: #758793;
-  --color-accent: #B83B78;
+  --color-accent: #F4B827;
   --color-agent-active: #4F9F38;
   --color-link-hover: #0E3B7A;
   --accent-warm: #F2B51D;

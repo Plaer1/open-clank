@@ -10,19 +10,19 @@ import { snapModalToZone } from './tileManager.js';
 
 export const THEMES = {
   'clanker-dark': {
-    bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#B83B78',
+    bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#F6BE48',
     advanced: { userBubbleBg:'#30333A', aiBubbleBg:'#25272C', bubbleBorder:'#555A62',
                 sidebarBg:'#202227', brandColor:'#F6BE48', brandMixTo:'#ED6AB0',
                 hamburgerColor:'#FFF4D6', inputBg:'#2B2E34', inputBorder:'#555A62',
-                sendBtnBg:'#B83B78', sendBtnHover:'#8E285B', codeBg:'#101114',
+                sendBtnBg:'#F6BE48', sendBtnHover:'#C4922A', codeBg:'#101114',
                 codeFg:'#FFF4D6', toggleActive:'#A8DE53' },
   },
   'clanker-light': {
-    bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#B83B78',
+    bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#F4B827',
     advanced: { userBubbleBg:'#DCEAF0', aiBubbleBg:'#FFF9E7', bubbleBorder:'#26323D',
                 sidebarBg:'#F4B827', brandColor:'#EC635C', brandMixTo:'#D94B9C',
                 hamburgerColor:'#17202A', inputBg:'#FFF9E7', inputBorder:'#26323D',
-                sendBtnBg:'#B83B78', sendBtnHover:'#8E285B', codeBg:'#111A27',
+                sendBtnBg:'#F4B827', sendBtnHover:'#C4922A', codeBg:'#111A27',
                 codeFg:'#FFF9E7', toggleActive:'#4F9F38' },
   },
   dark:       { bg:'#282c34', fg:'#9cdef2', panel:'#111111', border:'#355a66', red:'#e06c75' },
@@ -60,11 +60,11 @@ const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
 const THEME_SNAPSHOT_VERSION = 2;
 const AUTH_USER_KEY = 'odysseus-auth-user';
 const THEME_OWNER_PREFIX = `${LS_KEY}:scope:`;
-const LEGACY_CLANKER_ACCENTS = new Set(['#5A9EF5', '#2469D8']);
-const THEME_ACCENT_DEFAULT = '#B83B78';
-const THEME_ACCENT_HOVER = '#8E285B';
-const THEME_ACCENT_FOCUS = '#D95F9A';
-const THEME_ACCENT_DISABLED = '#B97A99';
+const LEGACY_CLANKER_ACCENTS = new Set(['#5A9EF5', '#2469D8', '#B83B78']);
+const THEME_ACCENT_DEFAULT = '#F6BE48';
+const THEME_ACCENT_HOVER = '#C4922A';
+const THEME_ACCENT_FOCUS = '#FFD97A';
+const THEME_ACCENT_DISABLED = '#C4A46A';
 const THEME_ERROR_DEFAULT = '#FF776E';
 const THEME_SUCCESS_DEFAULT = '#8DD85D';
 let _themeOwner = null;
@@ -158,7 +158,7 @@ function _themeColor(value) {
   return /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(color) ? color : null;
 }
 
-function _themeOwnerKey(owner) {
+function _themeOwnerKey(owner = _themeOwner) {
   const id = String(owner || '').trim();
   return id ? `${THEME_OWNER_PREFIX}${encodeURIComponent(id)}` : LS_KEY;
 }
@@ -213,7 +213,7 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
   for (const key of ['bg', 'fg', 'panel', 'border', 'red']) {
     const candidate = _themeColor(rawPalette[key]);
     const fallback = _themeColor(base[key]) || (key === 'red' ? THEME_ACCENT_DEFAULT : '#000000');
-    palette[key] = (legacyDefault && key === 'red') ? THEME_ACCENT_DEFAULT : (candidate || fallback);
+    palette[key] = (legacyDefault && key === 'red') ? (_themeColor(base.red) || THEME_ACCENT_DEFAULT) : (candidate || fallback);
   }
 
   const rawAdvanced = {
@@ -256,7 +256,13 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
     ...source,
     ...(_isPlainObject(source.typography) ? source.typography : {}),
   };
-  const pattern = options.pattern || options.bgPattern || THEME_DEFAULT_PATTERN[name] || 'none';
+  // Normalize legacy pattern aliases at every load/import/save path (T19).
+  const PATTERN_ALIASES = { 'clanker-sweep': null };
+  let rawPattern = options.pattern || options.bgPattern || THEME_DEFAULT_PATTERN[name] || 'none';
+  if (Object.prototype.hasOwnProperty.call(PATTERN_ALIASES, rawPattern)) {
+    rawPattern = PATTERN_ALIASES[rawPattern] || THEME_DEFAULT_PATTERN[name] || 'none';
+  }
+  const pattern = rawPattern;
   const effectColor = options.effectColor || options.bgEffectColor || THEME_DEFAULT_EFFECT_COLOR[name] || '';
   const effectIntensity = options.effectIntensity ?? options.bgEffectIntensity
     ?? THEME_DEFAULT_INTENSITY[name] ?? 1;
@@ -306,7 +312,7 @@ function _loadCustomThemes() {
 function _saveCustomThemes(obj) {
   Storage.setJSON(_customThemeStorageKey(), obj);
 }
-export function saveCustomTheme(name, colors, opts) {
+function _writeCustomThemeEntry(name, colors, opts) {
   const ct = _loadCustomThemes();
   // Enforce limit — allow overwriting existing, block new past max
   if (!ct[name] && Object.keys(ct).length >= MAX_CUSTOM_THEMES) {
@@ -328,6 +334,11 @@ export function saveCustomTheme(name, colors, opts) {
   ct[name] = entry;
   _saveCustomThemes(ct);
   _syncCustomThemesToServer(ct);
+  return 'ok';
+}
+export function saveCustomTheme(name, colors, opts) {
+  const result = _writeCustomThemeEntry(name, colors, opts);
+  if (result !== 'ok') return result;
   initThemeUI();
   return 'ok';
 }
@@ -1446,7 +1457,14 @@ export function initThemeUI() {
     if (fr) opts.frosted = !!fr.checked;
     return opts;
   }
-  function _saveFull(name, colors) { save(name, colors, _getOpts()); }
+  function _saveFull(name, colors) {
+    const opts = _getOpts();
+    save(name, colors, opts);
+    // Keep the named custom-library entry identical to the active snapshot so
+    // switching away and back loses nothing (T03).
+    const ct = _loadCustomThemes();
+    if (name && ct[name]) _writeCustomThemeEntry(name, colors, opts);
+  }
 
   // Click handlers for all swatches (preset + custom) across both grids
   const allGrids = [grid, userGrid].filter(Boolean);
@@ -1576,20 +1594,13 @@ export function initThemeUI() {
       }
       if (_hasAdv) colors.advanced = _adv;
       applyColors(colors);
-      // Auto-save: if the active theme is one of the user's custom themes,
-      // route changes back into it so renaming/reloading keeps the edits.
-      // Otherwise fall back to the transient 'custom' slot (existing behavior).
+      // Commit the complete state transaction before any UI reinit so a
+      // re-render can never reapply the previous stored snapshot (T02).
+      // _saveFull also writes the named custom-library entry (T03).
       const _activeSaved = getSaved();
       const _activeName = _activeSaved && _activeSaved.name;
       const _customMap = _loadCustomThemes();
       if (_activeName && _customMap && _customMap[_activeName]) {
-        // Preserve advanced/opts keys that aren't part of basic colors.
-        saveCustomTheme(_activeName, colors, {
-          font: _activeSaved.font, density: _activeSaved.density,
-          bgPattern: _activeSaved.bgPattern, bgEffectColor: _activeSaved.bgEffectColor,
-          bgEffectIntensity: _activeSaved.bgEffectIntensity,
-          bgEffectSize: _activeSaved.bgEffectSize,
-        });
         _saveFull(_activeName, colors);
       } else {
         _saveFull('custom', colors);
@@ -1655,7 +1666,9 @@ export function initThemeUI() {
       Storage.remove(_themeOwnerKey());
       if (!_themeOwner) Storage.remove(LS_KEY);
       const colors = THEMES[DEFAULT_THEME];
-      applyTheme(DEFAULT_THEME, colors, { persist: false });
+      // Persist through the same owner-bound save path so server hydration
+      // cannot restore the old theme (T05).
+      applyTheme(DEFAULT_THEME, colors, { persist: true });
     });
   }
 
@@ -1714,19 +1727,12 @@ export function initThemeUI() {
       const base = readCurrentColors();
       base.advanced = readAdvanced();
       applyColors(base);
-      // Same auto-save routing as the basic color inputs above — write
-      // to the active custom theme if there is one, else fall back to
-      // the transient 'custom' slot.
+      // Commit before any UI reinit (T02); _saveFull writes the named
+      // library entry with complete options (T03).
       const _activeSaved = getSaved();
       const _activeName = _activeSaved && _activeSaved.name;
       const _customMap = _loadCustomThemes();
       if (_activeName && _customMap && _customMap[_activeName]) {
-        saveCustomTheme(_activeName, base, {
-          font: _activeSaved.font, density: _activeSaved.density,
-          bgPattern: _activeSaved.bgPattern, bgEffectColor: _activeSaved.bgEffectColor,
-          bgEffectIntensity: _activeSaved.bgEffectIntensity,
-          bgEffectSize: _activeSaved.bgEffectSize,
-        });
         _saveFull(_activeName, base);
       } else {
         _saveFull('custom', base);
@@ -1840,8 +1846,14 @@ export function initThemeUI() {
           opt.dataset.customFont = '1';
           nf.appendChild(opt);
         }
-        // Restore saved value after options are populated
+        // Restore saved value after options are populated, then reapply
+        // the font so a late-loaded custom font is not left on fallback.
+        // Density and backgrounds are untouched (T07).
         nf.value = _initFont;
+        if (_customFonts[_initFont] && !FONT_MAP[_initFont]) {
+          const densityEl = document.getElementById('theme-density-select');
+          applyFontDensity(_initFont, densityEl ? densityEl.value : _initDensity);
+        }
       })
       .catch(e => console.warn('Custom fonts fetch failed:', e));
   }
@@ -1941,6 +1953,9 @@ export function initThemeUI() {
       const type = document.getElementById('harmony-type').value;
       const mode = document.getElementById('harmony-mode').value;
       const colors = generateHarmonyColors(accent, type, mode);
+      // Clear Clanker identity alongside the custom palette so no stale
+      // identity class survives the transition (T06).
+      applyThemeIdentity('custom');
       applyColors(colors);
       syncPickers(colors);
       _saveFull('custom', colors);
@@ -1992,6 +2007,9 @@ export function initThemeUI() {
       if (cur && cur.bgPattern) obj.bgPattern = cur.bgPattern;
       if (cur && cur.bgEffectColor) obj.bgEffectColor = cur.bgEffectColor;
       if (cur && cur.bgEffectControls) obj.bgEffectControls = cur.bgEffectControls;
+      if (cur && cur.bgEffectIntensity !== undefined) obj.bgEffectIntensity = cur.bgEffectIntensity;
+      if (cur && cur.bgEffectSize !== undefined) obj.bgEffectSize = cur.bgEffectSize;
+      if (cur && cur.frosted !== undefined) obj.frosted = cur.frosted;
       const json = JSON.stringify(obj, null, 2);
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -2042,14 +2060,14 @@ export function initThemeUI() {
       if (parsed.bgPattern) opts.bgPattern = parsed.bgPattern;
       if (parsed.bgEffectColor) opts.bgEffectColor = parsed.bgEffectColor;
       if (parsed.bgEffectControls && typeof parsed.bgEffectControls === 'object') opts.bgEffectControls = parsed.bgEffectControls;
+      if (parsed.bgEffectIntensity !== undefined) opts.bgEffectIntensity = Number(parsed.bgEffectIntensity);
+      if (parsed.bgEffectSize !== undefined) opts.bgEffectSize = Number(parsed.bgEffectSize);
+      if (parsed.frosted !== undefined) opts.frosted = !!parsed.frosted;
       const result = saveCustomTheme(slug, colorData, opts);
       if (result === 'limit') { saveError.textContent = 'Max ' + MAX_CUSTOM_THEMES + ' custom themes. Delete one first.'; saveError.style.display = 'block'; return; }
-      save(slug, colorData, opts);
-      applyColors(colorData);
-      applyFontDensity(opts.font || DEFAULT_FONT, opts.density || DEFAULT_DENSITY);
-      applyBgEffectColor(opts.bgEffectColor || '');
-      applyBackgroundEffectControls(opts.bgEffectControls);
-      applyBgPattern(opts.bgPattern || 'none');
+      // Apply identity, colors and options together so no stale Clanker
+      // identity class survives the transition (T06).
+      applyTheme(slug, colorData, { persist: true, storedOptions: { ...colorData, ...opts } });
       importAreaEl.classList.add('hidden');
       importActionsEl.classList.add('hidden');
     });

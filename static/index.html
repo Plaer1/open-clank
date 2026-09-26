@@ -28,37 +28,39 @@
       // Built-in presets are versioned. Do not let an older saved Clanker
       // palette flash before theme.js migrates localStorage.
       if (themeName === 'clanker-dark' && !(t && t.colors)) c = {
-        bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#B83B78',
-        advanced:{userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#B83B78',sendBtnHover:'#8E285B',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'}
+        bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#F6BE48',
+        advanced:{userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#F6BE48',sendBtnHover:'#C4922A',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'}
       };
       if (themeName === 'clanker-light' && !(t && t.colors)) c = {
-        bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#B83B78',
-        advanced:{userBubbleBg:'#DCEAF0',aiBubbleBg:'#FFF9E7',bubbleBorder:'#26323D',sidebarBg:'#F4B827',brandColor:'#EC635C',brandMixTo:'#D94B9C',hamburgerColor:'#17202A',inputBg:'#FFF9E7',inputBorder:'#26323D',sendBtnBg:'#B83B78',sendBtnHover:'#8E285B',codeBg:'#111A27',codeFg:'#FFF9E7',toggleActive:'#4F9F38'}
+        bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#F4B827',
+        advanced:{userBubbleBg:'#DCEAF0',aiBubbleBg:'#FFF9E7',bubbleBorder:'#26323D',sidebarBg:'#F4B827',brandColor:'#EC635C',brandMixTo:'#D94B9C',hamburgerColor:'#17202A',inputBg:'#FFF9E7',inputBorder:'#26323D',sendBtnBg:'#F4B827',sendBtnHover:'#C4922A',codeBg:'#111A27',codeFg:'#FFF9E7',toggleActive:'#4F9F38'}
       };
-      // Old built-in records used blue as their implicit accent. Recognize
-      // only an exact built-in-shaped record; customized palettes are kept.
+      // Old built-in records used blue or pink as their implicit accent.
+      // Recognize only an exact built-in-shaped record; customized palettes
+      // are kept.
       if (t && t.colors && (themeName === 'clanker-dark' || themeName === 'clanker-light')) {
         var _legacyAccent = String(t.colors.red || '').toUpperCase();
         var _defaultBg = themeName === 'clanker-dark' ? '#191A1E' : '#F3EEDB';
         var _defaultFg = themeName === 'clanker-dark' ? '#FFF4D6' : '#17202A';
         var _defaultPanel = themeName === 'clanker-dark' ? '#25272C' : '#FFF9E7';
         var _defaultBorder = themeName === 'clanker-dark' ? '#555A62' : '#26323D';
-        if ((_legacyAccent === '#5A9EF5' || _legacyAccent === '#2469D8')
+        var _goldAccent = themeName === 'clanker-dark' ? '#F6BE48' : '#F4B827';
+        if ((_legacyAccent === '#5A9EF5' || _legacyAccent === '#2469D8' || _legacyAccent === '#B83B78')
             && (!t.colors.bg || String(t.colors.bg).toUpperCase() === _defaultBg)
             && (!t.colors.fg || String(t.colors.fg).toUpperCase() === _defaultFg)
             && (!t.colors.panel || String(t.colors.panel).toUpperCase() === _defaultPanel)
             && (!t.colors.border || String(t.colors.border).toUpperCase() === _defaultBorder)) {
           c = themeName === 'clanker-dark'
-            ? { bg:_defaultBg, fg:_defaultFg, panel:_defaultPanel, border:_defaultBorder, red:'#B83B78', advanced:{sendBtnBg:'#B83B78',sendBtnHover:'#8E285B'} }
-            : { bg:_defaultBg, fg:_defaultFg, panel:_defaultPanel, border:_defaultBorder, red:'#B83B78', advanced:{sendBtnBg:'#B83B78',sendBtnHover:'#8E285B'} };
+            ? { bg:_defaultBg, fg:_defaultFg, panel:_defaultPanel, border:_defaultBorder, red:_goldAccent, advanced:{sendBtnBg:_goldAccent,sendBtnHover:'#C4922A'} }
+            : { bg:_defaultBg, fg:_defaultFg, panel:_defaultPanel, border:_defaultBorder, red:_goldAccent, advanced:{sendBtnBg:_goldAccent,sendBtnHover:'#C4922A'} };
         }
       }
       // Runtime normalization fills partial Clanker records from these same
       // preset advanced values before applying user overrides. Keeping this
       // map in the boot path prevents first-paint token flashes.
       var _clankerAdvancedDefaults = {
-        'clanker-dark': {userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#B83B78',sendBtnHover:'#8E285B',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'},
-        'clanker-light': {userBubbleBg:'#DCEAF0',aiBubbleBg:'#FFF9E7',bubbleBorder:'#26323D',sidebarBg:'#F4B827',brandColor:'#EC635C',brandMixTo:'#D94B9C',hamburgerColor:'#17202A',inputBg:'#FFF9E7',inputBorder:'#26323D',sendBtnBg:'#B83B78',sendBtnHover:'#8E285B',codeBg:'#111A27',codeFg:'#FFF9E7',toggleActive:'#4F9F38'},
+        'clanker-dark': {userBubbleBg:'#30333A',aiBubbleBg:'#25272C',bubbleBorder:'#555A62',sidebarBg:'#202227',brandColor:'#F6BE48',brandMixTo:'#ED6AB0',hamburgerColor:'#FFF4D6',inputBg:'#2B2E34',inputBorder:'#555A62',sendBtnBg:'#F6BE48',sendBtnHover:'#C4922A',codeBg:'#101114',codeFg:'#FFF4D6',toggleActive:'#A8DE53'},
+        'clanker-light': {userBubbleBg:'#DCEAF0',aiBubbleBg:'#FFF9E7',bubbleBorder:'#26323D',sidebarBg:'#F4B827',brandColor:'#EC635C',brandMixTo:'#D94B9C',hamburgerColor:'#17202A',inputBg:'#FFF9E7',inputBorder:'#26323D',sendBtnBg:'#F4B827',sendBtnHover:'#C4922A',codeBg:'#111A27',codeFg:'#FFF9E7',toggleActive:'#4F9F38'},
       };
       if (c && _clankerAdvancedDefaults[themeName]) {
         c.advanced = Object.assign({}, _clankerAdvancedDefaults[themeName], c.advanced || {});
@@ -68,16 +70,16 @@
         s.setProperty('--fg', c.fg || '#FFF4D6');
         s.setProperty('--panel', c.panel || '#25272C');
         s.setProperty('--border', c.border || '#555A62');
-        s.setProperty('--red', c.red || '#B83B78');
-        s.setProperty('--accent', (c.advanced && c.advanced.accentPrimary) || c.red || '#B83B78');
-        s.setProperty('--accent-primary', (c.advanced && c.advanced.accentPrimary) || c.red || '#B83B78');
+        s.setProperty('--red', c.red || '#F6BE48');
+        s.setProperty('--accent', (c.advanced && c.advanced.accentPrimary) || c.red || '#F6BE48');
+        s.setProperty('--accent-primary', (c.advanced && c.advanced.accentPrimary) || c.red || '#F6BE48');
         var _clankerAccent = themeName === 'clanker-dark' || themeName === 'clanker-light';
-        s.setProperty('--accent-hover', (c.advanced && c.advanced.accentHover) || (_clankerAccent ? '#8E285B' : ((c.advanced && c.advanced.sendBtnHover) || c.red || '#B83B78')));
-        s.setProperty('--accent-focus', (c.advanced && c.advanced.accentFocus) || (_clankerAccent ? '#D95F9A' : (c.red || '#B83B78')));
-        s.setProperty('--accent-disabled', (c.advanced && c.advanced.accentDisabled) || (_clankerAccent ? '#B97A99' : (c.red || '#B83B78')));
+        s.setProperty('--accent-hover', (c.advanced && c.advanced.accentHover) || (_clankerAccent ? '#C4922A' : ((c.advanced && c.advanced.sendBtnHover) || c.red || '#F6BE48')));
+        s.setProperty('--accent-focus', (c.advanced && c.advanced.accentFocus) || (_clankerAccent ? '#FFD97A' : (c.red || '#F6BE48')));
+        s.setProperty('--accent-disabled', (c.advanced && c.advanced.accentDisabled) || (_clankerAccent ? '#C4A46A' : (c.red || '#F6BE48')));
         s.setProperty('--accent-error', (c.advanced && c.advanced.accentError) || '#FF776E');
-        s.setProperty('--accent-selection', (c.advanced && c.advanced.accentPrimary) || c.red || '#B83B78');
-        s.setProperty('--color-accent', (c.advanced && c.advanced.accentPrimary) || c.red || '#B83B78');
+        s.setProperty('--accent-selection', (c.advanced && c.advanced.accentPrimary) || c.red || '#F6BE48');
+        s.setProperty('--color-accent', (c.advanced && c.advanced.accentPrimary) || c.red || '#F6BE48');
         s.setProperty('--color-error', (c.advanced && c.advanced.accentError) || '#FF776E');
         s.setProperty('--color-danger', (c.advanced && c.advanced.accentError) || '#FF776E');
         s.setProperty('--color-success', (c.advanced && c.advanced.successColor) || '#8DD85D');
@@ -93,7 +95,7 @@
         var mtc = document.querySelector('meta[name="theme-color"]');
         if (mtc && c.bg) mtc.setAttribute('content', c.bg);
         // Update favicon to match accent color
-        var ac = c.red || '#B83B78';
+        var ac = c.red || '#F6BE48';
         var fav = document.querySelector("link[rel='icon']");
         if (fav) fav.href = 'data:image/svg+xml,' + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 3 29 27H3Z' fill='none' stroke='" + ac + "' stroke-width='2' stroke-linejoin='round'/><path d='M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z' fill='" + ac + "' fill-rule='evenodd' clip-rule='evenodd'/><circle cx='16' cy='17' r='1.2' fill='" + ac + "'/></svg>");
         // Derive syntax highlighting colors from theme
@@ -125,7 +127,7 @@
         // Apply every owned advanced token, including defaults when a custom
         // record omitted it, so values cannot bleed from the prior theme.
         var a = c.advanced || {};
-        var advDefaults = {userBubbleBg:c.bg||'#191A1E',aiBubbleBg:c.panel||'#25272C',bubbleBorder:c.border||'#555A62',sidebarBg:c.panel||'#25272C',sectionAccent:c.red||'#B83B78',brandColor:c.red||'#B83B78',brandMixTo:c.fg||'#FFF4D6',hamburgerColor:c.fg||'#FFF4D6',inputBg:c.panel||'#25272C',inputBorder:c.border||'#555A62',sendBtnBg:c.red||'#B83B78',sendBtnHover:c.red||'#B83B78',codeBg:s.getPropertyValue('--hl-bg')||c.bg||'#101114',codeFg:c.fg||'#FFF4D6',toggleBg:c.panel||'#25272C',toggleActive:c.red||'#B83B78'};
+        var advDefaults = {userBubbleBg:c.bg||'#191A1E',aiBubbleBg:c.panel||'#25272C',bubbleBorder:c.border||'#555A62',sidebarBg:c.panel||'#25272C',sectionAccent:c.red||'#F6BE48',brandColor:c.red||'#F6BE48',brandMixTo:c.fg||'#FFF4D6',hamburgerColor:c.fg||'#FFF4D6',inputBg:c.panel||'#25272C',inputBorder:c.border||'#555A62',sendBtnBg:c.red||'#F6BE48',sendBtnHover:c.red||'#F6BE48',codeBg:s.getPropertyValue('--hl-bg')||c.bg||'#101114',codeFg:c.fg||'#FFF4D6',toggleBg:c.panel||'#25272C',toggleActive:c.red||'#F6BE48'};
         var advMap = {userBubbleBg:'--user-bubble-bg',aiBubbleBg:'--ai-bubble-bg',bubbleBorder:'--bubble-border',sidebarBg:'--sidebar-bg',sectionAccent:'--section-accent',brandColor:'--brand-color',brandMixTo:'--brand-mix-to',hamburgerColor:'--hamburger-color',inputBg:'--input-bg',inputBorder:'--input-border',sendBtnBg:'--send-btn-bg',sendBtnHover:'--send-btn-hover',codeBg:'--code-bg',codeFg:'--code-fg',toggleBg:'--toggle-bg',toggleActive:'--toggle-active'};
         for (var k in advMap) s.setProperty(advMap[k], a[k] || advDefaults[k]);
       }
@@ -167,8 +169,8 @@
       var path = (window.location.pathname || '').toLowerCase();
       var theme = (function(){ try { var o=localStorage.getItem('odysseus-auth-owner') || localStorage.getItem('odysseus-auth-user'); var k=o ? 'odysseus-theme:scope:' + encodeURIComponent(o) : 'odysseus-theme'; return JSON.parse(localStorage.getItem(k) || (!o ? localStorage.getItem('odysseus-theme') : 'null')); } catch(_) { return null; } })();
       var ac = theme && theme.name === 'clanker-dark'
-        ? ((theme.colors && theme.colors.red) || '#B83B78')
-        : (theme && (theme.red || theme.colors && theme.colors.red)) || '#B83B78';
+        ? ((theme.colors && theme.colors.red) || '#F6BE48')
+        : (theme && (theme.red || theme.colors && theme.colors.red)) || '#F6BE48';
       // Shapes are line-stroke SVGs (no emoji glyphs). Each entry returns
       // the inner SVG markup rendered against currentColor=`ac`.
       var SHAPES = {
@@ -342,7 +344,7 @@
 <body>
   <!-- Loading overlay — hides all flashing until app is ready -->
   <div id="app-loader" style="position:fixed;inset:0;z-index:99999;background:var(--bg,#191A1E);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;transition:opacity .3s">
-    <div id="loader-wave" style="color:var(--brand-color,var(--red,#B83B78));font-family:monospace;font-size:11px;opacity:.5">▁▂▃</div>
+    <div id="loader-wave" style="color:var(--brand-color,var(--red,#F6BE48));font-family:monospace;font-size:11px;opacity:.5">▁▂▃</div>
   </div>
   <script nonce="{{CSP_NONCE}}">
   (function(){
@@ -375,9 +377,9 @@
   </script>
   <!-- Memory Management Modal -->
   <div id="memory-modal" class="modal hidden">
-    <div class="modal-content memory-modal-content" role="dialog" aria-label="Brain" style="background:var(--bg)">
+    <div class="modal-content memory-modal-content" role="dialog" aria-label="Menmery" style="background:var(--bg)">
       <div class="modal-header">
-        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>Brain</h4>
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>Menmery</h4>
         <button class="close-btn" id="close-memory-modal" aria-label="Close memory modal">✖</button>
       </div>
       <div class="modal-body memory-modal-body">
@@ -960,7 +962,7 @@
     <!-- Tool launchers — always visible, alphabetical -->
     <button class="icon-rail-btn" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg></button>
-    <button class="icon-rail-btn" id="rail-copal" title="Copal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14"/><path d="M2 19h20"/><path d="M8 7h8M8 11h8M8 15h5"/></svg></button>
+    <button class="icon-rail-btn" id="rail-copal" title="Copal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5c-4.5 0-7.5 4.2-7.5 9.2 0 4.8 3.2 8.8 7.5 10.3 4.3-1.5 7.5-5.5 7.5-10.3 0-5-3-9.2-7.5-9.2z"/><path d="M8.5 10c.8-2.2 2.2-3.8 4.2-4.5"/><circle cx="10" cy="13.5" r="1.2" fill="currentColor" stroke="none"/></svg></button>
     <div id="rail-copal-launchers" class="rail-copal-launchers" aria-label="Copal destinations">
       <button class="icon-rail-btn rail-copal-entry" data-copal-view="notes" title="Editor" aria-label="Editor"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
       <button style="display:none" class="icon-rail-btn rail-copal-entry" data-copal-launcher="code" data-copal-compat="true" title="Editor" aria-label="Editor" data-copal-target="/code"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg></button>
@@ -976,10 +978,13 @@
     <button class="icon-rail-btn" id="rail-email" title="Email"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></button>
     <button class="icon-rail-btn" id="rail-gallery" style="display:none" data-retired="gallery" title="Gallery (retired — see Files)" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></button>
     <button class="icon-rail-btn" id="rail-archive" title="Library"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/></svg></button>
-    <button class="icon-rail-btn" id="rail-memory" title="Brain"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></button>
+    <button class="icon-rail-btn" id="rail-memory" title="Menmery"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></button>
     <button style="display:none" class="icon-rail-btn" id="rail-notes" data-copal-compat="true" title="Editor" aria-label="Editor"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
     <button class="icon-rail-btn" id="rail-tasks" title="Clanker Tasks" aria-label="Clanker Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></button>
-    <button class="icon-rail-btn" id="rail-theme" title="Theme"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg></button>
+    <!-- Theme rail launcher removed (S22). Settings -> Appearance retains
+         the Theme surface. Hidden handle keeps rail/shortcut wiring
+         resolvable and opens Settings -> Appearance. -->
+    <button style="display:none" class="icon-rail-btn" id="rail-theme" title="Theme" aria-hidden="true" data-theme-settings-alias><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg></button>
     <div style="flex:1"></div>
     <!-- Static: bottom -->
     <button class="icon-rail-btn" id="rail-settings" title="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
@@ -1089,7 +1094,7 @@
 
       <div class="section copal-sidebar-section" id="copal-section">
         <div class="section-header-flex" id="copal-section-toggle">
-          <span class="section-title"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14"/><path d="M2 19h20"/><path d="M8 7h8M8 11h8M8 15h5"/></svg><span>Copal</span></span>
+          <span class="section-title"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5c-4.5 0-7.5 4.2-7.5 9.2 0 4.8 3.2 8.8 7.5 10.3 4.3-1.5 7.5-5.5 7.5-10.3 0-5-3-9.2-7.5-9.2z"/><path d="M8.5 10c.8-2.2 2.2-3.8 4.2-4.5"/><circle cx="10" cy="13.5" r="1.2" fill="currentColor" stroke="none"/></svg><span>Copal</span></span>
           <button type="button" class="section-header-btn" id="copal-appearance-btn" title="Show or hide Copal launchers" aria-label="Copal appearance"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
         </div>
         <div id="copal-submenu" class="copal-sidebar-submenu">
@@ -1145,7 +1150,7 @@
             <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
             <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
           </svg>
-          <span class="grow">Brain</span>
+          <span class="grow">Menmery</span>
         </div>
         <div class="list-item" id="tool-calendar-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -2176,7 +2181,7 @@
               </label>
               <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></span>
-                <span class="vis-label">Brain</span>
+                <span class="vis-label">Menmery</span>
                 <input type="checkbox" checked data-ui-key="tool-memory"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">

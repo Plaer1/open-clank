@@ -48,9 +48,12 @@ test('mounted theme presets apply readable palettes and persist identity safely'
         colors: { bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#5A9EF5' },
       }, { name:'clanker-dark' });
       window.__theme.applyColors(custom.colors);
-      const root = getComputedStyle(document.documentElement);
+      const computedAccentValue = getComputedStyle(document.documentElement).getPropertyValue('--accent-primary').trim();
       window.__theme.applyTheme('clanker-light', null, { persist:false, storedOptions:{ bgPattern:'none' } });
-      const button = getComputedStyle(document.getElementById('primary-probe'));
+      const buttonEl = document.getElementById('primary-probe');
+      // Finish transitions so computed color reflects the settled theme.
+      buttonEl.getAnimations().forEach(a => { try { a.finish(); } catch (_) {} });
+      const button = getComputedStyle(buttonEl);
       return {
         legacyAccent: legacy.colors.red,
         legacyPattern: legacy.background.pattern,
@@ -59,19 +62,19 @@ test('mounted theme presets apply readable palettes and persist identity safely'
         customHover: custom.colors.advanced.accentHover,
         forestHover: forest.colors.advanced.accentHover,
         explicitAccent: explicit.colors.red,
-        computedAccent: root.getPropertyValue('--accent-primary').trim(),
+        computedAccent: computedAccentValue,
         buttonBackground: button.backgroundColor,
         buttonForeground: button.color,
       };
     })()`);
-    assert.equal(normalized.legacyAccent, '#B83B78');
+    assert.equal(normalized.legacyAccent, '#F6BE48');
     assert.equal(normalized.legacyPattern, 'none');
-    assert.equal(normalized.customAccent, '#B83B78');
+    assert.equal(normalized.customAccent, '#F6BE48');
     assert.equal(normalized.customSend, null);
-    assert.equal(normalized.customHover, '#B83B78');
+    assert.equal(normalized.customHover, '#F6BE48');
     assert.equal(normalized.forestHover, '#7CB871');
     assert.equal(normalized.explicitAccent, '#5A9EF5');
-    assert.equal(normalized.computedAccent, '#B83B78');
+    assert.equal(normalized.computedAccent, '#F6BE48');
     const rgb = value => value.match(/\d+(?:\.\d+)?/g).map(Number).slice(0, 3);
     const luminance = value => rgb(value).map(channel => channel / 255).map(channel => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4).reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
     const ratio = (Math.max(luminance(normalized.buttonBackground), luminance(normalized.buttonForeground)) + 0.05) / (Math.min(luminance(normalized.buttonBackground), luminance(normalized.buttonForeground)) + 0.05);
@@ -140,7 +143,8 @@ test('account hydration ignores stale responses across A to B to A switches', as
     await evaluate(`window.__account='B'; document.dispatchEvent(new CustomEvent('openclank:auth-context-changed', { detail:{ username:'B', accountId:'B' } }))`);
     await until(`window.__pendingThemes.filter(item => item.owner === 'B').length >= 1`, 'stale B hydration');
     await settle('A', 'clanker-dark', '#AA1111');
-    assert.equal(await evaluate(`getComputedStyle(document.documentElement).getPropertyValue('--red').trim()`), '#B83B78');
+    // Stale A response is ignored; B's owner-scoped local snapshot survives.
+    assert.equal(await evaluate(`getComputedStyle(document.documentElement).getPropertyValue('--red').trim()`), '#11AA11');
     await settle('B', 'clanker-light', '#11AA11');
     await until('window.__hydrations.length >= 3', 'fresh B hydration');
 

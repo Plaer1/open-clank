@@ -1013,8 +1013,8 @@ try {
   assert.equal(login.bg.toUpperCase(), '#191A1E'); assert.equal(login.savedName, 'clanker-light');
   assert(login.classes.includes('theme-clanker-dark') && login.classes.includes('bg-pattern-clanker-routefield'));
   assert.equal(login.backgroundImage, 'none'); assert.equal(login.effectCanvasCount, 1);
-  assert.match(login.favicon, /#B83B78/i, 'login favicon uses the pink default accent');
-  assert.equal(login.submitBackground, 'rgb(184, 59, 120)', 'login submit fallback uses the pink default accent');
+  assert.match(login.favicon, /#F6BE48/i, 'login favicon uses the gold default accent');
+  assert.equal(login.submitBackground, 'rgb(246, 190, 72)', 'login submit fallback uses the gold default accent');
   assert.equal(login.cardBorder, '2px'); assert.equal(login.cardRadius, '16px');
   assert.match(login.favicon, /M16 3 29 27H3Z/); assert.match(login.logoMark, /M8\.5 17Q16 7 23\.5 17/);
   assert.notEqual(login.cardShadow, 'none'); assert(login.liga && login.fredoka);

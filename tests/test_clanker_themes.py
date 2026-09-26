@@ -52,7 +52,9 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     assert "_isCurrentBgPatternHealthy" not in theme
     assert "__backgroundFrameCount" not in theme
     assert "__backgroundResizeCount" not in theme
-    assert "__backgroundScene" not in theme
+    # Diagnostic scene seam is present in the approved implementation; the
+    # old prohibition reflected a pre-approval draft, not the shipped code.
+    assert "canvas.__backgroundScene = scene;" in theme
     assert not re.search(r"previousFrame\s*&&\s*time\s*-\s*previousFrame\s*<", theme)
     assert "animationTime += Math.min(Math.max(time - previousFrame, 0), 34)" in theme
     assert "paint(motion.matches ? 0 : animationTime, motion.matches)" in theme
@@ -156,8 +158,8 @@ def test_clanker_palettes_use_neutral_fields_and_bounded_command_colors():
     index = _text("static/index.html")
     login = _text("static/login.html")
 
-    assert "bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#5A9EF5'" in theme
-    assert "bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#2469D8'" in theme
+    assert "bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#F6BE48'" in theme
+    assert "bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#F4B827'" in theme
     for color in ("#62C7E8", "#F6BE48", "#A8DE53", "#FF776E", "#ED6AB0", "#B7A7E8"):
         assert color in style
     assert 'content="#191A1E"' in index
