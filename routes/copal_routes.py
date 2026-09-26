@@ -3371,6 +3371,31 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         publish(scope, "document", result)
         return result
 
+    @router.get("/official/docs")
+    async def official_docs(request: Request, workspace: str | None = None):
+        """Maintained official handbook articles for Help and provisioning."""
+        del request, workspace
+        from src.openclank.official_docs import official_payloads
+        return {"articles": official_payloads()}
+
+    @router.get("/official/home")
+    async def official_home(request: Request, workspace: str | None = None):
+        """The article Help opens first."""
+        del request, workspace
+        from src.openclank.official_docs import official_home as _home
+        return _home()
+
+    @router.post("/official/provision")
+    async def official_provision(request: Request, workspace: str | None = None):
+        """Idempotently provision the read-only official docs folder."""
+        scope = _scope(request, workspace)
+        from src.openclank.official_docs import official_payloads
+        result = await _call(request, "provision_official", {
+            **scope,
+            "articles": official_payloads(),
+        })
+        return result
+
     @router.get("/documents/{document_id}")
     async def get_document(document_id: str, request: Request, workspace: str | None = None):
         scope = _scope(request, workspace)

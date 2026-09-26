@@ -1370,6 +1370,86 @@ class LooseCopalRepository:
         if changed:
             self._save(vault, manifest)
 
+    def provision_official_docs(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Idempotently provision the maintained official docs folder.
+
+        Each article is a real read-only document under the official root, not
+        a link placeholder. Matching is by exact canonical name: an existing
+        read-only record is replaced only when its stored body is still an
+        unmodified official revision, so a personal edit is never clobbered. A
+        same-named page the caller did not provision (no read-only flag) is
+        personal data and is left alone.
+
+        Re-running creates nothing twice: an interrupted run resumes by
+        creating whatever is missing and refreshing whatever is present.
+        """
+        from src.openclank.official_docs import is_user_modified_content
+
+        vault, manifest = self._scope(args)
+        documents = manifest.setdefault("documents", {})
+        articles = args.get("articles")
+        if not isinstance(articles, list) or not articles:
+            raise CopalBridgeError("official docs provisioning requires articles")
+        created: list[str] = []
+        updated: list[str] = []
+        skipped: list[dict[str, Any]] = []
+        for article in articles:
+            if not isinstance(article, dict):
+                raise CopalBridgeError("official article must be an object")
+            name = self._safe_name(str(article.get("name") or ""), str(article.get("kind") or "wiki"))
+            content = str(article.get("content") or "")
+            read_only = bool(article.get("read_only", True))
+            existing = next(
+                (row for row in documents.values()
+                 if isinstance(row, dict) and row.get("path") == name and not row.get("trashed")),
+                None,
+            )
+            if existing is None:
+                document_id = f"doc_{uuid.uuid4().hex}"
+                record = {
+                    "id": document_id,
+                    "owner": args.get("owner"),
+                    "workspace_id": args.get("workspace_id"),
+                    "kind": str(article.get("kind") or "wiki"),
+                    "corpus": str(article.get("corpus") or "wiki"),
+                    "name": name,
+                    "path": name,
+                    "head": self._fingerprint(content),
+                    "createdAt": time.time(),
+                    "updatedAt": time.time(),
+                    "readOnly": read_only,
+                    "trashed": False,
+                }
+                documents[document_id] = record
+                self._atomic_write(vault / name, content)
+                try:
+                    record["mtime_ns"] = (vault / name).stat().st_mtime_ns
+                except OSError:
+                    pass
+                self._operation(manifest, "create", f"create {name}", document_id=document_id)
+                created.append(name)
+                continue
+            if not existing.get("readOnly"):
+                # Personal page occupies the name. Never overwrite it.
+                skipped.append({"name": name, "id": existing.get("id"), "reason": "personal-page-occupies-name"})
+                continue
+            current_path = vault / str(existing.get("path") or name)
+            try:
+                current_content = self._read_content(current_path)
+            except FileNotFoundError as exc:
+                raise CopalBridgeError("loose Copal document file is missing") from exc
+            if is_user_modified_content(current_content):
+                skipped.append({"name": name, "id": existing.get("id"), "reason": "user-modified"})
+                continue
+            if current_content == content:
+                continue
+            result = self._write_record(vault, manifest, existing, content, operation="write")
+            existing["readOnly"] = read_only
+            updated.append(name)
+            del result
+        self._save(vault, manifest)
+        return {"created": created, "updated": updated, "skipped": skipped}
+
     async def call(self, operation: str, args: dict[str, Any] | None = None, *, timeout: float = 20) -> Any:
         del timeout
         return await asyncio.to_thread(self._call_sync, operation, args or {})
@@ -1384,6 +1464,8 @@ class LooseCopalRepository:
         self._guarded.reconcile(self)
         if operation == "commit_guarded":
             return self._guarded.execute(self, args)
+        if operation == "provision_official":
+            return self.provision_official_docs(args)
         if operation == "owner_inventory":
             return self.owner_inventory(str(args.get("owner") or ""))
         if operation == "preflight_rename_owner":

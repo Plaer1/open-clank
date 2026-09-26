@@ -385,6 +385,7 @@ function openHelp(input = {}, { focus = true } = {}) {
     <p class="openclank-help-next"><strong>Try this</strong> <span data-help-next></span></p>
     <div class="copal-dialog-actions">
       <a class="copal-btn primary" data-help-lesson target="_self">Open lesson</a>
+      <button type="button" class="copal-btn" data-help-handbook>Open handbook</button>
       <button type="button" class="copal-btn" data-help-pin></button>
       <button type="button" class="copal-btn" data-help-ask>Attach to assistant</button>
       <button type="button" class="copal-btn" data-help-close>Close</button>
@@ -403,6 +404,11 @@ function openHelp(input = {}, { focus = true } = {}) {
   else if (context.sourceStatus === 'unavailable') state.textContent = 'The active surface is unavailable. The Field Guide lesson is still available.';
   else if (!context.resourceId && !context.selection) state.textContent = 'Nothing is selected yet. Open a resource for more specific help.';
   else state.textContent = 'Only the identifiers and fields shown below are attached; document contents stay in the workspace.';
+  const handbook = helpDialog.querySelector('[data-help-handbook]');
+  handbook.addEventListener('click', () => {
+    closeHelp();
+    if (typeof window.openClankHandbook === 'function') window.openClankHandbook();
+  });
   const lesson = helpDialog.querySelector('[data-help-lesson]');
   lesson.href = lessonHref(context);
   lesson.setAttribute('aria-label', `Open ${spec.label} Field Guide lesson`);

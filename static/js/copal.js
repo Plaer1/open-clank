@@ -328,6 +328,36 @@ function close(view = state.view, push = true, fromManager = false) {
   if (push) history.pushState({}, '', '/');
 }
 
+/** S21: Help opens the maintained handbook as Wiki-style docs inside Editor. */
+async function openClankHandbook() {
+  const homeName = 'OpenClank/Home';
+  const match = state.docs.find((item) => item.name === homeName || item.path === homeName);
+  if (match) {
+    openDocument(match.id, 'notes', true);
+    return match.id;
+  }
+  try {
+    const response = await fetch('/api/copal/official/home', { headers: { Accept: 'application/json' } });
+    if (response.ok) {
+      const home = await response.json();
+      const byId = home?.id && state.docs.find((item) => item.id === home.id);
+      if (byId) {
+        openDocument(byId.id, 'notes', true);
+        return byId.id;
+      }
+    }
+  } catch {
+    // fall through to folder
+  }
+  // Folder fallback: Files view at the official root.
+  if (typeof appletPath === 'function') {
+    const target = appletPath('files', { q: 'OpenClank' });
+    if (target) window.dispatchEvent(new CustomEvent('openclank:navigate', { detail: { href: target } }));
+  }
+  return null;
+}
+window.openClankHandbook = openClankHandbook;
+
 function openDocument(id, view = state.view, push = true, options = {}) {
   const doc = state.docs.find((item) => item.id === id);
   const wikiOwned = (doc && (doc.kind === 'wiki' || doc.kind === 'meme')) || view === 'wiki';
