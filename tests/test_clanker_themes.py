@@ -85,7 +85,7 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     assert "repeating-linear-gradient" not in login
     for pattern, function_name, canvas_id in (
         ("clanker-kene-weave", "_initClankerKeneWeave", "clanker-kene-weave-canvas"),
-        ("clanker-radar", "_initClankerRadar", "clanker-radar-canvas"),
+        ("clanker-lcars", "_initClankerLcars", "clanker-lcars-canvas"),
         ("clanker-gem-drift", "_initClankerGemDrift", "clanker-gem-drift-canvas"),
         ("clanker-emoji-drift", "_initClankerEmojiDrift", "clanker-emoji-drift-canvas"),
         ("clanker-matrix-rain", "_initClankerMatrixRain", "clanker-matrix-rain-canvas"),

@@ -413,7 +413,7 @@ try {
   const teardown = await evaluate(`(async () => {
     const select=document.getElementById('theme-bg-pattern-select');
     const oldCanvas=document.getElementById('clanker-routefield-canvas');
-    select.value='clanker-radar';
+    select.value='clanker-lcars';
     select.dispatchEvent(new Event('change',{bubbles:true}));
     await new Promise(resolve=>setTimeout(resolve,80));
     const result={
@@ -426,7 +426,7 @@ try {
     return result;
   })()`);
   assert.equal(teardown.oldConnected, false);
-  assert.deepEqual(teardown.active, ['clanker-radar-canvas']);
+  assert.deepEqual(teardown.active, ['clanker-lcars-canvas']);
   await waitFor("document.getElementById('clanker-routefield-canvas')?.isConnected", 'restored route field');
 
   const dark = await evaluate(`(async () => {
@@ -528,7 +528,7 @@ try {
   const patternResults = {};
   for (const [pattern, canvasId, screenshotName, minimumPaintedRatio] of [
     ['clanker-kene-weave', 'clanker-kene-weave-canvas', 'clanker-kene-weave', 0.16],
-    ['clanker-radar', 'clanker-radar-canvas', 'clanker-radar', 0.28],
+    ['clanker-lcars', 'clanker-lcars-canvas', 'clanker-lcars', 0.28],
     ['clanker-gem-drift', 'clanker-gem-drift-canvas', 'clanker-gem-drift', 0.025],
     ['clanker-emoji-drift', 'clanker-emoji-drift-canvas', 'clanker-emoji-drift', 0.012],
     ['clanker-matrix-rain', 'clanker-matrix-rain-canvas', 'clanker-matrix-rain', 0.018],
@@ -705,7 +705,7 @@ try {
       stable:document.getElementById('clanker-emoji-rain-canvas')?.isConnected,
     };
 
-    await choose('clanker-radar');
+    await choose('clanker-lcars');
     const saved=JSON.parse(localStorage.getItem('odysseus-theme'));
     return { kene, gem, emoji, matrixRain, emojiRain, hidden:document.getElementById('theme-bg-effect-controls')?.hidden, saved, controls:saved?.bgEffectControls };
   })()`);
@@ -829,7 +829,7 @@ try {
   const canvasPatternIds = {
     'clanker-routefield':'clanker-routefield-canvas',
     'clanker-kene-weave':'clanker-kene-weave-canvas',
-    'clanker-radar':'clanker-radar-canvas',
+    'clanker-lcars':'clanker-lcars-canvas',
     'clanker-gem-drift':'clanker-gem-drift-canvas',
     'clanker-emoji-drift':'clanker-emoji-drift-canvas',
     'clanker-matrix-rain':'clanker-matrix-rain-canvas',
@@ -838,7 +838,7 @@ try {
     'perlin-flow':'perlin-flow-canvas', petals:'petals-canvas', sparkles:'sparkles-canvas', embers:'embers-canvas',
   };
   const patternOrder = [
-    'none', 'clanker-routefield', 'clanker-kene-weave', 'clanker-radar',
+    'none', 'clanker-routefield', 'clanker-kene-weave', 'clanker-lcars',
     'clanker-gem-drift', 'clanker-emoji-drift', 'clanker-matrix-rain', 'clanker-emoji-rain', 'clanker-blueprint', 'dots', 'synapse', 'rain',
     'constellations', 'perlin-flow', 'petals', 'sparkles', 'embers',
   ];

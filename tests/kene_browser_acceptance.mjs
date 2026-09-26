@@ -229,8 +229,8 @@ test('Kene keeps one owner, continuous joins, reduced motion, and bounded frame 
     // Repeated pattern switches exercise disposal of RAF, resize and motion
     // listeners. End every cycle at none and compare the exact baseline.
     for (let cycle = 0; cycle < 20; cycle += 1) {
-      await evaluate(`window.__theme.applyBgPattern('clanker-radar')`);
-      await until("document.getElementById('clanker-radar-canvas')?.isConnected", `radar switch ${cycle + 1}`);
+      await evaluate(`window.__theme.applyBgPattern('clanker-lcars')`);
+      await until("document.getElementById('clanker-lcars-canvas')?.isConnected", `lcars switch ${cycle + 1}`);
       await evaluate(`window.__theme.applyBgPattern('none')`);
       await until("document.querySelectorAll('[data-background-effect-canvas]').length === 0", `none switch ${cycle + 1}`);
       await evaluate(`window.__theme.applyBgPattern('clanker-kene-weave')`);

@@ -264,7 +264,9 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
     ...(_isPlainObject(source.typography) ? source.typography : {}),
   };
   // Normalize legacy pattern aliases at every load/import/save path (T19).
-  const PATTERN_ALIASES = { 'clanker-sweep': null };
+  // `clanker-radar` (Radar Ripples) migrates to the S25 LCARS redesign while
+  // keeping saved intensity/size/color preferences on the same theme record.
+  const PATTERN_ALIASES = { 'clanker-sweep': null, 'clanker-radar': 'clanker-lcars' };
   let rawPattern = options.pattern || options.bgPattern || THEME_DEFAULT_PATTERN[name] || 'none';
   if (Object.prototype.hasOwnProperty.call(PATTERN_ALIASES, rawPattern)) {
     rawPattern = PATTERN_ALIASES[rawPattern] || THEME_DEFAULT_PATTERN[name] || 'none';
@@ -687,14 +689,14 @@ export function applyUiScale(scale) {
 }
 
 const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-clanker-routefield', 'bg-pattern-clanker-kene-weave',
-  'bg-pattern-clanker-radar', 'bg-pattern-clanker-gem-drift', 'bg-pattern-clanker-emoji-drift',
+  'bg-pattern-clanker-lcars', 'bg-pattern-clanker-gem-drift', 'bg-pattern-clanker-emoji-drift',
   'bg-pattern-clanker-matrix-rain', 'bg-pattern-clanker-emoji-rain', 'bg-pattern-clanker-sweep', 'bg-pattern-clanker-blueprint',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
   'bg-pattern-perlin-flow',
   'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];
 const _CANVAS_PATTERNS = { 'clanker-routefield': _initClankerRoutefield,
   'clanker-kene-weave': _initClankerKeneWeave,
-  'clanker-radar': _initClankerRadar,
+  'clanker-lcars': _initClankerLcars,
   'clanker-gem-drift': _initClankerGemDrift,
   'clanker-emoji-drift': _initClankerEmojiDrift,
   'clanker-matrix-rain': _initClankerMatrixRain,
@@ -2498,15 +2500,15 @@ function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null })
     // on every frame created a second, monochrome render state.
     const config = _readClankerEffectConfig(true);
     // Scene geometry follows the vanilla lifecycle: rebuild only when geometry
-    // changes. Palette reads stay live without resetting animation state.
-    // The chat pane is already the clipping boundary. Keep its artwork full
-    // bleed so a viewport-scale crop cannot leave a gutter on one edge.
+    // or effect-control topology changes. Palette/intensity reads stay live in
+    // draw() so style-only updates preserve scene identity and trajectories
+    // (T08). The chat pane is already the clipping boundary. Keep its artwork
+    // full bleed so a viewport-scale crop cannot leave a gutter on one edge.
     const safeBounds = chatPane
       ? { inset: 0, left: 0, top: 0, right: width, bottom: height, width, height }
       : _clankerSafeBounds(width, height, config.size);
-    const sceneStyleKey = `${config.intensity}:${config.outline}:${config.colors.join(',')}`;
     const controlSceneKey = typeof getSceneKey === 'function' ? getSceneKey() : '';
-    const nextSceneKey = `${width}:${height}:${config.size}:${safeBounds.inset}:${sceneStyleKey}:${controlSceneKey}`;
+    const nextSceneKey = `${width}:${height}:${config.size}:${safeBounds.inset}:${controlSceneKey}`;
     if (sceneKey !== nextSceneKey) {
       scene = build({ width, height, safeBounds, dpr, ...config });
       canvas.__backgroundStaticCanvas = scene?.staticCanvas || null;
@@ -2603,8 +2605,61 @@ function _pointOnCachedPolyline(route, progress) {
   };
 }
 
-// Stable connected route map. Tracks and nodes stay fixed while packets move.
+// S25 Signal Routes — persistent bead state on a bounded path graph.
+//
+// The previous renderer wrapped each packet's progress with `% 1`, so a packet
+// that reached a route endpoint teleported back to the start. Beads here own a
+// distance along one edge and roll into a connected edge at the junction, so
+// position is continuous through the graph. A fixed pool, branch cooldown and
+// retirement keep density stable over long runs; palette/intensity changes do
+// not rebuild the scene (see `_mountClankerEffect` scene key).
 function _initClankerRoutefield() {
+  // Pool and branch policy. `MAX_ROUTE_BEADS` is a hard cap; splits refuse to
+  // spawn above it and old beads retire when a younger one needs the slot.
+  const MAX_ROUTE_BEADS = 48;
+  const BEAD_LIFETIME_MS = 42000;
+  const BRANCH_COOLDOWN_MS = 5200;
+  const DIRECTION_CHANGE_CHANCE = .16;
+  const COLOR_CHANGE_CHANCE = .12;
+  const SPLIT_CHANCE = .10;
+  // Sampled polyline segments per quadratic edge — enough for smooth travel
+  // without paying a bezier evaluation per bead per frame.
+  const SAMPLES_PER_ROUTE = 18;
+
+  const sampleQuadratic = (route) => {
+    const points = [];
+    for (let index = 0; index <= SAMPLES_PER_ROUTE; index += 1) {
+      points.push(_pointOnQuadratic(route, index / SAMPLES_PER_ROUTE));
+    }
+    const cumulative = [0];
+    for (let index = 1; index < points.length; index += 1) {
+      cumulative.push(cumulative[index - 1] + Math.hypot(
+        points[index].x - points[index - 1].x,
+        points[index].y - points[index - 1].y,
+      ));
+    }
+    return { points, cumulative, total: cumulative[cumulative.length - 1] || 1 };
+  };
+
+  const beadPosition = (route, distance) => {
+    const samples = route.samples;
+    const clamped = Math.max(0, Math.min(samples.total, distance));
+    let low = 0;
+    let high = samples.cumulative.length - 1;
+    while (low < high) {
+      const middle = Math.floor((low + high + 1) / 2);
+      if (samples.cumulative[middle] <= clamped) low = middle;
+      else high = middle - 1;
+    }
+    const segment = Math.min(low, samples.points.length - 2);
+    const start = samples.cumulative[segment];
+    const length = samples.cumulative[segment + 1] - start;
+    const amount = length ? (clamped - start) / length : 0;
+    const a = samples.points[segment];
+    const b = samples.points[segment + 1];
+    return { x: a.x + (b.x - a.x) * amount, y: a.y + (b.y - a.y) * amount };
+  };
+
   _mountClankerEffect({
     id: 'clanker-routefield-canvas',
     bodyClass: 'bg-pattern-clanker-routefield',
@@ -2624,6 +2679,10 @@ function _initClankerRoutefield() {
             y: row === 0 ? safeBounds.top : row === rows - 1 ? safeBounds.bottom : baseY + (_clankerNoise(seed + 13) - .5) * gapY * .34,
             color: (row * 2 + column) % 6,
             hub: (row + column * 2) % 6 === 0,
+            // Branch cooldown clock (ms) — a junction that just split stays
+            // quiet so one hot node cannot monopolize the pool.
+            lastBranchAt: -BRANCH_COOLDOWN_MS,
+            incident: [],
           });
         }
       }
@@ -2634,13 +2693,18 @@ function _initClankerRoutefield() {
         const dy = b.y - a.y;
         const length = Math.hypot(dx, dy) || 1;
         const bend = (_clankerNoise(seed) - .5) * Math.min(gapX, gapY) * .7;
-        routes.push({
+        const route = {
           a, b,
+          index: routes.length,
           phase: _clankerNoise(seed + 41),
           color: (a.color + b.color + seed) % 6,
           cx: Math.max(safeBounds.left, Math.min(safeBounds.right, (a.x + b.x) / 2 - (dy / length) * bend)),
           cy: Math.max(safeBounds.top, Math.min(safeBounds.bottom, (a.y + b.y) / 2 + (dx / length) * bend)),
-        });
+        };
+        route.samples = sampleQuadratic(route);
+        routes.push(route);
+        a.incident.push(route.index);
+        b.incident.push(route.index);
       };
       for (let row = 0; row < rows; row += 1) {
         for (let column = 0; column < columns; column += 1) {
@@ -2652,13 +2716,50 @@ function _initClankerRoutefield() {
           }
         }
       }
-      return { nodes, hubs: nodes.filter(node => node.hub), routes };
+
+      // Persistent bead pool. Each bead owns one edge and a distance along it.
+      // Positions survive palette/intensity changes because the scene is not
+      // rebuilt for style (T08) — only for geometry/topology.
+      const beads = [];
+      const seedBeads = Math.min(22, Math.max(10, Math.round(routes.length * .28)));
+      for (let index = 0; index < seedBeads && routes.length; index += 1) {
+        const routeIndex = Math.floor(_clankerNoise(index * 53 + 3) * routes.length);
+        const route = routes[Math.min(routeIndex, routes.length - 1)];
+        beads.push({
+          routeIndex: route.index,
+          distance: _clankerNoise(index * 29 + 7) * route.samples.total,
+          direction: _clankerNoise(index * 19 + 11) > .5 ? 1 : -1,
+          color: route.color,
+          speed: 34 + _clankerNoise(index * 41 + 13) * 26,
+          glow: .55 + _clankerNoise(index * 61 + 17) * .45,
+          bornAt: -_clankerNoise(index * 71 + 19) * BEAD_LIFETIME_MS,
+          // Last time this bead asked for a split — feeds the junction clock.
+          lastSplitAt: -BRANCH_COOLDOWN_MS,
+        });
+      }
+
+      return {
+        nodes,
+        hubs: nodes.filter(node => node.hub),
+        routes,
+        beads,
+        beadPolicy: {
+          MAX_ROUTE_BEADS, BEAD_LIFETIME_MS, BRANCH_COOLDOWN_MS,
+          DIRECTION_CHANGE_CHANCE, COLOR_CHANGE_CHANCE, SPLIT_CHANCE,
+        },
+        stats: { splits: 0, retirements: 0, transitions: 0 },
+        lastTime: 0,
+      };
     },
     draw: (ctx, { time, reduced, scene, intensity, size, colors, outline }) => {
-      // Reduced motion is a hard visual freeze, not merely a stopped RAF.
-      // Keep the deterministic route geometry visible while pinning packets
-      // to their initial phase so a delayed repaint cannot move the scene.
+      // Reduced motion is a hard visual freeze: geometry stays visible and
+      // beads are pinned to their seeded positions so a delayed repaint cannot
+      // move the scene. No continuous travel, no junction rolls.
       const renderTime = reduced ? 0 : time;
+      const elapsed = (!reduced && scene.lastTime && renderTime > scene.lastTime)
+        ? Math.min(64, renderTime - scene.lastTime) : 0;
+      if (!reduced) scene.lastTime = renderTime;
+
       for (const node of scene.hubs) {
         ctx.save();
         ctx.translate(node.x, node.y);
@@ -2707,22 +2808,127 @@ function _initClankerRoutefield() {
         ctx.globalAlpha = intensity * (node.hub ? 0.88 : 0.62);
         ctx.fill();
       }
-      scene.routes.forEach((route, index) => {
-        if (index % 4) return;
-        const progress = (renderTime / (11200 + (index % 5) * 760) + route.phase) % 1;
-        const point = _pointOnQuadratic(route, progress);
-        const radius = (index % 4 === 0 ? 3.4 : 2.6) * size;
+
+      // ── Beads ──
+      const policy = scene.beadPolicy;
+      const advance = (bead) => {
+        if (!elapsed || !scene.routes.length) return;
+        const route = scene.routes[bead.routeIndex];
+        if (!route) return;
+        const now = renderTime;
+        // Lifetime: retire and respawn on a random edge so density stays
+        // stable without letting the pool grow.
+        if (now - bead.bornAt > policy.BEAD_LIFETIME_MS) {
+          const respawnIndex = Math.floor(_clankerNoise(now * .001 + bead.routeIndex * 7) * scene.routes.length);
+          const respawn = scene.routes[Math.min(respawnIndex, scene.routes.length - 1)];
+          bead.routeIndex = respawn.index;
+          bead.distance = _clankerNoise(now * .0013 + respawn.index) * respawn.samples.total;
+          bead.direction = _clankerNoise(now * .0017 + respawn.index) > .5 ? 1 : -1;
+          bead.color = respawn.color;
+          bead.bornAt = now;
+          bead.glow = .55 + _clankerNoise(now * .0019) * .45;
+          scene.stats.retirements += 1;
+          return;
+        }
+        bead.distance += bead.speed * (size || 1) * .06 * elapsed * bead.direction;
+
+        // Occasional direction / color changes — seeded, not per-frame random.
+        const roll = _clankerNoise(now * .0007 + bead.routeIndex * 13 + bead.distance * .001);
+        if (roll < policy.DIRECTION_CHANGE_CHANCE * .02) bead.direction *= -1;
+        else if (roll < (policy.DIRECTION_CHANGE_CHANCE + policy.COLOR_CHANGE_CHANCE) * .02) {
+          bead.color = (bead.color + 1) % colors.length;
+        }
+
+        const total = route.samples.total;
+        if (bead.distance <= 0 || bead.distance >= total) {
+          // Reached a junction. Roll into a connected edge starting at the
+          // arrival node — the bead's position stays exactly on the junction.
+          const arrivingAt = bead.direction > 0 ? route.b : route.a;
+          const leavingFrom = bead.direction > 0 ? route.a : route.b;
+          const candidates = arrivingAt.incident
+            .map(index => scene.routes[index])
+            .filter(candidate => candidate && candidate !== route);
+          if (!candidates.length) {
+            bead.direction *= -1;
+            bead.distance = Math.max(0, Math.min(total, bead.distance));
+            return;
+          }
+          // Prefer an edge that does not immediately reverse onto the node we
+          // just left, so travel reads as continuous flow through the junction.
+          const forward = candidates.filter(candidate =>
+            candidate.a !== leavingFrom && candidate.b !== leavingFrom);
+          const pool = forward.length ? forward : candidates;
+          const choice = Math.floor(_clankerNoise(now * .0009 + bead.routeIndex * 17) * pool.length);
+          const next = pool[Math.min(choice, pool.length - 1)];
+          bead.routeIndex = next.index;
+          // Continuous handoff: enter the new edge at the shared junction.
+          const enterFromB = next.a === arrivingAt;
+          bead.direction = enterFromB ? -1 : 1;
+          bead.distance = enterFromB ? next.samples.total : 0;
+          if (_clankerNoise(now * .0011 + next.index) < policy.COLOR_CHANGE_CHANCE * .2) {
+            bead.color = next.color;
+          }
+          scene.stats.transitions += 1;
+
+          // Splits: at a cooled-down junction, with pool headroom, a second
+          // bead peels onto a different incident edge.
+          const cooled = now - arrivingAt.lastBranchAt >= policy.BRANCH_COOLDOWN_MS;
+          const wantsSplit = _clankerNoise(now * .0021 + next.index * 3) < policy.SPLIT_CHANCE * .08;
+          if (cooled && wantsSplit && scene.beads.length < policy.MAX_ROUTE_BEADS) {
+            const alternate = candidates.filter(candidate => candidate !== next);
+            if (alternate.length) {
+              const alt = alternate[Math.floor(_clankerNoise(now * .0023 + next.index) * alternate.length)];
+              const altFromB = alt.a === arrivingAt;
+              scene.beads.push({
+                routeIndex: alt.index,
+                distance: altFromB ? alt.samples.total : 0,
+                direction: altFromB ? -1 : 1,
+                color: alt.color,
+                speed: bead.speed * (0.85 + _clankerNoise(now * .0027) * .3),
+                glow: .55 + _clankerNoise(now * .0029) * .45,
+                bornAt: now,
+                lastSplitAt: now,
+              });
+              arrivingAt.lastBranchAt = now;
+              bead.lastSplitAt = now;
+              scene.stats.splits += 1;
+            }
+          }
+        }
+      };
+
+      if (!reduced) {
+        for (const bead of scene.beads) advance(bead);
+        // Hard cap enforcement: if a burst pushed past the pool, retire the
+        // oldest beads. Density must never grow without bound.
+        while (scene.beads.length > policy.MAX_ROUTE_BEADS) {
+          scene.beads.shift();
+          scene.stats.retirements += 1;
+        }
+      }
+
+      for (const bead of scene.beads) {
+        const route = scene.routes[bead.routeIndex];
+        if (!route) continue;
+        const point = beadPosition(route, bead.distance);
+        const radius = (2.6 + bead.glow * 1.2) * size;
+        // Short local glow only — a soft halo, never a snake body or trail.
         ctx.beginPath();
-        ctx.arc(point.x, point.y, radius + 1.5 * size, 0, Math.PI * 2);
-        ctx.fillStyle = outline;
-        ctx.globalAlpha = intensity * 0.88;
+        ctx.arc(point.x, point.y, radius + 2.4 * size, 0, Math.PI * 2);
+        ctx.fillStyle = colors[bead.color];
+        ctx.globalAlpha = intensity * .16 * bead.glow;
         ctx.fill();
         ctx.beginPath();
         ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = colors[route.color];
+        ctx.fillStyle = outline;
+        ctx.globalAlpha = intensity * .85;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, radius * .68, 0, Math.PI * 2);
+        ctx.fillStyle = colors[bead.color];
         ctx.globalAlpha = intensity;
         ctx.fill();
-      });
+      }
     },
   });
 }
@@ -2930,14 +3136,18 @@ function _initClankerKeneWeave() {
         };
       });
       // Static geometry is identical across frames. Rasterizing it once keeps
-      // the animation loop focused on the small set of moving signals.
+      // the animation loop focused on the small set of moving signals. The
+      // raster is a named function so a palette/intensity change can repaint
+      // it without rebuilding the scene or restarting snake trajectories (T08).
       const staticCanvas = document.createElement('canvas');
       const pixelRatio = Math.max(1, Math.min(2, dpr || 1));
       staticCanvas.width = Math.max(1, Math.floor(width * pixelRatio));
       staticCanvas.height = Math.max(1, Math.floor(height * pixelRatio));
-      const staticCtx = staticCanvas.getContext('2d');
-      if (staticCtx) {
+      const rasterizeStatic = (staticColors, staticOutline, staticIntensity, staticSize) => {
+        const staticCtx = staticCanvas.getContext('2d');
+        if (!staticCtx) return;
         staticCtx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+        staticCtx.clearRect(0, 0, width, height);
         staticCtx.lineCap = 'round';
         staticCtx.lineJoin = 'round';
         paths.forEach(path => {
@@ -2945,43 +3155,118 @@ function _initClankerKeneWeave() {
           path.points.forEach((point, pointIndex) => pointIndex
             ? staticCtx.lineTo(point.x, point.y)
             : staticCtx.moveTo(point.x, point.y));
-          staticCtx.strokeStyle = outline;
-          staticCtx.lineWidth = 3.4 * size;
-          staticCtx.globalAlpha = intensity * (path.layer ? .2 : .24);
+          staticCtx.strokeStyle = staticOutline;
+          staticCtx.lineWidth = 3.4 * staticSize;
+          staticCtx.globalAlpha = staticIntensity * (path.layer ? .2 : .24);
           staticCtx.stroke();
-          staticCtx.strokeStyle = colors[path.color];
-          staticCtx.lineWidth = 7 * size;
-          staticCtx.globalAlpha = intensity * .025;
+          staticCtx.strokeStyle = staticColors[path.color];
+          staticCtx.lineWidth = 7 * staticSize;
+          staticCtx.globalAlpha = staticIntensity * .025;
           staticCtx.stroke();
-          staticCtx.strokeStyle = colors[path.color];
-          staticCtx.lineWidth = 1.2 * size;
-          staticCtx.globalAlpha = intensity * (path.layer ? .3 : .36);
+          staticCtx.strokeStyle = staticColors[path.color];
+          staticCtx.lineWidth = 1.2 * staticSize;
+          staticCtx.globalAlpha = staticIntensity * (path.layer ? .3 : .36);
           staticCtx.stroke();
         });
         junctions.forEach(junction => {
-          staticCtx.fillStyle = colors[junction.color];
-          staticCtx.globalAlpha = intensity * .06;
+          staticCtx.fillStyle = staticColors[junction.color];
+          staticCtx.globalAlpha = staticIntensity * .06;
           staticCtx.beginPath();
-          staticCtx.arc(junction.x, junction.y, 7 * size, 0, Math.PI * 2);
+          staticCtx.arc(junction.x, junction.y, 7 * staticSize, 0, Math.PI * 2);
           staticCtx.fill();
-          staticCtx.globalAlpha = intensity * .7;
+          staticCtx.globalAlpha = staticIntensity * .7;
           staticCtx.beginPath();
-          staticCtx.arc(junction.x, junction.y, 1.8 * size, 0, Math.PI * 2);
+          staticCtx.arc(junction.x, junction.y, 1.8 * staticSize, 0, Math.PI * 2);
           staticCtx.fill();
         });
         staticCtx.globalAlpha = 1;
-      }
+      };
+      rasterizeStatic(colors, outline, intensity, size);
       phase('static-done');
+      // Bounded grid paint field — separate from snake bodies. Cells deposit
+      // color where snakes visit and decay over time; the field is recreated
+      // (cleared) only on a topology reset (scene rebuild). Off means no new
+      // paint while existing paint keeps fading.
+      const paintCell = Math.max(18, Math.min(tileWidth, tileHeight) / 3.2);
+      const paintCols = Math.max(4, Math.min(96, Math.ceil(width / paintCell)));
+      const paintRows = Math.max(4, Math.min(96, Math.ceil(height / paintCell)));
+      const paintField = {
+        cols: paintCols,
+        rows: paintRows,
+        cellW: width / paintCols,
+        cellH: height / paintRows,
+        colors: new Uint8Array(paintCols * paintRows),
+        alphas: new Float32Array(paintCols * paintRows),
+        deposit(x, y, colorIndex, amount) {
+          const column = Math.floor(x / this.cellW);
+          const row = Math.floor(y / this.cellH);
+          if (column < 0 || row < 0 || column >= this.cols || row >= this.rows) return;
+          const index = row * this.cols + column;
+          this.colors[index] = ((colorIndex % 6) + 6) % 6;
+          this.alphas[index] = Math.min(1, this.alphas[index] + amount);
+        },
+        decay(elapsedMs) {
+          if (!elapsedMs) return;
+          // Half-life ≈ 2.6s: paint fades out steadily whether or not new
+          // deposits are arriving.
+          const factor = Math.exp(-elapsedMs / 2600);
+          const alphas = this.alphas;
+          for (let index = 0; index < alphas.length; index += 1) {
+            if (alphas[index] > 0) alphas[index] *= factor;
+          }
+        },
+        clear() {
+          this.alphas.fill(0);
+        },
+      };
       return { paths, junctions, snakePoints, maxSnakeStep: maxSnakeStep, snakeSeed,
-        snakeRoutes, snakes, staticCanvas, heads: [],
+        snakeRoutes, snakes, staticCanvas, rasterizeStatic, paintField,
+        styleKey: `${intensity}:${outline}:${colors.join(',')}`,
+        heads: [],
         layerVectors: [{ x: 1, y: 0 }, { x: 0, y: 1 }], mirroredPairs: paths.length / 2,
         junctionOffsetError: junctionNodes.length === junctions.length ? 0 : Infinity };
     },
     draw: (ctx, { width, height, time, reduced, scene, intensity, size, colors, outline }) => {
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
+      // Style-only updates repaint the static raster in place. Snake state is
+      // untouched so trajectories continue through palette/intensity changes.
+      const styleKey = `${intensity}:${outline}:${colors.join(',')}`;
+      if (scene.styleKey !== styleKey) {
+        if (typeof scene.rasterizeStatic === 'function') {
+          scene.rasterizeStatic(colors, outline, intensity, size);
+        }
+        scene.styleKey = styleKey;
+      }
       if (scene.staticCanvas) ctx.drawImage(scene.staticCanvas, 0, 0, scene.staticCanvas.width, scene.staticCanvas.height, 0, 0, width, height);
       const renderTime = reduced ? 0 : time;
+
+      // ── Grid paint trail (S25) ──
+      // Separate from snake bodies: a bounded cell field that receives color
+      // where snakes visit and decays on its own clock. `snakePaintTrail` off
+      // stops deposits; existing paint keeps fading to zero.
+      const paintTrailOn = getBackgroundEffectControlValue('clanker-kene-weave', 'snakePaintTrail', false);
+      const paintField = scene.paintField;
+      const paintElapsed = (!reduced && scene.paintLastTime && renderTime > scene.paintLastTime)
+        ? Math.min(80, renderTime - scene.paintLastTime) : 0;
+      if (!reduced) scene.paintLastTime = renderTime;
+      if (paintField) {
+        if (paintElapsed) paintField.decay(paintElapsed);
+        // Paint is drawn under the snakes as the residue they leave behind.
+        // Deposits from this frame land here next frame (one-frame lag is
+        // imperceptible and keeps paint out of the snake stroke path).
+        const { cols, rows, cellW, cellH, colors: paintColors, alphas: paintAlphas } = paintField;
+        for (let row = 0; row < rows; row += 1) {
+          for (let column = 0; column < cols; column += 1) {
+            const index = row * cols + column;
+            const alpha = paintAlphas[index];
+            if (alpha <= 0.012) continue;
+            ctx.fillStyle = colors[paintColors[index] % colors.length];
+            ctx.globalAlpha = intensity * alpha * .26;
+            ctx.fillRect(column * cellW, row * cellH, cellW + .5, cellH + .5);
+          }
+        }
+      }
 
       const snakeCount = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeCount', 7);
       const snakeSpeedPct = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeSpeed', 100) / 100;
@@ -3049,6 +3334,18 @@ function _initClankerKeneWeave() {
           x: headPoint.x, y: headPoint.y, routeIndex: snake.routeIndex,
           reverse: snake.reverse, progress: snake.progress, cycle: snake.cycle,
         };
+        // Deposit paint at the head (and a short trail of tail samples) so the
+        // grid field reads as continuous coverage rather than dotted points.
+        if (paintTrailOn && paintField) {
+          const depositColor = Math.floor(_clankerNoise(random + 31) * colors.length);
+          paintField.deposit(headPoint.x, headPoint.y, depositColor, .34);
+          for (let paintStep = 1; paintStep <= 3; paintStep += 1) {
+            const paintProgress = headProgress + (reverse ? paintStep : -paintStep) * .0024;
+            if (paintProgress < 0 || paintProgress > 1) continue;
+            const paintPoint = _pointOnCachedPolyline(route, paintProgress);
+            paintField.deposit(paintPoint.x, paintPoint.y, depositColor, .18);
+          }
+        }
         const tail = [];
         for (let step = tailSteps; step >= 0; step -= 1) {
           const pointProgress = headProgress + (reverse ? step : -step) * .0024;
@@ -3101,110 +3398,261 @@ function _initClankerKeneWeave() {
   });
 }
 
-function _initClankerRadar() {
+// S25 LCARS redesign — replaces Radar Ripples (`clanker-radar` migrates to
+// `clanker-lcars` via PATTERN_ALIASES). Composition: asymmetric rounded elbow
+// rails near the margins, segmented bars, small status tiles and coordinated
+// pulses/stepped scans. Center stays open for readable applets. No concentric
+// rings. Palette is theme-relative (gold/blue in Clanker) with low-alpha
+// cyan/lilac secondary detail. Reduced motion is composed static art.
+function _initClankerLcars() {
   _mountClankerEffect({
-    id: 'clanker-radar-canvas',
-    bodyClass: 'bg-pattern-clanker-radar',
+    id: 'clanker-lcars-canvas',
+    bodyClass: 'bg-pattern-clanker-lcars',
     build: ({ size, safeBounds }) => {
-      const base = Math.min(safeBounds.width, safeBounds.height);
-      const specs = [
-        [.16, .18, .17, 4, .08],
-        [.34, .34, .17, 2, .31],
-        [.58, .18, .16, 0, .52],
-        [.82, .36, .18, 3, .74],
-        [.18, .72, .18, 1, .93],
-        [.54, .70, .18, 5, .43],
-        [.82, .82, .16, 4, .19],
+      const { left, top, right, bottom, width, height } = safeBounds;
+      // Rail thickness tracks the margin inset so laptop/large/mobile all keep
+      // a readable open center. Elbow radius is generous — the rounded outer
+      // corner is the LCARS signature.
+      const rail = Math.max(9, Math.min(26, safeBounds.inset * .82)) * Math.max(.65, size);
+      const radius = rail * .92;
+      // Asymmetric arm lengths: the top-left and bottom-right elbows are the
+      // dominant frame; the opposite corners are quieter, shorter elbows.
+      const armLongH = width * .30;
+      const armLongV = height * .34;
+      const armShortH = width * .17;
+      const armShortV = height * .19;
+      // Elbow = two capsules meeting at the outer corner (rounded on both).
+      const elbows = [
+        { x: left, y: top, dirX: 1, dirY: 1, armH: armLongH, armV: armLongV, colorIndex: 0, accentIndex: 1, primary: true },
+        { x: right, y: bottom, dirX: -1, dirY: -1, armH: armLongH * .92, armV: armLongV * .86, colorIndex: 1, accentIndex: 0, primary: true },
+        { x: right, y: top, dirX: -1, dirY: 1, armH: armShortH, armV: armShortV, colorIndex: 1, accentIndex: 0, primary: false },
+        { x: left, y: bottom, dirX: 1, dirY: -1, armH: armShortH * .84, armV: armShortV * 1.08, colorIndex: 0, accentIndex: 1, primary: false },
+      ].map(elbow => ({
+        ...elbow,
+        rail,
+        radius,
+        // Normalized capsule origins so draw() does not recompute sign cases.
+        hx: elbow.dirX > 0 ? elbow.x : elbow.x - elbow.armH,
+        hy: elbow.dirY > 0 ? elbow.y : elbow.y - rail,
+        vx: elbow.dirX > 0 ? elbow.x : elbow.x - rail,
+        vy: elbow.dirY > 0 ? elbow.y : elbow.y - elbow.armV,
+      }));
+
+      // Segmented bars sit just inside the long elbows. Gaps between segments
+      // are the LCARS "discrete channel" look; pulses travel across them.
+      const barGap = 4 * size;
+      const barH = rail * .62;
+      const makeBar = (y, x0, x1, seed, colorIndex) => {
+        const segments = [];
+        let cursor = x0;
+        let index = 0;
+        while (cursor < x1 - barH) {
+          const noise = _clankerNoise(seed + index * 17);
+          const segW = Math.min(x1 - cursor, barH * (1.6 + noise * 3.4));
+          segments.push({
+            x: cursor,
+            y,
+            w: segW,
+            h: barH,
+            colorIndex: (colorIndex + index) % 6,
+            // Per-segment alpha band keeps the bar low-contrast overall.
+            alphaBand: .34 + (index % 3) * .1,
+            // Pulse phase seed (0..1) — coordinated pulses share the bar clock.
+            phase: _clankerNoise(seed + index * 31 + 7),
+          });
+          cursor += segW + barGap;
+          index += 1;
+        }
+        return { y, x0, x1, segments, seed, barH };
+      };
+      const bars = [
+        makeBar(top + rail * 1.35, left + armLongH * .55, right - armShortH * 1.1, 11, 0),
+        makeBar(bottom - rail * 1.35 - barH, left + armShortH * .7, right - armLongH * .48, 29, 1),
       ];
+
+      // Small status tiles: rounded chips with a tiny level indicator. Placed
+      // near the elbows, never in the center third of the composition.
+      const tile = Math.max(10, rail * 1.15);
+      const tiles = [
+        { x: left + armLongH * .30, y: top + rail * 2.4, w: tile * 2.2, h: tile, colorIndex: 1, level: .62, phase: .12 },
+        { x: left + armLongH * .30 + tile * 2.6, y: top + rail * 2.4, w: tile * 1.5, h: tile, colorIndex: 0, level: .38, phase: .58 },
+        { x: right - armShortH * .55, y: bottom - rail * 2.4 - tile, w: tile * 1.9, h: tile, colorIndex: 1, level: .71, phase: .33 },
+        { x: right - armShortH * .55, y: bottom - rail * 2.4 - tile * 2.3, w: tile * 1.3, h: tile, colorIndex: 0, level: .25, phase: .81 },
+      ];
+
+      // Quiet stepped scans: thin highlight strips that move in discrete steps
+      // along a bar rather than sweeping continuously.
+      const scans = bars.map((bar, index) => ({
+        barIndex: index,
+        stepCount: Math.max(6, bar.segments.length * 2),
+        speed: 0.55 + index * 0.22,
+        thickness: bar.barH * .38,
+      }));
+
       return {
-        centers: specs.map(([xRatio, yRatio, radiusRatio, color, phase]) => {
-          const x = safeBounds.left + safeBounds.width * xRatio;
-          const y = safeBounds.top + safeBounds.height * yRatio;
-          const available = Math.max(1, Math.min(
-            x - safeBounds.left,
-            safeBounds.right - x,
-            y - safeBounds.top,
-            safeBounds.bottom - y,
-          ) - 6 * size);
-          return { x, y, radius: Math.min(base * radiusRatio, available), color, phase };
-        }),
+        elbows,
+        bars,
+        tiles,
+        scans,
+        rail,
+        radius,
+        barH,
+        tile,
+        safeBounds: { left, top, right, bottom, width, height },
       };
     },
     draw: (ctx, { time, reduced, scene, intensity, size, colors, outline }) => {
+      // Reduced motion is a composed static art piece: geometry and resting
+      // highlights only, pinned so a delayed repaint cannot move the scene.
       const renderTime = reduced ? 0 : time;
-      scene.centers.forEach((center, centerIndex) => {
+      const primary = colors[0];
+      const accent = colors[1];
+      const lilac = colors[5] || colors[1];
+      // Low-alpha secondary cyan/lilac details. Cyan is the primary hue read
+      // back at low alpha; lilac is the palette's lilac slot.
+      const cyanDetail = primary;
+      const drawCapsule = (x, y, w, h, r, color, alpha) => {
         ctx.beginPath();
-        ctx.arc(center.x, center.y, center.radius, 0, Math.PI * 2);
-        ctx.fillStyle = colors[center.color];
-        ctx.globalAlpha = intensity * .025;
-        ctx.fill();
-
-        for (let ring = 1; ring <= 5; ring += 1) {
-          const radius = center.radius * ring / 5;
-          ctx.beginPath();
-          ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
-          ctx.strokeStyle = ring === 5 ? outline : colors[(center.color + ring) % colors.length];
-          ctx.lineWidth = (ring === 5 ? 2.8 : 1.1) * size;
-          ctx.globalAlpha = intensity * (ring === 5 ? .5 : .22);
-          ctx.stroke();
-
-          const direction = ring % 2 ? 1 : -.55;
-          const arcStart = center.phase * Math.PI * 2 + ring * 1.37 + renderTime / (11500 + centerIndex * 740) * direction;
-          ctx.beginPath();
-          ctx.arc(center.x, center.y, radius, arcStart, arcStart + .34 + ring * .12);
-          ctx.strokeStyle = colors[(center.color + ring + 1) % colors.length];
-          ctx.lineWidth = (ring % 3 === 0 ? 4 : 2.2) * size;
-          ctx.globalAlpha = intensity * .7;
-          ctx.stroke();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(x, y, w, h, r);
+        } else {
+          // Ordinary fallback for engines without roundRect.
+          ctx.rect(x, y, w, h);
         }
+        ctx.fillStyle = color;
+        ctx.globalAlpha = alpha;
+        ctx.fill();
+      };
 
-        for (let tick = 0; tick < 12; tick += 1) {
-          const angle = tick / 12 * Math.PI * 2 + center.phase;
-          const inner = center.radius * (tick % 3 === 0 ? .89 : .94);
-          ctx.beginPath();
-          ctx.moveTo(center.x + Math.cos(angle) * inner, center.y + Math.sin(angle) * inner);
-          ctx.lineTo(center.x + Math.cos(angle) * center.radius, center.y + Math.sin(angle) * center.radius);
-          ctx.strokeStyle = colors[(center.color + tick) % colors.length];
-          ctx.lineWidth = (tick % 3 === 0 ? 2 : 1) * size;
-          ctx.globalAlpha = intensity * .55;
-          ctx.stroke();
+      // ── Elbow rails ──
+      for (const elbow of scene.elbows) {
+        const baseAlpha = intensity * (elbow.primary ? .30 : .20);
+        const edgeAlpha = intensity * (elbow.primary ? .46 : .30);
+        // Horizontal capsule arm.
+        drawCapsule(elbow.hx, elbow.hy, elbow.armH, elbow.rail, elbow.rail / 2,
+          colors[elbow.colorIndex], baseAlpha);
+        // Vertical capsule arm.
+        drawCapsule(elbow.vx, elbow.vy, elbow.rail, elbow.armV, elbow.rail / 2,
+          colors[elbow.colorIndex], baseAlpha);
+        // Inner accent stripe along the primary elbows (low-alpha gold/blue).
+        if (elbow.primary) {
+          const stripe = elbow.rail * .28;
+          drawCapsule(
+            elbow.dirX > 0 ? elbow.hx + elbow.rail * .5 : elbow.hx + elbow.rail * .5,
+            elbow.dirY > 0 ? elbow.hy + elbow.rail - stripe : elbow.hy,
+            Math.max(6, elbow.armH - elbow.rail * .5), stripe, stripe / 2,
+            colors[elbow.accentIndex], edgeAlpha * .55,
+          );
+          drawCapsule(
+            elbow.dirX > 0 ? elbow.vx + elbow.rail - stripe : elbow.vx,
+            elbow.dirY > 0 ? elbow.vy + elbow.rail * .5 : elbow.vy + elbow.rail * .5,
+            stripe, Math.max(6, elbow.armV - elbow.rail * .5), stripe / 2,
+            colors[elbow.accentIndex], edgeAlpha * .55,
+          );
         }
-
-        const angle = center.phase * Math.PI * 2 + time / (13800 + centerIndex * 920);
+        // Low-alpha cyan/lilac detail caps at the arm ends (quiet secondary).
+        const endR = elbow.rail * .5;
         ctx.beginPath();
-        ctx.moveTo(center.x, center.y);
-        ctx.arc(center.x, center.y, center.radius * .96, angle - .28, angle);
-        ctx.closePath();
-        ctx.fillStyle = colors[center.color];
-        ctx.globalAlpha = intensity * .055;
+        ctx.arc(
+          elbow.dirX > 0 ? elbow.hx + elbow.armH - endR : elbow.hx + endR,
+          elbow.hy + endR, endR * .62, 0, Math.PI * 2,
+        );
+        ctx.fillStyle = cyanDetail;
+        ctx.globalAlpha = intensity * .16;
         ctx.fill();
         ctx.beginPath();
-        ctx.moveTo(center.x, center.y);
-        ctx.lineTo(center.x + Math.cos(angle) * center.radius * .96, center.y + Math.sin(angle) * center.radius * .96);
-        ctx.strokeStyle = colors[center.color];
-        ctx.lineWidth = 2.4 * size;
-        ctx.globalAlpha = intensity * .58;
+        ctx.arc(
+          elbow.vx + endR,
+          elbow.dirY > 0 ? elbow.vy + elbow.armV - endR : elbow.vy + endR,
+          endR * .62, 0, Math.PI * 2,
+        );
+        ctx.fillStyle = lilac;
+        ctx.globalAlpha = intensity * .14;
+        ctx.fill();
+      }
+
+      // ── Segmented bars + coordinated pulses ──
+      // One shared pulse clock per bar so connected segments light in sequence
+      // (coordinated pulses through connected segments, no expanding rings).
+      const pulsePeriod = 5200;
+      for (const bar of scene.bars) {
+        for (const segment of bar.segments) {
+          drawCapsule(segment.x, segment.y, segment.w, segment.h, segment.h / 2,
+            colors[segment.colorIndex], intensity * segment.alphaBand * .62);
+        }
+        // Coordinated pulse: a phase-locked highlight stepping across segments.
+        const clock = ((renderTime / pulsePeriod) + bar.seed * .017) % 1;
+        const pulseIndex = Math.floor(clock * bar.segments.length);
+        const pulseSegment = bar.segments[pulseIndex];
+        if (pulseSegment) {
+          drawCapsule(pulseSegment.x, pulseSegment.y, pulseSegment.w, pulseSegment.h,
+            pulseSegment.h / 2, accent, intensity * .34);
+          // Quiet low-alpha cyan wash on the pulse segment.
+          drawCapsule(pulseSegment.x, pulseSegment.y, pulseSegment.w, pulseSegment.h,
+            pulseSegment.h / 2, cyanDetail, intensity * .10);
+        }
+      }
+
+      // ── Status tiles ──
+      for (const tile of scene.tiles) {
+        drawCapsule(tile.x, tile.y, tile.w, tile.h, tile.h * .32,
+          colors[tile.colorIndex], intensity * .22);
+        // Level indicator: a short bar inside the tile whose length is the
+        // tile's designed level, with a gentle breathing highlight.
+        const breathe = reduced ? 1 : 1 + Math.sin(renderTime / 2400 + tile.phase * Math.PI * 2) * .12;
+        const levelW = (tile.w - tile.h * .55) * Math.max(.12, Math.min(1, tile.level * breathe));
+        drawCapsule(
+          tile.x + tile.h * .28,
+          tile.y + tile.h * .34,
+          levelW,
+          tile.h * .32,
+          tile.h * .16,
+          colors[(tile.colorIndex + 1) % colors.length],
+          intensity * .52,
+        );
+        // Low-alpha lilac tick at the tile's far edge.
+        drawCapsule(
+          tile.x + tile.w - tile.h * .38,
+          tile.y + tile.h * .22,
+          tile.h * .16,
+          tile.h * .56,
+          tile.h * .08,
+          lilac,
+          intensity * .18,
+        );
+      }
+
+      // ── Quiet stepped scans ──
+      // Discrete steps along the bar — not a continuous sweep. Each step is a
+      // short highlight strip in a segment slot.
+      for (const scan of scene.scans) {
+        const bar = scene.bars[scan.barIndex];
+        if (!bar || !bar.segments.length) continue;
+        const step = reduced
+          ? Math.floor(scan.stepCount * .38)
+          : Math.floor((renderTime / 2800 * scan.speed) % scan.stepCount);
+        const progress = step / scan.stepCount;
+        const x = bar.x0 + (bar.x1 - bar.x0) * progress;
+        const w = Math.min(bar.barH * 1.4, bar.x1 - x);
+        if (w <= 0) continue;
+        drawCapsule(x, bar.y + (bar.barH - scan.thickness) / 2, w, scan.thickness,
+          scan.thickness / 2, cyanDetail, intensity * .20);
+      }
+
+      // Resting outline ticks at the elbow corners — quiet secondary structure.
+      ctx.globalAlpha = intensity * .12;
+      ctx.strokeStyle = outline;
+      ctx.lineWidth = 1 * size;
+      for (const elbow of scene.elbows) {
+        const cx = elbow.dirX > 0 ? elbow.x + elbow.rail * .5 : elbow.x - elbow.rail * .5;
+        const cy = elbow.dirY > 0 ? elbow.y + elbow.rail * .5 : elbow.y - elbow.rail * .5;
+        ctx.beginPath();
+        ctx.moveTo(cx - elbow.rail * .28, cy);
+        ctx.lineTo(cx + elbow.rail * .28, cy);
+        ctx.moveTo(cx, cy - elbow.rail * .28);
+        ctx.lineTo(cx, cy + elbow.rail * .28);
         ctx.stroke();
-
-        for (let blip = 0; blip < 3; blip += 1) {
-          const blipAngle = center.phase * 9 + blip * 2.31;
-          const blipRadius = center.radius * (.28 + blip * .24);
-          const pulse = 1 + Math.sin(time / 1250 + blipAngle) * .24;
-          const x = center.x + Math.cos(blipAngle) * blipRadius;
-          const y = center.y + Math.sin(blipAngle) * blipRadius;
-          ctx.beginPath();
-          ctx.arc(x, y, (2.4 + blip) * pulse * size, 0, Math.PI * 2);
-          ctx.fillStyle = colors[(center.color + blip + 2) % colors.length];
-          ctx.globalAlpha = intensity * .82;
-          ctx.fill();
-        }
-
-        ctx.beginPath();
-        ctx.arc(center.x, center.y, 4.4 * size, 0, Math.PI * 2);
-        ctx.fillStyle = colors[center.color];
-        ctx.globalAlpha = intensity;
-        ctx.fill();
-      });
+      }
     },
   });
 }
