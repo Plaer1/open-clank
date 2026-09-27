@@ -133,7 +133,7 @@
     "bs": {
       "name": "Bosanski",
       "dir": "ltr",
-      "catalog": "en"
+      "catalog": "bs"
     },
     "no": {
       "name": "Norsk",
