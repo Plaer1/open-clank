@@ -53,6 +53,7 @@ const PRECACHE = [
   '/static/i18n/fa.json',
   '/static/i18n/bg.json',
   '/static/i18n/bs.json',
+  '/static/i18n/hr.json',
   '/static/i18n/cs.json',
   '/static/i18n/da.json',
   '/static/i18n/de.json',
