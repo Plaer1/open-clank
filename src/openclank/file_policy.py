@@ -520,16 +520,97 @@ class FilePolicyRepository:
                 )
             except sqlite3.IntegrityError:
                 existing = connection.execute(
-                    "SELECT request_digest FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                    "SELECT request_digest,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
                     (str(owner_subject_id), str(operation_id)),
                 ).fetchone()
                 if existing is None or str(existing["request_digest"]) != str(request_digest):
                     raise FilePolicyError("operation id was already used for a different request", code="idempotency_conflict")
+                current = _parse_json(decrypt(str(existing["receipt_ciphertext"])), None)
+                if not isinstance(current, Mapping):
+                    raise FilePolicyError("Files operation receipt is unavailable", code="provider_unavailable")
+                current_owner = str(current.get("lease_owner") or "")
+                incoming_owner = str(receipt.get("lease_owner") or "")
+                # Adoption receipts are fenced by the claimant that acquired
+                # the durable lease.  A stale process must not publish a
+                # terminal or recovery receipt after another process has
+                # taken over an expired lease.
+                if current_owner and incoming_owner != current_owner:
+                    raise FilePolicyError("operation lease is owned by another claimant", code="operation_pending")
+                if current_owner and not incoming_owner:
+                    raise FilePolicyError("operation lease owner is required", code="operation_pending")
+                if current_owner:
+                    incoming = dict(receipt)
+                    incoming["lease_owner"] = current_owner
+                    duration = max(1_000, min(int(current.get("lease_duration_ms") or 30_000), 120_000))
+                    incoming["lease_duration_ms"] = duration
+                    incoming["lease_expires_unix_ms"] = _now_ms() + duration
+                    payload = encrypt(_json(incoming))
                 connection.execute(
                     "UPDATE file_operations SET generation=?,receipt_ciphertext=?,lifecycle_phase=COALESCE(?, lifecycle_phase) WHERE owner_subject_id=? AND operation_id=? AND request_digest=?",
                     (int(generation), payload, str(phase) if phase is not None else None, str(owner_subject_id), str(operation_id), str(request_digest)),
                 )
 
+    def claim_operation(
+        self,
+        *,
+        owner_subject_id: str,
+        operation_id: str,
+        request_digest: str,
+        generation: int,
+        receipt: Mapping[str, Any],
+        lease_owner: str,
+        lease_ms: int = 30_000,
+    ) -> dict[str, Any] | None:
+        """Atomically claim or renew a non-terminal Files operation lease.
+
+        ``None`` means this caller owns publication.  A live lease returns the
+        stored receipt; an expired lease is replaced under BEGIN IMMEDIATE.
+        Terminal receipts are returned unchanged for replay.
+        """
+        now = _now_ms()
+        bounded_lease = max(1_000, min(int(lease_ms), 120_000))
+        owner = str(lease_owner or "").strip()
+        if not owner:
+            raise FilePolicyError("operation lease owner is required", code="invalid_operation")
+        proposed = dict(receipt)
+        proposed["lease_owner"] = owner
+        proposed["lease_duration_ms"] = bounded_lease
+        proposed["lease_expires_unix_ms"] = now + bounded_lease
+        payload = encrypt(_json(proposed))
+        with self._connect() as connection:
+            self._begin(connection)
+            row = connection.execute(
+                "SELECT request_digest,generation,receipt_ciphertext FROM file_operations WHERE owner_subject_id=? AND operation_id=?",
+                (str(owner_subject_id), str(operation_id)),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO file_operations(owner_subject_id,operation_id,request_digest,generation,receipt_ciphertext,created_unix_ms,lifecycle_phase) VALUES (?,?,?,?,?,?,?)",
+                    (str(owner_subject_id), str(operation_id), str(request_digest), int(generation), payload, now, str(proposed.get("phase") or "staged")),
+                )
+                connection.commit()
+                return None
+            if str(row["request_digest"]) != str(request_digest):
+                connection.rollback()
+                raise FilePolicyError("operation id was already used for a different request", code="idempotency_conflict")
+            existing = _parse_json(decrypt(str(row["receipt_ciphertext"])), None)
+            if not isinstance(existing, Mapping):
+                connection.rollback()
+                raise FilePolicyError("Files operation receipt is unavailable", code="provider_unavailable")
+            phase = str(existing.get("phase") or "")
+            if phase in {"complete", "recovery_required"}:
+                connection.rollback()
+                return {"digest": str(row["request_digest"]), "generation": int(row["generation"]), "receipt": dict(existing)}
+            expires = int(existing.get("lease_expires_unix_ms") or 0)
+            if expires > now and str(existing.get("lease_owner") or "") != owner:
+                connection.rollback()
+                return {"digest": str(row["request_digest"]), "generation": int(row["generation"]), "receipt": dict(existing)}
+            connection.execute(
+                "UPDATE file_operations SET generation=?,receipt_ciphertext=?,lifecycle_phase=? WHERE owner_subject_id=? AND operation_id=? AND request_digest=?",
+                (int(generation), payload, str(proposed.get("phase") or "staged"), str(owner_subject_id), str(operation_id), str(request_digest)),
+            )
+            connection.commit()
+            return None
     @staticmethod
     def _bump(connection: sqlite3.Connection) -> int:
         connection.execute(

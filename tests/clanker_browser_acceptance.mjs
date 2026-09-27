@@ -167,8 +167,22 @@ try {
     const proto=CanvasRenderingContext2D.prototype;
     const clearRect=proto.clearRect;
     const stamps=[];
+    const framePaints=new Map();
+    const requestFrame=window.requestAnimationFrame;
+    let activeFrameTimestamp=null;
+    window.requestAnimationFrame=function(callback) {
+      return requestFrame.call(window, timestamp => {
+        activeFrameTimestamp=timestamp;
+        try { callback(timestamp); } finally { activeFrameTimestamp=null; }
+      });
+    };
     proto.clearRect=function(...args) {
-      if (this.canvas===canvas) stamps.push(performance.now());
+      if (this.canvas===canvas) {
+        stamps.push(performance.now());
+        if (activeFrameTimestamp !== null) {
+          framePaints.set(activeFrameTimestamp, (framePaints.get(activeFrameTimestamp) || 0) + 1);
+        }
+      }
       return clearRect.apply(this,args);
     };
     // Graphics-substrate patterns (code rain) may run on the WebGL2 backend,
@@ -179,7 +193,12 @@ try {
     if (typeof WebGL2RenderingContext !== 'undefined') {
       glClear=WebGL2RenderingContext.prototype.clear;
       WebGL2RenderingContext.prototype.clear=function(...args) {
-        if (this.canvas===canvas) stamps.push(performance.now());
+        if (this.canvas===canvas) {
+          stamps.push(performance.now());
+          if (activeFrameTimestamp !== null) {
+            framePaints.set(activeFrameTimestamp, (framePaints.get(activeFrameTimestamp) || 0) + 1);
+          }
+        }
         return glClear.apply(this,args);
       };
     }
@@ -203,15 +222,16 @@ try {
     finally {
       proto.clearRect=clearRect;
       if (glClear) WebGL2RenderingContext.prototype.clear=glClear;
+      window.requestAnimationFrame=requestFrame;
     }
     const intervals=stamps.slice(1).map((ts,index)=>ts-stamps[index]).sort((a,b)=>a-b);
-    return { paints:stamps.length, min:intervals[0] || 0, median:intervals[Math.floor(intervals.length/2)] || 0, max:intervals.at(-1) || 0 };
+    return { paints:stamps.length, min:intervals[0] || 0, median:intervals[Math.floor(intervals.length/2)] || 0, max:intervals.at(-1) || 0, maxPaintsPerFrame:Math.max(0, ...framePaints.values()) };
   })()`);
   const canvasCadenceStable = async id => {
     const cadence = await canvasCadence(id, 340);
     const minimumPaints = id.startsWith('clanker-') ? 6 : 2;
     assert(cadence?.paints >= minimumPaints, `${id} only painted ${cadence?.paints || 0} frames`);
-    assert(cadence.min >= 7, `${id} rendered twice inside a single frame (${cadence.min.toFixed(1)}ms)`);
+    assert(cadence.maxPaintsPerFrame <= 1, `${id} has multiple paints in one animation frame (${cadence.maxPaintsPerFrame})`);
     return cadence;
   };
 
@@ -459,7 +479,15 @@ try {
     const oldCanvas=document.getElementById('clanker-routefield-canvas');
     select.value='clanker-lcars';
     select.dispatchEvent(new Event('change',{bubbles:true}));
-    await new Promise(resolve=>setTimeout(resolve,80));
+    await new Promise((resolve, reject) => {
+      const deadline = Date.now() + 5000;
+      const check = () => {
+        if (document.getElementById('clanker-lcars-canvas')?.isConnected) resolve();
+        else if (Date.now() >= deadline) reject(new Error('Timed out waiting for mounted LCARS canvas'));
+        else setTimeout(check, 25);
+      };
+      check();
+    });
     const result={
       oldConnected:oldCanvas.isConnected,
       active:[...document.querySelectorAll('[data-background-effect-canvas]')].map(canvas=>canvas.id),
@@ -1039,6 +1067,7 @@ try {
   for (const [pattern, canvasId] of Object.entries(canvasPatternIds).filter(([name]) => name.startsWith('clanker-'))) {
     await evaluate(`(() => { const select=document.getElementById('theme-bg-pattern-select'); select.value=${JSON.stringify(pattern)}; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
     await waitFor(`document.getElementById(${JSON.stringify(canvasId)})?.isConnected`, `${pattern} mobile canvas`);
+    await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     const frame = await canvasState(canvasId);
     assert.equal(frame?.width, mobile.innerWidth, `${pattern} mobile width`);
     assert.equal(frame?.height, mobile.innerHeight, `${pattern} mobile height`);

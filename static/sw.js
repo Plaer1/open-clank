@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'open-clank-v355-applet-routes';
+const CACHE_NAME = 'open-clank-v357-usage-workspace';
 
 // Mirror of static/js/appletRoutes.js SHELL_PATHS + SHELL_PATH_PREFIXES.
 // The service worker cannot import the ES module, so keep this list in sync
@@ -15,7 +15,7 @@ const CACHE_NAME = 'open-clank-v355-applet-routes';
 const SHELL_NAV_PATHS = [
   '/', '/editor', '/files', '/wiki', '/graph', '/treehouse', '/timeline',
   '/todo', '/calendar', '/notes', '/code', '/bases', '/mind', '/galaxy',
-  '/email', '/memory', '/gallery', '/tasks', '/library', '/cookbook', '/settings',
+  '/email', '/memory', '/gallery', '/tasks', '/library', '/cookbook', '/usage', '/settings',
 ];
 const SHELL_NAV_PREFIXES = ['/settings/', '/copal/'];
 
@@ -35,6 +35,8 @@ const PRECACHE = [
   '/static/js/i18n.js',
   '/static/js/custom-context-menu.js',
   '/static/js/contextualHelp.js',
+  '/static/js/statsUsage.js',
+  '/static/js/chatWorkspace.js',
   '/static/i18n/registry.json',
   '/static/i18n/en.json',
   '/static/i18n/zh-Hans.json',

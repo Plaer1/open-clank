@@ -94,6 +94,12 @@ import { Tool } from "@/tool"
 import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
+import { GenTitle, type GenTitlePart } from "./gen-title"
+import { NotFoundError } from "@/storage"
+
+export const normalizeTitleInput = GenTitle.normalizeTitleInput
+export const sanitizeGeneratedTitle = GenTitle.sanitizeGeneratedTitle
+export const titlePromptText = GenTitle.titlePromptText
 import { MaxMode } from "./max-mode"
 import { Shell } from "@/shell/shell"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
@@ -293,12 +299,34 @@ const elog = EffectLogger.create({ service: "session.prompt" })
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts>
+  readonly recovery: (input: { sessionID: SessionID; agentID?: string; allowBusy?: boolean }) => Effect.Effect<RecoveryCandidate[]>
+  readonly resume: (input: ResumeTurnInput) => Effect.Effect<MessageV2.WithParts, unknown>
+  readonly resumeBackground: (input: ResumeTurnInput) => Effect.Effect<void, unknown>
   readonly loop: (input: z.infer<typeof LoopInput>) => Effect.Effect<MessageV2.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts>
   readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
   readonly sweepOrphanAssistants: (sessionID: SessionID, immediate?: boolean) => Effect.Effect<void>
+  /** Compatibility hook for cron integrations that provide tool-part cleanup. */
+  readonly sweepOrphanToolParts?: (sessionID: SessionID, immediate?: boolean) => Effect.Effect<void>
+  /** Legacy cron fixture hook; title generation is owned by the prompt implementation. */
+  readonly genTitle?: (...args: any[]) => Effect.Effect<{ title: string; status: string }>
   readonly predict: (input: { sessionID: SessionID }) => Effect.Effect<string>
+}
+
+export interface RecoveryCandidate {
+  assistantMessageID: MessageID
+  parentMessageID: MessageID
+  created: number
+}
+
+export interface ResumeTurnInput {
+  sessionID: SessionID
+  assistantMessageID: MessageID
+  agentID?: string
+  task_id?: string
+  titleLocale?: string
+  model?: { providerID: string; modelID: string }
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
@@ -547,6 +575,8 @@ export const layer = Layer.effect(
       history: MessageV2.WithParts[]
       providerID: ProviderID
       modelID: ModelID
+      titleLocale?: string
+      titleText?: string
     }) {
       if (input.session.parentID) return
 
@@ -569,65 +599,58 @@ export const layer = Layer.effect(
         return
       }
 
-      if (!Session.isDefaultTitle(input.session.title)) return
+      if (!Session.isDefaultTitle(input.session.title) && input.session.titleSource !== "fallback") return
 
       const real = (m: MessageV2.WithParts) =>
         m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
       const idx = input.history.findIndex(real)
       if (idx === -1) return
-      if (input.history.filter(real).length !== 1) return
 
-      const context = input.history.slice(0, idx + 1)
-      const firstUser = context[idx]
+      const firstUser = input.history[idx]
       if (!firstUser || firstUser.info.role !== "user") return
-      const firstInfo = firstUser.info
-
-      const subtasks = firstUser.parts.filter((p): p is MessageV2.SubtaskPart => p.type === "subtask")
-      const onlySubtasks = subtasks.length > 0 && firstUser.parts.every((p) => p.type === "subtask")
-
-      const ag = yield* agents.get("title")
-      if (!ag) return
-      const mdl = ag.modelRef
-        ? yield* provider.resolveModelRef(ag.modelRef, input.providerID)
-        : ag.model
-          ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
-          : ((yield* provider.getSmallModel(input.providerID)) ??
-            (yield* provider.getModel(input.providerID, input.modelID)))
-      const msgs = onlySubtasks
-        ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
-        : yield* MessageV2.toModelMessagesEffect(context, mdl)
-      const text = yield* llm
-        .stream({
-          agent: ag,
-          user: firstInfo,
-          system: [],
-          small: true,
-          tools: {},
-          model: mdl,
-          sessionID: input.session.id,
-          retries: 2,
-          messages: [{ role: "user", content: "Generate a title for this conversation:\n" }, ...msgs],
-        })
-        .pipe(
-          Stream.filter((e): e is Extract<LLM.Event, { type: "text-delta" }> => e.type === "text-delta"),
-          Stream.map((e) => e.text),
-          Stream.mkString,
-          Effect.orDie,
-        )
-      const cleaned = text
-        .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
-        .split("\n")
-        .map((line) => line.trim())
-        .find((line) => line.length > 0)
-      if (!cleaned) return
-      const t = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
-      yield* sessions
-        .setGeneratedTitle({
-          sessionID: input.session.id,
-          title: t,
-          expectedRevision: input.session.titleRevision,
-        })
-        .pipe(Effect.catchCause((cause) => elog.error("failed to generate title", { error: Cause.squash(cause) })))
+      const parts: GenTitlePart[] = firstUser.parts.flatMap((part): GenTitlePart[] => {
+        if (part.type === "text" && !part.ignored && !part.synthetic) return [{ type: "text", text: part.text }]
+        if (part.type === "subtask") return [{ type: "text", text: part.prompt }]
+        if (part.type === "file" && !("synthetic" in part && part.synthetic))
+          return [{ type: "image", data: "", mime: part.mime, filename: part.filename }]
+        return []
+      })
+      const source = input.titleText?.trim()
+        ? GenTitle.titleInputText(input.titleText, [])
+        : GenTitle.titleInputText(
+        undefined,
+        parts.map((part) =>
+          part.type === "text"
+            ? { ...part, text: part.text.replace(/(^|\n)\/[A-Za-z0-9][A-Za-z0-9:_-]*[ \t]+/g, "$1") }
+            : part,
+        ),
+          )
+      const fallbackLine = source.split("\n").map((line) => line.trim()).find(Boolean) ?? "Untitled"
+      const fallback = Array.from(fallbackLine).length <= GenTitle.TITLE_MAX_LENGTH
+        ? fallbackLine
+        : Array.from(fallbackLine).slice(0, GenTitle.TITLE_MAX_LENGTH - 1).join("").trimEnd() + "…"
+      const current = yield* sessions.get(input.session.id)
+      if (current.titleSource !== "fallback") return
+      const result = yield* GenTitle.genTitle({
+        text: source,
+        parts: [],
+        sessionID: current.id,
+        providerID: input.providerID,
+        model: { providerID: input.providerID, modelID: input.modelID },
+        locale: input.titleLocale,
+      }).pipe(
+        Effect.provideService(Agent.Service, agents),
+        Effect.provideService(Provider.Service, provider),
+        Effect.provideService(LLM.Service, llm),
+        Effect.provideService(Config.Service, config),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.interrupt
+            : elog.warn("failed to generate title", { error: Cause.squash(cause) }).pipe(Effect.as({ title: fallback, status: "fallback" as const })),
+        ),
+      )
+      if (result.status !== "generated") return
+      yield* sessions.setTitleIfDefault({ sessionID: current.id, title: result.title, expectedRevision: current.titleRevision, source: "generated" })
     })
 
     const predict = Effect.fn("SessionPrompt.predict")(function* (input: { sessionID: SessionID }) {
@@ -1017,6 +1040,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       messages: MessageV2.WithParts[]
       agentID?: string
       task_id?: string
+      mcpContext?: MCP.TurnContext
     }) {
       using _ = log.time("resolveTools")
       const tools: Record<string, AITool> = {}
@@ -1284,7 +1308,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
 
       const localToolNames = new Set(Object.keys(tools))
-      const mcpTools = Object.entries(yield* mcp.tools())
+      const mcpTools = Object.entries(yield* mcp.tools(input.mcpContext))
       const agentToolAllowlist = input.agent.toolAllowlist ? new Set(input.agent.toolAllowlist) : undefined
       const disabledMcpTools = Permission.disabled(
         mcpTools.map(([key]) => key),
@@ -1963,6 +1987,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     })
 
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
+      if (input.source === "spawn" && !input.agentID) {
+        return yield* Effect.die(new Error("Spawn input requires an agentID"))
+      }
+      if (
+        input.source === "hook" &&
+        !input.provenance &&
+        input.parts?.some((part) => part.type !== "text")
+      ) {
+        return yield* Effect.die(new Error("non-text parts requires provenance"))
+      }
       const agentName = input.agent || (yield* agents.defaultAgent())
       const ag = yield* agents.get(agentName)
       if (!ag) {
@@ -2237,6 +2271,24 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 ]
               }
 
+              // Preserve unsupported local files as references. Hydrating an
+              // opaque package/archive into a giant data URL both bloats the
+              // persisted turn and prevents the host from deciding how to open
+              // it later. Native media is handled by the provider wire path;
+              // everything else remains a file URL.
+              if (!/^(?:image|audio|video)\//.test(part.mime)) {
+                return [
+                  {
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "text",
+                    synthetic: true,
+                    text: `Called the Read tool with the following input: {"file_path":"${filepath}"}`,
+                  },
+                  { ...part, messageID: info.id, sessionID: input.sessionID },
+                ]
+              }
+
               return [
                 {
                   messageID: info.id,
@@ -2280,7 +2332,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           ]
         }
 
-        return [{ ...part, messageID: info.id, sessionID: input.sessionID }]
+        return [
+          {
+            ...part,
+            ...(input.source === "hook" && part.type === "text" ? { synthetic: true } : {}),
+            messageID: info.id,
+            sessionID: input.sessionID,
+          },
+        ]
       })
 
       const parts = yield* Effect.forEach(input.parts, resolvePart, { concurrency: "unbounded" }).pipe(
@@ -2405,6 +2464,65 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }
         const message = yield* createUserMessage(input)
         yield* sessions.touch(input.sessionID)
+        const titleMessages = session.titleRevision === 0
+          ? yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
+          : []
+        const genuineUsers = titleMessages.filter(
+          (item) =>
+            item.info.role === "user" &&
+            !item.info.provenance?.hookPhase &&
+            !item.parts.some((part) => "metadata" in part && part.metadata?.origin) &&
+            !item.parts.every((part) => "synthetic" in part && part.synthetic),
+        )
+        const firstTitleMessage = genuineUsers.find(
+          (item): item is MessageV2.WithParts & { info: MessageV2.User } => item.info.role === "user",
+        )
+
+        // Reserve the deterministic first-turn title before callers that do
+        // not start a model loop (notably noReply and command inputs).
+        if (
+          input.source !== "spawn" &&
+          input.source !== "hook" &&
+          message.info.role === "user" &&
+          Session.isDefaultTitle(session.title) &&
+          firstTitleMessage
+        ) {
+          const firstText = firstTitleMessage.parts.find(
+            (part): part is MessageV2.TextPart => part.type === "text" && !part.synthetic && !part.ignored,
+          )?.text
+          const attachment = firstTitleMessage.parts.find(
+            (part): part is MessageV2.FilePart => part.type === "file" && !("synthetic" in part && part.synthetic),
+          )?.filename
+          const commandOnly = Boolean(input.command) || firstTitleMessage.parts.some(
+            (part) => part.type === "text" && part.text.trim().startsWith("/"),
+          )
+          const fallback = GenTitle.titleInputText(commandOnly || !firstText ? attachment ?? firstText : firstText, [])
+          const fallbackTitle = fallback.split("\n").map((line) => line.trim()).find(Boolean) || "Untitled"
+          const reserved = yield* sessions.setTitleIfDefault({
+            sessionID: session.id,
+            title: Array.from(fallbackTitle).slice(0, GenTitle.TITLE_MAX_LENGTH).join(""),
+            expectedRevision: session.titleRevision,
+            source: "fallback",
+          }).pipe(
+            Effect.catchCause((cause) =>
+              elog.warn("initial title reservation failed; preserving user turn", { error: Cause.squash(cause) }).pipe(
+                Effect.as(false),
+              ),
+            ),
+          )
+          if (reserved && !(commandOnly && attachment))
+            yield* title({
+              session,
+              agent: firstTitleMessage.info.agent,
+              modelID: firstTitleMessage.info.model.modelID,
+              providerID: firstTitleMessage.info.model.providerID,
+              history: [firstTitleMessage],
+              titleLocale: input.titleLocale,
+              titleText: input.command && firstTitleMessage.info.id === message.info.id && input.arguments?.trim()
+                ? input.arguments
+                : undefined,
+            }).pipe(Effect.forkDetach({ startImmediately: true }), Effect.asVoid)
+        }
 
         // The caller's tool map is a complete per-turn policy REVISION
         // (identity Slice 05: replace, never accumulate). `undefined` means
@@ -2458,12 +2576,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       task_id?: string,
       notifyParentOnComplete?: boolean,
       verifyGoalTarget?: Goal.GoalTarget,
+      resumeFrom?: MessageID,
+      modelOverride?: { providerID: string; modelID: string },
+      userRedispatch?: boolean,
     ) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.run")(function* (
       sessionID: SessionID,
       agentID?: string,
       task_id?: string,
       notifyParentOnComplete?: boolean,
       verifyGoalTarget?: Goal.GoalTarget,
+      resumeFrom?: MessageID,
+      modelOverride?: { providerID: string; modelID: string },
+      userRedispatch?: boolean,
     ) {
       const ctx = yield* InstanceState.context
       const slog = elog.with({ sessionID })
@@ -2472,6 +2596,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const session = yield* sessions.get(sessionID)
       let lastFinishedForPrune: MessageV2.Assistant | undefined
       let lastModelForPrune: Provider.Model | undefined
+      // Capture managed settings once, after the admitted turn resolves its
+      // model. Every subsequent compaction/prune decision uses this immutable
+      // snapshot; a host save cannot mutate an in-flight turn.
+      let admittedConfig: Config.Info | undefined
       let outputLengthContinuations = 0
       // Shared local counter for "model finished but produced nothing usable"
       // (think-only / empty). T04's generic-invalid retries reuse this same
@@ -2500,6 +2628,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // into the same loop.
       let hardHalt = false
       const resolvedAgentID = agentID ?? "main"
+      const mcpContext: MCP.TurnContext = { sessionId: sessionID, turnId: ulid(), actorId: resolvedAgentID }
       // Tracks plugin-driven cancellation (session.pre OR any session.userQuery.pre)
       // so session.post reports outcome="cancelled" instead of "error".
       let cancelled = false
@@ -2538,20 +2667,41 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               : finalAsst
                 ? sessionErrorText(finalAsst.error)
                 : undefined
-          yield* plugin.trigger(
-            "session.post",
-            {
-              sessionID,
-              agentID: resolvedAgentID,
-              task_id,
-              outcome,
-              error,
-              finalText: finalAsst ? assistantFinalText(finalAsst, finalParts) : undefined,
-              assistantMessageID: finalAsst?.id,
-              trajectory: serializeTrajectoryMessages(sliceMsgs),
-              systemPrompt: lastSystemPrompt,
-            },
-            {},
+          yield* Effect.all(
+            [
+              plugin
+                .trigger(
+                  "session.post",
+                  {
+                    sessionID,
+                    agentID: resolvedAgentID,
+                    task_id,
+                    outcome,
+                    error,
+                    finalText: finalAsst ? assistantFinalText(finalAsst, finalParts) : undefined,
+                    assistantMessageID: finalAsst?.id,
+                    trajectory: serializeTrajectoryMessages(sliceMsgs),
+                    systemPrompt: lastSystemPrompt,
+                  },
+                  {},
+                )
+                .pipe(Effect.ignore),
+              mcp.clients().pipe(
+                Effect.flatMap((clients) =>
+                  MCP.notifyTurnLifecycle(
+                    clients,
+                    mcpContext,
+                    cancelled || (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause))
+                      ? "cancelled"
+                      : failed || finalIsError
+                        ? "error"
+                        : "completed",
+                  ),
+                ),
+                Effect.ignore,
+              ),
+            ],
+            { concurrency: "unbounded", discard: true },
           )
         }).pipe(Effect.ignore)
 
@@ -3371,7 +3521,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             continue
           }
 
-          if (lastAssistant) {
+          if (lastAssistant && lastAssistant.id !== resumeFrom && !(userRedispatch && step === 0)) {
             const classification = classifyAssistantStep({
               phase: "existing-assistant",
               lastUser,
@@ -3432,15 +3582,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           step++
           // Per-step turn heartbeat: only writer of turn_count; advances last_turn_time/time_updated so the orchestrator can tell progressing children from stalled ones. Safe 0-row no-op when no registry row exists.
           yield* actorRegistry.updateTurn(sessionID, resolvedAgentID).pipe(Effect.ignore)
-          if (step === 1)
-            yield* title({
-              session,
-              agent: lastUser.agent,
-              modelID: lastUser.model.modelID,
-              providerID: lastUser.model.providerID,
-              history: msgs,
-            }).pipe(Effect.ignore, Effect.forkIn(scope))
-
           if (step === 1 && !session.parentID) {
             const cfg = yield* config.get()
             const dreamTrigger = yield* shouldAutoDream(cfg, session.projectID).pipe(
@@ -3506,7 +3647,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
           }
 
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          const model = yield* getModel(
+            modelOverride ? ProviderID.make(modelOverride.providerID) : lastUser.model.providerID,
+            modelOverride ? ModelID.make(modelOverride.modelID) : lastUser.model.modelID,
+            sessionID,
+          )
+          admittedConfig ??= Config.withManagedAgentSettings(
+            yield* config.get(),
+            model.options["_openclankAgentSettings"],
+          )
           lastModelForPrune = model
           lastFinishedForPrune = lastFinished
           const task = tasks.pop()
@@ -3531,6 +3680,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               auto: compactionPart?.auto ?? false,
               overflow: compactionPart?.overflow,
               agentID: lastUser.agentID,
+              cfg: admittedConfig,
             })
             // cron-sentinel cache is invalidated via a SessionCompaction.Event
             // .Compacted bus subscription inside cron-bridge — see
@@ -3558,7 +3708,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           //      dedup across the recent conversation window, not just the
           //      current user message.
           if (lastFinished && lastFinished.summary !== true && model) {
-            const cfg = yield* config.get()
+            const cfg = admittedConfig ?? (yield* config.get())
             const pressure = pressureLevel({ cfg, tokens: lastFinished.tokens, model })
             if (pressure >= 2) {
               // De-bounce: nudge at most once per high-pressure episode (the
@@ -3659,6 +3809,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 tokens: lastFinished.tokens,
                 promptOps: fireOps,
                 agentID: lastUser.agentID,
+                cfg: admittedConfig,
               })
               .pipe(Effect.ignore)
           }
@@ -3668,7 +3819,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             !isBoundedComputation &&
             lastFinished &&
             lastFinished.summary !== true &&
-            (overflowCheck({ cfg: yield* config.get(), tokens: lastFinished.tokens, model }) ||
+            (overflowCheck({ cfg: admittedConfig ?? (yield* config.get()), tokens: lastFinished.tokens, model }) ||
               (yield* prune.maxThresholdCrossed(sessionID)))
           ) {
             // Subagent overflow → per-actor compaction (lossy LLM summarization
@@ -3780,6 +3931,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               messages: msgs,
               agentID: lastUser.agentID,
               task_id,
+              mcpContext,
             })
             const tools = resolvedTools.tools
             const activeTools = resolvedTools.activeTools
@@ -4367,6 +4519,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               tokens: lastFinishedForPrune.tokens,
               lastAssistantTime: lastFinishedForPrune.time.completed,
               promptOps,
+              cfg: admittedConfig,
             })
             .pipe(Effect.ignore, Effect.forkIn(scope))
         }
@@ -4423,6 +4576,87 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }).pipe(Effect.onExit(firePostSession), Effect.orDie)
     })
 
+    const hasUsefulAssistantParts = (parts: readonly MessageV2.Part[]) =>
+      parts.some((part) =>
+        (part.type === "text" && !part.synthetic && !part.ignored && part.text.trim().length > 0) ||
+        part.type === "tool" ||
+        (part.type === "reasoning" && part.text.trim().length > 0),
+      )
+
+    const isRecoveryWorthyAssistant = (info: MessageV2.Assistant) => {
+      if ("completed" in info.time && !info.error && info.finish && info.finish !== "tool-calls" && info.finish !== "length") return false
+      if (info.finish === "stop" && !info.error) return false
+      return true
+    }
+
+    const recovery = Effect.fn("SessionPrompt.recovery")(function* (input: {
+      sessionID: SessionID
+      agentID?: string
+      allowBusy?: boolean
+    }) {
+      if (!input.allowBusy && (yield* status.get(input.sessionID)).type !== "idle") return []
+      const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
+      const candidates: RecoveryCandidate[] = []
+      for (const [index, msg] of msgs.entries()) {
+        if (msg.info.role !== "assistant" || !isRecoveryWorthyAssistant(msg.info)) continue
+        const parentID = msg.info.parentID
+        if (!msgs.some((parent) => parent.info.role === "user" && parent.info.id === parentID)) continue
+        if (msgs.slice(index + 1).some((later) => later.info.role === "user" || later.info.role === "assistant")) continue
+        candidates.push({ assistantMessageID: msg.info.id, parentMessageID: parentID, created: msg.info.time.created })
+      }
+      return candidates
+    })
+
+    const recoveryWork = (input: ResumeTurnInput) => Effect.gen(function* () {
+      const agentID = input.agentID ?? "main"
+      const candidates = yield* recovery({ sessionID: input.sessionID, agentID, allowBusy: true })
+      const candidate = candidates.find((item) => item.assistantMessageID === input.assistantMessageID)
+      if (!candidate) return yield* Effect.fail(new NotFoundError({ message: `No resumable interrupted turn found for assistant message ${input.assistantMessageID}` }))
+      const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID })
+      const target = msgs.find((item) => item.info.id === input.assistantMessageID)
+      if (!target || target.info.role !== "assistant" || target.info.parentID !== candidate.parentMessageID)
+        return yield* Effect.fail(new NotFoundError({ message: "Recovery candidate disappeared" }))
+      const targetInfo = target.info
+      const parentID = targetInfo.parentID
+      const useful = hasUsefulAssistantParts(target.parts)
+      if (targetInfo.error && !("completed" in targetInfo.time)) {
+        yield* sessions.updateMessage({ ...targetInfo, time: { ...targetInfo.time, completed: Date.now() } })
+      }
+      if (!useful) {
+        for (const item of msgs) {
+          if (item.info.role === "assistant" && item.info.parentID === parentID && !item.info.error && !hasUsefulAssistantParts(item.parts))
+            yield* sessions.removeMessage({ sessionID: input.sessionID, messageID: item.info.id })
+        }
+      } else if (!targetInfo.error) {
+        yield* sessions.updateMessage({
+          ...targetInfo,
+          time: { ...targetInfo.time, completed: targetInfo.time.completed ?? Date.now() },
+          error: new MessageV2.AbortedError({ message: "Abandoned: resumed as a new assistant turn" }).toObject(),
+        })
+      }
+      return yield* runLoop(input.sessionID, agentID, input.task_id, undefined, undefined, useful ? targetInfo.id : undefined, input.model, !useful)
+    })
+
+    const resume = Effect.fn("SessionPrompt.resume")(function* (input: ResumeTurnInput) {
+      const agentID = input.agentID ?? "main"
+      yield* state.assertNotBusy(input.sessionID, agentID)
+      const candidates = yield* recovery({ sessionID: input.sessionID, agentID })
+      if (!candidates.some((item) => item.assistantMessageID === input.assistantMessageID))
+        return yield* Effect.fail(new NotFoundError({ message: `No resumable interrupted turn found for assistant message ${input.assistantMessageID}` }))
+      if (input.model) yield* getModel(ProviderID.make(input.model.providerID), ModelID.make(input.model.modelID), input.sessionID)
+      return yield* state.startAndWait(input.sessionID, agentID, lastAssistant(input.sessionID, agentID), recoveryWork(input).pipe(Effect.orDie))
+    })
+
+    const resumeBackground = Effect.fn("SessionPrompt.resumeBackground")(function* (input: ResumeTurnInput) {
+      const agentID = input.agentID ?? "main"
+      yield* state.assertNotBusy(input.sessionID, agentID)
+      const candidates = yield* recovery({ sessionID: input.sessionID, agentID: input.agentID })
+      if (!candidates.some((item) => item.assistantMessageID === input.assistantMessageID))
+        return yield* Effect.fail(new NotFoundError({ message: `No resumable interrupted turn found for assistant message ${input.assistantMessageID}` }))
+      if (input.model) yield* getModel(ProviderID.make(input.model.providerID), ModelID.make(input.model.modelID), input.sessionID)
+      yield* state.start(input.sessionID, agentID, lastAssistant(input.sessionID, agentID), recoveryWork(input).pipe(Effect.orDie))
+    })
+
     const loop: (input: z.infer<typeof LoopInput>) => Effect.Effect<MessageV2.WithParts> = Effect.fn(
       "SessionPrompt.loop",
     )(function* (input: z.infer<typeof LoopInput>) {
@@ -4450,6 +4684,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const error = new NamedError.Unknown({ message: `Command not found: "${input.command}".${hint}` })
         yield* bus.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
         throw error
+      }
+      // Validate the actual user-turn overrides before rendering templates or
+      // calling prompt(). A delegated command may have a valid task agent/model
+      // while its caller supplies an invalid actor; that input must have no
+      // message or title side effects.
+      const requestedAgentName = input.agent ?? cmd.agent ?? (yield* agents.defaultAgent())
+      const requestedAgent = yield* agents.get(requestedAgentName)
+      if (!requestedAgent) {
+        const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+        const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+        throw new NamedError.Unknown({ message: `Agent not found: "${requestedAgentName}".${hint}` })
+      }
+      if (input.model) {
+        const requestedModel = Provider.parseModel(input.model)
+        yield* getModel(requestedModel.providerID, requestedModel.modelID, input.sessionID)
       }
       const agentName = cmd.agent ?? input.agent ?? (yield* agents.defaultAgent())
 
@@ -4705,6 +4954,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const result = yield* prompt({
         sessionID: input.sessionID,
         messageID: input.messageID,
+        command: input.command,
+        arguments: input.arguments,
         model: userModel,
         agent: userAgent,
         parts,
@@ -4722,6 +4973,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const impl = Service.of({
       cancel,
       prompt,
+      recovery,
+      resume,
+      resumeBackground,
       loop,
       shell,
       command,
@@ -4830,6 +5084,9 @@ export const PromptInput = z.object({
       "If the spawning caller bound this prompt to a specific user-task (T4 etc), pass its TID. Propagates to Tool.Context.taskId so memory-path-guard allows writes to tasks/<task_id>/*.md.",
     ),
   source: z.enum(["user", "spawn", "hook"]).optional(),
+  command: z.string().optional(),
+  arguments: z.string().optional(),
+  titleLocale: z.string().optional(),
   provenance: MessageV2.Provenance.optional(),
   noReply: z.boolean().optional(),
   verifyGoalTarget: Goal.Target.optional(),
@@ -4932,6 +5189,12 @@ export const CommandInput = z.object({
   parts: z
     .array(
       z.discriminatedUnion("type", [
+        MessageV2.TextPart.omit({
+          messageID: true,
+          sessionID: true,
+        }).partial({
+          id: true,
+        }),
         MessageV2.FilePart.omit({
           messageID: true,
           sessionID: true,

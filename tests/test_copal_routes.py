@@ -1676,9 +1676,10 @@ def test_asset_delivery_is_scoped_to_owned_asset_directory(tmp_path, monkeypatch
 
 def test_copal_sidebar_has_all_native_submenus_in_stable_order():
     html = (ROOT / "static/index.html").read_text()
-    expected = ["notes", "wiki", "timeline", "graph", "treehouse", "todo"]
+    expected = ["notes", "timeline", "graph", "treehouse", "todo"]
     positions = [html.index(f'data-copal-view="{view}"') for view in expected]
     assert positions == sorted(positions)
+    assert 'data-copal-view="wiki"' not in html
     assert '<iframe' not in html[positions[0]:positions[-1]]
     assert 'data-copal-view="calendar"' not in html
     assert 'data-copal-view="galaxy"' not in html

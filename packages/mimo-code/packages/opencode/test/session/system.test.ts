@@ -87,7 +87,7 @@ describe("session.system", () => {
     expect(toolLess).toBe("Explore files.")
   })
 
-  test("does not inject vision capability guidance for GPT, Claude, or Gemini models", async () => {
+  test("uses selected model capability for GPT, Claude, and Gemini models", async () => {
     await using tmp = await tmpdir({ git: true })
 
     await Instance.provide({
@@ -121,9 +121,9 @@ describe("session.system", () => {
           }).pipe(Effect.provide(SystemPrompt.defaultLayer)),
         )
 
-        expect(prompts[0].join("\n")).not.toContain("<vision-capability>")
-        expect(prompts[1].join("\n")).not.toContain("<vision-capability>")
-        expect(prompts[2].join("\n")).not.toContain("<vision-capability>")
+        expect(prompts[0].join("\n")).toContain("<vision-capability>")
+        expect(prompts[1].join("\n")).toContain("<vision-capability>")
+        expect(prompts[2].join("\n")).toContain("<vision-capability>")
       },
     })
   })

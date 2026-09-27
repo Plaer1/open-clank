@@ -31,6 +31,7 @@ const state = {
   buffers: new Map(),
   activePath: null,
   activeDirectory: '',
+  workspaceOpenRelative: '',
   requestGeneration: 0,
   fileGeneration: 0,
   fileActivationSequence: 0,
@@ -408,7 +409,7 @@ async function handleCodeFilePolicyChanged() {
   }
 
   try {
-    const page = await loadInitialCodeRoot(resolvedRoot, generation);
+    const page = await loadInitialCodeRoot(state.rootResourceRef || state.activeDirectoryRef || resolvedRoot, generation);
     if (!page || generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
     const rootLabel = state.shell?.querySelector('[data-code-root]');
     if (rootLabel) rootLabel.textContent = resolvedRoot;
@@ -506,6 +507,7 @@ async function workspaceRoot() {
           || (page?.entries || []).find((item) => item?.capabilities?.includes('children'));
         if (folder?.ref) {
           state.rootResourceRef = String(folder.ref);
+          state.activeDirectoryRef = state.rootResourceRef;
           return String(folder.name || 'Workspace');
         }
       }
@@ -572,6 +574,7 @@ function displayName(path) {
 }
 
 function languageForPath(path) { return sharedLanguageForPath(path); }
+function languageDialectForPath(path) { return sharedLanguageDialectForPath(path); }
 
 function parentPath(path) {
   const normalized = String(path || '').replace(/\\/g, '/').replace(/\/$/, '');
@@ -916,8 +919,14 @@ async function resolveEditorRelativeResource(relativePath) {
 }
 
 async function listCodeDirectory(path, { cursor = null, signal = null } = {}) {
-  const parentRef = String(path || state.rootResourceRef || '').trim();
-  if (!parentRef || !state.rootResourceRef && !String(path || '').startsWith('rr')) {
+  const requested = String(path || '').trim();
+  // `state.root` is a display label/path retained for tabs and breadcrumbs.
+  // Once Files has issued a sealed root ref, it is the only authority for
+  // browsing that root; never send the label through the facade as a parent.
+  const parentRef = state.rootResourceRef && (!requested || requested === state.root || requested === state.rootResourceRef)
+    ? String(state.rootResourceRef).trim()
+    : requested;
+  if (!parentRef || !state.rootResourceRef && !parentRef.startsWith('rr')) {
     throw new Error('Choose an authorized Editor folder before browsing.');
   }
   const response = await filesFacadeClient.children(parentRef, {
@@ -1097,7 +1106,7 @@ async function refreshExplorer() {
   try {
     let loaded;
     if (!state.explorerTree) {
-      const page = await loadInitialCodeRoot(state.root, generation);
+      const page = await loadInitialCodeRoot(state.rootResourceRef || state.activeDirectoryRef || state.root, generation);
       if (!page) return false;
       mountCodeExplorer(page.items, page.nextCursor, state.root);
       loaded = true;
@@ -1177,7 +1186,7 @@ async function displayWorkspaceRoot(root, generation = ++state.requestGeneration
     // Fetch the candidate page while the current root/buffers/tree remain
     // visible. A denied or stale folder therefore cannot replace a usable
     // Editor view with an empty/error root.
-    const page = root ? await loadInitialCodeRoot(root, generation) : { items:[], nextCursor:null };
+    const page = root ? await loadInitialCodeRoot(state.rootResourceRef || state.activeDirectoryRef || root, generation) : { items:[], nextCursor:null };
     if (!page || generation !== state.requestGeneration || !state.nativeWindow.visible) return false;
     if (!(await prepareWorkspaceChange(root))) return false;
     if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
@@ -1773,13 +1782,19 @@ function saveActive() { return saveBuffer(state.activePath); }
 
 async function showActiveInFiles() {
   const path = state.activePath;
+  const activeTitle = document.querySelector('.code-editor-tab.active')?.getAttribute('title') || state.shell?.querySelector('.code-editor-tab.active')?.getAttribute('title') || '';
   const workspaceId = savedWorkspaceId();
   if (!path || !workspaceId) {
     setStatus('This file is not bound to a Workspace yet', true);
     return false;
   }
   try {
-    const relative = workspaceRelativePath(path);
+    let relative;
+    try { relative = workspaceRelativePath(activeTitle || path); } catch (_) { relative = ''; }
+    if (!relative && workspaceId) {
+      const activeLabel = document.querySelector('.code-editor-tab.active')?.getAttribute('title') || state.shell?.querySelector('.code-editor-tab.active')?.getAttribute('title') || '';
+      relative = state.workspaceOpenRelative || displayName(path) || displayName(activeLabel);
+    }
     const files = await import('./files.js');
     const reveal = files.revealWorkspaceResource || files.default?.revealWorkspaceResource;
     if (typeof reveal !== 'function') throw new Error('Files integration is unavailable');
@@ -1929,7 +1944,15 @@ async function open() {
   markLauncherActive(true);
   setStatus('Loading workspace…');
   const generation = ++state.requestGeneration;
-  const root = await workspaceRoot();
+  let root;
+  try {
+    root = await workspaceRoot();
+  } catch (error) {
+    if (generation !== state.requestGeneration || error?.name === 'AbortError') return false;
+    renderEditor();
+    setStatus('Workspace access could not be revalidated; unsaved changes were retained', true);
+    return false;
+  }
   if (generation !== state.requestGeneration || !state.nativeWindow.visible) return;
   await displayWorkspaceRoot(root, generation);
 }
@@ -2010,6 +2033,7 @@ export async function openResource(resourceRef) {
     const response = await filesFacadeClient.workspace(resourceRef, 'app_folder', { signal:controller.signal });
     if (!current()) throw new Error('Editor access changed; choose the resource again.');
     const workspaceId = String(response?.workspace?.id || '').trim();
+    state.workspaceOpenRelative = String(response?.open_relative || '').trim();
     const workspace = await workspaceModule.resolveWorkspaceId(workspaceId, 'app_folder');
     if (!current()) throw new Error('Editor access changed; choose the resource again.');
     // Re-resolve the exact target through Files before loading the workspace.

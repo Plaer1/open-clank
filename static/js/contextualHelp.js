@@ -14,7 +14,7 @@ const SURFACES = Object.freeze({
   files: { label: 'Files', lesson: 'fg-files', description: 'Browse authorized locations and open a resource in Editor.', next: 'Choose an authorized location, then select one file.' },
   assistant: { label: 'Assistant', lesson: 'fg-assistant', description: 'Ask for help with the current workflow while keeping resource contents in the workspace.', next: 'Attach only the current identifiers, then review the scope before sending.' },
   timeline: { label: 'Timeline', lesson: 'fg-timeline', description: 'Plan work with dated notes, spans, and relationships.', next: 'Open a day or task and inspect its linked note.' },
-  wiki: { label: 'Wiki', lesson: 'fg-wiki', description: 'Arrange authored stories and preserve their source content.', next: 'Open a story card, then follow a link or edit its source.' },
+  wiki: { label: 'Wiki in Editor', lesson: 'fg-wiki', description: 'Edit Wiki pages in the shared Editor while preserving their source content.', next: 'Open a Wiki page in Editor, then follow a link or edit its source.' },
   bases: { label: 'Bases', lesson: 'fg-bases', description: 'Query notes with typed properties and keep the source document available.', next: 'Open a Base view and inspect one typed result.' },
   graph: { label: 'Graph', lesson: 'fg-connections', description: 'Explore links between the resources in this workspace.', next: 'Select a node to follow its source relationship.' },
   tasks: { label: 'Tasks', lesson: 'fg-tasks', description: 'Review actionable checkboxes projected from your notes.', next: 'Filter the list, then open the source note for an edit.' },

@@ -7,7 +7,7 @@
  *   #ge-save-menu-btn + #ge-save-menu  (Save / Save as / Download /
  *                                       Save project / Load project)
  *   #ge-zoom-out / #ge-zoom-in / #ge-zoom-fit / #ge-zoom-100
- *   #ge-export-gallery / #ge-download
+ *   #ge-export-gallery / #ge-retry-save-copy / #ge-download
  *   #ge-save-project / #ge-load-project
  *   #ge-edge-menu-btn + #ge-edge-menu (Width input + Feather / Delete
  *                                      action buttons)
@@ -23,6 +23,7 @@
  *   fitZoom:              () => void,
  *   applyZoom:            () => void,
  *   exportToGallery:      () => void,
+ *   retryPendingSaveCopy:  () => Promise<void>,
  *   downloadPNG:          () => void,
  *   saveProject:          () => void,
  *   loadProjectPrompt:    () => void,
@@ -56,7 +57,7 @@ export function wireTopbar(deps) {
   const {
     undo, redo, toggleHistoryPanel,
     fitZoom, applyZoom,
-    exportToGallery, downloadPNG, saveProject, loadProjectPrompt,
+    exportToGallery, retryPendingSaveCopy, downloadPNG, saveProject, loadProjectPrompt,
     activeLayer, saveState, applyEdgeFeather, composite,
     registerDocClickAway, uiModule,
   } = deps;
@@ -125,6 +126,19 @@ export function wireTopbar(deps) {
 
   // Export / Download / Project Save / Project Load.
   document.getElementById('ge-export-gallery')?.addEventListener('click', exportToGallery);
+  document.getElementById('ge-retry-save-copy')?.addEventListener('click', async () => {
+    const button = document.getElementById('ge-retry-save-copy');
+    if (button) button.disabled = true;
+    try {
+      await retryPendingSaveCopy();
+      if (button) button.hidden = true;
+      uiModule?.showToast?.('Saved copy binding completed.', 3500);
+    } catch (error) {
+      uiModule?.showToast?.(`Retry failed: ${error?.message || 'binding unavailable'}`, 5000);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
   document.getElementById('ge-download')?.addEventListener('click', downloadPNG);
   document.getElementById('ge-save-project')?.addEventListener('click', saveProject);
   document.getElementById('ge-load-project')?.addEventListener('click', loadProjectPrompt);

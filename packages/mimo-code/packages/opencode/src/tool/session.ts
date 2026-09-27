@@ -722,14 +722,14 @@ export const SessionTool = Tool.define<typeof parameters, Metadata, Deps>(
         // orchestrator asked for. When --topic is set, prefix the title with a
         // `[topic:X]` marker so a later `create --topic X` finds and reuses this
         // standing child (topicOf reads it back from sessions.children).
-        if (op.topic) {
+        if (op.topic && result.titleRevision !== undefined) {
           const base = op.title ?? `${op.mode ?? "build"}: ${op.task.slice(0, 40)}`
           yield* sessions.setTitle({
             sessionID: result.sessionID,
             title: tagTitle(op.topic, base),
             expectedRevision: result.titleRevision,
           })
-        } else if (op.title) {
+        } else if (op.title && result.titleRevision !== undefined) {
           yield* sessions.setTitle({
             sessionID: result.sessionID,
             title: op.title,

@@ -140,8 +140,7 @@ export function formatTypedCell(raw, type, format = 'auto', locale) {
 }
 
 function trimMoney(value) {
-  if (Number.isInteger(value)) return String(value);
-  return String(Number(value.toFixed(2)));
+  return value.toFixed(2);
 }
 
 const STATUS_RANK = { valid: 0, invalid: 1, blank: 2 };

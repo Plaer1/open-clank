@@ -28,6 +28,8 @@ function sessionRow(id: string, directory: string, updated: number) {
     projectID: "p",
     directory,
     title: "t",
+    titleSource: "fallback",
+    titleRevision: 0,
     version: "test",
     time: { created: updated, updated },
   }
@@ -228,6 +230,36 @@ describe("tui bootstrap directory race", () => {
       expect(resolved.every((x) => x.created === false)).toBe(true)
       expect(http.count("POST", "/session")).toBe(0)
       expect(http.roots(DIR_B)).toEqual(["ses_orch"])
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("apply and refresh keep a newer title while accepting a stale session's other fields", async () => {
+    const http = createFetch({ sessions: { [DIR_B]: ["ses_orch"] } })
+    const { app, sdk, sync } = await mount(http)
+    try {
+      sdk.switchDirectory(DIR_B)
+      await sync.bootstrap({ fatal: false })
+      await wait(() => sync.session.get("ses_orch") !== undefined)
+      const current = sync.session.get("ses_orch")!
+      sync.session.apply({ ...current, title: "Authoritative title", titleSource: "user", titleRevision: 3 })
+      sync.session.apply({ ...current, title: "stale title", titleSource: "fallback", titleRevision: 1, time: { ...current.time, updated: 999 } })
+      expect(sync.session.get("ses_orch")?.title).toBe("Authoritative title")
+      expect(sync.session.get("ses_orch")?.titleRevision).toBe(3)
+      expect(sync.session.get("ses_orch")?.time.updated).toBe(999)
+      sync.session.apply({ ...current, title: "equal conflict", titleSource: "generated", titleRevision: 3, time: { ...current.time, updated: 998 } })
+      expect(sync.session.get("ses_orch")?.title).toBe("Authoritative title")
+      expect(sync.session.get("ses_orch")?.time.updated).toBe(998)
+      const incomplete = { ...current, title: "incomplete", titleSource: undefined, titleRevision: undefined, time: { ...current.time, updated: 997 } } as unknown as typeof current
+      sync.session.apply(incomplete)
+      expect(sync.session.get("ses_orch")?.title).toBe("Authoritative title")
+      expect(sync.session.get("ses_orch")?.titleRevision).toBe(3)
+      expect(sync.session.get("ses_orch")?.time.updated).toBe(997)
+      await sync.session.refresh()
+      expect(sync.session.get("ses_orch")?.title).toBe("Authoritative title")
+      expect(sync.session.get("ses_orch")?.titleRevision).toBe(3)
+      expect(sync.session.get("ses_orch")?.time.updated).toBe(100)
     } finally {
       app.renderer.destroy()
     }

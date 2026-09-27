@@ -1,6 +1,6 @@
 export * as GenTitle from "./gen-title"
 
-import { Effect, Stream } from "effect"
+import { Cause, Effect, Stream } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
 import { Provider } from "@/provider"
@@ -12,6 +12,7 @@ import { LLM } from "./llm"
 import { createStructuredOutputTool } from "./prompt"
 import * as Session from "./session"
 import { Log } from "@/util"
+import { Config } from "@/config"
 
 const log = Log.create({ service: "session.gen-title" })
 
@@ -93,7 +94,7 @@ function localAttachmentPath(part: { url?: string; source?: unknown }) {
   return original
 }
 
-function normalizeTitleInput(
+export function normalizeTitleInput(
   parts: readonly {
     type: string
     text?: string
@@ -103,6 +104,7 @@ function normalizeTitleInput(
     source?: unknown
     synthetic?: boolean
     ignored?: boolean
+    metadata?: unknown
   }[],
 ) {
   const eligible = parts.filter((part) => !part.synthetic && !part.ignored)
@@ -168,7 +170,7 @@ function looksLikeToolCall(value: string) {
   )
 }
 
-function sanitizeGeneratedTitle(value: string) {
+export function sanitizeGeneratedTitle(value: string) {
   const withoutThinking = value.replace(/<think>[\s\S]*?<\/think>\s*/gi, "")
   if (looksLikeToolCall(withoutThinking)) return undefined
   const line = withoutThinking
@@ -212,12 +214,17 @@ export const genTitle = Effect.fn("GenTitle.genTitle")(function* (input: GenTitl
   const agents = yield* Agent.Service
   const provider = yield* Provider.Service
   const llm = yield* LLM.Service
+  const config = yield* Config.Service
   const ag = yield* agents.get("title")
   if (!ag) return fallback()
 
-  const attempt = Effect.fnUntraced(function* (resolve: Effect.Effect<Provider.Model | undefined>) {
+  const attempted = new Set<string>()
+  const attempt = (resolve: Effect.Effect<Provider.Model | undefined>) => Effect.gen(function* () {
     const model = yield* resolve
     if (!model) return undefined
+    const key = `${model.providerID}/${model.id}`
+    if (attempted.has(key)) return undefined
+    attempted.add(key)
     if (!model.capabilities.input.text || !model.capabilities.toolcall) return undefined
     let candidate: unknown
     const sessionID = input.sessionID
@@ -289,25 +296,35 @@ export const genTitle = Effect.fn("GenTitle.genTitle")(function* (input: GenTitl
     return { title: truncateTitle(title), status: "generated" as const }
   }).pipe(
     Effect.catchCause((cause) => {
-      const error = cause
+      if (Cause.hasInterrupts(cause)) return Effect.interrupt
+      const error = Cause.squash(cause)
       log.warn("title model attempt failed", { error })
       return Effect.succeed(undefined)
     }),
   )
 
-  const preferred = input.model
-    ? yield* attempt(provider.getModel(input.model.providerID, input.model.modelID))
-    : input.providerID
-      ? yield* attempt(provider.getSmallModel(input.providerID))
-      : undefined
+  const cfg = yield* config.get()
+  const configuredTitleModel = ag.modelRef
+    ? provider.resolveModelRef(ag.modelRef, input.providerID)
+    : ag.model
+      ? provider.getModel(ag.model.providerID, ag.model.modelID)
+      : cfg.small_model || cfg.model_groups?.lite
+        ? input.providerID
+          ? provider.getSmallModel(input.providerID)
+          : undefined
+        : input.model
+          ? provider.getModel(input.model.providerID, input.model.modelID)
+          : undefined
+  const preferred = configuredTitleModel ? yield* attempt(configuredTitleModel) : undefined
   if (preferred) return preferred
-  if (!input.model) return fallback()
-  return (yield* attempt(provider.getModel(input.model.providerID, input.model.modelID))) ?? fallback()
+  if (input.model) return (yield* attempt(provider.getModel(input.model.providerID, input.model.modelID))) ?? fallback()
+  return fallback()
 })
 
 export const genTitleSafe = (input: GenTitleInput) =>
   genTitle(input).pipe(
-    Effect.catchCause(() => {
+    Effect.catchCause((cause) => {
+      if (Cause.hasInterrupts(cause)) return Effect.interrupt
       const normalized = normalizeTitleInput([
         { type: "text", text: titleInputText(input.text, input.parts) },
         ...(input.parts ?? []).flatMap((part) => (part.type === "image" ? [{ type: "file" as const, filename: part.filename }] : [])),

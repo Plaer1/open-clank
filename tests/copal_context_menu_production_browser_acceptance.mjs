@@ -14,7 +14,8 @@ const page = `<!doctype html><meta charset="utf-8"><body>
 
 const resource = { ref:'rr1.readme', id:'resource-readme', provider:'host', kind:'file', name:'README.md', mime_type:'text/markdown', capabilities:['stat','open','preview'] };
 const doc = { id:'note-1', kind:'note', name:'README.md', head:'head-1', text:'# Readme', properties:{}, relations:[], tags:[], resource:{ key:{ accountId:'account-owner', workspaceId:'default', provider:'host', resourceId:'resource-readme' }, revision:{ kind:'hostFingerprint', value:'fp-1' }, representation:'markdown', locator:{ displayName:'README.md', locationLabel:'README.md', opaqueRef:'rr1.readme' }, capabilities:{ read:true, edit:true, rename:false, delete:false } } };
-const planning = { tracks:[{ id:'track-1', name:'Build', color:'#8b5cf6', icon:'build', enabled:true, tasks:[{ id:'event-1', title:'Ship', startDate:'2026-09-10', dueDate:'2026-09-12', primaryTrackId:'track-1', status:'pending', sharedTrackIds:[] }] }], floatingTodos:[] };
+const localDate = (offset) => { const value = new Date(); value.setDate(value.getDate() + offset); return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`; };
+const planning = { tracks:[{ id:'track-1', name:'Build', color:'#8b5cf6', icon:'build', enabled:true, tasks:[{ id:'event-1', title:'Ship', startDate:localDate(-1), dueDate:localDate(1), primaryTrackId:'track-1', status:'pending', sharedTrackIds:[] }] }], floatingTodos:[] };
 let fileOpens = 0;
 const treehouse = { accountId:'account-owner', workspace:'default', actor:{ id:'owner', displayName:'Owner' }, permissions:{ learner:true, author:false, admin:false, analytics:false, grade:false }, courseCapabilities:{}, state:{ revision:'r1', profiles:{ owner:{ id:'owner', displayName:'Owner', active:true, roles:['learner'] } }, courses:{ "course-1":{ id:'course-1', title:'Course One', description:'A course', status:'published', moduleIds:['module-1'] } }, modules:{ "module-1":{ id:'module-1', courseId:'course-1', title:'Module One', description:'', activityIds:['activity-1'], assignmentIds:[] } }, activities:{ "activity-1":{ id:'activity-1', title:'Lesson One', activityType:'lesson', points:1, status:'published', skillIds:[], content:'Lesson', surface:{ href:'/copal/editor?doc=note-1', label:'Editor' } } }, assignments:{}, courseGrants:{}, enrollments:{}, submissions:{}, skills:{}, events:[] }, projection:{ eventCount:0, learners:{ owner:{ points:0, badges:[], quests:[], streak:0, courses:{}, skills:{}, pointEvidence:[] } } } };
 
@@ -79,7 +80,7 @@ await withCopalBrowser({ page, request:async (req, res) => {
   await until('document.querySelectorAll(".copal-graph-node").length > 0');
   await openMenu('.copal-graph-node');
   await evaluate('document.querySelector("#openclank-context-menu button[data-command=open-graph-node]").click()');
-  await until('location.pathname === "/copal/editor"');
+  await until('location.pathname === "/editor"');
   await evaluate('void window.__openFiles()');
   await until('!!document.querySelector(".files-entry.file")');
   await openMenu('.files-entry.file');

@@ -28,6 +28,7 @@ from src.generated_images import (
     resolve_gallery_image_path,
     stage_gallery_image_bytes,
 )
+from src.openclank.files_image_store import FilesImageStore, FilesImageError
 from src.openclank.modality_facade import describe_image, transform_image
 from src.openclank.operation_router import (
     ManagedOperationDenied,
@@ -305,9 +306,26 @@ def setup_gallery_routes() -> APIRouter:
             # video metadata extraction in a follow-up.
             exif = {} if is_video else _extract_exif(content)
             original_name = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
-
-            img_id = str(uuid.uuid4())
-            staged = stage_gallery_image_bytes(content, root=GALLERY_IMAGE_DIR)
+            try:
+                files_store = FilesImageStore(session_factory=SessionLocal, blob_root=GALLERY_IMAGE_DIR)
+                managed = files_store.import_image(
+                    user,
+                    parent_id=files_store.ensure_photos(user).id,
+                    name=file.filename,
+                    data=content,
+                    mime_type=(f"video/{ext}" if is_video else f"image/{ext}"),
+                    operation_key=f"gallery-upload:{user}:{file_hash}",
+                    provenance={"prompt": original_name, "width": exif.get("width"), "height": exif.get("height")},
+                    source_provider="gallery",
+                )
+            except FilesImageError as exc:
+                raise HTTPException(409 if exc.code == "idempotency_conflict" else 400, exc.code) from None
+            except Exception:
+                logger.exception("Files image import failed")
+                raise HTTPException(500, "Gallery image publication failed") from None
+            img_id = managed.id
+            filename = managed.locator or filename
+            staged = None
             image = GalleryImage(
                 id=img_id,
                 filename=filename,
@@ -329,11 +347,8 @@ def setup_gallery_routes() -> APIRouter:
                 db.add(image)
                 db.commit()
                 try:
-                    publish_staged_gallery_image(
-                        staged,
-                        filename,
-                        root=GALLERY_IMAGE_DIR,
-                    )
+                    if staged is not None:
+                        publish_staged_gallery_image(staged, filename, root=GALLERY_IMAGE_DIR)
                 except Exception:
                     # A committed row without bytes is fail-closed, but remove
                     # it immediately so a retry does not inherit a phantom.
@@ -353,7 +368,8 @@ def setup_gallery_routes() -> APIRouter:
                 logger.exception("gallery_upload: metadata commit failed")
                 raise HTTPException(500, "Gallery image publication failed") from None
             finally:
-                discard_staged_gallery_image(staged, root=GALLERY_IMAGE_DIR)
+                if staged is not None:
+                    discard_staged_gallery_image(staged, root=GALLERY_IMAGE_DIR)
             resp = {"ok": True, "filename": filename, "id": img_id}
             if exif.get("exif_error"):
                 resp["exif_warning"] = exif["exif_error"]

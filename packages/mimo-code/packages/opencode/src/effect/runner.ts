@@ -5,6 +5,7 @@ export interface Runner<A, E = never, B = never> {
   readonly busy: boolean
   readonly ensureRunning: (work: Effect.Effect<A, E>) => Effect.Effect<A, E>
   readonly start: (work: Effect.Effect<A, E>) => Effect.Effect<void, B>
+  readonly startAndWait: (work: Effect.Effect<A, E>, onInterrupt?: Effect.Effect<A, E>) => Effect.Effect<A, E | B>
   readonly startShell: (work: Effect.Effect<A, E>) => Effect.Effect<A, E | B>
   readonly cancel: Effect.Effect<void>
 }
@@ -174,6 +175,20 @@ export const make = <A, E = never, B = never>(
       }),
     ).pipe(Effect.flatten)
 
+  // The runner's interruption fallback is fixed at construction time, just like
+  // ensureRunning/startShell. Callers must not be able to shadow it per wait.
+  const startAndWait = (work: Effect.Effect<A, E>): Effect.Effect<A, E | B> =>
+    SynchronizedRef.modifyEffect(
+      ref,
+      Effect.fnUntraced(function* (st) {
+        if (st._tag !== "Idle") return [busyFailure<A>(), st] as const
+        const done = yield* Deferred.make<A, E | Cancelled>()
+        const run = yield* startRun(work, done)
+        const result = Deferred.await(done).pipe(Effect.catchTag("RunnerCancelled", () => onInterrupt ?? Effect.die("runner interrupted")))
+        return [result, { _tag: "Running", run } as State<A, E>] as readonly [Effect.Effect<A, E | B>, State<A, E>]
+      }),
+    ).pipe(Effect.flatten)
+
   const cancel = SynchronizedRef.modify(ref, (st) => {
     switch (st._tag) {
       case "Idle":
@@ -215,6 +230,7 @@ export const make = <A, E = never, B = never>(
     },
     ensureRunning,
     start,
+    startAndWait,
     startShell,
     cancel,
   }

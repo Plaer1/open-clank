@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 import uuid
 
 from sqlalchemy import func, or_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from core.database import SessionLocal
 from core.provider_models import (
@@ -73,6 +73,39 @@ _KEYLESS_CONNECTION_KINDS = frozenset(
 )
 _MISSING = object()
 _SAFE_ERROR_CODE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
+
+
+def _erase_optional_quota_rows(db, *, owner: str, account_ids: Sequence[str]) -> None:
+    """Erase quota metadata when the optional Stats schema is installed.
+
+    Provider lifecycle operations are also used by the early provider-only
+    schema and by staged migrations.  Missing optional tables must not make a
+    credential tombstone fail, while unrelated SQL errors remain fatal.
+    """
+    if not account_ids:
+        return
+    from core.stats_models import StatsQuotaObservation, StatsQuotaCycle
+
+    try:
+        # Keep a missing optional table from aborting the enclosing provider
+        # lifecycle transaction on databases that mark the outer transaction
+        # failed after an OperationalError.
+        with db.begin_nested():
+            db.query(StatsQuotaObservation).filter(
+                StatsQuotaObservation.owner == owner,
+                StatsQuotaObservation.account_id.in_(account_ids),
+            ).delete(synchronize_session=False)
+            db.query(StatsQuotaCycle).filter(
+                StatsQuotaCycle.owner == owner,
+                StatsQuotaCycle.account_id.in_(account_ids),
+            ).delete(synchronize_session=False)
+    except OperationalError as exc:
+        message = str(getattr(exc, "orig", exc)).lower()
+        if "no such table" not in message or not any(
+            table in message
+            for table in ("stats_quota_observations", "stats_quota_cycles")
+        ):
+            raise
 
 
 class ProviderStoreError(RuntimeError):
@@ -755,6 +788,7 @@ class ProviderStore:
                 account.deleted_at = timestamp
                 account.revision += 1
             if account_ids:
+                _erase_optional_quota_rows(db, owner=owner, account_ids=account_ids)
                 db.query(ProviderRefreshLease).filter(
                     ProviderRefreshLease.account_id.in_(account_ids)
                 ).delete(synchronize_session=False)
@@ -1015,6 +1049,7 @@ class ProviderStore:
             db.query(ProviderCredentialLease).filter(
                 ProviderCredentialLease.account_id == row.id
             ).delete(synchronize_session=False)
+            _erase_optional_quota_rows(db, owner=owner, account_ids=[row.id])
             return self._detach(db, row)
 
     def credential_access(self, *, owner: str, account_id: str) -> CredentialAccess:

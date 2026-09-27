@@ -577,6 +577,37 @@ class GalleryImage(TimestampMixin, Base):
     )
 
 
+class FilesImageResource(TimestampMixin, Base):
+    """Files-owned immutable image/folder metadata.
+
+    GalleryImage remains the compatibility provider row.  This table owns the
+    stable Files identity, hierarchy and byte locator used by new imports.
+    """
+    __tablename__ = "files_image_resources"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False)  # folder or image
+    parent_id = Column(String, nullable=True, index=True)
+    display_name = Column(String, nullable=False)
+    revision = Column(Integer, nullable=False, default=1)
+    digest = Column(String(64), nullable=True, index=True)
+    size = Column(Integer, nullable=False, default=0)
+    mime_type = Column(String, nullable=True)
+    locator = Column(String, nullable=True)
+    provenance = Column(JSON, nullable=True)
+    operation_key = Column(String, nullable=True, index=True)
+    source_provider = Column(String, nullable=True)
+    source_resource_id = Column(String, nullable=True)
+    favorite = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+
+    __table_args__ = (
+        Index("ix_files_image_owner_parent", "owner", "parent_id", "is_active"),
+        UniqueConstraint("owner", "operation_key", name="uq_files_image_owner_operation"),
+    )
+
+
 class EmailAccount(TimestampMixin, Base):
     """A configured IMAP/SMTP account. Supports multiple accounts per user —
     exactly one row per owner has is_default=True.
@@ -1091,6 +1122,8 @@ class ManagedImageProject(TimestampMixin, Base):
     # Stable image resource identity — the durable key across moves/renames.
     image_provider        = Column(String, nullable=False, default="gallery")
     image_resource_id     = Column(String, nullable=False, index=True)
+    # Stable Save-copy replay fence. Scoped by owner in repository queries.
+    operation_key         = Column(String, nullable=True, index=True)
     # Image revision the current editable state was built against.
     expected_image_revision = Column(String, nullable=True)
     # Optimistic-concurrency counter for state commits.
@@ -1105,6 +1138,7 @@ class ManagedImageProject(TimestampMixin, Base):
     __table_args__ = (
         Index('ix_managed_image_projects_owner_updated', 'owner', 'is_active', 'updated_at'),
         Index('ix_managed_image_projects_image', 'image_provider', 'image_resource_id'),
+        UniqueConstraint('owner', 'operation_key', name='uq_managed_image_projects_owner_operation'),
     )
 
 
@@ -2981,6 +3015,37 @@ def _migrate_add_actor_model_columns():
                 conn.exec_driver_sql(f'ALTER TABLE "turn_actors" ADD COLUMN "{column}" VARCHAR')
 
 
+def _migrate_stats_columns():
+    """Add typed Stats provenance columns to databases from the first S01 cut."""
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as conn:
+        tables = {
+            str(row[0])
+            for row in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "stats_events" not in tables:
+            return
+        columns = {
+            str(row[1])
+            for row in conn.exec_driver_sql("PRAGMA table_info(\"stats_events\")").fetchall()
+        }
+        if "model_fingerprint" not in columns:
+            conn.exec_driver_sql('ALTER TABLE "stats_events" ADD COLUMN "model_fingerprint" VARCHAR')
+        if "attempt_coverage" not in columns:
+            conn.exec_driver_sql(
+                'ALTER TABLE "stats_events" ADD COLUMN "attempt_coverage" VARCHAR '
+                "NOT NULL DEFAULT 'unavailable'"
+            )
+        if "observation_scope" not in columns:
+            conn.exec_driver_sql(
+                'ALTER TABLE "stats_events" ADD COLUMN "observation_scope" VARCHAR '
+                "NOT NULL DEFAULT 'message'"
+            )
+
+
 # WARNING: Foreign-key enforcement is enabled globally for all SQLite connections.
 # Any future migrations or schema changes that temporarily violate foreign-key
 # constraints will fail. To perform such operations, foreign_keys must be
@@ -2991,6 +3056,8 @@ def init_db():
     Should be called when starting the application.
     """
     legacy_provider_active = not _provider_cutover_is_complete()
+    # Register additive Stats tables before create_all on fresh and existing DBs.
+    from core import stats_models  # noqa: F401
     if legacy_provider_active:
         _migrate_model_endpoints()
         # Existing tables must gain ORM-declared columns before any post-create
@@ -3006,6 +3073,7 @@ def init_db():
                 if table.name not in _RETIRED_PROVIDER_TABLES
             ],
         )
+    _migrate_stats_columns()
     # SessionManager/restart recovery below selects full Session rows. Existing
     # databases must gain the externally-referenced Workspace column before
     # that first ORM query, not only in the later legacy migration chain.

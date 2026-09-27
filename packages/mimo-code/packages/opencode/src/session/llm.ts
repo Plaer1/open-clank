@@ -205,6 +205,10 @@ export type StreamInput = {
   retries?: number
   toolChoice?: "auto" | "required" | "none"
   agentID?: string
+  /** Isolated one-shot generation (titles and similar helpers). */
+  ephemeral?: boolean
+  /** Correlates an isolated request without changing the owning session. */
+  requestID?: string
 }
 
 export type StreamRequest = StreamInput & {
@@ -255,6 +259,7 @@ const live: Layer.Layer<
       user: MessageV2.User
       sessionID: string
       agentID?: string
+      ephemeral?: boolean
     }) {
       const system: string[] = []
       system.push(
@@ -284,6 +289,7 @@ const live: Layer.Layer<
       // R2): it can't Edit MEMORY.md, so teaching it the file-memory manual
       // would assert capabilities the turn doesn't have.
       const servesCheckpoint =
+        !input.ephemeral &&
         input.agent.name !== "chat" &&
         (yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID))
       if (servesCheckpoint) {
@@ -322,6 +328,7 @@ const live: Layer.Layer<
     })
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
+      const correlationID = input.requestID ?? input.sessionID
       const managedScope = ManagedProvider.enabled()
         ? ManagedProvider.requireScope(input.sessionID)
         : undefined
@@ -329,7 +336,7 @@ const live: Layer.Layer<
         .clone()
         .tag("providerID", input.model.providerID)
         .tag("modelID", input.model.id)
-        .tag("session.id", input.sessionID)
+        .tag(input.requestID ? "request.id" : "session.id", correlationID)
         .tag("small", (input.small ?? false).toString())
         .tag("agent", input.agent.name)
         .tag("mode", input.agent.mode)
@@ -368,6 +375,7 @@ const live: Layer.Layer<
           user: input.user,
           sessionID: input.sessionID,
           agentID: input.agentID,
+          ephemeral: input.ephemeral,
         }))
 
       const variant =
@@ -393,6 +401,7 @@ const live: Layer.Layer<
       }
 
       const isWorkflow = language instanceof GitLabWorkflowLanguageModel
+      if (input.ephemeral && isWorkflow) return yield* Effect.fail(new Error("Ephemeral workflow generation is unsupported"))
       // Reactive prefill-rejection backstop. The PRIMARY mechanism is the
       // proactive guard in ProviderTransform.message()
       // (ensureTrailingUserMessage): we never send a request ending in an
@@ -420,7 +429,16 @@ const live: Layer.Layer<
               ...requestMessages,
             ]
 
-      const params = yield* plugin.trigger(
+      const defaults = {
+        temperature: input.model.capabilities.temperature
+          ? (input.agent.temperature ?? ProviderTransform.temperature(input.model))
+          : undefined,
+        topP: input.agent.topP ?? ProviderTransform.topP(input.model),
+        topK: ProviderTransform.topK(input.model),
+        maxOutputTokens: ProviderTransform.maxOutputTokens(input.model),
+        options,
+      }
+      const params = input.ephemeral ? defaults : yield* plugin.trigger(
         "chat.params",
         {
           sessionID: input.sessionID,
@@ -440,7 +458,7 @@ const live: Layer.Layer<
         },
       )
 
-      const { headers } = yield* plugin.trigger(
+      const { headers } = input.ephemeral ? { headers: {} } : yield* plugin.trigger(
         "chat.headers",
         {
           sessionID: input.sessionID,
@@ -592,7 +610,7 @@ const live: Layer.Layer<
               if (prop !== "startSpan") return Reflect.get(target, prop, receiver)
               return (...args: Parameters<typeof target.startSpan>) => {
                 const span = target.startSpan(...args)
-                span.setAttribute("session.id", input.sessionID)
+                span.setAttribute(input.requestID ? "request.id" : "session.id", correlationID)
                 return span
               }
             },
@@ -606,7 +624,7 @@ const live: Layer.Layer<
         registeredToolCount: Object.keys(tools).length,
         activeToolCount: activeTools.length,
       })
-      yield* plugin
+      if (!input.ephemeral) yield* plugin
         .trigger(
           "session.llm.request",
           {
@@ -671,8 +689,8 @@ const live: Layer.Layer<
         maxOutputTokens: params.maxOutputTokens,
         abortSignal: input.abort,
         headers: {
-          "x-session-affinity": input.sessionID,
-          ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+          ...(!input.ephemeral ? { "x-session-affinity": input.sessionID } : {}),
+          ...(!input.ephemeral && input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
           ...input.model.headers,
           ...headers,
           "User-Agent": `mimocode/${InstallationVersion}`,
@@ -689,7 +707,7 @@ const live: Layer.Layer<
         // Managed mode centralizes retry/failover in the account-aware
         // processor. An SDK-internal retry is invisible and would reuse a
         // credential after the host has cooled or revoked that account.
-        maxRetries: ManagedProvider.enabled() ? 0 : (input.retries ?? 2),
+        maxRetries: input.ephemeral ? 0 : (ManagedProvider.enabled() ? 0 : (input.retries ?? 2)),
         messages,
         model: wrapLanguageModel({
           model: language,
@@ -708,11 +726,11 @@ const live: Layer.Layer<
         }),
         experimental_telemetry: {
           isEnabled: cfg.experimental?.openTelemetry,
-          functionId: "session.llm",
+          functionId: input.ephemeral ? "title.llm" : "session.llm",
           tracer: telemetryTracer,
           metadata: {
             userId: cfg.username ?? "unknown",
-            sessionId: input.sessionID,
+            ...(input.requestID ? { requestId: correlationID } : { sessionId: input.sessionID }),
           },
         },
       })

@@ -421,7 +421,9 @@ test('formatTypedCell keeps ISO date source but can display locale', () => {
 });
 
 test('formatTypedCell shows currency code or locale money without changing source', () => {
-  assert.equal(formatTypedCell('USD 12.50', 'currency', 'code'), 'USD 12.5');
+  assert.equal(formatTypedCell('USD 12.50', 'currency', 'code'), 'USD 12.50');
+  assert.equal(formatTypedCell('USD 12.5', 'currency', 'code'), 'USD 12.50');
+  assert.equal(formatTypedCell('USD 8', 'currency', 'code'), 'USD 8.00');
   const localeMoney = formatTypedCell('USD 12.50', 'currency', 'locale', 'en-US');
   assert.ok(localeMoney.includes('12.5'));
   assert.ok(localeMoney.includes('$') || localeMoney.includes('USD'));
@@ -588,6 +590,26 @@ column id=col-b type=currency format=code
   assert.equal(afterDelete.newModel.metadata.columns[0].type, 'currency');
 });
 
+test('transpose keeps table identity and extras; column ids and types are reset', () => {
+  const doc = `<!-- clank-table v=1 id=tbl-t future-key=keep-me
+column id=col-a type=date format=iso
+column id=col-b type=currency format=code
+-->
+| When | Amount |
+| :--- | ---: |
+| 2026-09-22 | USD 12.50 |
+| 2026-10-01 | USD 4.00 |`;
+  const model = parseTable(doc);
+  const { newModel } = applyTableEdit(doc, model, { type: 'transpose' });
+  assert.equal(newModel.metadata.tableId, 'tbl-t', 'table id survives transpose');
+  assert.ok(newModel.metadata.extras.includes('future-key=keep-me'), 'unknown extras survive');
+  assert.equal(newModel.metadata.columns.length, newModel.columns);
+  for (const col of newModel.metadata.columns) {
+    assert.equal(col.type, '', 'column types cannot follow transposed data');
+    assert.ok(col.id, 'fresh column ids are assigned');
+  }
+});
+
 // ─── S18: recursive formulas, cycles, and explicit errors ───────────────────
 
 test('evaluateFormula evaluates referenced formula cells recursively', () => {
@@ -738,6 +760,21 @@ test('CRLF and escaped pipes round-trip through structural edits', () => {
   const { newModel } = applyTableEdit(doc, model, { type: 'insertRow', afterRow: 1 });
   assert.equal(newModel.valid, true);
   assert.equal(newModel.rows[1].cells[0], 'x | y');
+});
+
+test('CRLF structural edits preserve whole-document line endings', () => {
+  const doc = '| A | B |\r\n| --- | --- |\r\n| 1 | 2 |\r\n| 3 | 4 |\r\nafter line';
+  const model = parseTable(doc);
+  const { newText, newModel, changes } = applyTableEdit(doc, model, { type: 'insertRow', afterRow: 1 });
+  assert.equal(newModel.valid, true);
+  assert.ok(!/(^|[^\r])\n/.test(newText), `bare \\n leaked into CRLF document: ${JSON.stringify(newText)}`);
+  assert.ok(/\r\n/.test(newText), 'table body keeps CRLF');
+  assert.ok(newText.includes('\r\nafter line'), 'block boundary is CRLF');
+  assert.equal(changes.length, 1);
+  const replaced = doc.slice(0, changes[0].from) + changes[0].insert + doc.slice(changes[0].to);
+  assert.ok(!/(^|[^\r])\n/.test(replaced), `change splice leaked bare \\n: ${JSON.stringify(replaced)}`);
+  assert.ok(replaced.includes('\r\nafter line'), 'change splice keeps CRLF block boundary');
+  assert.equal(replaced, newText, 'newText and change splice agree');
 });
 
 test('demo typed table computes totals', () => {

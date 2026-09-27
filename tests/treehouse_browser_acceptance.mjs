@@ -46,7 +46,7 @@ test('real browser mounts TreeHouse scope preview and per-mode context', async (
     const preview = await evaluate('window.__resetPreview');
     assert.match(preview, /1 visible course/);
     assert.match(preview, /Bob in school/);
-    assert.match(preview, /curricula and other learners stay intact/);
+    assert.match(preview, /curricula and other learners stay intact/i);
     await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent === 'Open').click()");
     await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent === 'Admin').click()");
     await evaluate("[...document.querySelectorAll('button')].find(button => button.textContent === 'Analytics').click()");

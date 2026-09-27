@@ -217,8 +217,9 @@ test('Kene keeps one owner, continuous joins, reduced motion, and bounded frame 
 
     await evaluate(`window.__reduceMotion=false; window.__theme.applyBgPattern('clanker-kene-weave')`);
     await until("document.getElementById('clanker-kene-weave-canvas')?.isConnected", 'Kene lifecycle scene');
-    const hiddenBefore = await evaluate(`({ raf:window.__rafCallbacks, canvases:document.querySelectorAll('[data-background-effect-canvas]').length, owner:!!window.__openClankBackgroundOwner })`);
-    await evaluate(`window.__hidden=true; document.dispatchEvent(new Event('visibilitychange'))`);
+    // Hide and sample in one browser task: a visible frame may run between
+    // separate CDP evaluations and must not count as a hidden callback.
+    const hiddenBefore = await evaluate(`(() => { window.__hidden=true; document.dispatchEvent(new Event('visibilitychange')); return { raf:window.__rafCallbacks, canvases:document.querySelectorAll('[data-background-effect-canvas]').length, owner:!!window.__openClankBackgroundOwner }; })()`);
     await evaluate('new Promise(resolve => setTimeout(resolve, 160))');
     const hiddenAfter = await evaluate(`({ raf:window.__rafCallbacks, canvases:document.querySelectorAll('[data-background-effect-canvas]').length, owner:!!window.__openClankBackgroundOwner })`);
     assert.equal(hiddenAfter.raf, hiddenBefore.raf, 'hidden Kene continued RAF callbacks');

@@ -57,6 +57,61 @@ export const DEFAULT_MAX_MEDIA_BYTES = 20 * 1024 * 1024
 /** Text is capped far lower — a prompt, not a payload. */
 export const DEFAULT_MAX_TEXT_BYTES = 1 * 1024 * 1024
 
+/** Native chat limits are separate from the MCP sampling safety ceiling above. */
+export const NATIVE_MAX_SOURCE_BYTES = 150 * 1024 * 1024
+export const NATIVE_MAX_PAYLOAD_BYTES = 50 * 1024 * 1024
+
+export type NativeModality = Modality | "pdf"
+export interface NativeContentRequirement {
+  readonly modality: NativeModality
+  readonly mimeType?: string
+  /** Decoded source bytes, when known. */
+  readonly bytes?: number
+  /** Encoded inline payload bytes, when known. */
+  readonly payloadBytes?: number
+}
+
+export type NativeRejectionReason =
+  | RejectionReason
+  | { readonly kind: "source-too-large"; readonly bytes: number; readonly maxBytes: number }
+  | { readonly kind: "payload-too-large"; readonly bytes: number; readonly maxBytes: number }
+
+/**
+ * Native chat preflight. PDF remains unknown until an installed adapter wire
+ * probe proves its serialization; it is never inferred from model metadata.
+ */
+export function nativeRejectionFor(
+  model: Provider.Model,
+  requirement: NativeContentRequirement,
+): NativeRejectionReason | undefined {
+  if (requirement.bytes !== undefined && requirement.bytes > NATIVE_MAX_SOURCE_BYTES) {
+    return { kind: "source-too-large", bytes: requirement.bytes, maxBytes: NATIVE_MAX_SOURCE_BYTES }
+  }
+  if (requirement.payloadBytes !== undefined && requirement.payloadBytes > NATIVE_MAX_PAYLOAD_BYTES) {
+    return { kind: "payload-too-large", bytes: requirement.payloadBytes, maxBytes: NATIVE_MAX_PAYLOAD_BYTES }
+  }
+  if (requirement.modality === "pdf") return { kind: "modality-unknown", modality: "pdf" as Modality }
+
+  // Native source/payload ceilings above are independent of the MCP registry's
+  // per-item decoded cap. Reuse only the adapter/model support and MIME verdict.
+  const declaration = modelDeclaration(model, requirement.modality)
+  if (declaration.support === "unknown") return { kind: "modality-unknown", modality: requirement.modality }
+  if (declaration.support === "unsupported") return { kind: "modality-unsupported", modality: requirement.modality }
+  if (requirement.mimeType && declaration.mimeTypes !== "any") {
+    const mime = requirement.mimeType.toLowerCase()
+    if (!declaration.mimeTypes.some((item) => item.toLowerCase() === mime)) {
+      return { kind: "mime-unsupported", modality: requirement.modality, mimeType: requirement.mimeType }
+    }
+  }
+  return undefined
+}
+
+export function describeNativeRejection(reason: NativeRejectionReason): string {
+  if (reason.kind === "source-too-large") return `source is ${reason.bytes} bytes, over the ${reason.maxBytes} byte native attachment limit`
+  if (reason.kind === "payload-too-large") return `encoded payload is ${reason.bytes} bytes, over the ${reason.maxBytes} byte native attachment limit`
+  return describeRejection(reason)
+}
+
 const SAFE_IMAGE_MIMES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
 // Mirrors OPENAI_AUDIO_MIMES in src/session/tool-attachment.ts — the set the
 // (repo-patched) OpenAI-compatible chat adapter can serialize as input_audio:

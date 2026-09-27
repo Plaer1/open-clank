@@ -435,6 +435,9 @@ class SessionManager:
                 timestamp=msg_time,
             )
             db.add(db_message)
+            # Numeric Stats facts share the canonical message transaction.
+            from services.stats.ledger import capture_message_event
+            capture_message_event(db, db_session, db_message, message)
 
             if session_id in self.sessions:
                 db_session.message_count = len(self.sessions[session_id].history)

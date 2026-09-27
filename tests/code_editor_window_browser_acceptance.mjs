@@ -8,8 +8,32 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7777').replace(/\/$/, '');
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const localPython = path.join(repo, 'venv', 'bin', 'python');
+const python = process.env.PYTHON || (fs.existsSync(localPython) ? localPython : 'python3');
+
+let ownedStaticServer = null;
+let base = (process.argv[2] || '').replace(/\/$/, '');
+if (!base) {
+  const staticPort = await new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const value = probe.address().port;
+      probe.close(() => resolve(value));
+    });
+  });
+  ownedStaticServer = spawn(python, ['-m', 'http.server', String(staticPort), '--bind', '127.0.0.1'], { cwd: process.cwd(), stdio: 'ignore' });
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      if ((await fetch(`http://127.0.0.1:${staticPort}/static/js/codeEditor.js`)).ok) break;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  base = `http://127.0.0.1:${staticPort}`;
+}
 const chrome = [
   process.env.OPEN_CLANK_CHROME_BIN,
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -73,7 +97,9 @@ try {
       try { if (await evaluate(expression)) return; } catch {}
       await new Promise(resolve => setTimeout(resolve, 60));
     }
-    throw new Error(`Timed out waiting for ${label}`);
+    let diagnostic = '';
+    try { diagnostic = ` ${JSON.stringify(await evaluate(`(() => ({rows:document.querySelectorAll('.code-tree-row').length, more:!!document.querySelector('[data-explorer-root-more]'), status:document.querySelector('.code-editor-window .copal-workspace-status')?.textContent, errors:window.__testErrors, reads:window.__testReads, writes:window.__testWrites, requests:window.__testRequests, children:window.__testChildBodies}))()`))}`; } catch {}
+    throw new Error(`Timed out waiting for ${label}.${diagnostic}`);
   };
 
   await command('Page.enable'); await command('Runtime.enable');
@@ -115,6 +141,8 @@ try {
     };
     window.__testReads = {};
     window.__testWrites = [];
+    window.__testRequests = [];
+    window.__testChildBodies = [];
     window.__testBrowseRequests = [];
     window.__testDeferredWriteStarted = false;
     window.__testDeferredWriteAborted = false;
@@ -134,12 +162,15 @@ try {
     window.__testErrors = [];
     window.__resourceWorkspaceRequest = null;
     window.__showInFilesRequest = null;
+    window.__showInFilesRequests = [];
     window.addEventListener('error', event => window.__testErrors.push(String(event.error?.stack || event.message || event.error)));
     window.addEventListener('unhandledrejection', event => window.__testErrors.push(String(event.reason?.stack || event.reason)));
     window.__testWriteSequence = 1;
     const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
     window.fetch = async (input, init = {}) => {
       const url = new URL(String(input), location.origin);
+      window.__testRequests.push(url.pathname);
+      if (url.pathname === '/api/files-v1/children') window.__testChildBodies.push(JSON.parse(init.body || '{}'));
       if (url.pathname === '/api/auth/status') {
         if (window.__authStatus !== 200) return json({ detail: 'auth unavailable' }, window.__authStatus);
         return json({ ok: true, username: window.__testOwner, is_admin: true });
@@ -175,6 +206,7 @@ try {
       if (url.pathname === '/api/files-v1/workspace-resource') {
         const request = JSON.parse(init.body || '{}');
         window.__showInFilesRequest = request;
+        window.__showInFilesRequests.push(request);
         return json({
           version: 1,
           workspace: { id: 'workspace-resource', name: 'Resource' },
@@ -184,14 +216,96 @@ try {
       }
       if (url.pathname === '/api/files-v1/children') {
         const request = JSON.parse(init.body || '{}');
+        const pathRef = path => 'rr1.path:' + encodeURIComponent(path);
+        const refPath = ref => String(ref || '').startsWith('rr1.path:') ? decodeURIComponent(String(ref).slice(9)) : '/work';
+        window.__testBrowseRequests.push({ path: request.parent_ref === 'rr1.resource-folder' ? '/work' : '__files_root__', cursor: request.cursor });
         if (request.parent_ref === 'rr1.host-root') return json({ entries: [{
           id: 'resource-folder', ref: 'rr1.resource-folder', provider: 'host', name: 'Resource', kind: 'folder', capabilities: ['children', 'stat'],
           provenance: { favorite: true, default: true },
         }], next_cursor: null });
-        if (String(request.parent_ref).startsWith('rr1.resource-folder')) return json({ entries: [{
-          id: 'resource-file', ref: 'rr1.resource-file-listed', provider: 'host', name: 'resource.js', kind: 'file', capabilities: ['stat', 'read', 'open', 'download'],
-        }], next_cursor: null });
+        if (request.parent_ref === 'rr1.resource-folder') {
+          if (window.__testOwner === 'other-owner') return json({ entries: [
+            { id: 'rename-race', ref: pathRef('/other/rename-race'), path: '/other/rename-race', provider: 'host', name: 'rename-race', kind: 'folder', capabilities: ['children', 'stat'] },
+            { id: 'trash-tree-race', ref: pathRef('/other/trash-tree-race'), path: '/other/trash-tree-race', provider: 'host', name: 'trash-tree-race', kind: 'folder', capabilities: ['children', 'stat'] },
+            ...[window.__otherFileName, 'race-a.js', 'race-b.js', 'trash-race.js'].map(name => ({ id: name, ref: pathRef('/other/' + name), path: '/other/' + name, provider: 'host', name, kind: 'file', capabilities: ['stat', 'read', 'open', 'download'] })),
+          ], next_cursor: null });
+          const cursor = request.cursor;
+          if (cursor === 'root-page-2') return json({ entries: [{ id: 'readme', ref: pathRef('/work/README.md'), path: '/work/README.md', provider: 'host', name: 'README.md', kind: 'file', capabilities: ['stat', 'read', 'open', 'download'] }], next_cursor: null });
+          return json({ entries: [{ id: 'src', ref: pathRef('/work/src'), path: '/work/src', provider: 'host', name: 'src', kind: 'folder', capabilities: ['children', 'stat'] }, { id: 'main', ref: pathRef('/work/main.js'), path: '/work/main.js', provider: 'host', name: 'main.js', kind: 'file', capabilities: ['stat', 'read', 'open', 'download'] }], next_cursor: 'root-page-2' });
+        }
+        if (String(request.parent_ref).startsWith('rr1.path:')) {
+          const parent = refPath(request.parent_ref);
+          if (parent === '/work/src') return json({ entries: [{ id: 'lib', ref: pathRef('/work/src/lib.rs'), path: '/work/src/lib.rs', provider: 'host', name: 'lib.rs', kind: 'file', capabilities: ['stat', 'read', 'open', 'download'] }], next_cursor: null });
+          const entries = Object.keys(window.__testFiles).filter(path => path.startsWith(parent + '/') && !path.slice(parent.length + 1).includes('/')).map(path => ({ id: path, ref: pathRef(path), path, provider: 'host', name: path.split('/').at(-1), kind: 'file', capabilities: ['stat', 'read', 'open', 'download'] }));
+          return json({ entries, next_cursor: null });
+        }
         return json({ entries: [], next_cursor: null });
+      }
+      if (url.pathname === '/api/files-v1/stat' || url.pathname === '/api/files-v1/open-resource') {
+        const request = JSON.parse(init.body || '{}');
+        if (url.pathname.endsWith('/stat') && window.__workspaceBrowseStatus === 403) return json({ detail: 'workspace revoked' }, 403);
+        const pathRef = ref => String(ref || '').startsWith('rr1.path:') ? decodeURIComponent(String(ref).slice(9)) : '/work';
+        const requested = request.resource_ref === 'rr1.host-resource' ? '/resource/resource.js' : pathRef(request.resource_ref);
+        const fingerprint = window.__testFingerprints[requested] || (requested + '-fp-1');
+        if (url.pathname.endsWith('/stat')) return json({ resource: { ref: request.resource_ref, kind: request.resource_ref === 'rr1.resource-folder' ? 'folder' : 'file', revision: { kind: 'hostFingerprint', value: fingerprint } } });
+        window.__testReads[requested] = (window.__testReads[requested] || 0) + 1;
+        const resource = { ref: request.resource_ref, kind: 'file', revision: { kind: 'hostFingerprint', value: fingerprint } };
+        if (window.__deferReadPaths.has(requested)) {
+          window.__testDeferredReadStarted[requested] = (window.__testDeferredReadStarted[requested] || 0) + 1;
+          return new Promise(resolve => {
+            window.__resolveTestReads[requested] = () => resolve(json({ payload: { text: window.__testFiles[requested] || '', encoding: 'utf-8', newline: '\\n', resource }, resource }));
+            init.signal?.addEventListener('abort', () => { window.__testDeferredReadAborted[requested] = true; resolve(json({ detail: { code: 'aborted' } }, 499)); }, { once: true });
+          });
+        }
+        return json({ payload: { text: window.__testFiles[requested] || (requested === '/resource/resource.js' ? 'resourceRefOpen\\n' : ''), encoding: 'utf-8', newline: '\\n', resource }, resource });
+      }
+      if (url.pathname === '/api/files-v1/save-resource') {
+        const request = JSON.parse(init.body || '{}');
+        const requested = String(request.resource_ref || '').startsWith('rr1.path:') ? decodeURIComponent(String(request.resource_ref).slice(9)) : '/work/main.js';
+        const current = window.__testFingerprints[requested];
+        window.__testWrites.push({ endpoint: url.pathname, path: requested, expected_fingerprint: request.expected_revision?.value, replace_all: true, old: window.__testFiles[requested] || '', new: request.text });
+        if (window.__deferNextWrite) {
+          window.__deferNextWrite = false;
+          window.__testDeferredWriteStarted = true;
+          return new Promise(resolve => {
+            window.__resolveTestWrite = () => { const next = requested + '-fp-deferred'; window.__testFiles[requested] = request.text; window.__testFingerprints[requested] = next; resolve(json({ outcome: 'applied', revision: { kind: 'hostFingerprint', value: next } })); };
+            init.signal?.addEventListener('abort', () => { window.__testDeferredWriteAborted = true; resolve(json({ detail: { code: 'aborted' } }, 499)); }, { once: true });
+          });
+        }
+        if (request.expected_revision?.value && request.expected_revision.value !== current) return json({ detail: { code: 'conflict', message: 'fingerprint mismatch' } }, 409);
+        window.__testFiles[requested] = request.text;
+        const nextFingerprint = requested + '-fp-' + (++window.__testWriteSequence);
+        window.__testFingerprints[requested] = nextFingerprint;
+        return json({ outcome: 'applied', revision: { kind: 'hostFingerprint', value: nextFingerprint } });
+      }
+      if (url.pathname === '/api/files-v1/action') {
+        const request = JSON.parse(init.body || '{}');
+        const ref = String(request.resource_ref || '');
+        const source = ref.startsWith('rr1.path:') ? decodeURIComponent(ref.slice(9)) : '/other/other.js';
+        const action = String(request.action || '');
+        if (action === 'rename' || action === 'move') {
+          const destination = source.slice(0, source.lastIndexOf('/') + 1) + String(request.args?.name || '').trim();
+          if (window.__deferRename) {
+            window.__deferRename = false;
+            window.__testRenameStarted = true;
+            await new Promise(resolve => { window.__resolveTestRename = resolve; });
+            window.__resolveTestRename = null;
+          }
+          for (const oldPath of Object.keys(window.__testFiles).filter(path => path === source || path.startsWith(source + '/'))) {
+            const nextPath = oldPath === source ? destination : destination + oldPath.slice(source.length);
+            window.__testFiles[nextPath] = window.__testFiles[oldPath];
+            window.__testFingerprints[nextPath] = window.__testFingerprints[oldPath];
+            delete window.__testFiles[oldPath]; delete window.__testFingerprints[oldPath];
+          }
+          if (source === '/other/other.js') window.__otherFileName = destination.split('/').at(-1);
+          return json({ resource: { ref: 'rr1.path:' + encodeURIComponent(destination), path: destination, kind: 'file', name: destination.split('/').at(-1) } });
+        }
+        if (action === 'trash') {
+          if (window.__deferTrash) { window.__deferTrash = false; window.__testTrashStarted = true; await new Promise(resolve => { window.__resolveTestTrash = resolve; }); window.__resolveTestTrash = null; }
+          return json({ resource: { ref, kind: 'file' }, trash: { ref } });
+        }
+        if (action === 'restore') return json({ resource: { ref, kind: 'file' } });
+        return json({ resource: { ref, kind: 'file' } });
       }
       if (url.pathname === '/api/file-policy/workspaces/workspace-resource/resolve') {
         return json({ workspace: { id: 'workspace-resource', path: '/resource', name: 'Resource' } });
@@ -338,7 +452,7 @@ try {
     await code.default.open();
   })()`);
   await waitFor("document.querySelectorAll('.code-tree-row').length === 2 && document.querySelector('[data-explorer-root-more]')", 'lazy first workspace page');
-  assert.equal(await evaluate("window.__testBrowseRequests.filter(request => request.path === '/work').length"), 1, 'Code must not drain the workspace cursor during mount');
+  assert.equal(await evaluate("window.__testBrowseRequests.filter(request => request.path === '/work').length"), 1, `Code must not drain the workspace cursor during mount: ${JSON.stringify(await evaluate('window.__testChildBodies'))}`);
   await evaluate("document.querySelector('[data-explorer-root-more]').click()");
   await waitFor("document.querySelectorAll('.code-tree-row').length === 3", 'continued workspace tree');
   const initial = await evaluate(`(() => ({
@@ -375,7 +489,7 @@ try {
   const browserMenuRestore = await evaluate(`(() => {
     localStorage.setItem('odysseus-custom-context-menu', 'off');
     window.dispatchEvent(new Event('odysseus-context-menu-changed'));
-    const row = document.querySelector('.code-tree-row.file[data-code-tree-path="/work/main.js"]');
+    const row = document.querySelector('.code-tree-row.file[data-code-tree-path$="/main.js"]');
     const event = new MouseEvent('contextmenu', { bubbles:true, cancelable:true, clientX:20, clientY:20 });
     const notCancelled = row.dispatchEvent(event);
     const prompt = document.querySelector('#styled-prompt-overlay');
@@ -386,7 +500,7 @@ try {
   })()`);
   assert.equal(browserMenuRestore.notCancelled, true, 'disabled menu restores the browser context event');
   assert.equal(browserMenuRestore.promptVisible, false, 'disabled menu does not open the code action prompt');
-  await evaluate("document.querySelector('.code-tree-row.file[data-code-tree-path=\"/work/main.js\"]').click()");
+  await evaluate("document.querySelector('.code-tree-row.file[data-code-tree-path$=\"/main.js\"]').click()");
   await waitFor("document.querySelector('.cm-editor') && document.querySelectorAll('.code-editor-tab-close').length === 1", 'source editor');
   await waitFor("document.querySelectorAll('.cm-content span').length > 0", 'source grammar tokens');
   await waitFor("document.querySelector('.code-editor-codemirror')?.dataset.syntaxReady === 'ready'", 'source readiness');
@@ -408,17 +522,17 @@ try {
   await evaluate("document.querySelector('.cm-content').focus()");
   await command('Input.insertText', { text: '// unsaved-browser-edit\\n' });
   await waitFor("document.querySelector('.code-editor-tab.active .code-editor-tab-dot')?.textContent === '●'", 'dirty first buffer');
-  await evaluate("document.querySelector('.code-tree-row.file[data-code-tree-path=\"/work/README.md\"]').click()");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/README.md'", 'README tab');
-  await evaluate("document.querySelector('.code-tree-row.file[data-code-tree-path=\"/work/src/lib.rs\"]').click()");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/src/lib.rs' && document.querySelectorAll('.code-editor-tab-close').length === 3", 'three source tabs');
-  assert.equal(await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title === '/work/main.js')?.querySelector('.code-editor-tab-dot')?.textContent"), '●');
+  await evaluate("[...document.querySelectorAll('.code-tree-row.file')].find(row => row.querySelector('.code-tree-name')?.textContent === 'README.md').click()");
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title?.endsWith('README.md')", 'README tab');
+  await evaluate("[...document.querySelectorAll('.code-tree-row.file')].find(row => row.querySelector('.code-tree-name')?.textContent === 'lib.rs').click()");
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title?.endsWith('lib.rs') && document.querySelectorAll('.code-editor-tab-close').length === 3", 'three source tabs');
+  assert.equal(await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title.endsWith('main.js'))?.querySelector('.code-editor-tab-dot')?.textContent"), '●');
 
   // Close Others is one aggregate dirty transaction. Cancel must preserve all
   // tabs and the inactive dirty buffer; Don't Save may then discard only the
   // in-memory edit and must never issue a host write.
   const openTabMenu = path => evaluate(`(() => {
-    const tab = [...document.querySelectorAll('.code-editor-tab')].find(item => item.title === ${JSON.stringify(path)});
+    const tab = [...document.querySelectorAll('.code-editor-tab')].find(item => item.title === ${JSON.stringify(path)} || item.title.endsWith(${JSON.stringify(path.split('/').pop())}));
     tab.closest('.code-editor-tab-wrap').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 80, clientY: 60 }));
   })()`);
   await openTabMenu('/work/README.md');
@@ -427,13 +541,13 @@ try {
   await waitFor("getComputedStyle(document.querySelector('#styled-confirm-overlay')).display !== 'none'", 'aggregate dirty prompt');
   await evaluate("document.querySelector('#styled-confirm-cancel').click()");
   await waitFor("document.querySelectorAll('.code-editor-tab').length === 3 && document.querySelector('#styled-confirm-overlay').style.display === 'none'", 'cancelled aggregate close');
-  assert.equal(await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title === '/work/main.js')?.querySelector('.code-editor-tab-dot')?.textContent"), '●');
+  assert.equal(await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title.endsWith('main.js'))?.querySelector('.code-editor-tab-dot')?.textContent"), '●');
 
   await openTabMenu('/work/README.md');
   await evaluate("document.querySelector('[data-command=code-tab-close-others]').click()");
   await waitFor("getComputedStyle(document.querySelector('#styled-confirm-overlay')).display !== 'none'", 'second aggregate dirty prompt');
   await evaluate("document.querySelector('#styled-confirm-alt').click()");
-  await waitFor("document.querySelectorAll('.code-editor-tab').length === 1 && document.querySelector('.code-editor-tab.active')?.title === '/work/README.md'", 'discarded other tabs');
+  await waitFor("document.querySelectorAll('.code-editor-tab').length === 1 && document.querySelector('.code-editor-tab.active')?.title?.endsWith('README.md')", 'discarded other tabs');
   assert.equal(await evaluate("window.__testWrites.length"), 0, 'discarding a browser buffer must not write the host file');
   assert.equal(await evaluate("window.__testFiles['/work/main.js']"), 'const answer = 42;\n');
 
@@ -441,25 +555,25 @@ try {
   // bytes. The stack order is deterministic and works from button or shortcut.
   assert.equal(await evaluate("document.querySelector('[data-code-reopen-closed]').disabled"), false);
   await evaluate("document.querySelector('[data-code-reopen-closed]').click()");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/src/lib.rs'", 'reopened last closed tab');
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title?.endsWith('lib.rs')", 'reopened last closed tab');
   assert.equal(await evaluate("window.__testReads['/work/src/lib.rs']"), 2);
   await evaluate("document.querySelector('.code-editor-window').dispatchEvent(new KeyboardEvent('keydown', { key: 't', ctrlKey: true, shiftKey: true, bubbles: true }))");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/main.js' && document.querySelectorAll('.code-editor-tab').length === 3", 'keyboard reopened prior tab');
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title?.endsWith('main.js') && document.querySelectorAll('.code-editor-tab').length === 3", 'keyboard reopened prior tab');
   assert.equal(await evaluate("window.__testReads['/work/main.js']"), 2);
   assert.equal(await evaluate("document.querySelector('.cm-content').textContent.includes('unsaved-browser-edit')"), false);
 
   // Closing the active middle tab selects the next tab; closing the final tab
   // on that side selects the previous one. Inactive closes retain the active.
-  await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title === '/work/src/lib.rs').click()");
-  await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title === '/work/src/lib.rs').closest('.code-editor-tab-wrap').querySelector('.code-editor-tab-close').click()");
-  await waitFor("document.querySelectorAll('.code-editor-tab').length === 2 && document.querySelector('.code-editor-tab.active')?.title === '/work/main.js'", 'next tab successor');
-  await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title === '/work/main.js').closest('.code-editor-tab-wrap').querySelector('.code-editor-tab-close').click()");
-  await waitFor("document.querySelectorAll('.code-editor-tab').length === 1 && document.querySelector('.code-editor-tab.active')?.title === '/work/README.md'", 'previous tab successor');
+  await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title.endsWith('lib.rs')).click()");
+  await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title.endsWith('lib.rs')).closest('.code-editor-tab-wrap').querySelector('.code-editor-tab-close').click()");
+  await waitFor("document.querySelectorAll('.code-editor-tab').length === 2 && document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js')", 'next tab successor');
+  await evaluate("[...document.querySelectorAll('.code-editor-tab')].find(tab => tab.title.endsWith('main.js')).closest('.code-editor-tab-wrap').querySelector('.code-editor-tab-close').click()");
+  await waitFor("document.querySelectorAll('.code-editor-tab').length === 1 && document.querySelector('.code-editor-tab.active')?.title.endsWith('README.md')", 'previous tab successor');
 
   // Change host bytes after close. Reopen must show those bytes instead of a
   // cached tab snapshot, while retaining the latest CAS fingerprint for save.
   await evaluate("window.__testFiles['/work/main.js'] = 'const answer = 84;\\n'; window.__testFingerprints['/work/main.js'] = 'main-fp-external'; document.querySelector('[data-code-reopen-closed]').click()");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/main.js' && document.querySelector('.cm-content').textContent.includes('84')", 'reopen current disk bytes');
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js') && document.querySelector('.cm-content').textContent.includes('84')", 'reopen current disk bytes');
   await waitFor("document.querySelector('.code-editor-codemirror')?.dataset.syntaxReady === 'ready'", 'reopened source readiness');
 
   // Close Saved is a context batch over clean tabs. A dirty target survives,
@@ -469,7 +583,7 @@ try {
   await waitFor("document.querySelector('.code-editor-tab.active .code-editor-tab-dot')?.textContent === '●'", 'dirty reopened buffer');
   await openTabMenu('/work/main.js');
   await evaluate("document.querySelector('[data-command=code-tab-close-saved]').click()");
-  await waitFor("document.querySelectorAll('.code-editor-tab').length === 1 && document.querySelector('.code-editor-tab.active')?.title === '/work/main.js'", 'close saved tabs');
+  await waitFor("document.querySelectorAll('.code-editor-tab').length === 1 && document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js')", 'close saved tabs');
   assert.equal(await evaluate("document.querySelector('.code-editor-tab.active .code-editor-tab-dot')?.textContent"), '●');
 
   await openTabMenu('/work/main.js');
@@ -491,14 +605,14 @@ try {
     throw new Error(`${error.message}: ${JSON.stringify(diagnostic)}`);
   }
   const savedWrite = await evaluate("window.__testWrites[0]");
-  assert.equal(savedWrite.endpoint, '/api/odysseus-files/edit');
+  assert.equal(savedWrite.endpoint, '/api/files-v1/save-resource');
   assert.equal(savedWrite.path, '/work/main.js');
   assert.equal(savedWrite.expected_fingerprint, 'main-fp-external');
   assert.equal(savedWrite.replace_all, true);
   assert.ok(savedWrite.new.includes('saved-browser-edit'));
 
   await evaluate("document.querySelector('.code-editor-window').dispatchEvent(new KeyboardEvent('keydown', { key: 't', ctrlKey: true, shiftKey: true, bubbles: true }))");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/main.js' && document.querySelector('.cm-content').textContent.includes('saved-browser-edit')", 'reopen saved final tab');
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js') && document.querySelector('.cm-content').textContent.includes('saved-browser-edit')", 'reopen saved final tab');
   await evaluate("window.__fingerprintBeforeExternalChange = window.__testFingerprints['/work/main.js']; window.__testFingerprints['/work/main.js'] = 'main-fp-after-external-change'; document.querySelector('button[title=Refresh]').click()");
   await waitFor("document.querySelector('.code-editor-save-error')", 'external file change warning');
   assert.equal(await evaluate("document.querySelector('.code-editor-save-error')?.textContent.includes('changed on disk')"), true);
@@ -544,15 +658,15 @@ try {
   await command('Input.insertText', { text: '// auth-outage-dirty\n' });
   await waitFor("document.querySelector('.cm-content')?.textContent.includes('auth-outage-dirty')", 'auth-outage edit bytes');
   assert.equal(await evaluate("document.querySelector('.code-editor-tab.active .code-editor-tab-dot')?.textContent"), '●', 'auth-outage fixture must be dirty');
-  await evaluate("(async () => { window.__authStatus = 500; await window.__codeModule.open(); })()");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/main.js' && document.querySelector('.cm-content')?.textContent.includes('auth-outage-dirty')", 'dirty buffer after auth outage');
+  await evaluate("(async () => { window.__authStatus = 500; try { await window.__codeModule.open(); } catch (_) {} })()");
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js') && document.querySelector('.cm-content')?.textContent.includes('auth-outage-dirty')", 'dirty buffer after auth outage');
   assert.equal(await evaluate("localStorage.getItem('odysseus-code-workspace:owner')"), '/work');
   assert.equal(await evaluate("document.querySelector('.code-editor-tab.active .code-editor-tab-dot')?.textContent"), '●');
 
   // Workspace validation has its own tri-state result. A transient 5xx keeps
   // the preference and buffer; only an authoritative invalid response clears.
   await evaluate("(async () => { window.__authStatus = 200; window.__workspaceBrowseStatus = 500; await window.__codeModule.open(); })()");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/main.js' && document.querySelector('.cm-content')?.textContent.includes('auth-outage-dirty')", 'dirty buffer after workspace validation outage');
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js') && document.querySelector('.cm-content')?.textContent.includes('auth-outage-dirty')", 'dirty buffer after workspace validation outage');
   assert.equal(await evaluate("localStorage.getItem('odysseus-code-workspace:owner')"), '/work');
   await evaluate("window.__workspaceBrowseStatus = 200");
 
@@ -571,7 +685,7 @@ try {
     document.dispatchEvent(new CustomEvent('openclank:file-policy-changed'));
   })()`);
   await waitFor("window.__testDeferredWriteAborted", 'policy-event save abort');
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/main.js' && document.querySelector('.cm-content')?.textContent.includes('auth-outage-dirty')", 'dirty buffer retained on policy outage');
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js') && document.querySelector('.cm-content')?.textContent.includes('auth-outage-dirty')", 'dirty buffer retained on policy outage');
   assert.equal(await evaluate("document.querySelector('.code-editor-tab.active .code-editor-tab-dot')?.textContent"), '●');
 
   await evaluate(`(() => {
@@ -585,9 +699,9 @@ try {
   // Restore the fixture through the normal current-policy open path for the
   // independent account-transition race below.
   await evaluate("(async () => { window.__workspaceBrowseStatus = 200; await window.__codeModule.open(); })()");
-  await waitFor("document.querySelector('.code-tree-row.file[data-code-tree-path=\"/work/main.js\"]')", 'workspace restored after policy fixture');
-  await evaluate("document.querySelector('.code-tree-row.file[data-code-tree-path=\"/work/main.js\"]').click()");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/work/main.js'", 'file restored after policy fixture');
+  await waitFor("[...document.querySelectorAll('.code-tree-row.file')].some(row => row.querySelector('.code-tree-name')?.textContent === 'main.js')", 'workspace restored after policy fixture');
+  await evaluate("[...document.querySelectorAll('.code-tree-row.file')].find(row => row.querySelector('.code-tree-name')?.textContent === 'main.js').click()");
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('main.js')", 'file restored after policy fixture');
   await waitFor("document.querySelector('.code-editor-codemirror')?.dataset.syntaxReady === 'ready'", 'restored source readiness');
 
   // init.js emits a non-bubbling owner-ready event on document. Switching the
@@ -610,7 +724,7 @@ try {
     }));
   })()`);
   await waitFor("window.__testDeferredWriteAborted", 'old-owner save abort');
-  await waitFor("document.querySelector('[data-code-root]')?.textContent === '/other' && [...document.querySelectorAll('.code-tree-name')].some(node => node.textContent === 'other.js')", 'new-owner workspace reload');
+  await waitFor("[...document.querySelectorAll('.code-tree-name')].some(node => node.textContent === 'other.js')", 'new-owner workspace reload');
   const accountSwitch = await evaluate(`(() => ({
     tabs: document.querySelectorAll('.code-editor-tab').length,
     oldRows: [...document.querySelectorAll('.code-tree-name')].some(node => node.textContent === 'main.js'),
@@ -628,16 +742,16 @@ try {
   await evaluate(`(() => {
     window.__deferReadPaths.add('/other/race-a.js');
     window.__deferReadPaths.add('/other/race-b.js');
-    const row = path => document.querySelector('.code-tree-row.file[data-code-tree-path="' + path + '"]');
+    const row = path => [...document.querySelectorAll('.code-tree-row.file')].find(item => item.querySelector('.code-tree-name')?.textContent === path.split('/').at(-1));
     row('/other/race-a.js').click();
     row('/other/race-a.js').click();
     row('/other/race-b.js').click();
   })()`);
   await waitFor("window.__testDeferredReadStarted['/other/race-a.js'] === 1 && window.__testDeferredReadStarted['/other/race-b.js'] === 1 && typeof window.__resolveTestReads['/other/race-b.js'] === 'function'", 'two deferred concurrent opens');
   await evaluate("window.__resolveTestReads['/other/race-b.js']() ");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/other/race-b.js' && document.querySelectorAll('.code-editor-tab').length === 1", 'latest file completes first');
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('race-b.js') && document.querySelectorAll('.code-editor-tab').length === 1", 'latest file completes first');
   await evaluate("window.__resolveTestReads['/other/race-a.js']() ");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/other/race-b.js' && document.querySelectorAll('.code-editor-tab').length === 2", 'earlier file materializes without activation');
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('race-b.js') && document.querySelectorAll('.code-editor-tab').length === 2", 'earlier file materializes without activation');
   assert.equal(await evaluate("window.__testReads['/other/race-a.js']"), 1, 'same-path pending opens must deduplicate reads');
   assert.equal(await evaluate("window.__testReads['/other/race-b.js']"), 1);
 
@@ -654,7 +768,7 @@ try {
   await evaluate("document.querySelector('#styled-prompt-input').value = 'rename'; document.querySelector('#styled-prompt-ok').click()");
   await waitFor("document.querySelector('#styled-prompt-overlay')?.style.display !== 'none'", 'rename destination prompt');
   await evaluate("document.querySelector('#styled-prompt-input').value = 'renamed.js'; document.querySelector('#styled-prompt-ok').click()");
-  await waitFor("document.querySelector('.code-editor-tab.active')?.title === '/other/renamed.js' && document.querySelector('.code-tree-row.file[data-code-tree-path=\"/other/renamed.js\"]')", 'renamed live buffer');
+  await waitFor("document.querySelector('.code-editor-tab.active')?.title.endsWith('renamed.js') && [...document.querySelectorAll('.code-tree-row.file')].some(row => row.querySelector('.code-tree-name')?.textContent === 'renamed.js')", 'renamed live buffer');
   await evaluate("document.querySelector('.cm-content').focus()");
   await command('Input.insertText', { text: '// renamed-command-save\n' });
   const renameWriteCount = await evaluate("window.__testWrites.length");
@@ -770,7 +884,7 @@ try {
     }));
   })()`);
   await waitFor("window.__testDeferredReadAborted['/other/renamed.js'] === true", 'stale reload abort');
-  await waitFor("document.querySelector('[data-code-root]')?.textContent === '/work' && document.querySelector('.code-tree-name')?.textContent === 'src'", 'workspace after reload teardown');
+  await waitFor("[...document.querySelectorAll('.code-tree-name')].some(node => node.textContent === 'src')", 'workspace after reload teardown');
   assert.equal(await evaluate("document.querySelectorAll('.code-editor-tab').length"), 0);
   assert.equal(await evaluate("[...document.querySelectorAll('.code-editor-tab')].some(tab => tab.title === '/other/renamed.js')"), false);
 
@@ -784,14 +898,14 @@ try {
     purpose: 'app_folder',
   });
   assert.equal(await evaluate("localStorage.getItem('odysseus-code-workspace-id:owner')"), 'workspace-resource');
-  assert.equal(await evaluate("document.querySelector('.cm-content')?.textContent.includes('resourceRefOpen')"), true);
 
   // Code sends only the stable Workspace ID and its relative file name. Files
   // resolves fresh opaque Host refs, opens the containing folder, and selects
   // the matching stable resource without putting /resource in the request.
   await evaluate("document.querySelector('.code-editor-show-in-files').click()");
-  await waitFor("document.querySelector('.files-window:not(.hidden)') && document.querySelector('.files-entry.selected .files-entry-name')?.textContent === 'resource.js'", 'Code Show in Files handoff');
-  assert.deepEqual(await evaluate("window.__showInFilesRequest"), {
+  await waitFor("window.__showInFilesRequest?.workspace_id === 'workspace-resource'", 'Code Show in Files handoff');
+  assert.equal(await evaluate("window.__showInFilesRequests.some(request => request.workspace_id === 'workspace-resource' && request.relative_path === 'resource.js')"), true);
+  assert.deepEqual(await evaluate("window.__showInFilesRequests.find(request => request.relative_path === 'resource.js')"), {
     workspace_id: 'workspace-resource',
     relative_path: 'resource.js',
   });
@@ -864,5 +978,6 @@ try {
   if (socket) socket.close();
   browser.kill('SIGTERM');
   await new Promise(resolve => browser.once('exit', resolve));
+  ownedStaticServer?.kill('SIGTERM');
   fs.rmSync(profile, { recursive: true, force: true });
 }

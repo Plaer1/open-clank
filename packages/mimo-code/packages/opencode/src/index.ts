@@ -42,7 +42,6 @@ import { Heap } from "./cli/heap"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { ensureProcessMetadata } from "./util/mimo-process"
 import { OpenClankDriverCommand, runOpenClankDriver } from "./cli/cmd/openclank-driver"
-import { UpgradeCommand } from "./cli/cmd/upgrade"
 import { LlmServerCommand } from "./cli/cmd/llm-server"
 import { ModelsDev } from "./provider/models"
 
@@ -233,7 +232,6 @@ const cli = yargs(args)
   .command(SessionCommand)
   .command(PluginCommand)
   .command(DbCommand)
-  .command(UpgradeCommand)
   .command(LlmServerCommand)
   .fail((msg, err) => {
     if (

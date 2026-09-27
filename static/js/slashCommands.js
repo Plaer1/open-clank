@@ -1195,7 +1195,7 @@ async function _cmdToggleSidebar(args, ctx) {
 async function _cmdOpen(args, ctx) {
   const target = (args[0] || '').trim().toLowerCase();
   if (!target) {
-    slashReply('Open what? Try /open Cookbook, /open Settings, /open Gallery, /open Editor, /open Clanker Tasks, /open Library, /open Research, or /open Compare.');
+    slashReply('Open what? Try /open Usage, /open Cookbook, /open Settings, /open Gallery, /open Editor, /open Clanker Tasks, /open Library, /open Research, or /open Compare.');
     return true;
   }
   const clickFirst = (...ids) => {
@@ -1206,6 +1206,11 @@ async function _cmdOpen(args, ctx) {
     return false;
   };
   try {
+    if (target === 'usage' || target === 'stats') {
+      if (typeof window.__openStatsUsage === 'function') window.__openStatsUsage();
+      else clickFirst('tool-usage-btn');
+      return true;
+    }
     if (target === 'cookbook' || target === 'cook') {
       if (cookbookModule && typeof cookbookModule.open === 'function') await cookbookModule.open({ tab: 'Download' });
       else clickFirst('tool-cookbook-btn', 'rail-cookbook');

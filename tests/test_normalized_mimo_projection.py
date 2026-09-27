@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -506,6 +507,34 @@ def test_projection_generation_is_deterministic_without_projection_state(normali
     assert changed.fingerprint != first.fingerprint
     assert reconcile_projection(changed, materializing=True)["generation"] != first_state["generation"]
     assert safe_additive_delta(first, changed) is False
+
+
+def test_agent_settings_only_delta_is_safe_for_warm_generation_drain(normalized_db):
+    with normalized_db() as db:
+        connection = _connection(db, "pcn_settings_delta")
+        _route(db, connection, "pmr_settings_delta", "gpt-a")
+        db.commit()
+    first = build_projection_snapshot("alice")
+    changed = deepcopy(first)
+    changed.providers["pcn_settings_delta"]["options"]["_openclankAgentSettings"] = {
+        "compaction": {"tail_turns": 0},
+    }
+    assert safe_additive_delta(first, changed) is True
+
+
+def test_provider_or_model_revocation_is_never_safe_additive(normalized_db):
+    with normalized_db() as db:
+        connection = _connection(db, "pcn_revocation_delta")
+        _route(db, connection, "pmr_revocation_delta", "gpt-a")
+        db.commit()
+    first = build_projection_snapshot("alice")
+    provider_removed = deepcopy(first)
+    provider_removed.providers.pop("pcn_revocation_delta", None)
+    assert safe_additive_delta(first, provider_removed) is False
+
+    model_removed = deepcopy(first)
+    model_removed.providers["pcn_revocation_delta"]["models"] = {}
+    assert safe_additive_delta(first, model_removed) is False
 
 
 def test_unsupported_chat_adapter_fails_closed_but_modality_only_route_does_not(normalized_db):

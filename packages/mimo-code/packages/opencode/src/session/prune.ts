@@ -130,18 +130,20 @@ export interface Interface {
     tokens: MessageV2.Assistant["tokens"]
     lastAssistantTime?: number
     promptOps?: ActorPromptOps
+    cfg?: Config.Info
   }) => Effect.Effect<void>
   /**
    * Fire background checkpoint writers for every newly-crossed threshold.
    * Call this at the START of each runLoop iteration so thresholds fire
    * mid-turn as tokens grow (not only at turn end).
    */
-  readonly fireCheckpoints: (input: {
-    sessionID: SessionID
-    model: Provider.Model
-    tokens: MessageV2.Assistant["tokens"]
-    promptOps: ActorPromptOps
-    agentID?: string
+    readonly fireCheckpoints: (input: {
+      sessionID: SessionID
+      model: Provider.Model
+      tokens: MessageV2.Assistant["tokens"]
+      promptOps: ActorPromptOps
+      agentID?: string
+      cfg?: Config.Info
   }) => Effect.Effect<void>
   /** True when the current tokens have just crossed the max checkpoint threshold. */
   readonly maxThresholdCrossed: (sessionID: SessionID) => Effect.Effect<boolean>
@@ -235,6 +237,7 @@ export const layer: Layer.Layer<
       tokens: MessageV2.Assistant["tokens"]
       promptOps: ActorPromptOps
       agentID?: string
+      cfg?: Config.Info
     }) {
       // Checkpoint serves main/peer only; subagents use per-actor compaction
       // (independent layers — see 2026-05-22-checkpoint-v8-design.md:71), and
@@ -262,7 +265,7 @@ export const layer: Layer.Layer<
         return
       }
 
-      const cfg = yield* config.get()
+      const cfg = input.cfg ?? (yield* config.get())
       const windowSize = usable({ cfg, model: input.model })
       if (windowSize === 0) return
       const raw = cfg.checkpoint?.thresholds ?? defaultThresholdsFor(windowSize)
@@ -358,8 +361,9 @@ export const layer: Layer.Layer<
       tokens: MessageV2.Assistant["tokens"]
       lastAssistantTime?: number
       promptOps?: ActorPromptOps
+      cfg?: Config.Info
     }) {
-      const cfg = yield* config.get()
+      const cfg = input.cfg ?? (yield* config.get())
       if (!cfg.compaction?.prune) return
 
       if (!isCacheCold(input.model, input.lastAssistantTime)) return

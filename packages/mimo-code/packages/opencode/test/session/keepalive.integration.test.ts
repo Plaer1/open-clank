@@ -41,6 +41,9 @@ const stubPrompt = Layer.succeed(
   SessionPrompt.Service,
   SessionPrompt.Service.of({
     cancel: () => Effect.void,
+    recovery: () => Effect.succeed([]),
+    resume: () => Effect.die("resume not expected in keepalive test"),
+    resumeBackground: () => Effect.die("resumeBackground not expected in keepalive test"),
     prompt: (input: PromptInput) =>
       Effect.sync(() => {
         const id = MessageID.ascending()

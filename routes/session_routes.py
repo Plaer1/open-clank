@@ -42,6 +42,7 @@ def _sanitize_export_filename(name: str) -> str:
 # model must never surface in the session list / sidebar — otherwise a blind
 # comparison can be de-anonymized before the user votes (issue #1285).
 COMPARE_SESSION_PREFIX = "[CMP] "
+_UNVERIFIED_OWNER = object()
 
 
 def _public_model(name: str, model: str) -> str:
@@ -110,21 +111,33 @@ def _reject_compact_during_active_run(session_id: str) -> None:
         raise HTTPException(409, "Session has an active run; try compacting after it finishes")
 
 
-async def _prepare_context_mutation(request: Request, session_id: str) -> None:
+async def _prepare_context_mutation(request: Request, session_id: str, *, session_owner=None,
+                                    verified_owner=_UNVERIFIED_OWNER):
     """Reject live mutations and purge stale Open Clank agent execution projections."""
     _reject_compact_during_active_run(session_id)
+    # Resolve the persisted owner before purging.  In auth-disabled mode the
+    # request has no effective user, but the stored session owner remains the
+    # authority for projection cleanup.
+    stored_owner = (
+        _verify_session_owner(request, session_id)
+        if verified_owner is _UNVERIFIED_OWNER else verified_owner
+    ) or session_owner
+    if not stored_owner and _auth_disabled():
+        from src.owner_identity import LOCAL_INSTALLATION_OWNER
+        stored_owner = LOCAL_INSTALLATION_OWNER
     from src.openclank.transcript_projection import purge_execution_projection
 
     try:
         await purge_execution_projection(
             getattr(request.app.state, "mimo_supervisor", None),
             session_id,
-            owner=effective_user(request) or None,
+            owner=stored_owner or effective_user(request) or None,
         )
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
+    return stored_owner
 
 
 def _verify_session_owner(request: Request, session_id: str, session_manager=None):
@@ -147,7 +160,7 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
     if row is not None:
         if user and row.owner != user:
             raise HTTPException(404, f"Session {session_id} not found")
-        return
+        return row.owner
     # No DB row — allow the caller to act on an in-memory ghost they own.
     # Incognito sessions deliberately exist only in this process, so route
     # callers do not all need to thread the manager through manually.
@@ -160,7 +173,7 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
     if session_manager is not None:
         ghost = getattr(session_manager, "sessions", {}).get(session_id)
         if ghost is not None and (not user or getattr(ghost, "owner", None) == user):
-            return
+            return getattr(ghost, "owner", None)
     raise HTTPException(404, f"Session {session_id} not found")
 
 
@@ -1296,7 +1309,7 @@ def setup_session_routes(
         writes an active-context projection; original source parts remain
         retrievable through the conversation archive.
         """
-        _verify_session_owner(request, session_id)
+        verified_owner = _verify_session_owner(request, session_id)
         try:
             session = session_manager.get_session(session_id)
         except KeyError:
@@ -1315,7 +1328,10 @@ def setup_session_routes(
                 "finite contexts.",
             )
 
-        await _prepare_context_mutation(request, session_id)
+        mutation_owner = await _prepare_context_mutation(
+            request, session_id, session_owner=getattr(session, "owner", None),
+            verified_owner=verified_owner,
+        )
 
         history = list(session.history or [])
         if len(history) < 6:
@@ -1333,6 +1349,7 @@ def setup_session_routes(
         from src.openclank.modality_facade import complete_text
 
         owner = getattr(session, "owner", None) or effective_user(request)
+        owner = mutation_owner or owner
 
         prior_compactions = sum(
             1 for m in history

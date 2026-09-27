@@ -6,7 +6,20 @@ import time
 from typing import List, Dict, Any, Optional, Tuple
 from src.chat_helpers import extract_urls
 from src.youtube_handler import is_youtube_url
-from src.search import comprehensive_web_search, fetch_webpage_content
+from src.search import SearchService, fetch_webpage_content
+
+
+async def _search_web_context(query: str, *, time_filter=None, owner: str = ""):
+    """Canonical chat search adapter returning context and source dictionaries."""
+    response = await SearchService().search(
+        query, caller="chat", mode="results", freshness=time_filter,
+        owner=owner or "", deadline=30,
+    )
+    if response.error:
+        raise RuntimeError(response.error.get("message", response.status))
+    sources = [result.as_dict() for result in response.results]
+    context = "\n\n".join(f"{result['title']}\n{result['snippet']}" for result in sources)
+    return context, sources
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
 from services.memory.principal_context import render_identity_template
 
@@ -304,8 +317,8 @@ class ChatProcessor:
 
                 if search_query:
                     # Execute web search using the final selected query
-                    web_context, web_sources = comprehensive_web_search(
-                        search_query, time_filter=time_filter, return_sources=True
+                    web_context, web_sources = await _search_web_context(
+                        search_query, time_filter=time_filter, owner=owner or ""
                     )
                     preface.append(untrusted_context_message("web search results", web_context))
             except Exception as e:

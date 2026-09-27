@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +10,9 @@ def test_startup_shell_keeps_html_and_modules_in_sync():
     index = (ROOT / "static/index.html").read_text(encoding="utf-8")
 
     assert "HTML (navigation): network-first" in worker
-    assert "open-clank-v352-qol2-s01" in worker
+    cache_names = re.findall(r"open-clank-v[0-9A-Za-z-]+", worker)
+    assert cache_names, "service worker must declare a versioned Open Clank cache"
+    assert len(set(cache_names)) == 1, "service worker cache revision must be unambiguous"
     # Keep the contract tied to the current shell revision. The service worker
     # is network-first for HTML/modules, so a stale historical query string is
     # a test failure rather than a reason to roll the frontend back.

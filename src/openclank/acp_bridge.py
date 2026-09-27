@@ -45,6 +45,9 @@ _MEMORY_BROKER_TOKEN = ""
 _COPAL_BROKER_URL = ""
 _COPAL_BROKER_TOKEN = ""
 
+_NATIVE_MEDIA_SOURCE_BYTES = 150 * 1024 * 1024
+_NATIVE_MEDIA_PAYLOAD_BYTES = 50 * 1024 * 1024
+
 
 def configure_frankenmemory_broker(url: str, token: str) -> None:
     """Configure the private app-owned memory transport inherited by lifetools.
@@ -3124,19 +3127,50 @@ def _path_within(path: str, root: str) -> bool:
         return False
 
 
-def _data_uri(value: str) -> tuple[str, str] | None:
+def _data_uri(value: str, *, declared_mime: str = "") -> tuple[str, str] | None:
     if not value.startswith("data:") or "," not in value:
         return None
     header, payload = value[5:].split(",", 1)
     fields = header.split(";")
     mime = fields[0] or "application/octet-stream"
-    if "base64" in fields[1:]:
-        try:
-            base64.b64decode(payload, validate=True)
-        except (ValueError, binascii.Error):
-            return None
-        return mime, payload
-    return mime, base64.b64encode(urllib.parse.unquote_to_bytes(payload)).decode("ascii")
+    # ACP native media crosses as an exact byte payload.  Plain/percent data
+    # URLs are intentionally rejected so they cannot be mistaken for base64.
+    if "base64" not in fields[1:] or not payload:
+        return None
+    if declared_mime and mime.lower() != declared_mime.lower():
+        return None
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    if len(raw) > _NATIVE_MEDIA_SOURCE_BYTES or len(payload.encode("ascii")) > _NATIVE_MEDIA_PAYLOAD_BYTES:
+        return None
+    return mime, payload
+
+
+def _media_error_part(name: str, reason: str) -> dict:
+    return {
+        "type": "text",
+        "text": f"[Attachment unavailable: {name} ({reason})]",
+    }
+
+
+def _bounded_blob(payload: Any) -> bool:
+    if not isinstance(payload, str) or not payload:
+        return False
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error):
+        return False
+    return len(raw) <= _NATIVE_MEDIA_SOURCE_BYTES and len(payload.encode("ascii")) <= _NATIVE_MEDIA_PAYLOAD_BYTES
+
+
+def _is_native_media_mime(mime: str) -> bool:
+    normalized = str(mime or "").split(";", 1)[0].strip().lower()
+    return normalized.startswith(("image/", "audio/", "video/")) or normalized in {
+        "application/pdf",
+        "application/octet-stream",
+    }
 
 
 def _content_parts(
@@ -3169,8 +3203,9 @@ def _content_parts(
         if kind in ("image", "image_url"):
             image = block.get("image_url") if kind == "image_url" else block
             uri = image.get("url") if isinstance(image, dict) else block.get("uri")
-            data = _data_uri(uri or "")
             name = next(names, "image")
+            declared_mime = str((image or {}).get("mediaType") or block.get("mimeType") or "") if isinstance(image, dict) else ""
+            data = _data_uri(uri or "", declared_mime=declared_mime)
             if data:
                 result.append({
                     "type": "image",
@@ -3178,19 +3213,31 @@ def _content_parts(
                     "mimeType": data[0],
                     "uri": f"attachment://{urllib.parse.quote(name)}",
                 })
+            elif isinstance(uri, str) and uri.startswith("data:"):
+                result.append(_media_error_part(name, "malformed or unsupported data URL"))
+            elif isinstance(uri, str) and uri.startswith(("http://", "https://")):
+                result.append(_media_error_part(name, "remote media bytes are unproven"))
             elif isinstance(uri, str) and _safe_resource_uri(uri, workspace):
                 result.append({
                     "type": "image",
                     "uri": uri,
                     "mimeType": block.get("mimeType") or "image/*",
                 })
+            else:
+                result.append(_media_error_part(name, "missing, unsafe, or unsupported image URI"))
             continue
         if kind in ("audio", "input_audio"):
             audio = block.get("audio") or block.get("input_audio") or {}
             uri = audio.get("url", "") if isinstance(audio, dict) else ""
             data = _data_uri(uri)
             if not data and isinstance(audio, dict) and audio.get("data"):
-                data = (f"audio/{audio.get('format') or 'mpeg'}", audio["data"])
+                raw_payload = str(audio["data"])
+                try:
+                    raw = base64.b64decode(raw_payload, validate=True)
+                except (ValueError, binascii.Error):
+                    raw = b""
+                if raw and len(raw) <= _NATIVE_MEDIA_SOURCE_BYTES and len(raw_payload.encode("ascii")) <= _NATIVE_MEDIA_PAYLOAD_BYTES:
+                    data = (f"audio/{audio.get('format') or 'mpeg'}", raw_payload)
             if data:
                 name = next(names, "audio")
                 result.append({
@@ -3201,10 +3248,20 @@ def _content_parts(
                         "blob": data[1],
                     },
                 })
+            elif uri.startswith(("http://", "https://")):
+                result.append(_media_error_part(next(names, "audio"), "remote media bytes are unproven"))
+            elif uri.startswith("data:") or (isinstance(audio, dict) and audio.get("data")):
+                result.append(_media_error_part(next(names, "audio"), "malformed or oversized audio payload"))
+            elif isinstance(audio, dict) and audio:
+                result.append(_media_error_part(next(names, "audio"), "missing, unsafe, or unsupported audio URI"))
             continue
         if kind == "resource_link":
             uri = str(block.get("uri") or "")
-            if _safe_resource_uri(uri, workspace):
+            mime = str(block.get("mimeType") or "application/octet-stream")
+            remote_native = uri.startswith(("http://", "https://")) and _is_native_media_mime(mime)
+            if remote_native:
+                result.append(_media_error_part(str(block.get("name") or "resource"), "remote native media bytes are unproven"))
+            elif _safe_resource_uri(uri, workspace):
                 result.append({
                     "type": "resource_link",
                     "uri": uri,
@@ -3212,15 +3269,24 @@ def _content_parts(
                     "mimeType": str(block.get("mimeType") or "application/octet-stream"),
                     "size": block.get("size"),
                 })
+            else:
+                result.append(_media_error_part(str(block.get("name") or "resource"), "unsupported or unsafe resource URI"))
             continue
         if kind == "resource" and isinstance(block.get("resource"), dict):
             resource = block["resource"]
             uri = str(resource.get("uri") or "")
-            if _safe_resource_uri(uri, workspace) and (
-                isinstance(resource.get("text"), str)
-                or isinstance(resource.get("blob"), str)
-            ):
+            text_value = resource.get("text")
+            blob_value = resource.get("blob")
+            has_text = "text" in resource
+            has_blob = "blob" in resource
+            valid_text = has_text and not has_blob and isinstance(text_value, str) and len(text_value.encode("utf-8")) <= _NATIVE_MEDIA_SOURCE_BYTES
+            valid_blob = has_blob and not has_text and _bounded_blob(blob_value)
+            if _safe_resource_uri(uri, workspace) and (valid_text or valid_blob):
                 result.append({"type": "resource", "resource": dict(resource)})
+            else:
+                result.append(_media_error_part(uri or "resource", "malformed, oversized, or unsafe resource"))
+        elif any(key in block for key in ("url", "uri", "data", "image_url", "input_audio")):
+            result.append(_media_error_part(str(kind or "attachment"), "unsupported media shape"))
     return result
 
 

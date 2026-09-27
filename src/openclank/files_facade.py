@@ -15,9 +15,11 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+import stat
 from typing import Any, AsyncIterator, Callable, Mapping, Protocol, Sequence
 
 from src.openclank.file_policy import FilePolicyError
+from src.openclank.macos_host_apps import MacOSHostApps, MacOSHostAppsError
 from src.openclank.resource_refs import (
     PROVIDERS,
     RESOURCE_CAPABILITIES,
@@ -1702,6 +1704,10 @@ class FilesFacade:
             failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": item_id, "outcome": "failed", "code": error.code}]}
             self._save_operation(context, operation, digest, context.policy_generation, retain_import_binding(failed))
             raise
+        # Provider receipts are normalized without transport identity; the
+        # browser uses the operation ID to reconcile a response that was lost
+        # after the provider committed the import.
+        receipt["operation_id"] = operation
         receipt["generation"] = int(context.policy_generation)
         receipt = retain_import_binding(receipt)
         self._save_operation(context, operation, digest, context.policy_generation, receipt)
@@ -2653,6 +2659,63 @@ class FilesFacade:
             "resource": resource,
             "exact": exact,
         }
+
+    async def host_applications(self, context: ProviderContext, *, resource_ref: str) -> dict[str, Any]:
+        provider, ref = self._provider_for_ref(context, resource_ref, capability="open")
+        if getattr(provider, "name", "") == "host":
+            discover = getattr(provider, "host_applications", None)
+            if not callable(discover):
+                raise FilesFacadeError("Host app discovery is unavailable", code="provider_unavailable")
+            applications = await discover(context, origin_id=ref.origin_id)
+        else:
+            path = await self._native_content_path(provider, context, ref.origin_id)
+            try:
+                applications = await MacOSHostApps().discover_async(path)
+            except MacOSHostAppsError as error:
+                raise FilesFacadeError(str(error), code=error.code) from error
+        return {"version": FACADE_VERSION, "resource_ref": resource_ref, "applications": applications}
+
+    async def open_on_host(self, context: ProviderContext, *, resource_ref: str, app_id: str) -> dict[str, Any]:
+        provider, ref = self._provider_for_ref(context, resource_ref, capability="open")
+        if getattr(provider, "name", "") == "host":
+            launch = getattr(provider, "open_on_host", None)
+            if not callable(launch):
+                raise FilesFacadeError("Host app launch is unavailable", code="provider_unavailable")
+            application = await launch(context, origin_id=ref.origin_id, app_id=app_id)
+        else:
+            path = await self._native_content_path(provider, context, ref.origin_id)
+            try:
+                application = await MacOSHostApps().launch_async(path, app_id)
+            except MacOSHostAppsError as error:
+                raise FilesFacadeError(str(error), code=error.code) from error
+        return {"version": FACADE_VERSION, "action": "open-host", "application": application}
+
+    async def _native_content_path(self, provider: FilesProvider, context: ProviderContext, origin_id: str) -> str:
+        entry = await provider.stat(context, origin_id=origin_id)
+        if entry.origin_id != origin_id or "open" not in entry.capabilities:
+            raise FilesFacadeError("resource capability is unavailable", code="resource_unavailable")
+        content_method = getattr(provider, "content", None)
+        if not callable(content_method):
+            raise FilesFacadeError("This managed resource has no native host representation", code="native_open_unsupported")
+        # Provider authorization failures must remain visible to the facade;
+        # only the returned source shape determines host-open support.
+        content = await content_method(context, origin_id=origin_id)
+        path = getattr(content, "path", None)
+        if path is None:
+            raise FilesFacadeError("This managed resource has no native host representation", code="native_open_unsupported")
+        candidate = Path(path)
+        try:
+            info = candidate.lstat()
+        except (FileNotFoundError, OSError):
+            raise FilesFacadeError("This managed resource has no native host representation", code="native_open_unsupported")
+        if not candidate.is_absolute() or stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise FilesFacadeError("This managed resource has no native host representation", code="native_open_unsupported")
+        expected = getattr(content, "expected_identity", None)
+        if expected is not None:
+            actual = (int(info.st_dev), int(info.st_ino), int(info.st_size), int(info.st_mtime_ns))
+            if tuple(expected) != actual:
+                raise FilesFacadeError("The managed resource changed before it could be opened", code="resource_unavailable")
+        return str(candidate)
 
     async def workspace_target(
         self,

@@ -54,6 +54,15 @@ function preserveRecentBudget(input: { cfg: Config.Info; model: Provider.Model }
   )
 }
 
+/** Native calculation used by selection and exposed for managed-turn checks. */
+export function preserveRecentBudgetFor(cfg: Config.Info, model: Provider.Model): number {
+  return preserveRecentBudget({ cfg, model })
+}
+
+export function tailTurnsFor(cfg: Config.Info): number {
+  return cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
+}
+
 function turns(messages: MessageV2.WithParts[]) {
   const result: Turn[] = []
   for (let i = 0; i < messages.length; i++) {
@@ -77,7 +86,7 @@ export interface Interface {
     tokens: MessageV2.Assistant["tokens"]
     model: Provider.Model
   }) => Effect.Effect<boolean>
-  readonly prune: (input: { sessionID: SessionID; agentID?: string }) => Effect.Effect<void>
+  readonly prune: (input: { sessionID: SessionID; agentID?: string; cfg?: Config.Info }) => Effect.Effect<void>
   readonly process: (input: {
     parentID: MessageID
     messages: MessageV2.WithParts[]
@@ -85,6 +94,7 @@ export interface Interface {
     auto: boolean
     overflow?: boolean
     agentID?: string
+    cfg?: Config.Info
   }) => Effect.Effect<"continue" | "stop" | "text-repeat">
   readonly create: (input: {
     sessionID: SessionID
@@ -139,7 +149,7 @@ export const layer: Layer.Layer<
       cfg: Config.Info
       model: Provider.Model
     }) {
-      const limit = input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
+      const limit = tailTurnsFor(input.cfg)
       if (limit <= 0) return { head: input.messages, tail_start_id: undefined }
       const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
       const all = turns(input.messages)
@@ -182,8 +192,9 @@ export const layer: Layer.Layer<
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: {
       sessionID: SessionID
       agentID?: string
+      cfg?: Config.Info
     }) {
-      const cfg = yield* config.get()
+      const cfg = input.cfg ?? (yield* config.get())
       if (!cfg.compaction?.prune) return
       log.info("pruning", { agentID: input.agentID ?? "main" })
 
@@ -237,6 +248,7 @@ export const layer: Layer.Layer<
       auto: boolean
       overflow?: boolean
       agentID?: string
+      cfg?: Config.Info
     }) {
       const parentIdx = input.messages.findLastIndex((m) => m.info.id === input.parentID)
       const parent = parentIdx >= 0 ? input.messages[parentIdx] : undefined
@@ -292,7 +304,7 @@ export const layer: Layer.Layer<
       const model = agent.model
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
-      const cfg = yield* config.get()
+      const cfg = input.cfg ?? (yield* config.get())
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const selected = yield* select({
         messages: history,

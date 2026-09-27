@@ -1217,6 +1217,73 @@ class MimoSupervisorPool:
         self._fsync_directory(path.parent)
         return str(value)
 
+    def _rewrite_session_map_owner(
+        self,
+        owner: str,
+        new_owner: str,
+        *,
+        path: Path | None = None,
+    ) -> None:
+        """Rewrite the owner-qualified map after an owner partition move.
+
+        The lifecycle guards are held by the caller.  A rename moves the
+        directory atomically, but the map entries carry the old owner inside
+        the JSON envelope, so the destination must be rewritten before it can
+        be admitted by a bridge for the new owner.  This is retry-safe: a
+        crash after the directory move leaves the destination in place and a
+        later reconciliation rewrites it again.
+        """
+        map_path = path or (self._runtime_home(owner) / "session-map.json")
+        if not map_path.exists():
+            return
+        mapping = __import__(
+            "src.openclank.session_map", fromlist=["OwnerSessionMap"]
+        ).OwnerSessionMap(map_path, owner)
+        try:
+            data = mapping._read_unlocked()
+            try:
+                raw_data = json.loads(map_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raw_data = None
+            if isinstance(raw_data, dict) and "version" not in raw_data:
+                # Flat v1 maps have no embedded owner; validation above is
+                # sufficient and their bytes must remain unchanged.
+                return
+            if (
+                isinstance(raw_data, dict)
+                and raw_data.get("version") == 2
+                and isinstance(raw_data.get("chats"), dict)
+            ):
+                # Preserve optional envelope fields exactly so compensation
+                # can restore the pre-move fingerprint byte-for-byte.
+                data = raw_data
+        except Exception:
+            if owner == new_owner:
+                raise
+            # A crash after the directory move and before the metadata
+            # rewrite leaves a valid destination map carrying the source
+            # owner. Accept that exact transitional state for recovery.
+            mapping = __import__(
+                "src.openclank.session_map", fromlist=["OwnerSessionMap"]
+            ).OwnerSessionMap(map_path, new_owner)
+            data = mapping._read_unlocked()
+            try:
+                raw_data = json.loads(map_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raw_data = None
+            if isinstance(raw_data, dict) and "version" not in raw_data:
+                return
+            if (
+                isinstance(raw_data, dict)
+                and raw_data.get("version") == 2
+                and isinstance(raw_data.get("chats"), dict)
+            ):
+                data = raw_data
+        for item in data.get("chats", {}).values():
+            item["owner"] = new_owner
+        mapping.owner = new_owner
+        mapping._write(data)
+
     def _owner_memory_data_dirs(self, owner: str) -> list[Path]:
         """Return only this owner's managed-engine data roots.
 
@@ -1743,6 +1810,39 @@ class MimoSupervisorPool:
                     worker,
                     owner_epoch=epoch,
                 )
+
+    async def effective_agent_settings(self, owner: str, provider_id: str, model_id: str) -> dict:
+        """Read nonsecret effective settings from the admitted native worker."""
+        lease = await self.admit_agent(owner, provider_id, model_id)
+        try:
+            return await lease.worker.managed_engine_call(
+                "_openclank/session/v1/settings/effective",
+                {"providerID": provider_id, "modelID": model_id},
+            )
+        finally:
+            await lease.release()
+
+    async def ready_effective_agent_settings(self, owner: str, provider_id: str, model_id: str) -> dict:
+        """Read settings only from an already-ready generation; never cold-start."""
+        key = self._key(owner)
+        async with self._owner_lock(key):
+            # Capture the lifecycle epoch while the owner lock is held.  The
+            # lease must release against this admission, even if account
+            # fencing advances the durable epoch immediately after publish.
+            owner_epoch = self._owner_lifecycle_epoch(key)
+            state = self._owner_state(key)
+            worker = state.active
+            if worker is None or not worker.is_alive():
+                raise SupervisorAdmissionError("SUPERVISOR_UNAVAILABLE", "owner worker is not ready", phase="readback", retryable=True)
+            if state.snapshot is None or state.snapshot.run_closure(provider_id, model_id) is None:
+                raise SupervisorAdmissionError("MODEL_NOT_PROJECTED", "selected model is not ready", phase="readback", retryable=False)
+            state.in_flight[worker] = state.in_flight.get(worker, 0) + 1
+            state.drain_events.setdefault(worker, asyncio.Event()).clear()
+        lease = AgentWorkerLease(self, key, worker, owner_epoch=owner_epoch)
+        try:
+            return await worker.managed_engine_call("_openclank/session/v1/settings/effective", {"providerID": provider_id, "modelID": model_id})
+        finally:
+            await lease.release()
 
     async def admit_agent(self, owner: str | None, provider_id: str, model_id: str) -> AgentWorkerLease:
         """Reconcile projection and acquire one generation-scoped Agent lease."""
@@ -2313,7 +2413,13 @@ class MimoSupervisorPool:
             )
         )
 
-    def _runtime_inventory_at(self, owner: str, root: Path) -> dict[str, object]:
+    def _runtime_inventory_at(
+        self,
+        owner: str,
+        root: Path,
+        *,
+        rewrite_map_owner: str | None = None,
+    ) -> dict[str, object]:
         if not os.path.lexists(root):
             return self._empty_runtime_inventory(owner)
         root_stat = root.lstat()
@@ -2340,14 +2446,48 @@ class MimoSupervisorPool:
                 metadata = path.lstat()
                 if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
                     raise RuntimeError("agent owner runtime contains a non-regular file")
-                digest = hashlib.sha256()
-                with path.open("rb") as handle:
-                    while block := handle.read(1024 * 1024):
-                        digest.update(block)
                 relative = path.relative_to(root).as_posix()
-                entries.append(["file", relative, metadata.st_size, digest.hexdigest()])
+                digest = hashlib.sha256()
+                if rewrite_map_owner is not None and relative == "session-map.json":
+                    mapping = __import__(
+                        "src.openclank.session_map", fromlist=["OwnerSessionMap"]
+                    ).OwnerSessionMap(path, owner)
+                    data = mapping._read_unlocked()
+                    try:
+                        raw_data = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        raw_data = None
+                    if isinstance(raw_data, dict) and "version" not in raw_data:
+                        with path.open("rb") as handle:
+                            raw_bytes = handle.read()
+                        digest.update(raw_bytes)
+                        byte_size = len(raw_bytes)
+                        entries.append(["file", relative, byte_size, digest.hexdigest()])
+                        file_count += 1
+                        byte_count += byte_size
+                        continue
+                    if (
+                        isinstance(raw_data, dict)
+                        and raw_data.get("version") == 2
+                        and isinstance(raw_data.get("chats"), dict)
+                    ):
+                        data = raw_data
+                    for item in data.get("chats", {}).values():
+                        item["owner"] = rewrite_map_owner
+                    encoded_map = (
+                        json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2)
+                        + "\n"
+                    ).encode("utf-8")
+                    digest.update(encoded_map)
+                    byte_size = len(encoded_map)
+                else:
+                    with path.open("rb") as handle:
+                        while block := handle.read(1024 * 1024):
+                            digest.update(block)
+                    byte_size = metadata.st_size
+                entries.append(["file", relative, byte_size, digest.hexdigest()])
                 file_count += 1
-                byte_count += metadata.st_size
+                byte_count += byte_size
         encoded = json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         return {
             "schema_version": 1,
@@ -2463,6 +2603,15 @@ class MimoSupervisorPool:
         target = self.owner_lifecycle_inventory(new_key)
         if bool(target["runtime"]["present"]) or int(target["permission_grants"]["count"]):
             raise RuntimeError("target Agent owner already contains durable state")
+        source_runtime = source["runtime"]
+        if source_runtime["present"] and (self._runtime_home(old_key) / "session-map.json").exists():
+            migrated = self._runtime_inventory_at(
+                old_key,
+                self._runtime_home(old_key),
+                rewrite_map_owner=new_key,
+            )
+            source_runtime["migrated_fingerprint"] = migrated["fingerprint"]
+            source_runtime["migrated_bytes"] = migrated["bytes"]
         return {
             "schema_version": 1,
             "source": source,
@@ -2535,7 +2684,25 @@ class MimoSupervisorPool:
             return "empty", source, target
         if self._runtime_inventory_matches(source, expected) and not target["present"]:
             return "source", source, target
+        if (
+            source["present"]
+            and not target["present"]
+            and source.get("fingerprint") == expected.get("migrated_fingerprint")
+            and source.get("bytes") == expected.get("migrated_bytes")
+        ):
+            # Compensation can be interrupted after moving the destination
+            # back but before restoring the source owner in the map.
+            return "source_migrated", source, target
         if not source["present"] and self._runtime_inventory_matches(target, expected):
+            return "target", source, target
+        if (
+            not source["present"]
+            and target["present"]
+            and target.get("fingerprint") == expected.get("migrated_fingerprint")
+            and target.get("bytes") == expected.get("migrated_bytes")
+        ):
+            # A completed rename intentionally changes only the deterministic
+            # session-map owner projection; the manifest pins its exact hash.
             return "target", source, target
         raise RuntimeError("Agent runtime state changed after preflight")
 
@@ -2572,6 +2739,10 @@ class MimoSupervisorPool:
                         new_key,
                         dict(expected.get("runtime") or {}),
                     )
+                    if runtime_position == "source_migrated":
+                        raise RuntimeError(
+                            "Agent runtime rename is awaiting compensation"
+                        )
                     grant_manifest = {
                         "schema_version": 1,
                         "source": dict(expected.get("permission_grants") or {}),
@@ -2591,18 +2762,51 @@ class MimoSupervisorPool:
                         new_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                         os.replace(old_path, new_path)
                         self._fsync_directory(new_path.parent)
+                        self._rewrite_session_map_owner(
+                            old_key,
+                            new_key,
+                            path=new_path / "session-map.json",
+                        )
                         runtime_state = "applied"
                     elif runtime_position == "target":
+                        self._rewrite_session_map_owner(
+                            old_key,
+                            new_key,
+                            path=self._runtime_home(new_key) / "session-map.json",
+                        )
                         runtime_state = "already_applied"
                     else:
                         runtime_state = "empty"
-                    runtime_position, runtime_source, runtime_target = self._runtime_owner_position(
-                        old_key,
-                        new_key,
-                        dict(expected.get("runtime") or {}),
-                    )
-                    if runtime_position not in {"target", "empty"}:
-                        raise RuntimeError("Agent runtime owner rename did not converge")
+                    if runtime_state in {"applied", "already_applied"}:
+                        runtime_target = self._runtime_inventory_at(
+                            new_key, self._runtime_home(new_key)
+                        )
+                        expected_fingerprint = expected["runtime"].get(
+                            "migrated_fingerprint"
+                        ) or expected["runtime"].get("fingerprint")
+                        expected_bytes = expected["runtime"].get(
+                            "migrated_bytes"
+                        ) or expected["runtime"].get("bytes")
+                        if (
+                            not runtime_target["present"]
+                            or (
+                                runtime_target["fingerprint"] != expected_fingerprint
+                                or runtime_target["bytes"] != expected_bytes
+                            )
+                        ):
+                            raise RuntimeError("Agent runtime owner rename did not converge")
+                        runtime_position = "target"
+                        runtime_source = self._runtime_inventory_at(
+                            old_key, self._runtime_home(old_key)
+                        )
+                    else:
+                        runtime_position = "empty"
+                        runtime_source = self._runtime_inventory_at(
+                            old_key, self._runtime_home(old_key)
+                        )
+                        runtime_target = self._runtime_inventory_at(
+                            new_key, self._runtime_home(new_key)
+                        )
                     if self._initial_owner == old_key:
                         self._initial_owner = new_key
                     if self._host_provider_owner == old_key:
@@ -2661,6 +2865,18 @@ class MimoSupervisorPool:
                     if runtime_position == "target":
                         os.replace(self._runtime_home(new_key), self._runtime_home(old_key))
                         self._fsync_directory(self._owners_root)
+                        self._rewrite_session_map_owner(
+                            new_key,
+                            old_key,
+                            path=self._runtime_home(old_key) / "session-map.json",
+                        )
+                        runtime_state = "compensated"
+                    elif runtime_position == "source_migrated":
+                        self._rewrite_session_map_owner(
+                            new_key,
+                            old_key,
+                            path=self._runtime_home(old_key) / "session-map.json",
+                        )
                         runtime_state = "compensated"
                     elif runtime_position == "source":
                         runtime_state = "already_compensated"

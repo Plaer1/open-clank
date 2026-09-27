@@ -27,17 +27,14 @@ from services.search.service import SearchService, SearchResponse
 def test_search_returns_structured_results(monkeypatch):
     calls = {}
 
-    def fake_search(query, max_pages=3, return_sources=False, **kwargs):
-        calls["query"] = query
-        calls["max_pages"] = max_pages
-        calls["return_sources"] = return_sources
-        calls["kwargs"] = kwargs
-        sources = [{"url": "https://example.com", "title": "Example"}]
-        return ("context text", sources) if return_sources else "context text"
+    def fake_provider(_name, query, count, *_args):
+        calls.update(query=query, count=count)
+        return [{"url": "https://example.com", "title": "Example"}]
 
-    monkeypatch.setattr(search_service, "comprehensive_web_search", fake_search)
+    monkeypatch.setattr(search_service, "_call_provider", fake_provider)
+    monkeypatch.setattr(search_service, "_get_search_settings", lambda: {"search_provider": "searxng"})
 
-    svc = SearchService(default_depth=2)
+    svc = SearchService(default_depth=2, fetch_content=False)
     resp = asyncio.run(svc.search("python async patterns"))
 
     assert isinstance(resp, SearchResponse)
@@ -45,9 +42,4 @@ def test_search_returns_structured_results(monkeypatch):
     assert resp.results[0].url == "https://example.com"
     assert resp.results[0].title == "Example"
 
-    # Called with the real param (max_pages, not max_results) and asked for the
-    # structured source list rather than the context string.
-    assert calls["return_sources"] is True
-    assert calls["max_pages"] == 20  # 10 * depth(2)
-    assert "max_results" not in calls["kwargs"]
-    assert "fetch_content" not in calls["kwargs"]
+    assert calls["count"] == 20

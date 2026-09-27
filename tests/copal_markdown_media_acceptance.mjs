@@ -12,7 +12,7 @@ fixture.state.docs=[origin,{id:'photo',name:'Notes/photo one.png',kind:'asset'},
 {id:'audio',name:'Notes/voice.wav',kind:'asset'},{id:'video',name:'Notes/clip.webm',kind:'asset'},{id:'pdf',name:'Notes/manual.pdf',kind:'asset'},
 {id:'guide',name:'Notes/Guide.md',kind:'markdown',text:'# Kept\\nWanted content\\n# Omitted\\nOther content'},
 {id:'cycle',name:'Notes/Cycle.md',kind:'markdown',text:'![[Cycle]]'}];
-window.render=text=>document.getElementById('render').replaceChildren(fixture.renderMarkdown(text,new Set(['origin'])));
+window.render=text=>document.getElementById('render').replaceChildren(fixture.renderMarkdown(text,new Set(['origin']),origin));
 </script>`;
 const delivered = [];
 let retryAvailable = false;

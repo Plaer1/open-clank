@@ -344,10 +344,16 @@ test('scene owner: one loop per id, dispose cancels frames, reduced motion paint
   owner.start();
   assert.equal(countSceneOwners(host), 1);
   assert.equal(getSceneOwner('surface-a', host), owner);
-  // Reduced motion: start paints once and schedules no continuous frame.
+  // Reduced motion: start schedules one static paint, never a loop.
+  assert.equal(paints.length, 0);
+  assert.equal(win.__frames.length, 1);
+  win.__pump();
   assert.equal(paints.length, 1);
   assert.equal(win.__frames.length, 0);
   owner.invalidate();
+  assert.equal(paints.length, 1);
+  assert.equal(win.__frames.length, 1);
+  win.__pump();
   assert.equal(paints.length, 2);
 
   // A second owner with the same id replaces the first without stacking loops.
@@ -428,6 +434,92 @@ test('consumer: no-WebGL mount uses Canvas2D and keeps scene state across update
   assert.deepEqual(after.documentState, before.documentState);
   consumer.dispose();
   assert.equal(consumer.disposed, true);
+  assert.equal(countSceneOwners(host), 0);
+});
+
+test('consumer: reduced-motion construction defers synchronous draw until consumer exists', () => {
+  const host = {};
+  const win = mockWindow({ reduced: true });
+  const doc = mockDocument(false);
+  const mount = { children: [], appendChild(c) { this.children.push(c); c.parentNode = this; } };
+  let consumer = null;
+  let paints = 0;
+  assert.doesNotThrow(() => {
+    consumer = createGraphicsConsumer({
+      mount,
+      id: 'reduced-construction',
+      win,
+      doc,
+      ownerHost: host,
+      draw: ({ backend, batch }) => {
+        paints += 1;
+        if (consumer && paints === 1) consumer.resize(32, 18, 1);
+        batch.rect(0, 0, 4, 4, '#fff');
+        backend.flush?.();
+      },
+    });
+  });
+  assert.equal(paints, 0);
+  assert.equal(win.__frames.length, 1);
+  win.__pump();
+  assert.equal(paints, 1);
+  assert.equal(win.__frames.length, 1);
+  win.__pump();
+  assert.equal(paints, 2);
+  assert.equal(win.__frames.length, 0);
+  consumer.dispose();
+  assert.equal(countSceneOwners(host), 0);
+});
+
+test('scene owner: reduced invalidation during paint coalesces one follow-up', () => {
+  const host = {};
+  const win = mockWindow({ reduced: true });
+  const doc = mockDocument(false);
+  let owner;
+  let paints = 0;
+  owner = createSceneOwner({
+    id: 'reduced-coalesced-follow-up',
+    host,
+    win,
+    doc,
+    paint: () => {
+      paints += 1;
+      if (paints === 1) {
+        owner.invalidate();
+        owner.invalidate();
+      }
+    },
+  });
+  owner.start();
+  win.__pump();
+  assert.equal(paints, 1);
+  assert.equal(win.__frames.length, 1);
+  win.__pump();
+  assert.equal(paints, 2);
+  assert.equal(win.__frames.length, 0);
+  owner.dispose();
+});
+
+test('scene owner: reduced-motion microtask fallback is cancellable without RAF', async () => {
+  const host = {};
+  const win = mockWindow({ reduced: true });
+  delete win.requestAnimationFrame;
+  delete win.cancelAnimationFrame;
+  const doc = mockDocument(false);
+  let paints = 0;
+  const owner = createSceneOwner({
+    id: 'reduced-no-raf',
+    host,
+    win,
+    doc,
+    paint: () => { paints += 1; },
+  });
+  owner.start();
+  owner.invalidate();
+  assert.equal(paints, 0);
+  owner.dispose();
+  await Promise.resolve();
+  assert.equal(paints, 0);
   assert.equal(countSceneOwners(host), 0);
 });
 

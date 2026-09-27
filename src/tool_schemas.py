@@ -86,6 +86,9 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
+                    "provider": {"type": "string", "description": "Optional explicitly selected provider"},
+                    "mode": {"type": "string", "enum": ["results", "read", "answer"], "description": "Search operation mode"},
+                    "intent": {"type": "string", "enum": ["web", "image"], "description": "Search intent; image returns image sources with page/original/thumbnail URLs"},
                     "time_filter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Optional freshness filter for news/latest/today queries"}
                 },
                 "required": ["query"]
@@ -545,7 +548,7 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "action": {"type": "string", "enum": ["toggle", "open_panel", "open_email_reply", "switch_model", "set_theme", "create_theme", "get_toggles"],
                                "description": "The UI action. Use set_theme for presets, create_theme to build a custom theme with any hex colors"},
-                    "name": {"type": "string", "description": "For toggle: web, bash, research, incognito, document_editor (aliases: shell, search, deepresearch, documents). For open_panel: documents, gallery, email, sessions, notes, brain/memories, skills, settings, cookbook. For open_email_reply: email UID. For set_theme: a preset theme name. For create_theme: the custom theme name."},
+                    "name": {"type": "string", "description": "For toggle: web, bash, research, incognito, document_editor (aliases: shell, search, deepresearch, documents). For open_panel: documents, gallery, email, sessions, notes, brain/memories, skills, settings, cookbook, usage/stats. For open_email_reply: email UID. For set_theme: a preset theme name. For create_theme: the custom theme name."},
                     "value": {"type": "string", "description": "Value: on/off for toggle, model name for switch_model, theme name for set_theme, or folder for open_email_reply"},
                     "uid": {"type": "string", "description": "Email UID for open_email_reply"},
                     "folder": {"type": "string", "description": "Email folder for open_email_reply (default INBOX)"},
@@ -1367,6 +1370,27 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_desktop",
+            "description": "Capture one opted-in macOS display, visible window, or bounded region for the current task. The result is retained through Files and never exposes a host path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "enum": ["display", "window", "region"]},
+                    "action": {"type": "string", "enum": ["capture", "correct"]},
+                    "original": {"type": "object", "description": "Immutable Files resource returned by an earlier capture"},
+                    "text": {"type": "string", "maxLength": 100000},
+                    "boxes": {"type": "array", "maxItems": 10000},
+                    "display": {"type": "integer", "minimum": 1, "maximum": 32},
+                    "window_id": {"type": "integer", "minimum": 1},
+                    "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4, "description": "[x, y, width, height]; x/y may be negative, width/height must be positive"}
+                },
+                "required": ["target"]
+            }
+        }
+    },
 ]
 
 # Copal is intentionally a single native read tool with an action-discriminated
@@ -1631,8 +1655,18 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         # advertises time_filter and the executor parses {"query","time_filter"},
         # but a bare query string dropped it. Mirrors the read_file JSON idiom.
         tf = args.get("time_filter")
-        if content and isinstance(tf, str) and tf in ("day", "week", "month", "year"):
-            content = json.dumps({"query": content, "time_filter": tf})
+        valid_time_filter = isinstance(tf, str) and tf in ("day", "week", "month", "year")
+        if content and (valid_time_filter or args.get("provider") or args.get("mode") or args.get("intent")):
+            payload = {"query": content}
+            if isinstance(tf, str) and tf in ("day", "week", "month", "year"):
+                payload["time_filter"] = tf
+            if args.get("provider"):
+                payload["provider"] = args["provider"]
+            if args.get("mode"):
+                payload["mode"] = args["mode"]
+            if args.get("intent") in ("web", "image"):
+                payload["intent"] = args["intent"]
+            content = json.dumps(payload)
     elif tool_type == "read_file":
         # Plain path (back-compat) unless a line range is requested → JSON.
         if args.get("offset") or args.get("limit"):

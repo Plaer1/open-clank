@@ -8,11 +8,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7777').replace(/\/$/, '');
+const explicitBase = (process.argv[2] || '').replace(/\/$/, '');
 const outputDir = process.argv[3] || '/tmp/openclank-i18n-browser';
 fs.mkdirSync(outputDir, { recursive: true });
 
-const port = await new Promise((resolve, reject) => {
+const freePort = () => new Promise((resolve, reject) => {
   const server = net.createServer();
   server.once('error', reject);
   server.listen(0, '127.0.0.1', () => {
@@ -20,7 +20,18 @@ const port = await new Promise((resolve, reject) => {
     server.close(() => resolve(selected));
   });
 });
-const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openclank-i18n-'));
+
+async function stopProcess(child) {
+  if (!child || child.exitCode != null) return;
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  child.kill('SIGTERM');
+  await Promise.race([exited, delay(3000)]);
+  if (child.exitCode == null) {
+    child.kill('SIGKILL');
+    await Promise.race([exited, delay(1000)]);
+  }
+}
+
 function chromeExecutable() {
   const candidates = [
     process.env.OPENCLANK_CHROME_BIN,
@@ -37,6 +48,36 @@ function chromeExecutable() {
 }
 const chrome = chromeExecutable();
 assert(chrome, 'Chrome/Chromium executable required; set OPENCLANK_CHROME_BIN or CHROME_BIN');
+let staticServer;
+let base = explicitBase;
+if (!base) {
+  const staticPort = await freePort();
+  const localPython = path.join(process.cwd(), 'venv', 'bin', 'python');
+  const python = process.env.PYTHON || (fs.existsSync(localPython) ? localPython : 'python3');
+  staticServer = spawn(python, ['-m', 'http.server', String(staticPort), '--bind', '127.0.0.1'], {
+    cwd: process.cwd(),
+    stdio: 'ignore',
+  });
+  base = `http://127.0.0.1:${staticPort}`;
+  let ready = false;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (staticServer.exitCode != null) break;
+    try {
+      if ((await fetch(`${base}/static/login.html`)).ok) {
+        ready = true;
+        break;
+      }
+    } catch {}
+    await delay(25);
+  }
+  if (!ready) {
+    await stopProcess(staticServer);
+    throw new Error('Disposable i18n static server did not become ready');
+  }
+}
+
+const port = await freePort();
+const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openclank-i18n-'));
 const chromium = spawn(chrome, [
   '--headless=new', '--no-sandbox', '--disable-gpu',
   `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, 'about:blank',
@@ -163,12 +204,18 @@ try {
   fs.writeFileSync(path.join(outputDir, 'japanese-interface.png'), Buffer.from(capture.data, 'base64'));
 
   await command('Page.navigate', { url: `${base}/static/login.html?__lang=zh-TW&__fresh=1` });
-  await waitFor("window.openClankI18n && document.readyState === 'complete'", 'Traditional Chinese locale page');
+  await waitFor("location.pathname === '/static/login.html' && location.search.includes('__lang=zh-TW') && document.readyState === 'complete'", 'Traditional Chinese locale page navigation');
   await new Promise(resolve => setTimeout(resolve, 400));
   assert.equal(await evaluate("window.openClankI18n.locale"), 'en');
   assert.equal(await evaluate("Boolean(document.querySelector('.i18n-offer'))"), true);
   assert.equal(await evaluate("document.querySelector('.i18n-offer').lang"), 'zh-Hant');
   await evaluate("document.querySelector('.i18n-offer [data-decline]').click()");
+
+  // The login page exposes the i18n facade before its asynchronous catalog
+  // registry has finished loading. Wait for the registry itself before
+  // checking aliases; this keeps the assertion about catalog semantics while
+  // avoiding a page-load/module-load race.
+  await waitFor("window.openClankI18n && window.openClankI18n.locales && window.openClankI18n.locales['en-CA'] && window.openClankI18n.locales.fr && window.openClankI18n.locales.ms", 'complete i18n catalog');
 
   // French-backed “Canadian English” display alias: selection label is the
   // joke, catalog bytes are French, html lang is French, and real fr remains.
@@ -228,4 +275,5 @@ try {
     fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     if (fs.existsSync(profile)) await delay(100);
   }
+  await stopProcess(staticServer);
 }

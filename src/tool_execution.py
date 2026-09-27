@@ -678,6 +678,7 @@ async def _direct_fallback(
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
     authority_workspace_id: Optional[str] = None,
+    files_importer: Optional[Callable[..., Any]] = None,
 ) -> Optional[Dict]:
     from src.shell_policy import minimal_shell_env
 
@@ -707,6 +708,7 @@ async def _direct_fallback(
             "workspace": agent_cwd(),
             "authority_workspace_id": str(authority_workspace_id or ""),
             "history_context": history_context,
+            "files_importer": files_importer,
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -714,7 +716,11 @@ async def _direct_fallback(
             return await TOOL_HANDLERS[tool](content, ctx)
 
     except Exception as e:
-        return {"error": f"{tool}: {e}", "exit_code": 1}
+        code = getattr(e, "code", None)
+        result = {"error": f"{tool}: {e}", "exit_code": 1}
+        if isinstance(code, str) and code:
+            result["code"] = code
+        return result
 
     return None
 
@@ -749,6 +755,7 @@ async def execute_tool_block(
     tool_policy: Optional[Any] = None,
     root_operation_id: Optional[str] = None,
     provider_grant_id: Optional[str] = None,
+    files_importer: Optional[Callable[..., Any]] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -792,6 +799,7 @@ async def execute_tool_block(
             copal_workspace=copal_workspace,
             root_operation_id=root_operation_id,
             provider_grant_id=provider_grant_id,
+            files_importer=files_importer,
         )
         return output
     finally:
@@ -809,6 +817,7 @@ async def _execute_tool_block_impl(
     copal_workspace: Optional[str] = None,
     root_operation_id: Optional[str] = None,
     provider_grant_id: Optional[str] = None,
+    files_importer: Optional[Callable[..., Any]] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1343,7 +1352,11 @@ async def _execute_tool_block_impl(
     elif tool in dynamic_handlers:
         first_line = content.split(chr(10))[0][:80]
         desc = f"registry: {tool} {first_line}".strip()
-        res = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        res = await _direct_fallback(
+            tool, content, progress_cb=progress_cb, session_id=session_id,
+            owner=owner, authority_workspace_id=authority_workspace_id,
+            files_importer=files_importer,
+        )
 
         if isinstance(res, tuple):
             desc, result = res

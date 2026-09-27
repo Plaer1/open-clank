@@ -80,6 +80,7 @@ _PURPOSES = frozenset(
         "utility",
         "memory",
         "research",
+        "search",
         "tasks",
         "vision",
         "images",
@@ -95,6 +96,7 @@ _PURPOSE_OPERATIONS = {
     # falls back to the separate Vision purpose.
     "memory": frozenset({"chat.complete", "vision.describe"}),
     "research": frozenset({"chat.stream", "chat.complete"}),
+    "search": frozenset({"web.search"}),
     "tasks": frozenset({"chat.stream", "chat.complete"}),
     "vision": frozenset({"vision.describe", "chat.stream", "chat.complete"}),
     "images": frozenset(

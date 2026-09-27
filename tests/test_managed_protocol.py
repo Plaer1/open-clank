@@ -77,10 +77,10 @@ def test_exact_managed_capability_declaration_is_required():
 
 
 def test_generated_contract_preserves_all_methods_and_operations():
-    assert len(client_capability_offer()["methods"]) == 23
-    assert len(MODEL_OPERATIONS) == 15
+    assert len(client_capability_offer()["methods"]) == 25
+    assert len(MODEL_OPERATIONS) == 16
     assert "chat.stream" in MODEL_OPERATIONS
-    assert sum(direction == "host_to_engine" for direction in METHOD_DIRECTIONS.values()) == 8
+    assert sum(direction == "host_to_engine" for direction in METHOD_DIRECTIONS.values()) == 10
     assert sum(direction == "engine_to_host" for direction in METHOD_DIRECTIONS.values()) == 15
 
 
@@ -291,3 +291,41 @@ async def test_acp_initialize_rejects_unmanaged_binary(monkeypatch):
     monkeypatch.setattr(client, "_send_request", fake_send)
     with pytest.raises(ManagedProtocolError):
         await client.initialize()
+
+
+@pytest.mark.asyncio
+async def test_acp_managed_operation_cancellation_emits_bound_cancel(monkeypatch):
+    client = ACPClient(asyncio.StreamReader(), _Writer())
+    seen = []
+
+    async def fake_send(method, params):
+        seen.append((method, params))
+        if method.endswith("/execute"):
+            raise asyncio.CancelledError()
+        assert method.endswith("/cancel")
+        return {"operationID": "pending", "rootOperationID": params["rootOperationID"], "state": "cancelled"}
+
+    monkeypatch.setattr(client, "_send_request", fake_send)
+    with pytest.raises(asyncio.CancelledError):
+        await client.execute_managed_operation({"rootOperationID": "root-search", "idempotencyKey": "operation-id-123456"})
+    assert seen == [
+        ("_openclank/operations/v1/execute", {"rootOperationID": "root-search", "idempotencyKey": "operation-id-123456"}),
+        ("_openclank/operations/v1/cancel", {"rootOperationID": "root-search", "idempotencyKey": "operation-id-123456"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_acp_managed_operation_cancellation_notification_is_bounded(monkeypatch):
+    client = ACPClient(asyncio.StreamReader(), _Writer())
+
+    async def fake_send(method, _params):
+        if method.endswith("/execute"):
+            raise asyncio.CancelledError()
+        await asyncio.sleep(10)
+        return {}
+
+    monkeypatch.setattr(client, "_send_request", fake_send)
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(asyncio.CancelledError):
+        await client.execute_managed_operation({"rootOperationID": "root-search", "idempotencyKey": "operation-id-123456"})
+    assert asyncio.get_running_loop().time() - started < 1

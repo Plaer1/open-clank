@@ -22,7 +22,7 @@ import { appletPath, updateAppletRoute, resolveAppletLocation } from './appletRo
 import { registerAdapter, createCodeMirrorContextAdapter } from './custom-context-menu.js';
 import { styledConfirm, styledPrompt } from './ui.js';
 
-const VIEWS = ['notes', 'wiki', 'timeline', 'graph', 'treehouse', 'todo'];
+const VIEWS = ['notes', 'timeline', 'graph', 'treehouse', 'todo'];
 // Mind is not a separate destination.  Its label is kept only as the legacy
 // deep-link alias text; Graph owns both views and Mind opens structure mode.
 const LABELS = { notes: 'Editor', wiki: 'Wiki', timeline: 'Timeline', galaxy: 'Galaxy', graph: 'Graph', mind: 'Graph', bases: 'Bases', treehouse: 'TreeHouse', todo: 'Meatbag Tasks' };
@@ -298,6 +298,7 @@ async function open(view = 'notes', push = true) {
     return;
   }
   const requestedView = String(view || 'notes').toLowerCase();
+  const legacyWikiHome = requestedView === 'wiki';
   const openingBases = requestedView === 'bases' || requestedView === 'base';
   view = resolveView(view);
   const scope = saveScope();
@@ -731,7 +732,11 @@ registerAppDestination('files', () => {
   else setStatus('Files is still loading.', true);
 });
 registerAppDestination('editor', () => openDocument(state.selected || state.docs[0]?.id || '', 'notes'));
-registerAppDestination('wiki', () => { ensureViewWindow('wiki'); activateView('wiki'); });
+registerAppDestination('wiki', ({ panel, doc, event } = {}) => {
+  const target = doc || panel || state.selected || state.docs.find((item) => item.kind === 'wiki')?.id || '';
+  if (target) openDocument(target, 'wiki', true, { intent:navigationIntentFromEvent(event) });
+  else open('editor');
+});
 registerAppDestination('graph', () => { ensureViewWindow('graph'); activateView('graph'); });
 registerAppDestination('galaxy', () => { ensureViewWindow('graph'); activateView('graph'); });
 registerAppDestination('treehouse', () => { ensureViewWindow('treehouse'); activateView('treehouse'); });
@@ -965,6 +970,27 @@ async function makeEditableWikiCopy(doc) {
   setStatus(`Created editable Wiki copy ${name}.`);
 }
 
+async function createWikiArticle() {
+  const name = await styledPrompt('Choose the name shown in the Editor.', { title:'New Wiki article', defaultValue:'Untitled article', confirmText:'Create', maxLength:160 });
+  if (!name) return;
+  const result = await api('/documents', { method:'POST', body:JSON.stringify({ name, kind:'wiki', content:'', corpus:'wiki' }) });
+  await loadDocuments(false);
+  if (result?.doc?.id) openDocument(result.doc.id, 'wiki');
+}
+
+function importWikiMemesFromEditor() {
+  const input = h('input', { type:'file', accept:`.memes,${MEMES_MIME}`, hidden:true, 'aria-label':'Import .memes file' });
+  input.addEventListener('change', () => {
+    const file = input.files?.[0]; input.remove();
+    if (file) previewWikiMemes(file).catch(error => setStatus(error.message, true));
+  }, { once:true });
+  document.body.append(input); input.click();
+}
+
+function exportWikiMemesFromEditor() {
+  return exportWikiMemes().catch(error => setStatus(error.message, true));
+}
+
 async function previewWikiMemes(file) {
   if (!file || (!file.name.toLowerCase().endsWith('.memes') && file.type !== MEMES_MIME)) {
     setStatus('Choose a .memes file.', true); return;
@@ -1114,6 +1140,9 @@ function mindModeState() {
 
 function resolveView(view, mode = null) {
   if (view === 'editor') view = 'notes';
+  // Wiki is a document type owned by the shared Editor. Keep the legacy view
+  // name as a route alias, but never create or restore a second window.
+  if (view === 'wiki') view = 'notes';
   // Bases is an Editor leaf now. Keep the old URL as a compatibility alias so
   // bookmarks open the selected Base in the shared Editor workspace.
   if (view === 'bases') view = 'notes';
@@ -3000,6 +3029,9 @@ notesFeature = createNotesFeature({
   baseAdapter:createBaseSheetAdapter(),
   makeEditableWikiCopy,
   previewWikiConversion,
+  createWikiArticle,
+  importWikiMemes:importWikiMemesFromEditor,
+  exportWikiMemes:exportWikiMemesFromEditor,
 });
 
 function renderTreeHouse() {
@@ -3186,7 +3218,7 @@ function ensureViewWindow(view) {
   const windowApi = createCopalWindow({
     id:modalId,
     label:LABELS[view],
-    subtitle:'Copal · canonical Redb',
+    subtitle:'Open Clank',
     minWidth:view === 'timeline' ? 720 : 560,
     minHeight:420,
     sizeKey:copalStorageKey(`odysseus-copal-${view}-window-size`),

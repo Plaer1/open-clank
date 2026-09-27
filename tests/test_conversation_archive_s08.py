@@ -1024,6 +1024,7 @@ def test_manual_compact_routes_refuse_persistent_acp(monkeypatch):
     from fastapi.testclient import TestClient
 
     import routes.history.history_routes as history_routes
+    import src.auth_helpers as auth_helpers
     import routes.session_routes as session_routes
     from src.context_compactor import session_has_persistent_engine
 
@@ -1106,3 +1107,112 @@ def test_manual_compact_routes_refuse_persistent_acp(monkeypatch):
         assert response.status_code == 409, f"{label} must refuse ACP compact"
         assert "Persistent ACP" in response.text, label
         assert len(manager.session.history) == 8, label
+
+
+def test_manual_compact_preserves_leading_system_persona_prefix():
+    from routes.history.history_routes import _leading_system_prefix
+
+    persona = ChatMessage(role="system", content="You are Odysseus")
+    policy = ChatMessage(role="system", content="Use the owner policy")
+    user = ChatMessage(role="user", content="start")
+    assert _leading_system_prefix([persona, policy, user]) == [persona, policy]
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_route_preserves_system_prefix_before_short_history(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import routes.history.history_routes as history_routes
+    import src.auth_helpers as auth_helpers
+    import src.agent_runs as agent_runs
+    import src.model_context as model_context
+    import src.openclank.modality_facade as modality_facade
+
+    system = [ChatMessage(role="system", content=f"policy-{i}") for i in range(4)]
+    short_conversation = [ChatMessage(role="user", content="old"), ChatMessage(role="assistant", content="recent")]
+    session = SimpleNamespace(
+        id="finite-prefix",
+        name="Finite",
+        endpoint_url="http://localhost:11434",
+        model="llama",
+        headers={},
+        owner="alice",
+        history=system + short_conversation,
+        message_count=6,
+        get_context_messages=lambda: [{"role": "user", "content": "x"}] * 6,
+    )
+
+    class Manager:
+        def __init__(self):
+            self.session = session
+            self.saved = None
+
+        def get_session(self, session_id):
+            return self.session
+
+        def replace_messages(self, session_id, messages):
+            self.saved = list(messages)
+            return True
+
+        def save_sessions(self):
+            pass
+
+    manager = Manager()
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *_args: None)
+    monkeypatch.setattr(auth_helpers, "effective_user", lambda _request: "alice")
+
+    async def prepare_context_mutation(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(history_routes, "_prepare_context_mutation", prepare_context_mutation)
+    monkeypatch.setattr(agent_runs, "is_active", lambda _session_id: False)
+    monkeypatch.setattr(model_context, "get_context_length", lambda *_args: 1000)
+    monkeypatch.setattr(model_context, "estimate_tokens", lambda _messages: 900)
+
+    completion_inputs = []
+
+    async def complete_text(**_kwargs):
+        completion_inputs.append(_kwargs["messages"])
+        return "preserved summary"
+
+    monkeypatch.setattr(modality_facade, "complete_text", complete_text)
+    app = FastAPI()
+    app.include_router(history_routes.setup_history_routes(manager))
+    response = TestClient(app).post("/api/session/finite-prefix/compact")
+
+    assert response.status_code == 200
+    assert "Not enough messages" in response.json()["message"]
+    assert manager.saved is None
+
+    manager.session.history = system + [
+        ChatMessage(role="user", content=f"turn-{i}") for i in range(6)
+    ]
+    manager.session.message_count = 10
+    response = TestClient(app).post("/api/session/finite-prefix/compact")
+    assert response.status_code == 200
+    assert [item.content for item in manager.saved[:4]] == [f"policy-{i}" for i in range(4)]
+    assert manager.saved[4].role == "system"
+    assert "preserved summary" in manager.saved[4].content
+
+    manager.session.history = system + [
+        ChatMessage(role="user", content=f"exact-{i}") for i in range(4)
+    ]
+    manager.saved = None
+    response = TestClient(app).post("/api/session/finite-prefix/compact")
+    assert response.status_code == 200
+    assert "Not enough messages" in response.json()["message"]
+    assert manager.saved is None
+
+    manager.session.history = system + [
+        ChatMessage(role="system", content="[Conversation summary — earlier messages were compacted]\nold summary", metadata={"compacted": True}),
+        *[ChatMessage(role="user", content=f"repeat-{i}") for i in range(5)],
+    ]
+    manager.saved = None
+    response = TestClient(app).post("/api/session/finite-prefix/compact")
+    assert response.status_code == 200
+    assert len(completion_inputs) == 2
+    assert "old summary" in completion_inputs[-1][1]["content"]
+    assert sum(1 for item in manager.saved if "[Conversation summary" in item.content) == 1

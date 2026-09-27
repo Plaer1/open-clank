@@ -284,7 +284,7 @@ class _CappedFetch:
 
 
 def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 5,
-                    max_bytes: int = None) -> "_CappedFetch":
+                    max_bytes: int = None, route=None) -> "_CappedFetch":
     """Capped streaming GET with SSRF-guarded, DNS-pinned manual redirects.
 
     Each hop is resolved once, validated as public, and then the actual TCP
@@ -294,6 +294,8 @@ def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 
     cap = min(max_bytes or WEB_FETCH_SOFT_MAX_BYTES, WEB_FETCH_HARD_MAX_BYTES)
     current = url
     for _ in range(max_redirects + 1):
+        if route is not None:
+            route.remaining_timeout()
         ips = _resolve_public_ips(current)
 
         # Force identity transfer-encoding. With gzip/deflate the wire bytes
@@ -312,6 +314,8 @@ def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 
         ) as client:
             with client.stream("GET", current) as response:
                 if response.status_code in (301, 302, 303, 307, 308):
+                    if route is not None:
+                        route.remaining_timeout()
                     location = response.headers.get("location")
                     if not location:
                         return _CappedFetch(response.status_code, response.headers, b"",
@@ -479,7 +483,7 @@ def _empty_result(url: str, error: str = "") -> dict:
 # Main content fetcher
 # ----------------------------------------------------------------------
 def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
-                          max_bytes: int = None) -> dict:
+                          max_bytes: int = None, route=None) -> dict:
     """Fetch and extract meaningful content from a webpage with caching.
 
     ``max_bytes`` raises the download budget per call (clamped to the hard
@@ -487,6 +491,8 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
     carries ``truncated``/``fetched_bytes``/``total_bytes`` so callers can
     tell the model the content is partial (#3812).
     """
+    if route is not None:
+        timeout = route.remaining_timeout()
     effective_cap = min(max_bytes or WEB_FETCH_SOFT_MAX_BYTES, WEB_FETCH_HARD_MAX_BYTES)
     # The cap is part of the cache identity: a truncated soft-cap fetch must
     # not be served to a later full-budget request for the same URL.
@@ -506,7 +512,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
                 cache_file.unlink(missing_ok=True)
                 content_cache_index.pop(cache_key, None)
         except Exception as e:
-            logger.warning(f"Failed to read content cache for {url}: {e}")
+            logger.warning("Failed to read content cache: %s", type(e).__name__)
             cache_file.unlink(missing_ok=True)
             content_cache_index.pop(cache_key, None)
 
@@ -522,20 +528,20 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
             "Connection": "keep-alive",
         }
         response = _get_public_url(url, headers=headers, timeout=timeout,
-                                   max_bytes=effective_cap)
+                                   max_bytes=effective_cap, route=route)
 
         if response.status_code == 429:
             raise RateLimitError(f"Rate limit hit for {url} (attempt {retry_attempt})")
 
         response.raise_for_status()
     except BodyTooLargeError as e:
-        error_logger.warning(f"Refused oversized body for {url}: {e}")
+        error_logger.warning("Refused oversized body: %s", type(e).__name__)
         return _empty_result(url, f"TooLarge: {e}")
     except httpx.HTTPStatusError as e:
-        error_logger.warning(f"HTTP {e.response.status_code} fetching {url}: {e}")
+        error_logger.warning("HTTP %s while fetching content", e.response.status_code)
         return _empty_result(url, f"HTTP {e.response.status_code}: {e}")
     except httpx.RequestError as e:
-        error_logger.error(f"NetworkError fetching {url} (attempt {retry_attempt}): {e}")
+        error_logger.error("NetworkError fetching content (attempt %s): %s", retry_attempt, type(e).__name__)
         return _empty_result(url, f"NetworkError: {e}")
     except RateLimitError as e:
         error_logger.error(str(e))
@@ -570,7 +576,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
                 pdf_bytes = io.BytesIO(response.content)
                 pdf_text = pdf_extract_text(pdf_bytes)
             except Exception as e:
-                logger.warning(f"PDF extraction failed for {url}: {e}")
+                logger.warning("PDF extraction failed: %s", type(e).__name__)
                 pdf_text = ""
         result = {
             "url": url,
@@ -587,7 +593,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
             "error": "" if pdf_text else "Failed to extract PDF text",
             **_size_fields,
         }
-        _cache_result(cache_file, cache_key, result, url)
+        _cache_result(cache_file, cache_key, result, url, route=route)
         return result
 
     # Plain-text / Markdown / JSON handling. Sources like
@@ -622,16 +628,16 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
             "error": "" if text_body else "Empty response body",
             **_size_fields,
         }
-        _cache_result(cache_file, cache_key, result, url)
+        _cache_result(cache_file, cache_key, result, url, route=route)
         return result
 
     # HTML handling
     try:
         soup = BeautifulSoup(response.text, "html.parser")
     except Exception as e:
-        error_logger.error(f"ParseError parsing HTML from {url} (attempt {retry_attempt}): {e}")
+        error_logger.error("ParseError parsing HTML (attempt %s): %s", retry_attempt, type(e).__name__)
         result = _empty_result(url, f"ParseError: {e}")
-        _cache_result(cache_file, cache_key, result, url)
+        _cache_result(cache_file, cache_key, result, url, route=route)
         return result
 
     title_tag = soup.find("title")
@@ -685,12 +691,14 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
         "error": "",
         **_size_fields,
     }
-    _cache_result(cache_file, cache_key, result, url)
+    _cache_result(cache_file, cache_key, result, url, route=route)
     return result
 
 
-def _cache_result(cache_file, cache_key: str, result: dict, url: str):
+def _cache_result(cache_file, cache_key: str, result: dict, url: str, route=None):
     """Write a result to the content cache."""
+    if route is not None:
+        route.remaining_timeout()
     try:
         cache_data = {"timestamp": datetime.now().isoformat(), "data": result}
         with open(cache_file, "w", encoding="utf-8") as f:
@@ -698,7 +706,7 @@ def _cache_result(cache_file, cache_key: str, result: dict, url: str):
         content_cache_index[cache_key] = datetime.now()
         cleanup_cache(CONTENT_CACHE_DIR, content_cache_index, timedelta(hours=2))
     except Exception as e:
-        logger.warning(f"Failed to write content cache for {url}: {e}")
+        logger.warning("Failed to write content cache: %s", type(e).__name__)
 
 
 # ----------------------------------------------------------------------

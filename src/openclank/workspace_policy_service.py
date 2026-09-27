@@ -153,6 +153,7 @@ def bind_workspace_path(
     purpose: WorkspacePurpose,
     name: str | None = None,
     media_adoption: object | None = None,
+    media_receipt: object | None = None,
 ) -> WorkspaceBinding:
     """Create/reuse a Workspace without granting any new Agent/People access."""
 
@@ -239,13 +240,29 @@ def bind_workspace_path(
     # itself; conflicts are returned to the caller through the recorded receipt.
     if callable(media_adoption):
         try:
-            media_adoption(
+            adoption_result = media_adoption(
                 workspace_root=binding.path,
                 workspace_id=workspace.id,
                 owner_subject_id=owner_subject_id,
             )
-        except Exception:
-            pass
+        except WorkspacePolicyServiceError:
+            raise
+        except Exception as error:
+            # Adoption owns durable preflight and journal capture.  A failed
+            # journal must be visible to the caller; reporting a successful
+            # workspace creation would otherwise imply that media is safe.
+            raise WorkspacePolicyServiceError(
+                "Workspace media adoption could not be durably recorded",
+                code="media_adoption_failed",
+            ) from error
+        if callable(media_receipt) and isinstance(adoption_result, dict) and adoption_result.get("status") == "complete":
+            try:
+                media_receipt(adoption_result)
+            except Exception as error:
+                raise WorkspacePolicyServiceError(
+                    "Workspace media receipt could not be durably recorded",
+                    code="media_receipt_failed",
+                ) from error
     return binding
 
 

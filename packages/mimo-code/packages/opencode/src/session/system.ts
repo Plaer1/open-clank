@@ -91,10 +91,10 @@ export const layer = Layer.effect(
           ].join("\n"),
           `IMPORTANT: Your response must ALWAYS strictly follow the same major language as the user.`,
         ]
-        const maskVisionCapability = [model.id, model.api.id, model.providerID].some((id) =>
-          /(^|[^a-z0-9])(gpt|claude|gemini)($|[^a-z0-9])/i.test(id),
-        )
-        if (!model.capabilities.input.image && !maskVisionCapability) {
+        // Vision guidance follows the selected model's declared route capability.
+        // Provider/model family names are not evidence that this exact adapter route
+        // can carry image bytes, and must never suppress an explicit fallback.
+        if (!model.capabilities.input.image) {
           // NOTE: vision models are resolved per-call (lazy). If provider list changes
           // mid-session, this block may differ between turns and break cached system prefix.
           // In practice provider config is stable within a session.

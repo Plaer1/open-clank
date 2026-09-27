@@ -13,8 +13,10 @@ the provider cutover.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import math
+import logging
 import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence
@@ -29,10 +31,13 @@ from core.provider_models import (
 )
 from src.openclank.artifacts import ArtifactError, ArtifactStore
 
+logger = logging.getLogger(__name__)
+
 
 MODEL_OPERATIONS = frozenset(
     {
         "chat.complete",
+        "web.search",
         "vision.describe",
         "image.generate",
         "image.edit",
@@ -56,6 +61,7 @@ PURPOSE_OPERATIONS: Mapping[str, frozenset[str]] = {
     # explicitly image-aware, and the resolver must use this same binding.
     "memory": frozenset({"chat.complete", "vision.describe"}),
     "research": frozenset({"chat.complete"}),
+    "search": frozenset({"web.search"}),
     "tasks": frozenset({"chat.complete"}),
     "vision": frozenset({"vision.describe"}),
     "images": frozenset(
@@ -92,6 +98,7 @@ def _binding_purposes(purpose: str) -> tuple[str, ...]:
 
 OPERATION_PURPOSE: Mapping[str, str] = {
     "chat.complete": "chat",
+    "web.search": "search",
     "vision.describe": "vision",
     "image.generate": "images",
     "image.edit": "images",
@@ -207,6 +214,79 @@ def _safe_json(value: Any, *, label: str, depth: int = 0) -> Any:
     raise ManagedOperationError(f"{label} is not JSON-safe")
 
 
+def _validate_search_input(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the narrow host-owned web.search request shape."""
+
+    query = value.get("query")
+    if not isinstance(query, str) or not query.strip() or len(query) > 2000:
+        raise ManagedOperationError("web.search query is invalid")
+    count = value.get("count", 10)
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 50:
+        raise ManagedOperationError("web.search count is invalid")
+    freshness = value.get("freshness")
+    if freshness is not None and freshness not in {"day", "week", "month", "year"}:
+        raise ManagedOperationError("web.search freshness is invalid")
+    answer = value.get("answer", False)
+    if not isinstance(answer, bool):
+        raise ManagedOperationError("web.search answer flag is invalid")
+    safe = _safe_json(dict(value), label="web.search input")
+    allowed = {"query", "count", "freshness", "answer"}
+    unexpected = set(safe) - allowed
+    if unexpected:
+        raise ManagedOperationDenied("web.search input contains unsupported fields")
+    return safe
+
+
+def _validate_search_output(value: Any) -> dict[str, Any]:
+    """Validate provider annotations without weakening the general safe JSON guard."""
+
+    if not isinstance(value, Mapping):
+        raise ManagedOperationProtocolError("web.search output must be an object")
+    results = value.get("results", [])
+    if not isinstance(results, list) or len(results) > 50:
+        raise ManagedOperationProtocolError("web.search results are invalid")
+    clean_results: list[dict[str, Any]] = []
+    for row in results:
+        if not isinstance(row, Mapping):
+            raise ManagedOperationProtocolError("web.search result row is invalid")
+        url = row.get("url")
+        if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+            raise ManagedOperationProtocolError("web.search source URL is invalid")
+        clean: dict[str, Any] = {"url": url}
+        for key in ("title", "snippet", "publishedAt", "provider"):
+            if key in row:
+                if not isinstance(row[key], str):
+                    raise ManagedOperationProtocolError("web.search source annotation is invalid")
+                clean[key] = row[key]
+        clean_results.append(clean)
+    search_queries = value.get("searchQueries", [])
+    if not isinstance(search_queries, list) or any(not isinstance(item, str) for item in search_queries):
+        raise ManagedOperationProtocolError("web.search queries are invalid")
+    support_links = value.get("supportLinks", [])
+    if not isinstance(support_links, list) or any(not isinstance(item, str) or not item.startswith(("https://", "http://")) for item in support_links):
+        raise ManagedOperationProtocolError("web.search support links are invalid")
+    usage = value.get("webSearchUsage", {})
+    if not isinstance(usage, Mapping) or any(
+        not isinstance(item, str) or isinstance(number, bool) or not isinstance(number, int) or number < 0
+        for item, number in usage.items()
+    ):
+        raise ManagedOperationProtocolError("web.search usage is invalid")
+    answer = value.get("answer")
+    if answer is not None and not isinstance(answer, str):
+        raise ManagedOperationProtocolError("web.search answer is invalid")
+    status = value.get("status", "ungrounded" if not clean_results else "complete")
+    if status not in {"complete", "partial", "ungrounded", "empty"}:
+        raise ManagedOperationProtocolError("web.search status is invalid")
+    return {
+        "results": clean_results,
+        "status": status,
+        **({"answer": answer} if answer is not None else {}),
+        **({"searchQueries": search_queries} if search_queries else {}),
+        **({"supportLinks": support_links} if support_links else {}),
+        **({"webSearchUsage": dict(usage)} if usage else {}),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class OperationArtifact:
     name: str
@@ -291,6 +371,10 @@ class ManagedOperationResult:
     binding_id: Optional[str] = None
     selected_account_id: Optional[str] = None
     usage: Mapping[str, int] = field(default_factory=dict)
+    # The native producer's normalization profile is provenance for Stats;
+    # it must not be replaced with the host's default when producers already
+    # separated cache/reasoning categories.
+    normalization_profile: Optional[str] = None
     model_fingerprint: Optional[str] = None
     dimension: Optional[int] = None
 
@@ -325,6 +409,7 @@ class ManagedOperationRouter:
         owner: str,
         purpose: str,
         operation: str,
+        include_provider_family: bool = False,
     ) -> dict[str, Any]:
         """Describe an owner's safe choices for one managed route purpose.
 
@@ -400,14 +485,25 @@ class ManagedOperationRouter:
                 for route, connection in rows
                 if normalized_operation in set(route.operations or ())
             ]
+            if include_provider_family:
+                family_by_route = {route.id: connection.family_id for route, connection in rows}
+                choices = [
+                    {**choice, "provider_family": family_by_route.get(choice["model_route_id"])}
+                    for choice in choices
+                ]
             eligible_ids = {
                 choice["model_route_id"] for choice in choices
             }
-            return {
+            result = {
                 "configured": selected_binding_id in eligible_ids,
+                "selected_model_route_id": selected_binding_id,
                 "binding_revision": binding_revision,
                 "eligible_routes": choices,
             }
+            if include_provider_family and selected_binding_id:
+                selected = next((choice for choice in choices if choice["model_route_id"] == selected_binding_id), None)
+                result["selected_provider_family"] = selected.get("provider_family") if selected else None
+            return result
         finally:
             db.close()
 
@@ -671,6 +767,10 @@ class ManagedOperationRouter:
             raise ManagedOperationError(
                 "idempotency key must contain between 16 and 128 characters"
             )
+        if operation == "web.search" and not request.model_route_id:
+            raise ManagedOperationDenied(
+                "web.search requires an explicitly selected helper model route"
+            )
         routes = self._resolve_routes(request)
         artifacts = self._verify_input_artifacts(owner, request.artifacts)
         payload = {
@@ -678,17 +778,74 @@ class ManagedOperationRouter:
             "idempotencyKey": idempotency_key,
             "operation": operation,
             "routes": [route.to_wire() for route in routes],
-            "input": _safe_json(request.input, label="operation input"),
+            "input": (
+                _validate_search_input(request.input)
+                if operation == "web.search"
+                else _safe_json(request.input, label="operation input")
+            ),
             "artifactInputs": [artifact.to_wire() for artifact in artifacts],
             "options": _safe_json(request.options, label="operation options"),
         }
         raw = await self._execute_engine(owner, payload)
-        return self._validate_result(
+        result = self._validate_result(
             owner=owner,
             request=request,
             routes=routes,
             raw=raw,
         )
+        if operation == "web.search":
+            search_usage = result.output.get("webSearchUsage")
+            if isinstance(search_usage, Mapping):
+                usage = dict(result.usage)
+                usage.update({f"webSearch_{key}": value for key, value in search_usage.items()})
+                result = replace(result, usage=usage)
+        native_capacity = raw.get("quota") if isinstance(raw, Mapping) else None
+        if native_capacity is not None:
+            try:
+                from services.stats.quota_adapters import native_capacity_envelope
+                native_payload = native_capacity_envelope(
+                    next(route for route in routes if route.model_route_id == result.model_route_id).provider_id,
+                    native_capacity, observed_at=datetime.now(timezone.utc))
+                if native_payload:
+                    result = replace(result, output={**result.output, "_openclank_quota": native_payload})
+            except Exception as error:
+                logger.info("terminal quota metadata unavailable (%s)", type(error).__name__)
+        quota_payload = result.output.get("_openclank_quota") if isinstance(result.output, Mapping) else None
+        public_result = (replace(result, output={key: value for key, value in result.output.items()
+                                                  if key != "_openclank_quota"})
+                         if isinstance(result.output, Mapping) and "_openclank_quota" in result.output
+                         else result)
+        if bool(request.options.get("incognito")):
+            return public_result
+        # Capture the validated terminal result at the managed operation seam.
+        # A Stats failure must not turn a committed operation into a host error.
+        try:
+            from services.stats.ledger import capture_operation_result
+            db = self._session_factory()
+            try:
+                selected_route = next(route for route in routes if route.model_route_id == result.model_route_id)
+                capture_operation_result(db, request, result, selected_route=selected_route)
+                db.commit()
+                if quota_payload is not None:
+                    try:
+                        from services.stats.quota_adapters import admit_terminal_quota_payload
+                        admit_terminal_quota_payload(
+                            db, owner=request.owner, operation_id=result.operation_id,
+                            root_operation_id=result.root_operation_id,
+                            connection_id=selected_route.connection_id,
+                            provider_id=selected_route.provider_id,
+                            billing_lane=selected_route.billing_lane,
+                            account_id=result.selected_account_id,
+                            payload=quota_payload)
+                        db.commit()
+                    except Exception as error:
+                        db.rollback()
+                        logger.warning("managed operation quota admission unavailable (%s)", type(error).__name__)
+            finally:
+                db.close()
+        except Exception as error:
+            logger.warning("managed operation Stats capture unavailable (%s)", type(error).__name__)
+        return public_result
 
     def _validate_result(
         self,
@@ -735,7 +892,11 @@ class ManagedOperationRouter:
                 "managed engine selected a route outside the authorized candidates"
             )
 
-        output = _safe_json(raw.get("output") or {}, label="operation output")
+        output = (
+            _validate_search_output(raw.get("output") or {})
+            if operation == "web.search" and state == "complete"
+            else _safe_json(raw.get("output") or {}, label="operation output")
+        )
         if not isinstance(output, Mapping):
             raise ManagedOperationProtocolError(
                 "managed operation output must be an object"
@@ -775,6 +936,11 @@ class ManagedOperationRouter:
 
         model_fingerprint = raw.get("modelFingerprint")
         dimension = raw.get("dimension")
+        selected_account_raw = raw.get("selectedAccountID")
+        if request.preferred_account_id and selected_account_raw != request.preferred_account_id:
+            raise ManagedOperationProtocolError(
+                "managed engine selected an account different from the bound request"
+            )
         if operation == "embeddings.create" and state == "complete":
             vectors = output.get("embeddings")
             if not isinstance(vectors, list) or not vectors:
@@ -818,10 +984,27 @@ class ManagedOperationRouter:
         usage_raw = raw.get("usage") or {}
         if not isinstance(usage_raw, Mapping):
             raise ManagedOperationProtocolError("operation usage is invalid")
+        normalization_profile = raw.get("normalizationProfile")
+        if normalization_profile is not None:
+            if (
+                not isinstance(normalization_profile, str)
+                or not normalization_profile
+                or len(normalization_profile) > 128
+                or any(ord(char) < 32 for char in normalization_profile)
+            ):
+                raise ManagedOperationProtocolError(
+                    "operation normalization profile is invalid"
+                )
         usage: dict[str, int] = {}
-        for key in ("inputTokens", "outputTokens", "totalTokens"):
+        for key in (
+            "inputTokens", "outputTokens", "totalTokens",
+            "cacheReadTokens", "cacheWriteTokens", "reasoningTokens",
+        ):
             if key in usage_raw:
-                value = int(usage_raw[key])
+                raw_value = usage_raw[key]
+                if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                    raise ManagedOperationProtocolError("operation usage counts must be integers")
+                value = raw_value
                 if value < 0:
                     raise ManagedOperationProtocolError(
                         "operation usage must not be negative"
@@ -848,6 +1031,7 @@ class ManagedOperationRouter:
                 else None
             ),
             usage=usage,
+            normalization_profile=normalization_profile,
             model_fingerprint=(
                 str(model_fingerprint) if model_fingerprint is not None else None
             ),

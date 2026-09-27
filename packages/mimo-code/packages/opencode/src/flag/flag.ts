@@ -162,6 +162,16 @@ export const Flag = {
   // placeholder when they can't be compressed. Values must be positive integers.
   MIMOCODE_MAX_PROMPT_IMAGES: number("MIMOCODE_MAX_PROMPT_IMAGES"),
   MIMOCODE_MAX_PROMPT_IMAGE_SIZE: number("MIMOCODE_MAX_PROMPT_IMAGE_SIZE"),
+  // Native attachment payload cap. Read lazily so tests and embedders can
+  // change the environment before preparing a request. Defaults to 50 MiB.
+  get MIMOCODE_MAX_ATTACHMENT_SIZE() {
+    return number("MIMOCODE_MAX_ATTACHMENT_SIZE") ?? 50 * 1024 * 1024
+  },
+  // Source read ceiling. Files above this limit are rejected before decode or
+  // compression. Defaults to 150 MiB.
+  get MIMOCODE_MAX_ATTACHMENT_SOURCE_SIZE() {
+    return number("MIMOCODE_MAX_ATTACHMENT_SOURCE_SIZE") ?? 150 * 1024 * 1024
+  },
   MIMOCODE_MIMO_ONLY,
   MIMOCODE_DISABLE_PROVIDER_ENV: MIMOCODE_MIMO_ONLY || truthy("MIMOCODE_DISABLE_PROVIDER_ENV"),
   MIMOCODE_DISABLE_CLAUDE_CODE,

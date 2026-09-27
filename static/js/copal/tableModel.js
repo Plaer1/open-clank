@@ -634,12 +634,18 @@ function rebuildAndDiff(lines, model, nextModel) {
   const newSource = tableBlockToSource(nextModel, lineEnding);
   const range = nextModel.blockRange || nextModel.sourceRange;
   const from = charOffset(lines, range.from, 0);
-  const to = charOffset(lines, range.to, 0) + lines[range.to].length;
-  const changes = [{ from, to, insert: newSource }];
+  // A trailing \r from a CRLF document rides inside the split line. Keep it in
+  // the replaced range and re-attach it to the rebuilt block so the following
+  // newline stays CRLF instead of flipping to a bare \n.
+  const lastLine = lines[range.to] ?? '';
+  const trailingCR = lastLine.endsWith('\r') ? '\r' : '';
+  const to = charOffset(lines, range.to, 0) + lastLine.length;
+  const insert = newSource + trailingCR;
+  const changes = [{ from, to, insert }];
   const newModel = parseTable(newSource, range.from);
   const newLines = [
     ...lines.slice(0, range.from),
-    ...newSource.split('\n'),
+    ...insert.split('\n'),
     ...lines.slice(range.to + 1),
   ];
   return { newText: newLines.join('\n'), newModel, changes };
@@ -795,9 +801,11 @@ function transposeTable(lines, model) {
   m.rows = newRows;
   m.columns = m.rows[0]?.cells.length || 0;
   m.alignments = Array(m.columns).fill('left');
-  // Transpose invalidates the old column identity map.
+  // Transpose invalidates the old column identity map. Column types cannot
+  // follow the data (old columns become rows) so they are dropped; the table
+  // identity and unknown extras are kept.
   if (m.metadata) {
-    m.metadata = ensureColumnIds(null, m.columns);
+    m.metadata = ensureColumnIds({ ...m.metadata, columns: [] }, m.columns);
   }
   return rebuildAndDiff(lines, model, m);
 }
@@ -1160,6 +1168,14 @@ function formatResult(val) {
   return String(val);
 }
 
+function columnCurrencyCode(model, col) {
+  for (let r = 1; r < model.rows.length; r++) {
+    const money = parseCurrencyCell(model.rows[r]?.cells?.[col] || '');
+    if (money) return money.code;
+  }
+  return '';
+}
+
 // ─── Interactive table widget ────────────────────────────────────────────────
 
 const tableOwners = new WeakMap();
@@ -1222,7 +1238,13 @@ export function createTableWidget(model, onEdit, { h, editable = true, locale, o
       const result = evaluateFormula(raw, widgetModel);
       // Computed results still respect the column display format when numeric.
       if (result.error) return result.error;
-      return result.value ?? raw;
+      const value = result.value ?? raw;
+      if (type === 'currency') {
+        const code = columnCurrencyCode(widgetModel, c);
+        if (code) return formatTypedCell(`${code} ${value}`, type, columnFormat(c), locale);
+        return value;
+      }
+      return formatTypedCell(value, type, columnFormat(c), locale);
     }
     return formatTypedCell(raw, type, columnFormat(c), locale);
   }

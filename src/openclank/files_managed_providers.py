@@ -27,6 +27,7 @@ from core.database import (
     ChatMessage,
     EditorDraft,
     GalleryImage,
+    FilesImageResource,
     PublishedFile,
     Session as DbSession,
     SessionLocal,
@@ -798,7 +799,7 @@ class CopalFilesProvider:
             f"workspace:{self.workspace_id}",
             "Copal",
             "provider_root",
-            ("children", "stat", "search"),
+            ("children", "stat", "search", "write"),
             workspace_id=self.workspace_id,
             provenance={"domain": "copal", "workspace": self.workspace_id},
             open_target={"app": "copal_notes"},
@@ -1249,11 +1250,29 @@ class GalleryFilesProvider:
             "root",
             "Gallery",
             "provider_root",
-            ("children", "stat", "search"),
+            ("children", "stat", "search", "write"),
             provenance={"domain": "gallery"},
             open_target={"app": "imps"},
             child_sort_keys=self._ROOT_SORTS,
         )]
+
+    async def create_directory(self, context: ProviderContext, *, parent_origin_id: str, name: str, operation_id: str | None = None) -> ProviderResource:
+        from src.openclank.files_image_store import FilesImageStore, FilesImageError
+        store = FilesImageStore(session_factory=self.session_factory)
+        if parent_origin_id == "root":
+            parent = store.ensure_gallery(context.owner_username)
+        elif parent_origin_id == "photos":
+            parent = store.ensure_photos(context.owner_username)
+        elif parent_origin_id.startswith("files-folder:"):
+            parent_id = parent_origin_id.split(":", 1)[1]
+            parent = type("Parent", (), {"id": parent_id})()
+        else:
+            raise FilesFacadeError("Gallery directory parent is unavailable", code="resource_unavailable")
+        try:
+            row = store.create_folder(context.owner_username, parent_id=parent.id, name=name, operation_key=operation_id)
+        except FilesImageError as exc:
+            raise FilesFacadeError(str(exc), code=exc.code) from exc
+        return self._managed_resource(row, parent.id)
 
     @staticmethod
     def _folder(origin_id: str, name: str) -> ProviderResource:
@@ -1266,7 +1285,7 @@ class GalleryFilesProvider:
             origin_id,
             name,
             "virtual_folder",
-            ("children", "stat", "search"),
+            ("children", "stat", "search", "write"),
             parent_origin_id="root",
             provenance={"domain": "gallery", "view": origin_id},
             child_sort_keys=child_sort_keys,
@@ -1321,6 +1340,35 @@ class GalleryFilesProvider:
             return ProviderPage(rows, total=len(rows), snapshot="gallery-folders-v2")
         db = self.session_factory()
         try:
+            managed_parent = parent_origin_id
+            if parent_origin_id in {"photos", "favorites"}:
+                folder = db.query(FilesImageResource.id).filter(
+                    FilesImageResource.owner == context.owner_username,
+                    FilesImageResource.kind == "folder",
+                    FilesImageResource.parent_id.is_(None) == False,
+                    FilesImageResource.display_name == "Photos",
+                    FilesImageResource.is_active.is_(True),
+                ).first()
+                managed_parent = folder[0] if folder else None
+            elif parent_origin_id.startswith("files-folder:"):
+                managed_parent = parent_origin_id.split(":", 1)[1]
+            if managed_parent:
+                managed_rows = db.query(FilesImageResource).filter(
+                    FilesImageResource.owner == context.owner_username,
+                    FilesImageResource.parent_id == managed_parent,
+                    FilesImageResource.is_active.is_(True),
+                ).all()
+                if managed_rows:
+                    if parent_origin_id == "favorites":
+                        managed_rows = [row for row in managed_rows if row.favorite]
+                    entries = tuple(self._managed_resource(row, managed_parent) for row in managed_rows)
+                    entries = _sort_resources(entries, sort)
+                    offset = _offset(cursor)
+                    page_entries = entries[offset:offset + limit]
+                    snapshot_value = _snapshot([managed_parent, len(entries), max((row.updated_at for row in managed_rows), default=None)])
+                    _check_snapshot(snapshot, snapshot_value)
+                    next_cursor = str(offset + len(page_entries)) if offset + len(page_entries) < len(entries) else None
+                    return ProviderPage(page_entries, next_cursor=next_cursor, total=len(entries), snapshot=snapshot_value)
             if parent_origin_id in {"photos", "favorites"}:
                 query_obj = db.query(
                     GalleryImage.id,
@@ -1440,6 +1488,31 @@ class GalleryFilesProvider:
             sort_kind=preview_kind or mime_type or ("image" if preview_kind == "image" else "file"),
         )
 
+    @staticmethod
+    def _managed_resource(row: FilesImageResource, parent: str) -> ProviderResource:
+        if row.kind == "folder":
+            return ProviderResource(
+                f"files-folder:{row.id}", row.display_name, "virtual_folder",
+                ("children", "stat", "search", "write", "rename", "move"), parent_origin_id=parent,
+                provenance={"domain": "gallery", "files_owned": True},
+                child_sort_keys=GalleryFilesProvider._MEDIA_SORTS,
+            )
+        preview_kind = "image" if str(row.mime_type or "").startswith("image/") else None
+        capabilities = ["stat", "open", "favorite", "rename", "move"]
+        if row.locator:
+            capabilities.append("download")
+            if preview_kind:
+                capabilities.append("preview")
+        return ProviderResource(
+            f"image:{row.id}", row.display_name, "image" if preview_kind else "file",
+            tuple(capabilities), parent_origin_id=parent, mime_type=row.mime_type,
+            size=row.size, modified_unix_ms=_millis(row.updated_at),
+            created_unix_ms=_millis(row.created_at),
+            provenance={"domain": "gallery", "files_owned": True, "favorite": bool(row.favorite)},
+            open_target={"app": "imps"}, download_name=row.display_name if row.locator else None,
+            preview_kind=preview_kind,
+        )
+
     async def stat(self, context: ProviderContext, *, origin_id: str) -> ProviderResource:
         if origin_id == "root":
             return (await self.roots(context))[0]
@@ -1450,6 +1523,24 @@ class GalleryFilesProvider:
     def _stat_sync(self, context: ProviderContext, origin_id: str) -> ProviderResource:
         db = self.session_factory()
         try:
+            if origin_id.startswith("files-folder:"):
+                folder = db.query(FilesImageResource).filter(
+                    FilesImageResource.id == origin_id.split(":", 1)[1],
+                    FilesImageResource.owner == context.owner_username,
+                    FilesImageResource.kind == "folder",
+                    FilesImageResource.is_active.is_(True),
+                ).one_or_none()
+                if folder:
+                    return self._managed_resource(folder, folder.parent_id or "root")
+            if origin_id.startswith("image:"):
+                managed = db.query(FilesImageResource).filter(
+                    FilesImageResource.id == origin_id.split(":", 1)[1],
+                    FilesImageResource.owner == context.owner_username,
+                    FilesImageResource.kind == "image",
+                    FilesImageResource.is_active.is_(True),
+                ).one_or_none()
+                if managed:
+                    return self._managed_resource(managed, "photos")
             if origin_id.startswith("image:"):
                 row = db.query(
                     GalleryImage.id,
@@ -1522,6 +1613,15 @@ class GalleryFilesProvider:
         action: str,
         args: Mapping[str, Any],
     ) -> ProviderResource:
+        if action in {"rename", "move"} and origin_id.startswith(("image:", "files-folder:")):
+            return await asyncio.to_thread(
+                self._move_managed_sync,
+                context,
+                origin_id,
+                str(args.get("name") or "").strip(),
+                args.get("parent_origin_id"),
+                args.get("expected_revision"),
+            )
         if action != "favorite.set" or not origin_id.startswith("image:"):
             raise FilesFacadeError("Gallery action is unavailable", code="resource_unavailable")
         return await asyncio.to_thread(
@@ -1530,6 +1630,52 @@ class GalleryFilesProvider:
             origin_id.split(":", 1)[1],
             bool(args["value"]),
         )
+
+    def _move_managed_sync(
+        self,
+        context: ProviderContext,
+        origin_id: str,
+        name: str,
+        parent_origin_id: str | None,
+        expected_revision: Any,
+    ) -> ProviderResource:
+        from src.openclank.files_image_store import FilesImageError, FilesImageStore
+        if not name:
+            raise FilesFacadeError("Gallery resource name is required", code="invalid_name")
+        resource_id = origin_id.split(":", 1)[1]
+        db = self.session_factory()
+        try:
+            row = db.query(FilesImageResource).filter(
+                FilesImageResource.id == resource_id,
+                FilesImageResource.owner == context.owner_username,
+                FilesImageResource.is_active.is_(True),
+            ).one_or_none()
+            if row is None:
+                raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
+            parent_id = row.parent_id
+            if parent_origin_id:
+                if parent_origin_id == "root":
+                    parent_id = FilesImageStore(session_factory=self.session_factory).ensure_gallery(context.owner_username).id
+                elif parent_origin_id == "photos":
+                    parent_id = FilesImageStore(session_factory=self.session_factory).ensure_photos(context.owner_username).id
+                elif parent_origin_id.startswith("files-folder:"):
+                    parent_id = parent_origin_id.split(":", 1)[1]
+                else:
+                    raise FilesFacadeError("Gallery destination is unavailable", code="resource_unavailable")
+            revision = int(expected_revision) if expected_revision is not None else int(row.revision)
+        finally:
+            db.close()
+        try:
+            moved = FilesImageStore(session_factory=self.session_factory).move(
+                context.owner_username,
+                resource_id,
+                parent_id,
+                name,
+                expected_revision=revision,
+            )
+        except FilesImageError as exc:
+            raise FilesFacadeError(str(exc), code=exc.code) from exc
+        return self._managed_resource(moved, moved.parent_id or "root")
 
     def _set_favorite_sync(
         self,
@@ -1547,6 +1693,14 @@ class GalleryFilesProvider:
             if row is None:
                 raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
             row.favorite = bool(value)
+            managed = db.query(FilesImageResource).filter(
+                FilesImageResource.id == image_id,
+                FilesImageResource.owner == context.owner_username,
+                FilesImageResource.kind == "image",
+                FilesImageResource.is_active.is_(True),
+            ).one_or_none()
+            if managed is not None:
+                managed.favorite = bool(value)
             db.commit()
             db.refresh(row)
             return self._image(row, "favorites" if value else "photos")
@@ -1564,26 +1718,35 @@ class GalleryFilesProvider:
             raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
         db = self.session_factory()
         try:
-            row = db.query(
-                GalleryImage.id,
-                GalleryImage.filename,
-            ).filter(
-                GalleryImage.id == origin_id.split(":", 1)[1],
-                GalleryImage.owner == context.owner_username,
-                GalleryImage.is_active == True,
-            ).first()
+            managed = db.query(FilesImageResource).filter(
+                FilesImageResource.id == origin_id.split(":", 1)[1],
+                FilesImageResource.owner == context.owner_username,
+                FilesImageResource.kind == "image",
+                FilesImageResource.is_active.is_(True),
+            ).one_or_none()
+            if managed is not None:
+                row = (managed.id, managed.locator)
+            else:
+                row = db.query(
+                    GalleryImage.id,
+                    GalleryImage.filename,
+                ).filter(
+                    GalleryImage.id == origin_id.split(":", 1)[1],
+                    GalleryImage.owner == context.owner_username,
+                    GalleryImage.is_active == True,
+                ).first()
         finally:
             db.close()
         if not row:
             raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
-        stored_name = _safe_gallery_storage_name(row.filename)
+        stored_name = _safe_gallery_storage_name(managed.locator) if managed is not None else _safe_gallery_storage_name(row.filename)
         if stored_name is None:
             raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
         try:
             path = self.image_resolver(stored_name)
         except Exception as exc:
             raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable") from exc
-        media_type = mimetypes.guess_type(stored_name)[0] or "application/octet-stream"
+        media_type = (managed.mime_type if managed is not None else None) or mimetypes.guess_type(stored_name)[0] or "application/octet-stream"
         return _path_content(
             origin_id,
             filename=_download_name(stored_name),
@@ -1595,6 +1758,26 @@ class GalleryFilesProvider:
         image_id = origin_id.split(":", 1)[1]
         db = self.session_factory()
         try:
+            managed = db.query(FilesImageResource).filter(
+                FilesImageResource.id == image_id,
+                FilesImageResource.owner == context.owner_username,
+                FilesImageResource.kind == "image",
+                FilesImageResource.is_active.is_(True),
+            ).one_or_none()
+            if managed is not None:
+                media_type = str(managed.mime_type or "")
+                if not media_type.startswith("image/"):
+                    raise FilesFacadeError("Gallery image preview is unavailable", code="resource_unavailable")
+                self._content_sync(context, origin_id)
+                return {
+                    "provider": "gallery", "resource_id": origin_id,
+                    "filename": managed.display_name, "prompt": str((managed.provenance or {}).get("prompt", "")),
+                    "caption": "", "model": str((managed.provenance or {}).get("model", "")),
+                    "size": "", "quality": "", "tags": "", "ai_tags": "",
+                    "favorite": bool(managed.favorite), "created_at": _millis(managed.created_at),
+                    "updated_at": _millis(managed.updated_at), "file_size": int(managed.size),
+                    "media_type": media_type, "read_only": False,
+                }
             row = db.query(GalleryImage).filter(
                 GalleryImage.id == image_id,
                 GalleryImage.owner == context.owner_username,

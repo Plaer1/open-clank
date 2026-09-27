@@ -138,6 +138,11 @@ class OperationJournalStore:
                 raise OperationConflict(
                     f"operation revision is stale; current revision is {row.revision}"
                 )
+            terminal_states = {"complete", "failed", "cancelled"}
+            if row.state in terminal_states and state and str(state) != row.state:
+                raise OperationConflict(
+                    f"terminal operation is already {row.state}; it cannot transition to {state}"
+                )
             if row.committed and selected_account_id and selected_account_id != row.selected_account_id:
                 raise OperationConflict("a committed operation cannot switch accounts")
             effective_binding_id = str(binding_id or row.binding_id or "").strip()
@@ -183,8 +188,6 @@ class OperationJournalStore:
                 if artifact_id not in artifacts:
                     artifacts.append(str(artifact_id))
                 row.artifact_ids = artifacts
-                row.committed = True
-                row.commit_reason = row.commit_reason or "artifact_returned"
             if row.state in {"complete", "failed", "cancelled"}:
                 row.completed_at = self._clock()
             row.revision += 1

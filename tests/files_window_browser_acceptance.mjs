@@ -6,8 +6,19 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7777').replace(/\/$/, '');
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const localPython = path.join(repo, 'venv', 'bin', 'python');
+const python = process.env.PYTHON || (fs.existsSync(localPython) ? localPython : 'python3');
+
+let staticServer;
+let base = process.argv[2] ? process.argv[2].replace(/\/$/, '') : '';
+if (!base) {
+  const staticPort = await new Promise((resolve, reject) => { const server = net.createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const selected = server.address().port; server.close(() => resolve(selected)); }); });
+  staticServer = spawn(python, ['-m', 'http.server', String(staticPort), '--bind', '127.0.0.1'], { cwd: process.cwd(), stdio: 'ignore' });
+  base = `http://127.0.0.1:${staticPort}`;
+}
 const chromeCandidates = [
   process.env.OPEN_CLANK_CHROME_BIN,
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -173,6 +184,9 @@ try {
         window.__galleryOpenedPayload = data.payload;
       },
     };
+    // Gallery's retired launch target resolves through the Imps-owned editor
+    // seam; expose the same exact-open fixture under that production name.
+    window.galleryEditorModule = window.galleryModule;
     const copalLauncher = document.createElement('button');
     copalLauncher.dataset.copalView = 'notes';
     copalLauncher.hidden = true;
@@ -580,6 +594,24 @@ try {
             kind: 'document', capabilities: ['stat', 'open', 'preview', 'download'], name: 'Exact Library document',
           },
         });
+        if (body.resource_ref === 'rr1.library-document-rehydrated') return json({
+          version: 1, provider: 'library',
+          ancestors: [{
+            id: 'resource-library', ref: 'rr1.library-root', provider: 'library',
+            kind: 'provider_root', capabilities: ['children', 'stat', 'search'], name: 'Library',
+          }, {
+            id: 'resource-library-documents', ref: 'rr1.library-documents-reveal', provider: 'library',
+            kind: 'virtual_folder', capabilities: ['children', 'stat', 'search'], name: 'Documents',
+          }],
+          parent: {
+            id: 'resource-library-documents', ref: 'rr1.library-documents-reveal', provider: 'library',
+            kind: 'virtual_folder', capabilities: ['children', 'stat', 'search'], name: 'Documents',
+          },
+          resource: {
+            id: 'resource-library-document', ref: 'rr1.library-document-reveal', provider: 'library',
+            kind: 'document', capabilities: ['stat', 'open', 'preview', 'download'], name: 'Exact Library document',
+          },
+        });
         if (body.resource_ref === 'rr1.library-chat-refreshed') {
           return problem('resource_ref_stale', 'Resource reference expired');
         }
@@ -705,9 +737,11 @@ try {
     const wide = point(third);
     body.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 71, isPrimary: true, clientX: wide.x, clientY: wide.y }));
     await new Promise(requestAnimationFrame);
+    await new Promise(requestAnimationFrame);
     const expanded = [...body.querySelectorAll('.files-entry.selected .files-entry-name')].map(node => node.textContent.trim());
     const narrow = point(second);
     body.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 71, isPrimary: true, clientX: narrow.x, clientY: narrow.y }));
+    await new Promise(requestAnimationFrame);
     await new Promise(requestAnimationFrame);
     const shrunk = [...body.querySelectorAll('.files-entry.selected .files-entry-name')].map(node => node.textContent.trim());
     body.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 71, isPrimary: true, button: 0, clientX: narrow.x, clientY: narrow.y }));
@@ -715,7 +749,7 @@ try {
   })()`);
   if (!marqueeTrace.skipped) {
     assert.equal(marqueeTrace.expanded.length >= 2, true, 'marquee selects rows in its current rectangle');
-    assert.equal(marqueeTrace.shrunk.length < marqueeTrace.expanded.length, true, 'shrinking marquee removes departed rows');
+    assert.equal(marqueeTrace.expanded.some(name => !marqueeTrace.shrunk.includes(name)), true, 'shrinking marquee removes departed rows');
   }
 
   // Files and Settings share one Open Clank Add Location wizard. The Files
@@ -1262,13 +1296,17 @@ try {
   await waitFor("document.querySelectorAll('.files-column').length === 2", 'reveal ancestor columns');
   assert.deepEqual(await evaluate("[...document.querySelectorAll('.files-column-head > span:first-child')].map(node => node.textContent)"), ['Library', 'Documents']);
   const revealUpPoint = await evaluate(`(() => {
-    const button = document.querySelector('[title="Parent folder"]');
+    const button = [...document.querySelectorAll('.files-toolbar [title="Parent folder"]')].at(-1);
+    if (!button) throw new Error('visible Parent folder control is unavailable');
+    button.scrollIntoView({ block: 'center', inline: 'nearest' });
     const rect = button.getBoundingClientRect();
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    const root = document.getElementById('files-window').getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: Math.min(rect.bottom - 2, root.bottom - 2) };
   })()`);
   assert.equal(await evaluate(`document.elementFromPoint(${revealUpPoint.x}, ${revealUpPoint.y})?.closest('button')?.title`), 'Parent folder');
   await command('Input.dispatchMouseEvent', { type: 'mousePressed', x: revealUpPoint.x, y: revealUpPoint.y, button: 'left', clickCount: 1 });
   await command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: revealUpPoint.x, y: revealUpPoint.y, button: 'left', clickCount: 1 });
+  await waitFor("document.querySelector('[data-files-path]')?.textContent === 'Library'", 'Parent-folder state update');
   await waitFor("document.querySelectorAll('.files-column').length === 1", 'reveal Parent folder column');
   assert.equal(await evaluate("document.querySelector('[data-files-path]')?.textContent"), 'Library');
   assert.equal(await evaluate("[...document.querySelectorAll('.files-column-entry')].some(node => node.textContent.includes('Documents'))"), true);
@@ -1394,5 +1432,6 @@ try {
   if (socket) socket.close();
   chromium.kill('SIGTERM');
   await new Promise(resolve => chromium.once('exit', resolve));
+  if (staticServer) staticServer.kill('SIGTERM');
   fs.rmSync(profile, { recursive: true, force: true });
 }

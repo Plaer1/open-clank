@@ -33,7 +33,7 @@ function route(id: string, displayName: unknown, source: string, capabilities: R
     modelID: id,
     displayName: typeof displayName === "string" && displayName.trim() ? displayName.trim().slice(0, 512) : id,
     operations: ["chat.stream", "chat.complete"],
-    capabilities,
+    capabilities: { voice_design: false, voice_clone: false, ...capabilities },
     provenance: { authority: "account-discovery", catalog: source },
   }
 }

@@ -228,6 +228,8 @@ function makeGenerationGateLayer() {
               })
             : base.cancelActor(sessionID, actorID),
         startShell: base.startShell,
+        start: base.start,
+        startAndWait: base.startAndWait,
         ensureRunning: (sessionID, actorID, onInterrupt, work) => {
           const key = `${sessionID}:${actorID}`
           const count = (ensureRunningCounts.get(key) ?? 0) + 1

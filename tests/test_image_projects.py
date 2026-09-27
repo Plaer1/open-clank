@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
 
 import pytest
 from sqlalchemy import create_engine
@@ -45,6 +46,47 @@ def _factory(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'projects.db'}")
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)
+
+
+def test_save_copy_replays_same_owner_resource_and_payload(tmp_path):
+    factory = _factory(tmp_path)
+    repo = ImageProjectRepository(factory)
+    source = repo.create_project(owner="alice", image_identity=ImageResourceIdentity("gallery", "source"), state={"layers": []})
+    writes = []
+    kwargs = dict(owner="alice", project_id=source.id, image_identity=ImageResourceIdentity("gallery", "copy"),
+                  expected_image_revision="rev-1", image_writer=lambda: writes.append(1) or "rev-1",
+                  state={"layers": [{"id": "x"}]}, operation_key="copy-op-1")
+    first = repo.save_copy(**kwargs)
+    second = repo.save_copy(**kwargs)
+    assert first.project_id == second.project_id
+    assert first.allocated is True
+    assert second.allocated is False
+    assert writes == [1]
+    with factory() as db:
+        assert db.query(ManagedImageProject).filter(ManagedImageProject.owner == "alice").count() == 2
+
+
+def test_save_copy_concurrent_retries_publish_one_project_and_one_image(tmp_path):
+    factory = _factory(tmp_path)
+    repo = ImageProjectRepository(factory)
+    source = repo.create_project(owner="alice", image_identity=ImageResourceIdentity("gallery", "source"))
+    writes = []
+    kwargs = dict(owner="alice", project_id=source.id, image_identity=ImageResourceIdentity("gallery", "copy"),
+                  expected_image_revision="rev-1", state={"layers": [{"id": "x"}]}, operation_key="copy-concurrent")
+
+    def invoke():
+        return repo.save_copy(**kwargs, image_writer=lambda: writes.append("published") or "rev-1")
+
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(invoke())) for _ in range(2)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join(3)
+    assert len(results) == 2
+    assert {result.project_id for result in results} == {results[0].project_id}
+    assert sorted(result.allocated for result in results) == [False, True]
+    assert writes == ["published"]
+    with factory() as db:
+        assert db.query(ManagedImageProject).filter(ManagedImageProject.owner == "alice").count() == 2
 
 
 IDENTITY = ImageResourceIdentity("gallery", "image-1")
@@ -144,6 +186,187 @@ def test_update_state_rejects_stale_image_revision(tmp_path):
             expected_project_revision=1,
             expected_image_revision="rev-b",  # does not match bound revision
         )
+
+
+def test_concurrent_resource_saves_serialize_and_second_writer_is_stale(tmp_path):
+    """Distinct repository sessions cannot both publish revision one."""
+    repo = ImageProjectRepository(_factory(tmp_path), lore_capture=lambda **kwargs: {})
+    record = repo.create_project(owner="alice", image_identity=IDENTITY, expected_image_revision="rev-a")
+    entered = threading.Event()
+    release = threading.Event()
+    outcomes = []
+
+    def save(label):
+        try:
+            result = repo.save_image_and_project(
+                owner="alice", project_id=record.id, expected_project_revision=1,
+                expected_image_revision="rev-a", new_image_revision=f"rev-{label}",
+                image_writer=(lambda: (entered.set(), release.wait(2), f"rev-{label}")[2]),
+                state={"label": label},
+            )
+            outcomes.append((label, "ok", result.project_revision))
+        except ImageProjectError as exc:
+            outcomes.append((label, exc.code, None))
+
+    first = threading.Thread(target=save, args=("one",))
+    second = threading.Thread(target=save, args=("two",))
+    first.start()
+    assert entered.wait(2)
+    second.start()
+    release.set()
+    first.join(3)
+    second.join(3)
+    assert sorted(item[1] for item in outcomes) == ["ok", "stale_project_revision"]
+    assert repo.get_project(project_id=record.id, owner="alice").project_revision == 2
+
+
+def test_lore_mutation_is_rechecked_before_pixel_writer(tmp_path):
+    """A Lore callback that changes the source must block publication."""
+    source = tmp_path / "shared.png"
+    source.write_bytes(b"before")
+    old_revision = "sha256:" + hashlib.sha256(b"before").hexdigest()
+    repo = ImageProjectRepository(
+        _factory(tmp_path),
+        lore_capture=lambda **kwargs: (source.write_bytes(b"external"), {})[1],
+    )
+    record = repo.create_project(owner="alice", image_identity=IDENTITY, expected_image_revision=old_revision)
+    writes = []
+    with pytest.raises(StaleImageRevision):
+        repo.save_image_and_project(
+            owner="alice", project_id=record.id, expected_project_revision=1,
+            expected_image_revision=old_revision,
+            new_image_revision="sha256:" + hashlib.sha256(b"new").hexdigest(),
+            image_bytes=b"before", image_reader=lambda: source.read_bytes(),
+            image_writer=lambda: (writes.append("write"), "sha256:" + hashlib.sha256(b"new").hexdigest())[1],
+        )
+    assert writes == []
+    assert source.read_bytes() == b"external"
+
+
+def test_metadata_failure_compensates_already_published_pixels(tmp_path):
+    """Metadata failure after publication must restore the original bytes."""
+    source = tmp_path / "shared.png"
+    source.write_bytes(b"before")
+    old_revision = "sha256:" + hashlib.sha256(b"before").hexdigest()
+    new_revision = "sha256:" + hashlib.sha256(b"after").hexdigest()
+    repo = ImageProjectRepository(_factory(tmp_path))
+    record = repo.create_project(owner="alice", image_identity=IDENTITY, expected_image_revision=old_revision)
+
+    def writer():
+        source.write_bytes(b"after")
+        return new_revision
+
+    def rollback(_revision):
+        source.write_bytes(b"before")
+
+    with pytest.raises(RuntimeError, match="metadata failed"):
+        repo.save_image_and_project(
+            owner="alice", project_id=record.id, expected_project_revision=1,
+            expected_image_revision=old_revision, new_image_revision=new_revision,
+            image_bytes=b"before", image_reader=lambda: source.read_bytes(),
+            image_writer=writer, image_rollback=rollback,
+            metadata_updater=lambda _db: (_ for _ in ()).throw(RuntimeError("metadata failed")),
+        )
+    assert source.read_bytes() == b"before"
+    assert repo.get_project(project_id=record.id, owner="alice").project_revision == 1
+
+
+def test_distinct_projects_sharing_image_reject_stale_second_writer(tmp_path):
+    """Two project rows bound to one file cannot publish from one stale hash."""
+    source = tmp_path / "shared.png"
+    source.write_bytes(b"before")
+    old_revision = "sha256:" + hashlib.sha256(b"before").hexdigest()
+    new_revision = "sha256:" + hashlib.sha256(b"first").hexdigest()
+    repo = ImageProjectRepository(_factory(tmp_path))
+    first = repo.create_project(owner="alice", image_identity=IDENTITY, expected_image_revision=old_revision)
+    second = repo.create_project(owner="alice", image_identity=IDENTITY, expected_image_revision=old_revision)
+
+    def first_writer():
+        source.write_bytes(b"first")
+        return new_revision
+
+    repo.save_image_and_project(
+        owner="alice", project_id=first.id, expected_project_revision=1,
+        expected_image_revision=old_revision, new_image_revision=new_revision,
+        image_bytes=b"before", image_reader=lambda: source.read_bytes(), image_writer=first_writer,
+    )
+    with pytest.raises(StaleImageRevision):
+        repo.save_image_and_project(
+            owner="alice", project_id=second.id, expected_project_revision=1,
+            expected_image_revision=old_revision, new_image_revision=new_revision,
+            image_bytes=b"before", image_reader=lambda: source.read_bytes(),
+            image_writer=lambda: pytest.fail("stale writer must not run"),
+        )
+    assert source.read_bytes() == b"first"
+
+
+def test_save_commit_failure_compensates_published_pixels(tmp_path):
+    factory = _factory(tmp_path)
+    repo = ImageProjectRepository(factory, lore_capture=lambda **kwargs: {})
+    record = repo.create_project(owner="alice", image_identity=IDENTITY, expected_image_revision="rev-a")
+    original_commit = factory().commit
+    factory().close()
+    fail = {"value": True}
+
+    def sessions():
+        session = factory()
+        real_commit = session.commit
+        def commit():
+            if fail["value"]:
+                fail["value"] = False
+                raise RuntimeError("injected commit failure")
+            return real_commit()
+        session.commit = commit
+        return session
+
+    failing_repo = ImageProjectRepository(sessions, lore_capture=lambda **kwargs: {})
+    writes = []
+    rollbacks = []
+    with pytest.raises(RuntimeError, match="injected commit failure"):
+        failing_repo.save_image_and_project(
+            owner="alice", project_id=record.id, expected_project_revision=1,
+            expected_image_revision="rev-a", new_image_revision="rev-b",
+            image_writer=lambda: (writes.append("publish"), "rev-b")[1],
+            image_rollback=lambda revision: rollbacks.append(revision),
+            image_bytes=b"before",
+        )
+    assert writes == ["publish"]
+    assert rollbacks == ["rev-b"]
+    assert repo.get_project(project_id=record.id, owner="alice").project_revision == 1
+
+
+def test_restore_commit_failure_compensates_published_pixels(tmp_path):
+    factory = _factory(tmp_path)
+    events = []
+    repo = ImageProjectRepository(factory, lore_capture=lambda **kwargs: (events.append(kwargs), default_lore_capture(**kwargs))[1])
+    record = repo.create_project(owner="alice", image_identity=IDENTITY, expected_image_revision="rev-a")
+    saved = repo.save_image_and_project(
+        owner="alice", project_id=record.id, expected_project_revision=1,
+        expected_image_revision="rev-a", new_image_revision="rev-b",
+        image_writer=lambda: "rev-b", state={"changed": True}, image_bytes=b"before",
+    )
+    fail = {"value": True}
+    def sessions():
+        session = factory()
+        real_commit = session.commit
+        def commit():
+            if fail["value"]:
+                fail["value"] = False
+                raise RuntimeError("injected restore commit failure")
+            return real_commit()
+        session.commit = commit
+        return session
+    rollbacks = []
+    failing_repo = ImageProjectRepository(sessions, lore_capture=lambda **kwargs: {})
+    with pytest.raises(RuntimeError, match="injected restore commit failure"):
+        failing_repo.replay_preimage(
+            owner="alice", project_id=record.id, action_id=saved.action_id,
+            expected_project_revision=2,
+            image_writer=lambda: "rev-a", image_rollback=lambda revision: rollbacks.append(revision),
+            current_image_bytes=b"after",
+        )
+    assert rollbacks == ["rev-a"]
+    assert repo.get_project(project_id=record.id, owner="alice").project_revision == 2
 
 
 def test_owner_isolation_for_read_and_write(tmp_path):

@@ -8,7 +8,7 @@ import {
   MockTranscriptionModelV3,
 } from "ai/test"
 import { ACP } from "../../src/acp/agent"
-import { ManagedOperations } from "../../src/acp/managed-operations"
+import { ManagedOperations, extractMimoSearchAnnotations, transformMimoSearchRequestBody } from "../../src/acp/managed-operations"
 import { ManagedProvider } from "../../src/acp/managed-provider"
 import type { OpenClankManagedProtocol } from "../../src/acp/openclank-protocol"
 import { ProviderTest } from "../fake/provider"
@@ -32,6 +32,10 @@ class Host {
   private journal: Journal | undefined
   private bindingRevision = 0
   private artifactSequence = 0
+  failJournalBeginOnce = false
+  failArtifactReadOnce = false
+  failCancelledCasOnce = false
+  cancelledCasSuccesses = 0
 
   addArtifact(data: Uint8Array, mediaType: string): Descriptor {
     const artifactID = `artifact-${++this.artifactSequence}`
@@ -117,6 +121,13 @@ class Host {
     }
     if (method.endsWith("/journal/cas")) {
       if (params.action === "begin") {
+        if (this.failJournalBeginOnce) {
+          this.failJournalBeginOnce = false
+          throw new Error("injected journal begin failure")
+        }
+        if (this.journal && this.journal.rootOperationID === String(params.rootOperationID)) {
+          return { ...this.journal, replayed: true }
+        }
         this.journal = {
           operationID: "operation-1",
           rootOperationID: String(params.rootOperationID),
@@ -137,6 +148,11 @@ class Host {
       if (!this.journal || params.expectedRevision !== this.journal.revision) {
         throw new Error("stale test journal revision")
       }
+      if (params.state === "cancelled" && this.failCancelledCasOnce) {
+        this.failCancelledCasOnce = false
+        throw new Error("injected cancelled CAS failure")
+      }
+      if (params.state === "cancelled") this.cancelledCasSuccesses += 1
       this.journal = {
         ...this.journal,
         ...(typeof params.state === "string" ? { state: params.state as Journal["state"] } : {}),
@@ -167,6 +183,10 @@ class Host {
       return this.addArtifact(Uint8Array.from(Buffer.concat(chunks)), String(params.mediaType))
     }
     if (method.endsWith("/artifact/read")) {
+      if (this.failArtifactReadOnce) {
+        this.failArtifactReadOnce = false
+        throw new Error("injected artifact read failure")
+      }
       const row = this.artifacts.get(String(params.artifactID))
       if (!row) throw new Error("unknown test artifact")
       const offset = Number(params.offset)
@@ -218,6 +238,7 @@ function request(
   modelID = "route-model",
   billingLane: OpenClankManagedProtocol.OperationRouteContext["billingLane"] = "metered_api",
   providerID = "provider-1",
+  options: Record<string, unknown> = {},
 ): OpenClankManagedProtocol.OperationExecuteRequest {
   return {
     rootOperationID: "root-operation",
@@ -235,7 +256,7 @@ function request(
     ],
     input,
     artifactInputs,
-    options: {},
+    options,
   }
 }
 
@@ -247,12 +268,13 @@ async function execute(
   modelID?: string,
   billingLane?: OpenClankManagedProtocol.OperationRouteContext["billingLane"],
   providerID?: string,
+  options?: Record<string, unknown>,
 ) {
   const host = new Host()
   ManagedProvider.installHostConnection(host as any)
   const artifactInputs = configure?.(host) ?? []
   const result = await new ManagedOperations.Router(host as any, runtimeValue).handle(
-    request(operation, input, artifactInputs, modelID, billingLane, providerID),
+    request(operation, input, artifactInputs, modelID, billingLane, providerID, options),
   )
   return { host, result }
 }
@@ -334,6 +356,218 @@ describe("managed non-stream operation router", () => {
     expect(result.output).toEqual({ text: "managed reply" })
     expect(result.committed).toBe(true)
     expect(language.doGenerateCalls).toHaveLength(1)
+  })
+
+  test("MiMo web.search uses the bounded hosted-search body transform and empty annotations stay ungrounded", async () => {
+    const body = transformMimoSearchRequestBody({ model: "mimo-v2.5", messages: [] }, { count: 4, answer: false })
+    expect(body.tools).toEqual([{ type: "web_search", max_keyword: 1, force_search: true, limit: 4 }])
+    expect(body.max_completion_tokens).toBe(256)
+    const language = new MockLanguageModelV3({
+      doGenerate: {
+        content: [{ type: "text", text: "A prose URL https://not-a-source.example" }],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 2, text: 2, reasoning: 0 } },
+        warnings: [],
+      },
+    })
+    const { result } = await execute(
+      "web.search",
+      { query: "typed", count: 4, answer: true },
+      runtime({ getLanguage: async () => language }),
+      undefined,
+      "mimo-v2.5",
+      "metered_api",
+      "xiaomi",
+    )
+    expect(result.output).toMatchObject({ results: [], status: "ungrounded", answer: expect.stringContaining("prose URL") })
+  })
+
+  test("MiMo search extracts only serialized provider annotations", () => {
+    const raw = JSON.stringify({ choices: [{ message: { content: "https://prose.example", annotations: [
+      { url: "https://source.example", title: "Source", summary: "Snippet", publish_time: "2026-09-26" },
+      { url: "javascript:alert(1)", title: "bad" },
+    ] } }] })
+    expect(extractMimoSearchAnnotations(raw)).toEqual([{
+      url: "https://source.example", title: "Source", snippet: "Snippet", publishedAt: "2026-09-26",
+    }])
+    expect(extractMimoSearchAnnotations("not-json")).toEqual([])
+    expect(extractMimoSearchAnnotations({ choices: [{ message: { content: "https://prose.example" } }] })).toEqual([])
+  })
+
+  test("MiMo search deadline aborts the transport and terminalizes the journal", async () => {
+    let aborted = false
+    const language = new MockLanguageModelV3({
+      doGenerate: async ({ abortSignal }) => {
+        await new Promise<void>((resolve) => {
+          if (abortSignal?.aborted) return resolve()
+          abortSignal?.addEventListener("abort", () => {
+            aborted = true
+            resolve()
+          }, { once: true })
+        })
+        throw new Error("transport aborted")
+      },
+    })
+    const { host, result } = await execute(
+      "web.search",
+      { query: "cancel me", count: 1, answer: false },
+      runtime({ getSearchLanguage: async () => language }),
+      undefined,
+      "mimo-v2.5",
+      "metered_api",
+      "xiaomi",
+      { deadlineMs: 20 },
+    )
+    expect(aborted).toBe(true)
+    expect(result.committed).toBe(false)
+    expect(host.calls.some((call) => call.method.endsWith("/journal/cas") && call.params.state === "failed")).toBe(true)
+  })
+
+  test("MiMo search does not retry a dispatched transient provider failure", async () => {
+    const language = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw new Error("network timeout")
+      },
+    })
+    const { host, result } = await execute(
+      "web.search",
+      { query: "one billed call", count: 1, answer: false },
+      runtime({ getSearchLanguage: async () => language }),
+      undefined,
+      "mimo-v2.5",
+      "metered_api",
+      "xiaomi",
+    )
+    expect(language.doGenerateCalls).toHaveLength(1)
+    expect(result.committed).toBe(false)
+    expect(host.calls.filter((call) => call.method.endsWith("/journal/cas") && call.params.attempt).length).toBe(1)
+  })
+
+  test("caller cancellation aborts MiMo transport and leaves a replayable cancelled terminal", async () => {
+    const language = new MockLanguageModelV3({
+      doGenerate: async ({ abortSignal }) => {
+        await new Promise<void>((resolve) => {
+          if (abortSignal?.aborted) return resolve()
+          abortSignal?.addEventListener("abort", () => resolve(), { once: true })
+        })
+        throw new Error("cancelled transport")
+      },
+    })
+    const host = new Host()
+    ManagedProvider.installHostConnection(host as any)
+    const router = new ManagedOperations.Router(host as any, runtime({ getSearchLanguage: async () => language }))
+    const payload = request("web.search", { query: "caller cancel", count: 1, answer: false }, [], "mimo-v2.5", "metered_api", "xiaomi")
+    const pending = router.handle(payload)
+    await Bun.sleep(5)
+    await expect(router.handle(payload)).rejects.toMatchObject({ code: "operation_in_progress" })
+    const cancellation = await router.cancel({ rootOperationID: payload.rootOperationID, idempotencyKey: payload.idempotencyKey })
+    const result = await pending
+    expect(cancellation.state).toBe("pending")
+    expect(result.state).toBe("cancelled")
+    expect(language.doGenerateCalls).toHaveLength(1)
+    expect(host.calls.some((call) => call.method.endsWith("/journal/cas") && call.params.state === "cancelled")).toBe(true)
+    const replay = await router.handle(payload)
+    expect(replay.replayed).toBe(true)
+    expect(language.doGenerateCalls).toHaveLength(1)
+  })
+
+  test("journal begin failure releases the matching in-flight controller", async () => {
+    const host = new Host()
+    host.failJournalBeginOnce = true
+    const language = new MockLanguageModelV3({
+      doGenerate: {
+        content: [{ type: "text", text: "ok" }],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } },
+        warnings: [],
+      },
+    })
+    const payload = request("chat.complete", { messages: [{ role: "user", content: "retry" }] })
+    ManagedProvider.installHostConnection(host as any)
+    const router = new ManagedOperations.Router(host as any, runtime({ getLanguage: async () => language }))
+    await expect(router.handle(payload)).rejects.toThrow("injected journal begin failure")
+    const retry = await router.handle(payload)
+    expect(["complete", "failed"]).toContain(retry.state)
+  })
+
+  test("replay artifact read failure does not leak the in-flight controller", async () => {
+    const host = new Host()
+    const language = new MockLanguageModelV3({
+      doGenerate: async ({ abortSignal }) => {
+        await new Promise<void>((resolve) => {
+          if (abortSignal?.aborted) return resolve()
+          abortSignal?.addEventListener("abort", () => resolve(), { once: true })
+        })
+        throw new Error("cancelled transport")
+      },
+    })
+    const payload = request("web.search", { query: "replay", count: 1, answer: false }, [], "mimo-v2.5", "metered_api", "xiaomi")
+    ManagedProvider.installHostConnection(host as any)
+    const first = new ManagedOperations.Router(host as any, runtime({ getSearchLanguage: async () => language }))
+    const pending = first.handle(payload)
+    await Bun.sleep(5)
+    await first.cancel({ rootOperationID: payload.rootOperationID, idempotencyKey: payload.idempotencyKey })
+    await pending
+    host.failArtifactReadOnce = true
+    const second = new ManagedOperations.Router(host as any, runtime({ getSearchLanguage: async () => language }))
+    await expect(second.handle(payload)).rejects.toThrow("injected artifact read failure")
+    const replay = await second.handle(payload)
+    expect(replay.replayed).toBe(true)
+    expect(language.doGenerateCalls).toHaveLength(1)
+  })
+
+  test("terminal cancellation CAS failure recovers from the attached artifact", async () => {
+    const host = new Host()
+    host.failCancelledCasOnce = true
+    const language = new MockLanguageModelV3({
+      doGenerate: async ({ abortSignal }) => {
+        await new Promise<void>((resolve) => {
+          if (abortSignal?.aborted) return resolve()
+          abortSignal?.addEventListener("abort", () => resolve(), { once: true })
+        })
+        throw new Error("cancelled transport")
+      },
+    })
+    const payload = request("web.search", { query: "recover", count: 1, answer: false }, [], "mimo-v2.5", "metered_api", "xiaomi")
+    ManagedProvider.installHostConnection(host as any)
+    const first = new ManagedOperations.Router(host as any, runtime({ getSearchLanguage: async () => language }))
+    const pending = first.handle(payload)
+    await Bun.sleep(5)
+    await first.cancel({ rootOperationID: payload.rootOperationID, idempotencyKey: payload.idempotencyKey })
+    await expect(pending).rejects.toThrow("injected cancelled CAS failure")
+    const second = new ManagedOperations.Router(host as any, runtime({ getSearchLanguage: async () => language }))
+    const recovered = await second.handle(payload)
+    expect(recovered.replayed).toBe(true)
+    expect(recovered.state).toBe("cancelled")
+    expect(language.doGenerateCalls).toHaveLength(1)
+    expect(host.cancelledCasSuccesses).toBe(1)
+  })
+
+  test("chat.complete emits only allowlisted passive capacity metadata", async () => {
+    const language = new MockLanguageModelV3({
+      doGenerate: {
+        content: [{ type: "text", text: "managed reply" }],
+        finishReason: { unified: "stop", raw: "stop" },
+        usage: {
+          inputTokens: { total: 2, noCache: 2, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 3, text: 3, reasoning: 0 },
+        },
+        response: { headers: { "x-ratelimit-limit-requests": "100", "x-ratelimit-remaining-requests": "80", "x-ratelimit-reset-requests": "6m0s", authorization: "secret" } },
+        warnings: [],
+      },
+    })
+    const { result } = await execute(
+      "chat.complete",
+      { messages: [{ role: "user", content: "hello" }] },
+      runtime({ getLanguage: async () => language }),
+      undefined,
+      undefined,
+      undefined,
+      "openai",
+    )
+    expect(result.quota).toMatchObject({ transport: "documented", adapterRevision: "openai-capacity-v1", requests: { limit: 100, remaining: 80 } })
+    expect(typeof result.quota?.requests?.resetAt).toBe("string")
+    expect(JSON.stringify(result)).not.toContain("authorization")
   })
 
   test("vision.describe verifies its image artifact before calling the language model", async () => {

@@ -31,6 +31,7 @@ from src.openclank.files_facade import (
 )
 from src.openclank.files_service_client import FilesServiceError, client_for_owner
 from src.openclank.filesystem_registry import FilesystemRegistryError, FilesystemRootRegistry
+from src.openclank.macos_host_apps import MacOSHostApps, MacOSHostAppsError
 from routes.odysseus_files_routes import project_navigation_roots
 from src.openclank.resource_refs import issue_resource_ref, stable_resource_id
 
@@ -1743,6 +1744,39 @@ class HostFilesProvider:
                 },
             },
         }
+
+    async def host_applications(self, context: ProviderContext, *, origin_id: str) -> list[dict[str, str]]:
+        """Discover installed apps only after the provider reauthorizes the ref."""
+        entry = await self.stat(context, origin_id=origin_id)
+        if entry.kind != "file" or "open" not in entry.capabilities:
+            raise FilesFacadeError("Host resource cannot be opened", code="resource_unavailable")
+        try:
+            return await MacOSHostApps().discover_async(await self._authorized_path(context, origin_id))
+        except MacOSHostAppsError as error:
+            raise FilesFacadeError(str(error), code=error.code) from error
+
+    async def open_on_host(self, context: ProviderContext, *, origin_id: str, app_id: str) -> Mapping[str, str]:
+        """Reauthorize and privately resolve the path for one native launch."""
+        entry = await self.stat(context, origin_id=origin_id)
+        if entry.kind != "file" or "open" not in entry.capabilities:
+            raise FilesFacadeError("Host resource cannot be opened", code="resource_unavailable")
+        try:
+            return await MacOSHostApps().launch_async(await self._authorized_path(context, origin_id), app_id)
+        except MacOSHostAppsError as error:
+            raise FilesFacadeError(str(error), code=error.code) from error
+
+    async def _authorized_path(self, context: ProviderContext, origin_id: str) -> str:
+        """Return the canonical path from the current authorized service stat."""
+        requested = _path(origin_id)
+        scope = self._scope(context)
+        try:
+            response = await self._client(context, scope).request("stat", requested, {"include_fingerprint": True})
+        except FilesServiceError as exc:
+            raise _service_error(exc) from exc
+        canonical = str((response.get("data") or {}).get("path") or "")
+        if not canonical or not Path(canonical).is_absolute() or "\x00" in canonical:
+            raise FilesFacadeError("Host resource is unavailable", code="resource_unavailable")
+        return canonical
 
     async def save_resource(
         self,

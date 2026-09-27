@@ -6,6 +6,7 @@ import { Instance } from "../../src/project/instance"
 import { Server } from "../../src/server/server"
 import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
+import { SessionRunState } from "../../src/session/run-state"
 import { MessageID } from "../../src/session/schema"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Log } from "../../src/util"
@@ -19,6 +20,35 @@ afterEach(async () => {
 })
 
 describe("session turn recovery routes", () => {
+  test("preserves an existing error while completing its recovery timestamp", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const result = await Instance.provide({
+      directory: tmp.path,
+      fn: async () => AppRuntime.runPromise(Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({ title: "error recovery" })
+        const user = yield* sessions.updateMessage({
+          id: MessageID.ascending(), role: "user", sessionID: session.id, agent: "build",
+          model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") }, time: { created: Date.now() },
+        })
+        const error = new Error("retained failure")
+        const assistant = yield* sessions.updateMessage({
+          id: MessageID.ascending(), parentID: user.id, sessionID: session.id, role: "assistant", mode: "build", agent: "build",
+          path: { cwd: tmp.path, root: tmp.path }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ModelID.make("test-model"), providerID: ProviderID.make("test"), time: { created: Date.now() },
+          error: { name: "ModelError", data: { message: error.message } },
+        })
+        yield* SessionPrompt.Service.use((svc) => svc.resumeBackground({ sessionID: session.id, assistantMessageID: assistant.id }))
+        yield* Effect.sleep("100 millis")
+        const after = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+        const retained = after.find((item) => item.info.id === assistant.id)?.info
+        return retained?.role === "assistant" ? retained : undefined
+      })),
+    })
+    expect(result?.error).toEqual({ name: "ModelError", data: { message: "retained failure" } })
+    expect(result?.time.completed).toEqual(expect.any(Number))
+  })
+
   test("lists the latest incomplete assistant and accepts resume without a new prompt", async () => {
     await using tmp = await tmpdir({ git: true })
     const result = await Instance.provide({
@@ -257,4 +287,67 @@ test("resume with only modelProviderID returns 400", async () => {
     })),
   })
   expect(result).toBe(400)
+})
+
+test("resume rejects an unavailable model before admitting work or mutating the candidate", async () => {
+  await using tmp = await tmpdir({ git: true })
+  const result = await Instance.provide({
+    directory: tmp.path,
+    fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "invalid recovery model" })
+      const user = yield* sessions.updateMessage({
+        id: MessageID.ascending(), role: "user", sessionID: session.id, agent: "build",
+        model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") }, time: { created: Date.now() },
+      })
+      const assistant = yield* sessions.updateMessage({
+        id: MessageID.ascending(), parentID: user.id, sessionID: session.id, role: "assistant", mode: "build", agent: "build",
+        path: { cwd: tmp.path, root: tmp.path }, cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelID.make("test-model"), providerID: ProviderID.make("test"), time: { created: Date.now() },
+      })
+      const app = Server.Default().app
+      const response = yield* Effect.promise(() => Promise.resolve(app.request(
+        `/session/${session.id}/turn/${assistant.id}/resume?directory=${encodeURIComponent(tmp.path)}&modelProviderID=test&modelID=missing-model`,
+        { method: "POST" },
+      )))
+      const candidates = yield* SessionPrompt.Service.use((svc) => svc.recovery({ sessionID: session.id, agentID: "main" }))
+      return { status: response.status, candidates }
+    })),
+  })
+  expect([400, 404]).toContain(result.status)
+  expect(result.candidates).toEqual([{ assistantMessageID: expect.any(String), parentMessageID: expect.any(String), created: expect.any(Number) }])
+})
+
+test("resume rejects a busy actor before cleanup or background admission", async () => {
+  await using tmp = await tmpdir({ git: true })
+  const result = await Instance.provide({
+    directory: tmp.path,
+    fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({ title: "busy recovery" })
+      const user = yield* sessions.updateMessage({
+        id: MessageID.ascending(), role: "user", sessionID: session.id, agent: "build",
+        model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") }, time: { created: Date.now() },
+      })
+      const assistant = yield* sessions.updateMessage({
+        id: MessageID.ascending(), parentID: user.id, sessionID: session.id, role: "assistant", mode: "build", agent: "build",
+        path: { cwd: tmp.path, root: tmp.path }, cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelID.make("test-model"), providerID: ProviderID.make("test"), time: { created: Date.now() },
+      })
+      const runState = yield* SessionRunState.Service
+      const held = { info: assistant, parts: [] }
+      yield* runState.start(session.id, "main", Effect.succeed(held), Effect.sleep("2 seconds").pipe(Effect.as(held)))
+      const response = yield* Effect.promise(() => Promise.resolve(Server.Default().app.request(
+        `/session/${session.id}/turn/${assistant.id}/resume?directory=${encodeURIComponent(tmp.path)}`,
+        { method: "POST" },
+      )))
+      const candidates = yield* SessionPrompt.Service.use((svc) => svc.recovery({ sessionID: session.id, agentID: "main", allowBusy: true }))
+      yield* runState.cancel(session.id)
+      return { status: response.status, candidates }
+    })),
+  })
+  expect(result.status).toBe(409)
+  expect(result.candidates).toEqual([{ assistantMessageID: expect.any(String), parentMessageID: expect.any(String), created: expect.any(Number) }])
 })

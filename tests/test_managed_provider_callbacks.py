@@ -562,3 +562,37 @@ def test_session_cwd_is_a_separate_engine_to_host_callback_family(managed_callba
     assert "_openclank/session/v1/cwd/change" in SESSION_METHODS
     assert "_openclank/session/v1/cwd/change" not in names
     assert len(names) == len(client.methods)
+
+
+@pytest.mark.asyncio
+async def test_callback_journal_terminal_winner_is_first_writer(managed_callbacks):
+    callbacks, _store, _factory, _artifacts = managed_callbacks
+    begin = await callbacks.dispatch(
+        "_openclank/operations/v1/journal/cas",
+        {
+            "action": "begin", "rootOperationID": "callback-race",
+            "operation": "web.search", "idempotencyKey": "callback-race-key-0001",
+            "request": {"operation": "web.search", "input": {"query": "x"}, "routes": [], "artifactInputs": [], "options": {}},
+            "connectionID": "openai-api", "billingLane": "metered_api", "modelRouteID": "route-gpt-test",
+        },
+    )
+    complete = await callbacks.dispatch(
+        "_openclank/operations/v1/journal/cas",
+        {"action": "cas", "operationID": begin["operationID"], "expectedRevision": begin["revision"], "state": "complete", "commitReason": "provider_result"},
+    )
+    assert complete["state"] == "complete" and complete["committed"] is True
+    with pytest.raises(ManagedProviderCallbackError):
+        await callbacks.dispatch(
+            "_openclank/operations/v1/journal/cas",
+            {"action": "cas", "operationID": begin["operationID"], "expectedRevision": complete["revision"], "state": "cancelled"},
+        )
+    replay = await callbacks.dispatch(
+        "_openclank/operations/v1/journal/cas",
+        {
+            "action": "begin", "rootOperationID": "callback-race",
+            "operation": "web.search", "idempotencyKey": "callback-race-key-0001",
+            "request": {"operation": "web.search", "input": {"query": "x"}, "routes": [], "artifactInputs": [], "options": {}},
+            "connectionID": "openai-api", "billingLane": "metered_api", "modelRouteID": "route-gpt-test",
+        },
+    )
+    assert replay["replayed"] is True and replay["state"] == "complete" and replay["revision"] == complete["revision"]

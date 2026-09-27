@@ -112,6 +112,79 @@ def test_regular_user_saves_only_personal_model_settings(settings_routes):
     assert exc.value.status_code == 403
 
 
+def test_agent_settings_override_reset_and_owner_isolation(settings_routes):
+    saved = asyncio.run(settings_routes["post"](_Request(
+        "bob-token",
+        {"agent_settings": {"compaction": {"tail_turns": 0, "max_context": "50%"}}},
+    )))
+    assert saved["agent_settings_override"] is True
+    assert settings_routes["prefs"]["bob"]["agent_settings"]["compaction"]["tail_turns"] == 0
+    alice = asyncio.run(settings_routes["get"](_Request("alice-token")))
+    assert alice["agent_settings_override"] is False
+    reset = asyncio.run(settings_routes["post"](_Request("bob-token", {"agent_settings": None})))
+    assert reset["agent_settings_override"] is False
+    assert "agent_settings" not in settings_routes["prefs"]["bob"]
+
+
+def test_agent_settings_rejects_invalid_native_quantities(settings_routes):
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(settings_routes["post"](_Request(
+            "bob-token", {"agent_settings": {"compaction": {"max_context": "soon"}}}
+        )))
+    assert exc.value.status_code == 400
+
+
+def test_settings_readback_uses_bound_chat_route_without_cold_admission(settings_routes, monkeypatch):
+    from src.openclank import chat_routing, modality_facade
+
+    route = SimpleNamespace(connection_id="bound-connection", provider_model_id="bound-model")
+    monkeypatch.setattr(modality_facade, "_configured_text_route", lambda **_kwargs: route)
+    monkeypatch.setattr(chat_routing, "resolve_chat_model_spec", lambda **_kwargs: pytest.fail("catalog fallback should not run"))
+
+    class ReadyWorker:
+        async def ready_effective_agent_settings(self, owner, provider_id, model_id):
+            raise AssertionError("supervisor seam should be called directly")
+
+    class ReadySupervisor:
+        def __init__(self):
+            self.calls = []
+            self.admit_calls = 0
+
+        async def ready_effective_agent_settings(self, owner, provider_id, model_id):
+            self.calls.append((owner, provider_id, model_id))
+            return {"context": {"hard": 1000, "usable": 800}, "compaction": {"tailTurns": 2}}
+
+        async def admit_agent(self, *_args):
+            self.admit_calls += 1
+            raise AssertionError("readback must not cold-admit a worker")
+
+    request = _Request("bob-token")
+    supervisor = ReadySupervisor()
+    request.app.state.mimo_supervisor = supervisor
+    visible = asyncio.run(settings_routes["get"](request))
+    assert visible["agent_settings_effective"]["status"] == "available"
+    assert supervisor.calls == [("bob", "bound-connection", "bound-model")]
+    assert supervisor.admit_calls == 0
+
+
+def test_settings_readback_preserves_stable_unavailable_reason(settings_routes, monkeypatch):
+    from src.openclank import modality_facade
+
+    monkeypatch.setattr(modality_facade, "_configured_text_route", lambda **_kwargs: SimpleNamespace(connection_id="bound", provider_model_id="model"))
+
+    class Supervisor:
+        async def ready_effective_agent_settings(self, *_args):
+            error = RuntimeError("provider secret must never leak")
+            error.code = "MODEL_NOT_PROJECTED"
+            raise error
+
+    request = _Request("bob-token")
+    request.app.state.mimo_supervisor = Supervisor()
+    visible = asyncio.run(settings_routes["get"](request))
+    assert visible["agent_settings_effective"] == {"status": "unavailable", "reason": "MODEL_NOT_PROJECTED"}
+    assert "provider secret" not in repr(visible)
+
+
 def test_admin_model_choice_is_personal_while_policy_remains_global(settings_routes):
     asyncio.run(settings_routes["post"](_Request(
         "alice-token",

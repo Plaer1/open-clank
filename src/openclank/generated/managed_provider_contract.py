@@ -2,7 +2,7 @@
 
 SCHEMA_ID = 'https://openclank.dev/contracts/managed-provider/v2'
 SCHEMA_VERSION = 2
-SCHEMA_SHA256 = 'e21dac877632b285e84fb84e7921d8c1c084e6002de25e2d59cf5da6f43dbb50'
+SCHEMA_SHA256 = '611c378cc61719f6290cd28e9c383b5a9f398fc174785c7c84b5269f366073ca'
 PROTOCOL_VERSION = 1
 PROVIDER_STORE_VERSION = 1
 OPERATION_ROUTER_VERSION = 1
@@ -30,9 +30,11 @@ OPERATION_METHODS = (    '_openclank/operations/v1/journal/cas',
     '_openclank/operations/v1/artifact/write',
     '_openclank/operations/v1/executor/invoke',
     '_openclank/operations/v1/execute',
+    '_openclank/operations/v1/cancel',
 )
 SESSION_METHODS = (    '_openclank/session/v1/cwd/change',
     '_openclank/session/v1/binding/read',
+    '_openclank/session/v1/settings/effective',
 )
 MANAGED_METHODS = frozenset((    '_openclank/provider-store/v1/account/bind',
     '_openclank/provider-store/v1/account/commit',
@@ -55,8 +57,10 @@ MANAGED_METHODS = frozenset((    '_openclank/provider-store/v1/account/bind',
     '_openclank/operations/v1/artifact/write',
     '_openclank/operations/v1/executor/invoke',
     '_openclank/operations/v1/execute',
+    '_openclank/operations/v1/cancel',
     '_openclank/session/v1/cwd/change',
     '_openclank/session/v1/binding/read',
+    '_openclank/session/v1/settings/effective',
 ))
 ENGINE_METHODS = frozenset((    '_openclank/provider-control/v1/catalog',
     '_openclank/provider-control/v1/connection/validate',
@@ -66,6 +70,8 @@ ENGINE_METHODS = frozenset((    '_openclank/provider-control/v1/catalog',
     '_openclank/provider-control/v1/oauth/callback',
     '_openclank/provider-control/v1/oauth/cancel',
     '_openclank/operations/v1/execute',
+    '_openclank/operations/v1/cancel',
+    '_openclank/session/v1/settings/effective',
 ))
 HOST_CALLBACK_METHODS = frozenset((    '_openclank/provider-store/v1/account/bind',
     '_openclank/provider-store/v1/account/commit',
@@ -85,6 +91,7 @@ HOST_CALLBACK_METHODS = frozenset((    '_openclank/provider-store/v1/account/bin
 ))
 MODEL_OPERATIONS = frozenset((    'chat.stream',
     'chat.complete',
+    'web.search',
     'vision.describe',
     'image.generate',
     'image.edit',
@@ -121,8 +128,10 @@ METHOD_DIRECTIONS = {
     '_openclank/operations/v1/artifact/write': 'engine_to_host',
     '_openclank/operations/v1/executor/invoke': 'engine_to_host',
     '_openclank/operations/v1/execute': 'host_to_engine',
+    '_openclank/operations/v1/cancel': 'host_to_engine',
     '_openclank/session/v1/cwd/change': 'engine_to_host',
-    '_openclank/session/v1/binding/read': 'engine_to_host'
+    '_openclank/session/v1/binding/read': 'engine_to_host',
+    '_openclank/session/v1/settings/effective': 'host_to_engine'
 }
 METHOD_WIRE_MAPPINGS = {
     '_openclank/provider-control/v1/catalog': ('empty object', '#/$defs/familyCatalogResult'),
@@ -146,6 +155,8 @@ METHOD_WIRE_MAPPINGS = {
     '_openclank/operations/v1/artifact/write': ('#/$defs/artifactWriteRequest', '#/$defs/artifactDescriptor'),
     '_openclank/operations/v1/executor/invoke': ('#/$defs/executorInvokeRequest', '#/$defs/artifactDescriptor'),
     '_openclank/operations/v1/execute': ('#/$defs/operationExecuteRequest', '#/$defs/operationExecuteResult'),
+    '_openclank/operations/v1/cancel': ('#/$defs/operationCancelRequest', '#/$defs/operationCancelResult'),
     '_openclank/session/v1/cwd/change': ('#/$defs/sessionCwdChangeRequest', '#/$defs/sessionCwdChangeResult'),
-    '_openclank/session/v1/binding/read': ('#/$defs/sessionBindingReadRequest', '#/$defs/sessionBindingReadResult')
+    '_openclank/session/v1/binding/read': ('#/$defs/sessionBindingReadRequest', '#/$defs/sessionBindingReadResult'),
+    '_openclank/session/v1/settings/effective': ('#/$defs/sessionSettingsEffectiveRequest', '#/$defs/sessionSettingsEffectiveResult')
 }

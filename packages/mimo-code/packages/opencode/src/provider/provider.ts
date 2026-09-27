@@ -556,6 +556,7 @@ export function applyManagedAdapterOptions(
   credential: Auth.Info | undefined,
   input: Record<string, any>,
   scope?: AccountSelection.Scope,
+  operation?: { kind: "web.search"; count: number },
 ): Record<string, any> {
   const options: Record<string, any> = { ...input, headers: { ...(input["headers"] ?? {}) } }
   for (const key of Object.keys(options)) {
@@ -595,6 +596,13 @@ export function applyManagedAdapterOptions(
       throw new Error("Managed Xiaomi account route does not match its fixed connection")
     }
     if (credentialURL) options["baseURL"] = credentialURL
+    if (operation?.kind === "web.search") {
+      const count = operation.count
+      options["transformRequestBody"] = (body: Record<string, any>) => ({
+        ...body,
+        tools: [{ type: "web_search", max_keyword: 1, force_search: true, limit: count }],
+      })
+    }
   }
   if (metadata.familyID === "openai" && metadata.billingLane === "subscription") {
     if (credential?.type !== "oauth") throw new Error("Managed ChatGPT subscription requires an OAuth credential")
@@ -1510,6 +1518,7 @@ export interface Interface {
   readonly getProvider: (providerID: ProviderID) => Effect.Effect<Info>
   readonly getModel: (providerID: ProviderID, modelID: ModelID) => Effect.Effect<Model>
   readonly getLanguage: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<LanguageModelV3>
+  readonly getSearchLanguage?: (model: Model, account: AccountSelection.Scope, count: number) => Effect.Effect<LanguageModelV3>
   readonly getEmbedding: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<EmbeddingModelV3>
   readonly getImage: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<ImageModelV3>
   readonly getSpeech: (model: Model, account?: AccountSelection.Scope) => Effect.Effect<SpeechModelV3>
@@ -2061,6 +2070,7 @@ const layer: Layer.Layer<
       s: State,
       envs: Record<string, string | undefined>,
       account?: AccountSelection.Scope,
+      operation?: { kind: "web.search"; count: number },
     ) {
       try {
         using _ = log.time("getSDK", {
@@ -2145,7 +2155,7 @@ const layer: Layer.Layer<
             ...options["headers"],
             ...model.headers,
           }
-        if (metadata) options = applyManagedAdapterOptions(metadata, account?.credential, options, account)
+        if (metadata) options = applyManagedAdapterOptions(metadata, account?.credential, options, account, operation)
 
         const key = sdkCacheKey(model, options, account)
         const existing = managedProviderMode ? undefined : s.sdk.get(key)
@@ -2291,6 +2301,21 @@ const layer: Layer.Layer<
             )
           throw e
         }
+      })
+    })
+
+    const getSearchLanguage = Effect.fn("Provider.getSearchLanguage")(function* (
+      model: Model,
+      account: AccountSelection.Scope,
+      count: number,
+    ) {
+      if (!Number.isSafeInteger(count) || count < 1 || count > 50) throw new Error("Managed search count is invalid")
+      const s = yield* InstanceState.get(state)
+      const envs = managedProviderMode ? {} : yield* env.all()
+      return yield* Effect.promise(async () => {
+        const provider = s.providers[model.providerID]
+        const sdk = await resolveSDK(model, s, envs, account, { kind: "web.search", count })
+        return selectManagedLanguageModel(sdk as BundledSDK, managedAdapterMetadata(provider, model), model.api.id)
       })
     })
 
@@ -2458,6 +2483,7 @@ const layer: Layer.Layer<
       getProvider,
       getModel,
       getLanguage,
+      getSearchLanguage,
       getEmbedding,
       getImage,
       getSpeech,

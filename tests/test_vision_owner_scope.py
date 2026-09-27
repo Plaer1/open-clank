@@ -56,7 +56,8 @@ async def test_vision_analysis_uses_managed_owner_route_and_affinity(monkeypatch
 def test_request_vision_call_sites_use_managed_facade():
     processor_source = (ROOT / "src" / "document_processor.py").read_text()
     upload_source = (ROOT / "routes" / "upload_routes.py").read_text()
-    document_source = (ROOT / "routes" / "document_routes.py").read_text()
+    document_source = (ROOT / "routes" / "document" / "document_routes.py").read_text()
+    document_shim = (ROOT / "routes" / "document_routes.py").read_text()
     gallery_source = (
         ROOT / "routes" / "gallery" / "gallery_routes.py"
     ).read_text()
@@ -65,6 +66,7 @@ def test_request_vision_call_sites_use_managed_facade():
     assert "describe_image_path" in processor_source
     assert "root_operation_id=root_operation_id" in processor_source
     assert "describe_image(" in document_source
+    assert "document_routes as _canonical" in document_shim
     assert "describe_image(" in gallery_source
     for source in (processor_source, gallery_source):
         assert "_resolve_vl_model" not in source

@@ -431,6 +431,11 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
     """
 
     normalized_owner = _owner(owner)
+    from routes.prefs_routes import _load_for_user
+    # Preserve native dynamic defaults when the owner has no explicit override.
+    # Loading DEFAULT_SETTINGS here would turn an undefined native reserve into
+    # a fixed 20k value before the selected model is known.
+    agent_settings = (_load_for_user(normalized_owner) or {}).get("agent_settings", {})
     db = core_database.SessionLocal()
     try:
         own_connections = (
@@ -670,7 +675,7 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
             ),
             "npm": npm,
             "api": api,
-            "options": _provider_options(connection, api),
+            "options": {**_provider_options(connection, api), "_openclankAgentSettings": agent_settings},
             "models": {
                 route.provider_model_id: _model_config(
                     connection,
@@ -693,6 +698,7 @@ def build_projection_snapshot(owner: str) -> ProjectionSnapshot:
         "shared_grants": shared_grant_material,
         "source_connections": sources,
         "small_model": small_model,
+        "agent_settings": agent_settings,
     }
     fingerprint = hashlib.sha256(_canonical(material).encode("utf-8")).hexdigest()
     return ProjectionSnapshot(
@@ -783,14 +789,25 @@ def projection_public(row: Any) -> dict[str, Any]:
 def safe_additive_delta(old: ProjectionSnapshot, new: ProjectionSnapshot) -> bool:
     """True only when existing route topology is identical and additions are safe."""
 
+    def without_settings(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                key: without_settings(item)
+                for key, item in value.items()
+                if key != "_openclankAgentSettings"
+            }
+        if isinstance(value, list):
+            return [without_settings(item) for item in value]
+        return value
+
     if old.owner != new.owner or old.small_model != new.small_model:
         return False
     for provider_id, old_provider in old.providers.items():
         new_provider = new.providers.get(provider_id)
         if new_provider is None:
             return False
-        if _canonical({key: value for key, value in old_provider.items() if key != "models"}) != _canonical(
-            {key: value for key, value in new_provider.items() if key != "models"}
+        if _canonical(without_settings({key: value for key, value in old_provider.items() if key != "models"})) != _canonical(
+            without_settings({key: value for key, value in new_provider.items() if key != "models"})
         ):
             return False
         old_models = old_provider.get("models") or {}
@@ -798,6 +815,6 @@ def safe_additive_delta(old: ProjectionSnapshot, new: ProjectionSnapshot) -> boo
         if not isinstance(old_models, dict) or not isinstance(new_models, dict):
             return False
         for model_id, model in old_models.items():
-            if model_id not in new_models or _canonical(model) != _canonical(new_models[model_id]):
+            if model_id not in new_models or _canonical(without_settings(model)) != _canonical(without_settings(new_models[model_id])):
                 return False
     return True

@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from core.operation_models import OperationBase
 from core.provider_models import ProviderBase, ProviderConnection
 from src.openclank.artifacts import ArtifactStore
+from src.openclank.operation_journal import OperationConflict, OperationJournalStore
 from src.openclank.operation_router import (
     ManagedOperationDenied,
     ManagedOperationProtocolError,
@@ -142,9 +143,10 @@ def test_route_preflight_exposes_only_safe_enabled_owner_choices(
         owner="alice",
         purpose="memory",
         operation="chat.complete",
-    ) == {
-        "configured": False,
-        "binding_revision": 0,
+        ) == {
+            "configured": False,
+            "selected_model_route_id": None,
+            "binding_revision": 0,
         "eligible_routes": [expected_choice],
     }
 
@@ -161,6 +163,7 @@ def test_route_preflight_exposes_only_safe_enabled_owner_choices(
     )
     assert configured == {
         "configured": True,
+        "selected_model_route_id": "route-chat",
         "binding_revision": 1,
         "eligible_routes": [expected_choice],
     }
@@ -487,3 +490,140 @@ async def test_router_refuses_urls_credentials_and_inline_binary(
         await router.execute(
             ManagedOperationRequest(input={"image": "data:image/png;base64,AA=="}, **base)
         )
+
+
+@pytest.mark.asyncio
+async def test_web_search_requires_explicit_mimo_route_and_accepts_annotation_rows(operation_environment):
+    store, factory, artifacts = operation_environment
+    store.create_connection(owner="alice", connection_id="connection-mimo", family_id="xiaomi",
+                            adapter_id="mimo-native", kind="api", billing_lane="metered_api", label="MiMo")
+    store.create_model_route(owner="alice", connection_id="connection-mimo", model_route_id="route-search",
+                             provider_model_id="mimo-v2.5", display_name="MiMo Search", operations=("web.search",))
+    calls = []
+
+    async def execute(_owner, payload):
+        calls.append(payload)
+        return {"operationID": "op-search-0001", "rootOperationID": payload["rootOperationID"],
+                "operation": "web.search", "state": "complete", "committed": True,
+                "commitReason": "response_returned", "modelRouteID": "route-search",
+                "connectionID": "connection-mimo", "billingLane": "metered_api",
+                "output": {"status": "complete", "results": [{"url": "https://source.example/a",
+                "title": "A", "snippet": "from annotation", "provider": "xiaomi"}],
+                "answer": "A grounded answer with https://prose.example ignored as a source."},
+                "artifacts": [], "replayed": False}
+
+    router = ManagedOperationRouter(session_factory=factory, artifact_store=artifacts, executor=execute)
+    with pytest.raises(ManagedOperationDenied, match="explicitly selected"):
+        await router.execute(ManagedOperationRequest(owner="alice", operation="web.search", purpose="search",
+            input={"query": "typed"}, root_operation_id="root-search-no-route", idempotency_key="search-no-route-0001"))
+    result = await router.execute(ManagedOperationRequest(owner="alice", operation="web.search", purpose="search",
+        model_route_id="route-search", input={"query": "typed", "count": 5, "answer": True},
+        root_operation_id="root-search-0001", idempotency_key="search-operation-0001"))
+    assert result.output["results"][0]["url"] == "https://source.example/a"
+    assert result.output["answer"].startswith("A grounded answer")
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_web_search_rejects_arbitrary_authority_and_malformed_source(operation_environment):
+    store, factory, artifacts = operation_environment
+    store.create_connection(owner="alice", connection_id="connection-mimo", family_id="xiaomi",
+                            adapter_id="mimo-native", kind="api", billing_lane="metered_api", label="MiMo")
+    store.create_model_route(owner="alice", connection_id="connection-mimo", model_route_id="route-search",
+                             provider_model_id="mimo-v2.5", display_name="MiMo Search", operations=("web.search",))
+
+    async def malformed(_owner, payload):
+        return {"operationID": "op-search-bad", "rootOperationID": payload["rootOperationID"],
+                "operation": "web.search", "state": "complete", "committed": True,
+                "modelRouteID": "route-search", "connectionID": "connection-mimo", "billingLane": "metered_api",
+                "output": {"results": [{"url": "javascript:alert(1)"}]}, "artifacts": [], "replayed": False}
+
+    router = ManagedOperationRouter(session_factory=factory, artifact_store=artifacts, executor=malformed)
+    base = dict(owner="alice", operation="web.search", purpose="search", model_route_id="route-search",
+                root_operation_id="root-search-bad", idempotency_key="search-operation-bad")
+    with pytest.raises(ManagedOperationDenied, match="unsupported fields"):
+        await router.execute(ManagedOperationRequest(input={"query": "q", "endpoint": "https://evil"}, **base))
+    with pytest.raises(ManagedOperationProtocolError, match="source URL"):
+        await router.execute(ManagedOperationRequest(input={"query": "q"}, **base))
+
+
+def test_cancelled_artifact_replay_is_uncommitted_and_single_terminal_transition(operation_environment):
+    _store, factory, _artifacts = operation_environment
+    journal = OperationJournalStore(factory)
+    row, replayed = journal.begin(
+        owner="alice", root_operation_id="root-cancel", operation="web.search",
+        idempotency_key="cancel-operation-0001", request={"query": "x"},
+        connection_id="connection-1", billing_lane="local", model_route_id="route-1",
+    )
+    assert replayed is False
+    attached = journal.cas(
+        owner="alice", operation_id=row.id, expected_revision=row.revision,
+        artifact_id="artifact-cancelled",
+    )
+    assert attached.committed is False
+    assert attached.state == "pending"
+    terminal = journal.cas(
+        owner="alice", operation_id=row.id, expected_revision=attached.revision,
+        state="cancelled", artifact_id="artifact-cancelled",
+    )
+    assert terminal.committed is False
+    assert terminal.state == "cancelled"
+    assert terminal.revision == row.revision + 2
+    replay, replayed = journal.begin(
+        owner="alice", root_operation_id="root-cancel", operation="web.search",
+        idempotency_key="cancel-operation-0001", request={"query": "x"},
+        connection_id="connection-1", billing_lane="local", model_route_id="route-1",
+    )
+    assert replayed is True
+    assert replay.state == "cancelled"
+    assert replay.committed is False
+    assert replay.artifact_ids == ["artifact-cancelled"]
+
+
+def test_journal_first_terminal_wins_across_completion_and_cancellation(operation_environment):
+    _store, factory, _artifacts = operation_environment
+    journal = OperationJournalStore(factory)
+
+    row, _ = journal.begin(
+        owner="alice", root_operation_id="root-race-a", operation="web.search",
+        idempotency_key="race-operation-00001", request={"query": "a"},
+        connection_id="connection-1", billing_lane="local", model_route_id="route-1",
+    )
+    complete = journal.cas(owner="alice", operation_id=row.id, expected_revision=row.revision, state="complete", commit_reason="provider_result")
+    assert complete.state == "complete"
+    assert complete.revision == row.revision + 1
+    with pytest.raises(OperationConflict):
+        journal.cas(owner="alice", operation_id=row.id, expected_revision=complete.revision, state="cancelled")
+    replay, replayed = journal.begin(
+        owner="alice", root_operation_id="root-race-a", operation="web.search",
+        idempotency_key="race-operation-00001", request={"query": "a"},
+        connection_id="connection-1", billing_lane="local", model_route_id="route-1",
+    )
+    assert replayed is True and replay.state == "complete" and replay.revision == complete.revision
+
+    row, _ = journal.begin(
+        owner="alice", root_operation_id="root-race-b", operation="web.search",
+        idempotency_key="race-operation-00002", request={"query": "b"},
+        connection_id="connection-1", billing_lane="local", model_route_id="route-1",
+    )
+    cancelled = journal.cas(owner="alice", operation_id=row.id, expected_revision=row.revision, state="cancelled")
+    assert cancelled.state == "cancelled" and cancelled.committed is False
+    with pytest.raises(OperationConflict):
+        journal.cas(owner="alice", operation_id=row.id, expected_revision=cancelled.revision, state="complete", commit_reason="provider_result")
+    replay, replayed = journal.begin(
+        owner="alice", root_operation_id="root-race-b", operation="web.search",
+        idempotency_key="race-operation-00002", request={"query": "b"},
+        connection_id="connection-1", billing_lane="local", model_route_id="route-1",
+    )
+    assert replayed is True and replay.state == "cancelled" and replay.committed is False
+
+
+def test_artifact_attachment_never_fabricates_commitment(operation_environment):
+    _store, factory, _artifacts = operation_environment
+    journal = OperationJournalStore(factory)
+    row, _ = journal.begin(owner="alice", root_operation_id="root-commit", operation="web.search", idempotency_key="commit-operation-0001", request={"query": "x"}, connection_id="connection-1", billing_lane="local", model_route_id="route-1")
+    complete = journal.cas(owner="alice", operation_id=row.id, expected_revision=row.revision, state="complete", artifact_id="artifact-result")
+    assert complete.committed is False
+    explicit = journal.cas(owner="alice", operation_id=row.id, expected_revision=complete.revision, commit_reason="provider_result")
+    assert explicit.committed is True
+    assert explicit.commit_reason == "provider_result"

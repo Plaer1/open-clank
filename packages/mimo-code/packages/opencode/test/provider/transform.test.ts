@@ -1580,7 +1580,7 @@ describe("ProviderTransform.message - provider-aware image size cap", () => {
     }
   })
 
-  test("anthropic: leaves remote image-file URLs untouched", () => {
+  test("remote image-file URLs require an explicit extraction/helper action", () => {
     const model = withApi("anthropic", {
       id: "claude-3-5-sonnet-20241022",
       url: "https://api.anthropic.com",
@@ -1588,7 +1588,8 @@ describe("ProviderTransform.message - provider-aware image size cap", () => {
     })
     const remote = new URL("https://example.com/capture.webp")
     const part = (ProviderTransform.message(fileMsgs(remote), model, {})[0].content as any[])[0]
-    expect(part).toEqual({ type: "file", mediaType: "image/webp", filename: "capture.webp", data: remote })
+    expect(part.type).toBe("text")
+    expect(part.text).toContain("remote media size")
   })
 
   test("bedrock: strips an oversized undecodable tool-result image (cap enforced)", () => {

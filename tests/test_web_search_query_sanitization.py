@@ -118,7 +118,7 @@ def _patch_flow(monkeypatch, llm_behaviour, captured):
     search call. ``llm_behaviour`` is either a string to return or an Exception
     instance to raise."""
 
-    def _fake_search(query, *args, **kwargs):
+    async def _fake_search(query, *args, **kwargs):
         captured["query"] = query
         captured["kwargs"] = kwargs
         return ("web context", [{"title": "src"}])
@@ -128,7 +128,7 @@ def _patch_flow(monkeypatch, llm_behaviour, captured):
             raise llm_behaviour
         return llm_behaviour
 
-    monkeypatch.setattr("src.chat_processor.comprehensive_web_search", _fake_search)
+    monkeypatch.setattr("src.chat_processor._search_web_context", _fake_search)
     monkeypatch.setattr("src.openclank.modality_facade.complete_text", _fake_llm)
 
 
@@ -150,7 +150,7 @@ def test_generated_query_is_used_and_sanitized(monkeypatch):
         use_rag=False,
     ))
 
-    assert "query" in captured, "comprehensive_web_search was not called"
+    assert "query" in captured, "canonical search adapter was not called"
 
     # The generated query won (not the sanitized first-line fallback) ...
     assert captured["query"] == "capital of France"
@@ -159,8 +159,7 @@ def test_generated_query_is_used_and_sanitized(monkeypatch):
     assert "`" not in captured["query"]
     assert "```" not in captured["query"]
 
-    # The other call-site kwargs (return_sources) are still forwarded.
-    assert captured["kwargs"].get("return_sources") is True
+    assert captured["kwargs"].get("owner") == ""
     # And the retrieved context was still appended to the preface.
     assert any("web context" in (msg.get("content") or "") for msg in preface)
 
@@ -180,7 +179,7 @@ def test_falls_back_to_sanitized_first_line_when_llm_raises(monkeypatch):
         use_rag=False,
     ))
 
-    assert "query" in captured, "comprehensive_web_search was not called"
+    assert "query" in captured, "canonical search adapter was not called"
     # Fallback was the first line ("Is `git reset` safe?"), sanitized.
     assert captured["query"] == _SANITIZED_FALLBACK
     assert "git reset" in captured["query"]  # inline code preserved
@@ -204,7 +203,7 @@ def test_falls_back_to_sanitized_first_line_when_llm_returns_empty(monkeypatch):
         use_rag=False,
     ))
 
-    assert "query" in captured, "comprehensive_web_search was not called"
+    assert "query" in captured, "canonical search adapter was not called"
     assert captured["query"] == _SANITIZED_FALLBACK
     assert "git reset" in captured["query"]
     assert "`" not in captured["query"]

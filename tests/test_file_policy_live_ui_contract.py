@@ -31,7 +31,7 @@ def test_code_policy_event_aborts_then_revalidates_without_treating_5xx_as_revoc
     assert "resolveWorkspaceRoot(priorRoot)" in handler
     assert "confirmedWorkspaceFailure(error)" in handler
     assert "purgeWorkspaceAuthority" in handler
-    assert "const page = await loadInitialCodeRoot(resolvedRoot, generation);" in handler
+    assert "loadInitialCodeRoot(state.rootResourceRef || state.activeDirectoryRef || resolvedRoot, generation)" in handler
 
 
 def test_files_policy_event_transactionally_rebuilds_current_projection():
@@ -43,7 +43,7 @@ def test_files_policy_event_transactionally_rebuilds_current_projection():
     )
     loader = section(
         source,
-        "async function loadNavigationRoots(options = {})",
+        "async function loadOpaqueNavigationRoots",
         "function renderFavorites",
     )
     managed = section(
@@ -61,7 +61,8 @@ def test_files_policy_event_transactionally_rebuilds_current_projection():
     assert "clearFilesAuthorityContent" in handler
     assert "current.resource_ref" in managed
     assert "entry.resource_id === prior.resourceId" in managed
-    assert "Number(error?.status || 0) !== 404" in loader
+    assert "filesFacadeClient.roots" in loader
+    assert "must not repopulate the tree with path-only compatibility entries" in loader
 
 
 def test_settings_announces_each_completed_policy_or_reset_mutation():
@@ -88,4 +89,3 @@ def test_settings_announces_each_completed_policy_or_reset_mutation():
     assert "mutation: 'people-access'" in visibility
     assert "mutation: 'agent-access'" in roots
     assert "mutation: 'location-remove'" in roots
-

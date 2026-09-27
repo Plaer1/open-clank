@@ -94,5 +94,5 @@ def test_mounted_files_never_rehydrates_path_only_history_or_startup_roots():
     assert "filesServiceClient" not in preview
     policy = source[source.index("async function handleFilesPolicyChanged") : source.index("async function handleAuthUserReady")]
     assert "snapshot.provider === 'host' && snapshot.hostPath" in policy
-    assert "refreshRawFilesProjection(snapshot, lifecycle)" not in policy
+    assert "refreshRawFilesProjection(snapshot, lifecycle)" in policy
     assert "saved folder has expired" in policy

@@ -156,12 +156,14 @@ ACHIEVEMENT_RARITY = {
 
 # Registered app destinations (clank://<key>).  Lesson bodies and Open
 # destination actions resolve through the shared registry in
-# static/js/copal/markdownRenderer.js; no /copal/* and no standalone
-# Wiki/Gallery/Mind launcher is taught here.
+# static/js/copal/markdownRenderer.js; no /copal/* or separate Wiki/Gallery/Mind
+# launcher is taught here.
 APP_DESTINATIONS = {
     "chat": {"label": "Chat", "href": "/", "locator": "#message"},
     "editor": {"label": "Editor", "href": "/editor", "locator": "[data-copal-view=notes]"},
-    "wiki": {"label": "Wiki library", "href": "/wiki", "locator": "[data-copal-view=wiki]"},
+    # /wiki remains the compatibility route; the shipped destination is the
+    # shared Editor's notes window, with Wiki mode selected by the document.
+    "wiki": {"label": "Wiki in Editor", "href": "/wiki", "locator": "[data-copal-view=notes]"},
     "files": {"label": "Files", "href": "/files", "locator": "[data-files-launcher]"},
     "graph": {"label": "Graph", "href": "/graph", "locator": "[data-copal-view=graph]"},
     "galaxy": {"label": "Galaxy", "href": "/galaxy", "locator": "[data-copal-view=graph]"},
@@ -590,18 +592,18 @@ _CLASSES: tuple[dict[str, Any], ...] = (
                 "wiki",
                 (
                     "A Wiki page is a document type, not a separate application. "
-                    "Create one from the [Wiki library](clank://wiki) and it opens in "
+                    "Create one from the [Wiki view in Editor](clank://wiki) and it opens in "
                     "the same Editor as everything else. Wiki pages hold Markdown "
                     "chunks and link to other documents; the link is real, and the "
                     "backlink shows up on the target."
                 ),
                 (
                     "One editor means one set of habits: the same shortcuts, the "
-                    "same links, the same search. The Wiki library is a filtered "
+                    "same links, the same search. The Wiki view is a filtered "
                     "shelf of page types — the writing model does not change."
                 ),
                 (
-                    "Open the [Wiki library](clank://wiki) and create a Wiki-type "
+                    "Open the [Wiki view in Editor](clank://wiki) and create a Wiki-type "
                     "page. Write a short chunk and link it to another readable "
                     "document. Reopen the link, then check the backlink on the "
                     "target.\n\n"

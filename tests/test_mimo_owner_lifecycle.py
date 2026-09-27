@@ -15,6 +15,7 @@ from core.database import Base
 from src.openclank.mimo_supervisor import (
     MimoSupervisor,
     MimoSupervisorPool,
+    AgentWorkerLease,
     SupervisorAdmissionError,
     _pick_small_model,
 )
@@ -173,12 +174,23 @@ async def test_supervisor_rename_and_purge_cover_owner_runtime(tmp_path, monkeyp
     pool = MimoSupervisorPool(auth_enabled=True, data_dir=tmp_path)
     old_runtime = pool._runtime_home("alice")
     old_runtime.mkdir(parents=True)
-    (old_runtime / "session-map.json").write_text("{}", encoding="utf-8")
+    from src.openclank.session_map import OwnerSessionMap
 
-    await pool.rename_owner("alice", "alice2")
+    OwnerSessionMap(old_runtime / "session-map.json", "alice").bind(
+        "chat-1", "ses_1"
+    )
+
+    manifest = await pool.preview_owner_rename("alice", "alice2")
+    await pool.reconcile_owner_rename("alice", "alice2", manifest)
     new_runtime = pool._runtime_home("alice2")
     assert not old_runtime.exists()
-    assert (new_runtime / "session-map.json").read_text(encoding="utf-8") == "{}"
+    assert OwnerSessionMap(new_runtime / "session-map.json", "alice2").read()[
+        "chats"
+    ]["chat-1"]["owner"] == "alice2"
+    await pool.reconcile_owner_rename("alice", "alice2", manifest)
+    assert OwnerSessionMap(new_runtime / "session-map.json", "alice2").read()[
+        "chats"
+    ]["chat-1"]["owner"] == "alice2"
 
     await pool.purge_owner("alice2")
     assert not new_runtime.exists()
@@ -293,6 +305,55 @@ class _Worker:
 
     async def stop(self):
         self.stop_calls += 1
+
+    def is_alive(self):
+        return True
+
+    def available_models(self):
+        return [{"modelId": "provider/model"}]
+
+
+@pytest.mark.asyncio
+async def test_settings_only_generation_drains_after_old_admitted_lease(tmp_path, monkeypatch):
+    _database(tmp_path, monkeypatch)
+    pool = MimoSupervisorPool(auth_enabled=True, data_dir=tmp_path)
+    old = _Worker("old")
+    old.installed_fingerprint = "old"
+    old.installed_generation = 1
+    candidate = _Worker("new")
+    snapshots = [
+        SimpleNamespace(owner="alice", fingerprint="old", providers={}, small_model=None, run_closure=lambda _p, _m: {"model": "model"}),
+        SimpleNamespace(owner="alice", fingerprint="new", providers={}, small_model=None, run_closure=lambda _p, _m: {"model": "model"}),
+    ]
+    import src.openclank.mimo_projection as projection
+    monkeypatch.setattr(projection, "build_projection_snapshot", lambda _owner: snapshots[-1])
+    monkeypatch.setattr(projection, "reconcile_projection", lambda snapshot, *, materializing: {"generation": 2})
+    monkeypatch.setattr(projection, "safe_additive_delta", lambda _old, _new: True)
+    async def campaign(*_args, **_kwargs):
+        candidate.projection_snapshot = snapshots[-1]
+        return candidate
+    monkeypatch.setattr(pool, "_start_campaign", campaign)
+    state = pool._owner_state("alice")
+    state.active = old
+    state.snapshot = snapshots[0]
+    state.in_flight[old] = 1
+    lease = AgentWorkerLease(pool, "alice", old, owner_epoch=pool._owner_lifecycle_epoch("alice"))
+    replacement = await pool._ensure_worker("alice")
+    assert replacement is candidate
+    await asyncio.sleep(0)
+    assert old.stop_calls == 0
+    await lease.release()
+    await asyncio.gather(*pool._background_tasks)
+    assert old.stop_calls == 1
+
+    # A later admission must use the replacement generation, while its own
+    # lease still participates in normal successful-terminal release.
+    candidate.projection_snapshot = snapshots[-1]
+    next_lease = await pool.admit_agent("alice", "provider", "model")
+    assert next_lease.worker is candidate
+    assert state.in_flight[candidate] == 1
+    await next_lease.release(successful_terminal=True)
+    assert state.in_flight[candidate] == 0
 
 
 @pytest.mark.asyncio

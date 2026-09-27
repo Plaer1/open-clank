@@ -191,6 +191,7 @@ export interface SpawnInput {
 export interface SpawnResult {
   actorID: string
   sessionID: SessionID
+  titleRevision?: number
   outcome: Deferred.Deferred<AgentOutcome>
   requestedModel?: string
   effectiveModel?: { providerID: ProviderID; modelID: ModelID }
@@ -1046,6 +1047,7 @@ export const layer = Layer.effect(
       return {
         actorID: child.id,
         sessionID: child.id,
+        titleRevision: child.titleRevision,
         outcome,
         ...(input.requestedModel ? { requestedModel: input.requestedModel } : {}),
         ...(input.model ? { effectiveModel: input.model } : {}),

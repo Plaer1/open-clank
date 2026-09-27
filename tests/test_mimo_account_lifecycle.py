@@ -85,6 +85,9 @@ async def test_mimo_owner_rename_compensates_component_partial_failure(tmp_path,
     pool = _pool(tmp_path)
     old_runtime = _seed_owner(pool, "alice")
     new_runtime = pool._runtime_home("alice2")
+    from src.openclank.session_map import OwnerSessionMap
+
+    OwnerSessionMap(old_runtime / "session-map.json", "alice").bind("chat-1", "ses_1")
     manifest = await pool.preview_owner_rename("alice", "alice2")
     original_replace = os.replace
 
@@ -102,6 +105,122 @@ async def test_mimo_owner_rename_compensates_component_partial_failure(tmp_path,
     assert receipt["permission_grants"]["state"] == "compensated"
     assert receipt["source"]["fingerprint"] == manifest["source"]["fingerprint"]
     assert receipt["target"]["count"] == 0
+    assert OwnerSessionMap(old_runtime / "session-map.json", "alice").read()["chats"]["chat-1"]["owner"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_mimo_owner_rename_replays_after_move_before_map_rewrite(tmp_path, monkeypatch):
+    pool = _pool(tmp_path)
+    old_runtime = _seed_owner(pool, "alice")
+    new_runtime = pool._runtime_home("alice2")
+    from src.openclank.session_map import OwnerSessionMap
+
+    OwnerSessionMap(old_runtime / "session-map.json", "alice").bind("chat-1", "ses_1")
+    manifest = await pool.preview_owner_rename("alice", "alice2")
+    original_replace = os.replace
+    moved = False
+
+    def fail_after_move(source, target):
+        nonlocal moved
+        if str(source) == str(old_runtime) and str(target) == str(new_runtime):
+            moved = True
+        elif moved and str(target) == str(new_runtime / "session-map.json"):
+            raise OSError("injected map rewrite interruption")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(mimo_supervisor.os, "replace", fail_after_move)
+    with pytest.raises(OSError, match="map rewrite"):
+        await pool.reconcile_owner_rename("alice", "alice2", manifest)
+    assert new_runtime.exists()
+
+    monkeypatch.setattr(mimo_supervisor.os, "replace", original_replace)
+    receipt = await pool.reconcile_owner_rename("alice", "alice2", manifest)
+    assert receipt["runtime"]["state"] == "already_applied"
+    assert OwnerSessionMap(new_runtime / "session-map.json", "alice2").read()["chats"]["chat-1"]["owner"] == "alice2"
+
+
+@pytest.mark.asyncio
+async def test_mimo_owner_rename_rejects_tampered_runtime_same_shape(tmp_path):
+    pool = _pool(tmp_path)
+    old_runtime = _seed_owner(pool, "alice")
+    manifest = await pool.preview_owner_rename("alice", "alice2")
+    (old_runtime / "mimocode" / "data" / "state.json").write_text(
+        "tampered", encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="runtime state changed"):
+        await pool.reconcile_owner_rename("alice", "alice2", manifest)
+    assert old_runtime.exists()
+    assert not pool._runtime_home("alice2").exists()
+
+
+@pytest.mark.asyncio
+async def test_mimo_owner_compensation_replays_after_map_rewrite_interrupt(tmp_path, monkeypatch):
+    pool = _pool(tmp_path)
+    old_runtime = _seed_owner(pool, "alice")
+    new_runtime = pool._runtime_home("alice2")
+    from src.openclank.session_map import OwnerSessionMap
+
+    OwnerSessionMap(old_runtime / "session-map.json", "alice").bind("chat-1", "ses_1")
+    manifest = await pool.preview_owner_rename("alice", "alice2")
+    await pool.reconcile_owner_rename("alice", "alice2", manifest)
+    original_replace = os.replace
+    moved_back = False
+
+    def fail_after_compensation_move(source, target):
+        nonlocal moved_back
+        if str(source) == str(new_runtime) and str(target) == str(old_runtime):
+            moved_back = True
+        elif moved_back and str(target) == str(old_runtime / "session-map.json"):
+            raise OSError("injected compensation map interruption")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(mimo_supervisor.os, "replace", fail_after_compensation_move)
+    with pytest.raises(OSError, match="compensation map"):
+        await pool.compensate_owner_rename("alice", "alice2", manifest)
+    assert old_runtime.exists()
+
+    monkeypatch.setattr(mimo_supervisor.os, "replace", original_replace)
+    receipt = await pool.compensate_owner_rename("alice", "alice2", manifest)
+    assert receipt["runtime"]["state"] == "compensated"
+    assert receipt["source"]["fingerprint"] == manifest["source"]["fingerprint"]
+    assert OwnerSessionMap(old_runtime / "session-map.json", "alice").read()["chats"]["chat-1"]["owner"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_mimo_owner_compensation_after_rewritten_map_restores_original(tmp_path):
+    pool = _pool(tmp_path)
+    old_runtime = _seed_owner(pool, "alice")
+    new_runtime = pool._runtime_home("alice2")
+    from src.openclank.session_map import OwnerSessionMap
+
+    OwnerSessionMap(old_runtime / "session-map.json", "alice").bind("chat-1", "ses_1")
+    manifest = await pool.preview_owner_rename("alice", "alice2")
+    await pool.reconcile_owner_rename("alice", "alice2", manifest)
+    receipt = await pool.compensate_owner_rename("alice", "alice2", manifest)
+    assert receipt["runtime"]["state"] == "compensated"
+    assert receipt["source"]["fingerprint"] == manifest["source"]["fingerprint"]
+    assert not new_runtime.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_map", [{"chat-1": "ses_1"}, {}])
+async def test_mimo_owner_rename_preserves_legacy_v1_map_bytes(tmp_path, legacy_map):
+    pool = _pool(tmp_path)
+    old_runtime = pool._runtime_home("alice")
+    old_runtime.mkdir(parents=True)
+    map_path = old_runtime / "session-map.json"
+    map_path.write_text(json.dumps(legacy_map, sort_keys=True) + "\n", encoding="utf-8")
+    original_bytes = map_path.read_bytes()
+
+    manifest = await pool.preview_owner_rename("alice", "alice2")
+    await pool.reconcile_owner_rename("alice", "alice2", manifest)
+    new_map = pool._runtime_home("alice2") / "session-map.json"
+    assert new_map.read_bytes() == original_bytes
+
+    replay = await pool.reconcile_owner_rename("alice", "alice2", manifest)
+    assert replay["runtime"]["state"] == "already_applied"
+    await pool.compensate_owner_rename("alice", "alice2", manifest)
+    assert map_path.read_bytes() == original_bytes
 
 
 @pytest.mark.asyncio

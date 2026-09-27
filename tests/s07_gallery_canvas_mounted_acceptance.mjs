@@ -2,6 +2,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { withCopalBrowser } from './helpers/copal_browser_fixture.mjs';
 
 const ONE_PIXEL = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
@@ -47,6 +48,7 @@ test('S07 mounts Files image source and Canvas drop handlers with strict context
     page,
     request: async (request, response) => {
       const pathname = new URL(request.url, 'http://fixture').pathname;
+      if (!pathname.startsWith('/api/')) return false;
       if (!pathname.startsWith('/api/')) return false;
       if (pathname === '/api/auth/status') {
         response.writeHead(200, { 'content-type': 'application/json' });
@@ -292,4 +294,175 @@ test('S07 mounts Gallery export through the authorized Files receipt path', asyn
     assert.equal(pickerRun.pickerClosed, true, JSON.stringify(pickerRun));
   });
   assert.deepEqual(importCalls, ['gallery-success', 'gallery-collision', 'gallery-lost', 'gallery-image-picker']);
+});
+
+test('S07 mounts real Imps openResource bytes before managed project creation', async () => {
+  const page = `<!doctype html><html><body><div id="toast" aria-live="polite"></div><script>window.__fixtureReady = true;</script></body></html>`;
+  const png = ONE_PIXEL;
+  const created = new Map();
+  let releaseA = null;
+  let saveEntered = false;
+  let releaseSave = null;
+  let saveCountA = 0;
+  const saveBodies = [];
+  let filesImportCount = 0;
+  let galleryUploadCount = 0;
+  const copyBodies = [];
+  let copyBindFailures = 1;
+  await withCopalBrowser({
+    page,
+    request: async (request, response) => {
+      const pathname = new URL(request.url, 'http://fixture').pathname;
+      if (!pathname.startsWith('/api/')) return false;
+      if (pathname === '/api/test/save-entered') { response.writeHead(200, {'content-type':'application/json'}); response.end(JSON.stringify({entered:saveEntered})); return true; }
+      if (pathname === '/api/test/release-save') { releaseSave?.(); releaseSave = null; saveEntered = false; response.writeHead(204); response.end(); return true; }
+      if (pathname === '/api/auth/status') { response.writeHead(200, {'content-type':'application/json'}); response.end(JSON.stringify({username:'s07-imps'})); return true; }
+      if (pathname === '/api/files-v1/roots') {
+        response.writeHead(200, {'content-type':'application/json'});
+        response.end(JSON.stringify({ policy_generation: 7, entries: [{
+          ref: 'gallery-root-ref', provider: 'gallery', kind: 'provider_root', name: 'Gallery',
+          capabilities: ['children', 'write'], revision: { kind: 'galleryFingerprint', value: 'root-1' },
+        }] })); return true;
+      }
+      if (pathname === '/api/files-v1/imports') {
+        filesImportCount += 1;
+        const chunks=[]; for await (const chunk of request) chunks.push(chunk);
+        const metadata = Buffer.concat(chunks).toString();
+        const operationId = metadata.match(/imps-copy:[A-Za-z0-9:_-]+/)?.[0] || '';
+        const itemId = `${operationId}:asset`;
+        response.writeHead(200, {'content-type':'application/json'});
+        response.end(JSON.stringify({ operation_id:operationId, generation:7, state:'complete', items:[{
+          item_id:itemId, outcome:'committed', resource_ref:'gallery-copy-ref',
+          resource_key:'resource-copy-stable', revision:{ kind:'contentDigest', value:'copy-digest' },
+        }] })); return true;
+      }
+      if (pathname === '/api/files-v1/open-resource') {
+        const chunks=[]; for await (const chunk of request) chunks.push(chunk);
+        const body = JSON.parse(Buffer.concat(chunks).toString());
+        if (body.resource_ref === 'gallery-copy-ref') {
+          response.writeHead(200, {'content-type':'application/json'});
+          response.end(JSON.stringify({ target:{app:'imps'}, resource:{ ref:'gallery-copy-ref', provider:'gallery', kind:'image', revision:{kind:'contentDigest',value:'copy-digest'}, capabilities:['open','read'] }, payload:{ provider:'gallery', resource_id:'image:copy-1', filename:'edited.png' } })); return true;
+        }
+        const ref = body.resource_ref;
+        const suffix = String(ref).endsWith('-a') ? 'a' : 'b';
+        if (suffix === 'a') await new Promise(resolve => { releaseA = resolve; setTimeout(resolve, 250); });
+        response.writeHead(200, {'content-type':'application/json'}); response.end(JSON.stringify({target:{app:'imps'},resource:{ref:`imps-image-${suffix}`,name:`fixture-${suffix}.png`,provider:'gallery',kind:'file'},payload:{provider:'gallery',resource_id:`image:fixture-${suffix}`,filename:`fixture-${suffix}.png`}})); return true;
+      }
+      if (pathname === '/api/gallery/upload') { galleryUploadCount += 1; response.writeHead(500); response.end(); return true; }
+      if (pathname === '/api/files-v1/content/imps-image-a' || pathname === '/api/files-v1/content/imps-image-b') { response.writeHead(200, {'content-type':'image/png'}); response.end(png); return true; }
+      if (pathname.startsWith('/api/imps/projects/for-image/')) {
+        const suffix = pathname.endsWith('fixture-a') ? 'a' : 'b';
+        const prior = created.get(suffix);
+        response.writeHead(200, {'content-type':'application/json'});
+        const savedState = prior && suffix === 'b' ? {
+          ...prior.state,
+          activeLayerId: 77,
+          layers: [{ ...prior.state.layers[0], id:77, name:'Saved red layer', isBase:true,
+            dataUrl:'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="1" height="1"%3E%3Crect width="1" height="1" fill="red"/%3E%3C/svg%3E' }],
+        } : prior?.state;
+        response.end(JSON.stringify({project: prior ? { id:`project-fixture-${suffix}`, project_revision:1, expected_image_revision:prior.expected_image_revision, name:suffix === 'b' ? 'Saved B project' : `fixture-${suffix}`, state:savedState } : null})); return true;
+      }
+      if (pathname === '/api/imps/projects') { const chunks=[]; for await (const chunk of request) chunks.push(chunk); const body=JSON.parse(Buffer.concat(chunks).toString()); const suffix=body.resource_id.endsWith('-a')?'a':'b'; created.set(suffix, body); response.writeHead(200, {'content-type':'application/json'}); response.end(JSON.stringify({id:`project-fixture-${suffix}`,project_revision:1,expected_image_revision:body.expected_image_revision,image:{provider:'gallery',resource_id:body.resource_id}})); return true; }
+      if (pathname === '/api/imps/projects/project-fixture-b/save-copy') { const chunks=[]; for await (const chunk of request) chunks.push(chunk); const body=JSON.parse(Buffer.concat(chunks).toString()); copyBodies.push(body); if (copyBindFailures > 0) { copyBindFailures -= 1; response.writeHead(503, {'content-type':'application/json'}); response.end(JSON.stringify({detail:'bind unavailable'})); return true; } response.writeHead(200, {'content-type':'application/json'}); response.end(JSON.stringify({project_id:'project-copy-1',project_revision:1,image:{provider:'gallery',resource_id:'image:copy-1'},refresh_receipt:{image_revision:'copy-digest'}})); return true; }
+      if (pathname.endsWith('/save')) { const chunks=[]; for await (const chunk of request) chunks.push(chunk); const body=JSON.parse(Buffer.concat(chunks).toString()); const isA = pathname.includes('project-fixture-a'); if (isA) { saveBodies.push(body); saveCountA += 1; if (saveCountA === 1) { saveEntered = true; await new Promise(resolve => { releaseSave = resolve; }); } } const nextRevision = Number(body.expected_project_revision || 1) + 1; response.writeHead(200, {'content-type':'application/json'}); response.end(JSON.stringify({project_revision:nextRevision,refresh_receipt:{image_revision:body.new_image_revision,image:{revision:body.new_image_revision}}})); return true; }
+      response.writeHead(404); response.end(); return true;
+    },
+  }, async ({ evaluate, until }) => {
+    await until('window.__fixtureReady');
+    await evaluate(`Promise.all([import('/static/js/galleryEditor.js'), import('/static/js/editor/state.js')]).then(([editor, state]) => { window.__openResource = editor.openResource; window.__galleryModuleClose = editor.closeEditor; window.__editorState = state.state; window.__galleryImportError = null; window.__saveSettled = 0; window.addEventListener('gallery-managed-save-settled', () => { window.__saveSettled += 1; }); }).catch(error => { window.__galleryImportError = String(error.stack || error); })`);
+    await until('window.__openResource || window.__galleryImportError');
+    assert.equal(await evaluate('window.__galleryImportError || null'), null);
+    await evaluate('window.__openResource("files://imps-image-b")');
+    await until('window.__openResource && document.querySelector("#gallery-editor-container")');
+    assert.equal(await evaluate('window.__galleryEditLive'), true);
+    const expectedHash = `sha256:${createHash('sha256').update(png).digest('hex')}`;
+    assert.equal(created.get('b')?.expected_image_revision, expectedHash, JSON.stringify([...created]));
+    assert.equal(await evaluate('window.__editorState.layers.length > 0'), true);
+    await evaluate(`Promise.resolve().then(async () => {
+      const editor = await import('/static/js/galleryEditor.js');
+      window.__exportToGallery = editor.exportToGallery;
+      await window.__exportToGallery();
+    })`);
+    assert.equal(filesImportCount, 1);
+    assert.equal(galleryUploadCount, 0);
+    assert.equal(copyBodies.length, 1);
+    await evaluate('window.__editorState.pendingSaveCopy != null');
+    await evaluate('window.__exportRetry = import("/static/js/galleryEditor.js").then(module => module.retryPendingSaveCopy())');
+    await evaluate('window.__exportRetry');
+    assert.equal(copyBodies.length, 2);
+    assert.equal(copyBodies[0].operation_key, copyBodies[1].operation_key);
+    assert.equal(await evaluate('window.__editorState.projectId'), 'project-copy-1');
+    assert.equal(await evaluate('window.__editorState.managedResourceId'), 'image:copy-1');
+    assert.equal(await evaluate('window.__editorState.imgWidth === 1 && window.__editorState.imgHeight === 1'), true);
+    const sameSave = await evaluate(`(async () => {
+      const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+      window.__holdBlob = true;
+      window.__releaseBlob = null;
+      HTMLCanvasElement.prototype.toBlob = function(callback, mime, quality) {
+        if (!window.__holdBlob) return originalToBlob.call(this, callback, mime, quality);
+        window.__releaseBlob = () => { window.__holdBlob = false; originalToBlob.call(this, callback, mime, quality); };
+      };
+      await window.__openResource('files://imps-image-a');
+      document.querySelector('#ge-save')?.click();
+      await new Promise(resolve => setTimeout(resolve, 30));
+      const next = window.__openResource('files://imps-image-b');
+      await next;
+      window.__releaseBlob();
+      while (window.__saveSettled < 1) await new Promise(resolve => setTimeout(resolve, 5));
+      HTMLCanvasElement.prototype.toBlob = originalToBlob;
+      return (await (await fetch('/api/test/save-entered')).json()).entered;
+    })()`);
+    assert.equal(await evaluate('window.__editorState.managedResourceId'), 'image:fixture-b');
+    assert.equal(await evaluate('window.__editorState.projectId'), 'project-fixture-b');
+    assert.equal(await evaluate('window.__editorState.layers[0].name'), 'Saved red layer');
+    assert.equal(await evaluate('(async () => (await (await fetch("/api/test/save-entered")).json()).entered)()'), false);
+    await evaluate(`(async () => {
+      await window.__openResource('files://imps-image-a');
+      document.querySelector('#ge-save')?.click();
+      while (!(await (await fetch('/api/test/save-entered')).json()).entered) await new Promise(resolve => setTimeout(resolve, 5));
+      document.querySelector('#ge-add-layer')?.click();
+      window.__editorState.draftName = 'newer draft during save';
+      await fetch('/api/test/release-save', { method:'POST' });
+      while (window.__saveSettled < 2) await new Promise(resolve => setTimeout(resolve, 5));
+      await new Promise(resolve => setTimeout(resolve, 200));
+      while (document.querySelector('#ge-save')?.disabled) await new Promise(resolve => setTimeout(resolve, 5));
+      document.querySelector('#ge-save')?.click();
+      while (window.__saveSettled < 3) await new Promise(resolve => setTimeout(resolve, 5));
+      return { layers: window.__editorState.layers.length, name: window.__editorState.draftName, settled: window.__saveSettled, error: window.__galleryLastSaveError };
+    })()`);
+    assert.equal(await evaluate('window.__editorState.managedResourceId'), 'image:fixture-a');
+    assert.equal(await evaluate('window.__editorState.projectRevision'), 3, JSON.stringify({ saveBodies }));
+    assert.equal(await evaluate('window.__editorState.draftName'), 'newer draft during save');
+    assert.equal(saveBodies[0].expected_project_revision, 1);
+    assert.equal(saveBodies[1].expected_project_revision, 2);
+    assert.equal(saveBodies[1].name, 'newer draft during save');
+    assert.equal(await evaluate('window.__editorState.layers.length >= 2'), true);
+    await evaluate(`(async () => {
+      const next = window.__openResource('files://imps-image-b');
+      await next;
+    })()`);
+    assert.equal(await evaluate('window.__editorState.managedResourceId'), 'image:fixture-b');
+    assert.equal(await evaluate('window.__editorState.projectId'), 'project-fixture-b');
+    assert.equal(await evaluate('window.__editorState.projectRevision'), 1);
+    assert.equal(await evaluate('window.__editorState.layers[0].name'), 'Saved red layer');
+    assert.equal(await evaluate('window.__editorState.layers[0].ctx.getImageData(0, 0, 1, 1).data[0] > 200'), true);
+    await evaluate(`(async () => {
+      window.__galleryAllowCloseEditor = true;
+      const first = window.__openResource('files://imps-image-a').catch(() => null);
+      const second = window.__openResource('files://imps-image-b');
+      await second;
+      await first;
+    })()`);
+    assert.equal(await evaluate('window.__editorState.editorOpen'), true);
+    assert.equal(await evaluate('window.__editorState.managedResourceId'), 'image:fixture-b');
+    const pendingClose = await evaluate(`(async () => {
+      const pending = window.__openResource('files://imps-image-a').catch(error => String(error.message));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      window.__galleryAllowCloseEditor = true;
+      const closed = window.__galleryModuleClose ? window.__galleryModuleClose() : false;
+      return { closed, error: await pending, open: window.__editorState.editorOpen };
+    })()`);
+    assert.equal(pendingClose.closed, true);
+    assert.equal(pendingClose.open, false);
+  });
 });

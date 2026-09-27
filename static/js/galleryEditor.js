@@ -70,6 +70,8 @@ import {
   canvasSizePromptHTML as _canvasSizePromptHTML,
 } from './editor/build/popups.js';
 import { state } from './editor/state.js';
+let _openGeneration = 0;
+let _managedEditEpoch = 0;
 import { createMoveTool } from './editor/tools/move.js';
 import { createCropTool } from './editor/tools/crop.js';
 import { createLassoTool } from './editor/tools/lasso.js';
@@ -110,6 +112,49 @@ import { wireTopbarOverflow } from './editor/wire-topbar-overflow.js';
 import { wireTopbarMenus } from './editor/wire-topbar-menus.js';
 
 const API_BASE = window.location.origin;
+
+async function _confirmedImpsOwner() {
+  try {
+    const response = await fetch('/api/auth/status', { credentials: 'same-origin', cache: 'no-store' });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const owner = String(data?.username || '').trim().toLowerCase();
+    return owner || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _clearPendingSaveCopy() {
+  state.pendingSaveCopy = null;
+  try { localStorage.removeItem('imps.pendingSaveCopy'); } catch (_) {}
+  const retryButton = document.getElementById('ge-retry-save-copy');
+  if (retryButton) retryButton.hidden = true;
+}
+
+async function _hydratePendingSaveCopy() {
+  const button = document.getElementById('ge-retry-save-copy');
+  if (!button) return;
+  let pending;
+  try { pending = JSON.parse(localStorage.getItem('imps.pendingSaveCopy') || 'null'); } catch (_) { _clearPendingSaveCopy(); return; }
+  if (!pending || typeof pending !== 'object' || typeof pending.source_project_id !== 'string'
+    || typeof pending.operation_id !== 'string' || typeof pending.resource_ref !== 'string'
+    || JSON.stringify(pending).length > 512 * 1024) { _clearPendingSaveCopy(); return; }
+  const owner = await _confirmedImpsOwner();
+  if (!owner || String(pending.owner || '').toLowerCase() !== owner) { _clearPendingSaveCopy(); return; }
+  state.pendingSaveCopy = pending;
+  button.hidden = false;
+}
+
+if (!window.__impsPendingOwnerGuard) {
+  window.__impsPendingOwnerGuard = true;
+  document.addEventListener('openclank:auth-user-ready', (event) => {
+    const announced = String(event?.detail?.username || '').trim().toLowerCase();
+    const pending = state.pendingSaveCopy;
+    if (pending?.owner && announced && pending.owner !== announced) _clearPendingSaveCopy();
+  });
+  document.addEventListener('openclank:auth-user-cleared', _clearPendingSaveCopy);
+}
 // ── State ──
 // Transform-overlay canvas — sits over the main canvas with extra margin
 // so resize / rotation handles render OUTSIDE the image edges. Pointer
@@ -1027,6 +1072,7 @@ function _snapshotState() {
 }
 
 function _saveState(label) {
+  _managedEditEpoch += 1;
   // saveState() runs FIRST in every mutating op (import, paste, copy,
   // merge, mask, delete, brush, …). If anything here throws, the whole
   // operation aborts before its real work runs — which silently breaks
@@ -1151,7 +1197,8 @@ async function _loadDraftById(draftId) {
     const res = await fetch(`/api/editor-drafts/${encodeURIComponent(draftId)}`, {
       credentials: 'same-origin',
     });
-    if (!res.ok) return null;
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`draft lookup failed (${res.status})`);
     const out = await res.json();
     if (!out || !out.payload || !Array.isArray(out.payload.layers)) return null;
     return out;
@@ -1164,13 +1211,14 @@ async function _findDraftForImage(imageId) {
   if (!imageId) return null;
   try {
     const res = await fetch('/api/editor-drafts', { credentials: 'same-origin' });
-    if (!res.ok) return null;
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`draft lookup failed (${res.status})`);
     const out = await res.json();
     const match = (out.drafts || []).find(d => d.source_image_id === imageId);
     if (!match) return null;
     return _loadDraftById(match.id);
-  } catch (_) {
-    return null;
+  } catch (error) {
+    throw error;
   }
 }
 
@@ -1187,7 +1235,7 @@ async function _clearDraftServer(draftId) {
 // raw payload (v1 localStorage shape) or a server response with
 // {payload: {...}}. Returns a promise that resolves once every layer's
 // dataURL has decoded into its canvas.
-function _restoreDraft(draft) {
+function _restoreDraft(draft, expectedGeneration = null) {
   return new Promise((resolve) => {
     // Server response: {id, name, payload:{...}, ...}. Unwrap.
     const data = draft.payload && draft.payload.layers ? draft.payload : draft;
@@ -1209,7 +1257,7 @@ function _restoreDraft(draft) {
       state.layerOffsets.set(layer.id, { ...(s.offset || { x: 0, y: 0 }) });
       const img = new Image();
       img.onload = () => {
-        if (!state.editorOpen) { resolve(); return; }
+        if (!state.editorOpen || (expectedGeneration != null && expectedGeneration !== _openGeneration)) { resolve(); return; }
         layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
         layer.ctx.drawImage(img, 0, 0);
         if (--pending === 0) resolve();
@@ -3206,7 +3254,7 @@ function _buildEditor(container) {
     toggleHistoryPanel: _toggleHistoryPanel,
     fitZoom: () => _fitZoom(),
     applyZoom: () => _applyZoom(),
-    exportToGallery, downloadPNG,
+    exportToGallery, retryPendingSaveCopy, downloadPNG,
     saveProject: () => _saveProject(),
     loadProjectPrompt: () => _loadProjectPrompt(),
     activeLayer,
@@ -3216,6 +3264,7 @@ function _buildEditor(container) {
     registerDocClickAway: _registerDocClickAway,
     uiModule,
   });
+  void _hydratePendingSaveCopy();
   // Fill — visible only when a selection or active mask exists. Pours
   // the current colour into whichever target is live:
   //   - active mask sub-layer → fills the layer's pixels clipped by
@@ -3279,6 +3328,9 @@ function _buildEditor(container) {
     if (!state.managedResourceId && state.imageId) {
       _bindManagedIdentity('gallery', `image:${state.imageId}`);
     }
+    // Capture the save target before any asynchronous canvas encoding. A
+    // different resource may be opened while toBlob() is pending.
+    const saveOperation = _captureManagedSaveSnapshot();
     const endBusy = _saveButtonBusy('Saving…');
     let blob = null;
     let savedOk = false;
@@ -3296,7 +3348,7 @@ function _buildEditor(container) {
       blob = await new Promise((resolve, reject) => {
         flat.toBlob(b => b ? resolve(b) : reject(new Error('Canvas encode failed')), mime, quality);
       });
-      const body = await _managedSave({ blob });
+      const body = await _managedSave({ blob, operation: saveOperation });
       const totalMs = Math.round(performance.now() - t0);
       if (uiModule) uiModule.showToast(`Saved over original (${(blob.size / 1024 / 1024).toFixed(1)}MB · ${(totalMs / 1000).toFixed(1)}s)`, 4000);
       window.dispatchEvent(new CustomEvent('gallery-refresh'));
@@ -3314,6 +3366,7 @@ function _buildEditor(container) {
     } finally {
       endBusy();
       if (savedOk) _flashSaveButtonOk();
+      window.dispatchEvent(new CustomEvent('gallery-managed-save-settled'));
     }
   });
 
@@ -3719,22 +3772,50 @@ async function _blobToBase64(blob) {
 }
 
 function _bindManagedIdentity(provider, resourceId) {
+  if (state.managedProvider !== (provider || null) || state.managedResourceId !== (resourceId || null)) {
+    state.projectId = null;
+    state.projectRevision = 0;
+    state.expectedImageRevision = '';
+  }
   state.managedProvider = provider || null;
   state.managedResourceId = resourceId || null;
   const m = String(resourceId || '').match(/^image:(.+)$/);
   state.imageId = m ? m[1] : state.imageId || null;
 }
 
-async function _ensureManagedProject() {
-  if (state.projectId) return state.projectId;
+async function _ensureManagedProject(expectedGeneration = null, expectedProvider = null, expectedResource = null, { forceLookup = false } = {}) {
+  const stillCurrent = () => expectedGeneration == null
+    || (expectedGeneration === _openGeneration && state.managedProvider === expectedProvider && state.managedResourceId === expectedResource);
+  if (!stillCurrent()) throw new Error('managed project open superseded');
+  const observedImageRevision = state.expectedImageRevision || '';
+  if (state.projectId && !forceLookup) return state.projectId;
   if (!state.managedProvider || !state.managedResourceId) return null;
   const lookup = await _impsRequest(
     `/api/imps/projects/for-image/${encodeURIComponent(state.managedProvider)}/${encodeURIComponent(state.managedResourceId)}`
-  ).catch(() => ({ project: null }));
+  ).catch(error => {
+    if (/^HTTP 404\b/.test(String(error?.message || ''))) return { project: null };
+    throw error;
+  });
+  if (!stillCurrent()) throw new Error('managed project lookup superseded');
   if (lookup && lookup.project) {
+    const storedRevision = String(lookup.project.expected_image_revision || '');
+    if (storedRevision && observedImageRevision && storedRevision !== observedImageRevision) {
+      throw new Error('managed image revision conflict; reload the source before restoring this project');
+    }
     state.projectId = lookup.project.id;
     state.projectRevision = lookup.project.project_revision;
-    state.expectedImageRevision = lookup.project.expected_image_revision || '';
+    // The bytes just opened are authoritative. An old or blank project
+    // revision must never replace that observed hash and authorize a write
+    // against different pixels.
+    state.expectedImageRevision = observedImageRevision || storedRevision;
+    if (lookup.project.name) state.draftName = lookup.project.name;
+    if (lookup.project.state && lookup.project.state.layers?.length) {
+      await _restoreDraft(lookup.project.state, expectedGeneration);
+      if (!stillCurrent()) throw new Error('managed project restore superseded');
+      composite();
+      _renderLayerPanel();
+      _fitZoom();
+    }
     return state.projectId;
   }
   const created = await _impsRequest('/api/imps/projects', {
@@ -3746,32 +3827,62 @@ async function _ensureManagedProject() {
       width: state.imgWidth || null,
       height: state.imgHeight || null,
       state: _serializeEditableState(),
-      expected_image_revision: state.expectedImageRevision || '',
+      expected_image_revision: observedImageRevision || state.expectedImageRevision || '',
     }),
   });
+  if (!stillCurrent()) throw new Error('managed project creation superseded');
   state.projectId = created.id;
   state.projectRevision = created.project_revision;
-  state.expectedImageRevision = created.expected_image_revision || '';
+  state.expectedImageRevision = created.expected_image_revision || observedImageRevision || '';
   return state.projectId;
 }
 
-async function _managedSave({ blob = null, stateDoc = null, name = null } = {}) {
-  const projectId = await _ensureManagedProject();
-  if (!projectId) throw new Error('No managed image resource is bound to this editor session');
-  const payload = {
-    expected_project_revision: state.projectRevision,
-    expected_image_revision: state.expectedImageRevision || '',
-    new_image_revision: state.expectedImageRevision || 'uncommitted',
-    state: stateDoc || _serializeEditableState(),
+function _captureManagedSaveSnapshot({ stateDoc = null, name = null } = {}) {
+  return {
+    generation: _openGeneration,
+    editEpoch: _managedEditEpoch,
+    provider: state.managedProvider,
+    resource: state.managedResourceId,
+    projectId: state.projectId,
+    projectRevision: state.projectRevision,
+    expectedImageRevision: state.expectedImageRevision || '',
+    draftId: state.draftId,
+    stateDoc: stateDoc || _serializeEditableState(),
     name: name || state.draftName || undefined,
     width: state.imgWidth || undefined,
     height: state.imgHeight || undefined,
   };
+}
+
+async function _managedSave({ blob = null, stateDoc = null, name = null, operation = null } = {}) {
+  const snapshot = operation || _captureManagedSaveSnapshot({ stateDoc, name });
+  const sameResource = () => snapshot.generation === _openGeneration
+    && state.managedProvider === snapshot.provider
+    && state.managedResourceId === snapshot.resource;
+  const sameEdits = () => _managedEditEpoch === snapshot.editEpoch;
+  const projectId = snapshot.projectId || await _ensureManagedProject(
+    snapshot.generation, snapshot.provider, snapshot.resource,
+  );
+  if (!sameResource() || !sameEdits()) throw new Error('managed save superseded before publication');
+  if (!projectId) throw new Error('No managed image resource is bound to this editor session');
+  const payload = {
+    expected_project_revision: snapshot.projectId ? snapshot.projectRevision : state.projectRevision,
+    expected_image_revision: snapshot.expectedImageRevision || state.expectedImageRevision || '',
+    new_image_revision: snapshot.expectedImageRevision || state.expectedImageRevision || 'uncommitted',
+    state: snapshot.stateDoc,
+    name: snapshot.name,
+    width: snapshot.width,
+    height: snapshot.height,
+  };
   if (blob) payload.image_bytes = await _blobToBase64(blob);
+  if (!sameResource() || !sameEdits()) throw new Error('managed save superseded during encoding');
   const body = await _impsRequest(`/api/imps/projects/${encodeURIComponent(projectId)}/save`, {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+  if (!sameResource() || state.projectId !== projectId) {
+    throw new Error('managed save completed for a superseded editor');
+  }
   state.projectRevision = body.project_revision;
   state.expectedImageRevision = (body.refresh_receipt && body.refresh_receipt.image_revision)
     || body.refresh_receipt?.image?.revision
@@ -3779,9 +3890,65 @@ async function _managedSave({ blob = null, stateDoc = null, name = null } = {}) 
   return body;
 }
 
-// Save a copy: allocate a separate image resource and managed project.
-// The byte write for the new resource goes through the Gallery upload
-// allocator; the managed project is bound via /api/imps save-copy.
+async function _filesGalleryDestination(signal = null) {
+  const roots = await filesFacadeClient.roots({ copalWorkspace: 'default', signal });
+  const entries = Array.isArray(roots?.entries) ? roots.entries : [];
+  const gallery = entries.find((entry) => (
+    entry?.provider === 'gallery'
+    && entry?.kind === 'provider_root'
+    && typeof entry?.ref === 'string'
+    && Array.isArray(entry?.capabilities)
+    && entry.capabilities.includes('write')
+  ));
+  if (!gallery) throw new Error('Files Gallery destination is unavailable');
+  const generation = Number(roots?.policy_generation);
+  if (!Number.isSafeInteger(generation) || generation < 0) throw new Error('Files policy generation is unavailable');
+  return { destinationRef: gallery.ref, generation };
+}
+
+async function _resolveImportedImpsResource(resourceRef, signal = null) {
+  const opened = await filesFacadeClient.openResource(resourceRef, { signal });
+  const resource = opened?.resource;
+  const payload = opened?.payload;
+  const provider = String(payload?.provider || '').trim();
+  const resourceId = String(payload?.resource_id || '').trim();
+  const revision = String(resource?.revision?.value || '').trim();
+  if (provider !== 'gallery' || !resourceId || !revision) {
+    throw new Error('Files import did not return a bindable Imps image');
+  }
+  return { provider, resourceId, revision, resourceRef };
+}
+
+async function _bindSaveCopy(pending) {
+  const resource = pending.resource_id && pending.expected_image_revision
+    ? {
+      provider: String(pending.provider || 'gallery'),
+      resourceId: String(pending.resource_id),
+      revision: String(pending.expected_image_revision),
+      resourceRef: String(pending.resource_ref || ''),
+    }
+    : await _resolveImportedImpsResource(pending.resource_ref);
+  const copyBody = await _impsRequest(
+    `/api/imps/projects/${encodeURIComponent(pending.source_project_id)}/save-copy`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: resource.provider,
+        resource_id: resource.resourceId,
+        operation_key: pending.operation_id,
+        expected_image_revision: resource.revision,
+        state: pending.state,
+        name: pending.name,
+        width: pending.width,
+        height: pending.height,
+      }),
+    },
+  );
+  return { copyBody, resource };
+}
+
+// Save a copy: allocate through the Files-owned Gallery provider, then bind
+// the resulting provider identity to a separate managed Imps project.
 export async function exportToGallery() {
   const endBusy = _saveButtonBusy('Saving copy…');
   let blob = null;
@@ -3799,48 +3966,55 @@ export async function exportToGallery() {
     blob = await new Promise((resolve, reject) => {
       flat.toBlob(b => b ? resolve(b) : reject(new Error('Canvas encode failed')), mime, quality);
     });
-    const formData = new FormData();
-    formData.append('file', blob, `edited.${isJpeg ? 'jpg' : 'png'}`);
-
-    const saveRes = await fetch(`${API_BASE}/api/gallery/upload`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      body: formData,
-    });
-    if (!saveRes.ok) {
-      const errBody = await saveRes.text().catch(() => '');
-      throw new Error(`HTTP ${saveRes.status}: ${errBody.substring(0, 120)}`);
-    }
-    const uploaded = await saveRes.json().catch(() => ({}));
-    // Bind the new resource as a separate managed project (Save a copy).
     const sourceProjectId = state.projectId;
-    const newResourceId = uploaded?.id ? `image:${uploaded.id}` : null;
-    if (sourceProjectId && newResourceId && state.managedProvider) {
-      try {
-        const copyBody = await _impsRequest(
-          `/api/imps/projects/${encodeURIComponent(sourceProjectId)}/save-copy`,
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              provider: state.managedProvider,
-              resource_id: newResourceId,
-              expected_image_revision: '',
-              state: _serializeEditableState(),
-              name: `${state.draftName || 'Untitled'} copy`,
-              width: state.imgWidth || null,
-              height: state.imgHeight || null,
-            }),
-          },
-        );
-        // The copy is a new session: rebind the editor onto it.
-        _bindManagedIdentity(state.managedProvider, newResourceId);
-        state.projectId = copyBody.project_id;
-        state.projectRevision = copyBody.project_revision;
-        state.expectedImageRevision = copyBody.refresh_receipt?.image_revision || '';
-        if (uploaded?.id) state.imageId = String(uploaded.id);
-      } catch (e) {
-        console.warn('[save-copy] managed project bind failed (image copy still saved)', e);
-      }
+    if (!sourceProjectId || !state.managedProvider) throw new Error('Open an editable Imps project before saving a copy');
+    const operationId = `imps-copy:${sourceProjectId}:${state.projectRevision || 0}:${state.managedResourceId || 'image'}`.slice(0, 128);
+    const itemId = `${operationId}:asset`.slice(0, 128);
+    const destination = await _filesGalleryDestination();
+    const imported = await filesFacadeClient.importFile(
+      new File([blob], `edited.${isJpeg ? 'jpg' : 'png'}`, { type: mime }),
+      {
+        operationId,
+        itemId,
+        generation: destination.generation,
+        destinationRef: destination.destinationRef,
+        name: `edited.${isJpeg ? 'jpg' : 'png'}`,
+        collision: 'fail',
+      },
+    );
+    const importedItem = imported?.items?.find((item) => item?.item_id === itemId && item?.outcome === 'committed');
+    if (!importedItem?.resource_ref) throw new Error('Files import did not commit an image resource');
+    const pending = {
+      owner: await _confirmedImpsOwner(),
+      source_project_id: sourceProjectId,
+      operation_id: operationId,
+      item_id: itemId,
+      resource_ref: importedItem.resource_ref,
+      resource_key: importedItem.resource_key || null,
+      provider: 'gallery',
+      name: `${state.draftName || 'Untitled'} copy`,
+      state: _serializeEditableState(),
+      width: state.imgWidth || null,
+      height: state.imgHeight || null,
+    };
+    try {
+      const { copyBody, resource } = await _bindSaveCopy(pending);
+      _clearPendingSaveCopy();
+      _bindManagedIdentity(resource.provider, resource.resourceId);
+      state.projectId = copyBody.project_id;
+      state.projectRevision = copyBody.project_revision;
+      state.expectedImageRevision = copyBody.refresh_receipt?.image_revision || resource.revision;
+      state.imageId = resource.resourceId;
+    } catch (e) {
+      // The Files-owned image is durable, but the Imps project bind is a
+      // separate idempotent step. Keep the opaque ref and operation identity
+      // so a retry binds the same resource instead of allocating another.
+      state.pendingSaveCopy = pending;
+      try { localStorage.setItem('imps.pendingSaveCopy', JSON.stringify(pending)); } catch (_) {}
+      const retryButton = document.getElementById('ge-retry-save-copy');
+      if (retryButton) retryButton.hidden = false;
+      if (uiModule) uiModule.showToast('Image imported; project binding is pending. Retry to finish saving.', 5000);
+      return;
     }
     const totalMs = Math.round(performance.now() - t0);
     window.dispatchEvent(new CustomEvent('gallery-refresh'));
@@ -3864,6 +4038,26 @@ export async function exportToGallery() {
     endBusy();
     if (savedOk) _flashSaveButtonOk();
   }
+}
+
+export async function retryPendingSaveCopy() {
+  const pending = state.pendingSaveCopy || (() => {
+    try { return JSON.parse(localStorage.getItem('imps.pendingSaveCopy') || 'null'); } catch (_) { return null; }
+  })();
+  if (!pending?.source_project_id || !pending.operation_id || !pending.resource_ref) throw new Error('No pending Imps copy binding');
+  const owner = await _confirmedImpsOwner();
+  if (!owner || !pending.owner || owner !== String(pending.owner).toLowerCase()) {
+    _clearPendingSaveCopy();
+    throw new Error('Pending copy belongs to another signed-in owner');
+  }
+  const { copyBody: body, resource } = await _bindSaveCopy(pending);
+  _clearPendingSaveCopy();
+  _bindManagedIdentity(resource.provider, resource.resourceId);
+  state.projectId = body.project_id;
+  state.projectRevision = body.project_revision;
+  state.expectedImageRevision = body.refresh_receipt?.image_revision || resource.revision;
+  state.imageId = resource.resourceId;
+  return body;
 }
 
 // Open the Cookbook modal scoped to img2img-capable models so the user
@@ -4260,7 +4454,9 @@ function _unmountEditorLoading() {
   state.editorLoadingEl = null;
 }
 
-export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) {
+export function openEditor(imageUrl, imageId, presetSize, displayName, draftId, openGeneration = null) {
+  const generation = openGeneration ?? ++_openGeneration;
+  _managedEditEpoch += 1;
   _setEditTabLabel(displayName || (presetSize ? 'New canvas' : 'Untitled'));
   state.imageId = imageId || null;
   // Legacy gallery opens still receive a raw gallery id; normalize them onto
@@ -4412,15 +4608,15 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
   // way closing the gallery / editor mid-edit doesn't lose progress.
   // (Server-backed: look up by source_image_id.)
   _mountEditorLoading('Looking up draft…');
-  _findDraftForImage(imageId).then(_draft => {
-    if (!state.editorOpen) return;
+  return _findDraftForImage(imageId).then(_draft => {
+    if (!state.editorOpen || generation !== _openGeneration) return Promise.reject(new Error('editor open superseded'));
     if (!_draft) return null;
     state.draftId = _draft.id;
     state.draftName = _draft.name || displayName || 'Untitled';
     const innerLabel = state.editorLoadingEl?.querySelector('.ge-loading-text');
     if (innerLabel) innerLabel.textContent = 'Resuming draft…';
     return _restoreDraft(_draft).then(() => {
-      if (!state.editorOpen) return null;
+      if (!state.editorOpen || generation !== _openGeneration) return Promise.reject(new Error('editor open superseded'));
       // If the draft was broken/empty (0 layers reconstructed), fall
       // through to loading the source image as a normal edit. Without
       // this guard the editor would sit empty and the user would be
@@ -4439,14 +4635,14 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
       return 'restored';
     });
   }).then(restored => {
-    if (!state.editorOpen) return;
+    if (!state.editorOpen || generation !== _openGeneration) return Promise.reject(new Error('editor open superseded'));
     if (restored) return;
-    _loadSourceImage();
+    return _loadSourceImage();
   }).catch(err => {
-    if (!state.editorOpen) return;
+    if (!state.editorOpen || generation !== _openGeneration) throw err;
     _unmountEditorLoading();
     console.warn('[openEditor] draft lookup failed', err);
-    _loadSourceImage();
+    return _loadSourceImage();
   });
   function _loadSourceImage() {
 
@@ -4485,7 +4681,19 @@ export function openEditor(imageUrl, imageId, presetSize, displayName, draftId) 
     if (uiModule) uiModule.showToast('Failed to load image');
     closeEditor();
   };
-  img.src = imageUrl;
+  return new Promise((resolve, reject) => {
+    const loaded = img.onload;
+    const failed = img.onerror;
+    img.onload = (...args) => {
+      if (!state.editorOpen || generation !== _openGeneration) return reject(new Error('editor open superseded'));
+      loaded(...args); resolve();
+    };
+    img.onerror = (...args) => {
+      if (!state.editorOpen || generation !== _openGeneration) return reject(new Error('editor open superseded'));
+      failed(...args); reject(new Error('failed to load image'));
+    };
+    img.src = imageUrl;
+  });
   }
 }
 
@@ -4512,6 +4720,7 @@ export function closeEditor() {
     try { uiModule.showToast('Close the edit tab first'); } catch {}
     return false;
   }
+  _openGeneration += 1;
   // Flush any pending debounced persist + fire one final save so closing
   // the editor mid-stroke doesn't lose work. The call is fire-and-forget;
   // the server commit lands shortly after the modal hides.
@@ -4602,8 +4811,10 @@ export function isEditorOpen() {
 // involved — legacy gallery links resolve here through the Files `imps` open
 // target.
 export async function openResource(resourceRef) {
+  const generation = ++_openGeneration;
   const { filesFacadeClient } = await import('./filesFacadeClient.js');
   const response = await filesFacadeClient.openResource(resourceRef);
+  if (generation !== _openGeneration) throw new Error('resource open superseded');
   const app = response?.target?.app;
   if ((app !== 'imps' && app !== 'gallery') || !response?.resource?.ref) {
     throw new Error('Imps resource response is invalid');
@@ -4612,6 +4823,17 @@ export async function openResource(resourceRef) {
   const payload = response.payload || {};
   const exactName = String(response.resource.name || payload.filename || payload.name || 'image');
   const previewUrl = filesFacadeClient.contentUrl(currentRef, { purpose: 'preview' });
+  const sourceResponse = await fetch(previewUrl, { credentials: 'same-origin' });
+  if (generation !== _openGeneration) throw new Error('resource open superseded');
+  if (!sourceResponse.ok) throw new Error(`Unable to read image resource (${sourceResponse.status})`);
+  const sourceBytes = await sourceResponse.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', sourceBytes);
+  if (generation !== _openGeneration) throw new Error('resource open superseded');
+  const observedRevision = `sha256:${[...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  const sourceUrl = URL.createObjectURL(new Blob([sourceBytes], { type: sourceResponse.headers.get('content-type') || 'image/*' }));
+  const sourceMime = String(sourceResponse.headers.get('content-type') || '').toLowerCase();
+  const originalExt = sourceMime.includes('jpeg') || sourceMime.includes('jpg') ? 'jpg'
+    : sourceMime.includes('webp') ? 'webp' : sourceMime.includes('png') ? 'png' : state.originalExt;
   // Bind the managed image identity BEFORE openEditor so Save/Load address
   // /api/imps/projects/* instead of the retired Gallery replace path.
   _bindManagedIdentity(
@@ -4619,21 +4841,24 @@ export async function openResource(resourceRef) {
     payload.resource_id || null,
   );
   state.imageRef = currentRef;
-  openEditor(previewUrl, null, null, exactName);
-  state.imageRef = currentRef;
-  // Reattach to existing editable work for this image, if any.
+  state.expectedImageRevision = observedRevision;
   try {
-    await _ensureManagedProject();
-  } catch (e) {
-    console.warn('[openResource] managed project lookup failed:', e);
+    await openEditor(sourceUrl, null, null, exactName, null, generation);
+    if (generation !== _openGeneration) throw new Error('resource open superseded');
+    state.imageRef = currentRef;
+    state.originalExt = originalExt;
+    await _ensureManagedProject(generation, payload.provider || 'gallery', payload.resource_id || null, { forceLookup: true });
+    if (generation !== _openGeneration) throw new Error('resource open superseded');
+    return Object.freeze({
+      resourceRef: currentRef,
+      name: exactName,
+      previewUrl,
+      readOnly: !!payload.read_only,
+      projectId: state.projectId,
+    });
+  } finally {
+    URL.revokeObjectURL(sourceUrl);
   }
-  return Object.freeze({
-    resourceRef: currentRef,
-    name: exactName,
-    previewUrl,
-    readOnly: !!payload.read_only,
-    projectId: state.projectId,
-  });
 }
 
 const galleryEditorModule = {
@@ -4643,6 +4868,7 @@ const galleryEditorModule = {
   openResource,
   exportPNG,
   exportToGallery,
+  retryPendingSaveCopy,
   downloadPNG,
 };
 

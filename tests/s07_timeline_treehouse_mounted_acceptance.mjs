@@ -12,6 +12,20 @@ const SOURCE = {
   resource_ref: 's07-source-ref', revision: { kind: 'hostFingerprint', value: 'source-r1' },
 };
 
+// Anchor the mounted event near the browser's current day so the real
+// centered timeline viewport always renders it during this journey.
+function dateOnlyOffset(offset) {
+  const date = new Date();
+  date.setUTCHours(12, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() + offset);
+  return date.toISOString().slice(0, 10);
+}
+
+const EVENT_START = dateOnlyOffset(-1);
+const EVENT_DUE = dateOnlyOffset(1);
+const GLOBAL_START = dateOnlyOffset(-30);
+const MOVE_DEADLINE = dateOnlyOffset(30);
+
 function json(response, body, status = 200) {
   response.writeHead(status, { 'content-type': 'application/json' });
   response.end(JSON.stringify(body));
@@ -45,7 +59,7 @@ function pageSource() {
         node.append(...children.filter(child => child != null).map(child => child instanceof Node ? child : document.createTextNode(String(child))));
         return node;
       };
-      const timelineData = { globalStart:'2026-09-01', moveDeadline:'2026-09-30', tracks:[{ id:'track-1', name:'Mounted lane', enabled:true, parentTrackId:null, tasks:[{ id:'event-1', title:'Attachable event', startDate:'2026-09-10', dueDate:'2026-09-12', head:'event-head-1', trackId:'track-1', attachments:[] }] }, { id:'track-1-child', name:'Nested lane', enabled:true, parentTrackId:'track-1', tasks:[] }], floatingTodos:[] };
+      const timelineData = { globalStart:'${GLOBAL_START}', moveDeadline:'${MOVE_DEADLINE}', tracks:[{ id:'track-1', name:'Mounted lane', enabled:true, parentTrackId:null, tasks:[{ id:'event-1', title:'Attachable event', startDate:'${EVENT_START}', dueDate:'${EVENT_DUE}', head:'event-head-1', trackId:'track-1', attachments:[] }] }, { id:'track-1-child', name:'Nested lane', enabled:true, parentTrackId:'track-1', tasks:[] }], floatingTodos:[] };
       const planning = planningModule.createPlanningFeature({
         h, api: async (path, options = {}) => { const response = await fetch('/api' + path, { ...options, credentials:'same-origin' }); return response.json(); },
         getPlanning:() => timelineData, refresh:async() => {}, setStatus:text => { window.__timelineStatus = String(text); },
@@ -135,7 +149,7 @@ test('S07 mounted Timeline and TreeHouse Files attachment qualification', async 
       timelineHead = 'event-head-2';
       if (Array.isArray(body?.patch?.attachments)) timelineAttachments = body.patch.attachments;
       const attachments = timelineAttachments;
-      return json(response, { event:{ id:'event-1', title:'Attachable event', startDate:'2026-09-10', dueDate:'2026-09-12', head:timelineHead, trackId:'track-1', attachments } });
+      return json(response, { event:{ id:'event-1', title:'Attachable event', startDate:EVENT_START, dueDate:EVENT_DUE, head:timelineHead, trackId:'track-1', attachments } });
     }
     if (pathname === '/api/treehouse') return json(response, snapshot());
     if (pathname === '/api/treehouse/commands') {

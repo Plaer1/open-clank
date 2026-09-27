@@ -361,6 +361,52 @@ export const SessionRoutes = lazy(() =>
       },
     )
     .get(
+      "/:sessionID/recovery",
+      describeRoute({
+        summary: "List recoverable session turns",
+        operationId: "session.recovery",
+        responses: {
+          200: { description: "Recoverable interrupted turns", content: { "application/json": { schema: resolver(z.array(z.object({ assistantMessageID: z.string(), parentMessageID: z.string(), created: z.number() }))) } } },
+          ...errors(400, 404),
+        },
+      }),
+      validator("param", z.object({ sessionID: SessionID.zod })),
+      validator("query", z.object({ agentID: z.string().optional() })),
+      async (c) =>
+        jsonRequest("SessionRoutes.recovery", c, function* () {
+          const params = c.req.valid("param")
+          const query = c.req.valid("query")
+          const session = yield* Session.Service
+          yield* session.get(params.sessionID)
+          return yield* (yield* SessionPrompt.Service).recovery({ sessionID: params.sessionID, agentID: query.agentID })
+        }),
+    )
+    .post(
+      "/:sessionID/turn/:assistantMessageID/resume",
+      describeRoute({
+        summary: "Resume an interrupted session turn",
+        operationId: "session.resume",
+        responses: { 202: { description: "Resume started" }, ...errors(400, 404, 409) },
+      }),
+      validator("param", z.object({ sessionID: SessionID.zod, assistantMessageID: MessageID.zod })),
+      validator("query", z.object({ agentID: z.string().optional(), task_id: z.string().optional(), titleLocale: z.string().optional(), modelProviderID: ProviderID.zod.optional(), modelID: ModelID.zod.optional() }).refine((q) => (q.modelProviderID === undefined) === (q.modelID === undefined), { message: "modelProviderID and modelID must be provided together" })),
+      async (c) => {
+        const params = c.req.valid("param")
+        const query = c.req.valid("query")
+        await runRequest("SessionRoutes.resume", c, Effect.gen(function* () {
+          yield* (yield* SessionPrompt.Service).resumeBackground({
+            sessionID: params.sessionID,
+            assistantMessageID: params.assistantMessageID,
+            agentID: query.agentID,
+            task_id: query.task_id,
+            titleLocale: query.titleLocale,
+            model: query.modelProviderID && query.modelID ? { providerID: query.modelProviderID, modelID: query.modelID } : undefined,
+          })
+        }))
+        return c.json({ resumed: true }, 202)
+      },
+    )
+    .get(
       "/:sessionID/todo",
       describeRoute({
         summary: "Get session todos",

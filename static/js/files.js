@@ -14,6 +14,7 @@ import {
 } from './editor/entryModel.js';
 import { isPreviewable, previewKind, readBoundedTextResponse } from './editor/previewModel.js';
 import uiModule from './ui.js';
+import * as Modals from './modalManager.js';
 import {
   createFilesSelectionModel,
   resourceKey,
@@ -1366,11 +1367,18 @@ async function createFilesResource(kind, captured) {
         // A lost response is reconciled by the same operation ID. Retrying the
         // provider request would be unsafe because the first request may have
         // already created the item.
-        try {
-          response = { ...(await filesFacadeClient.operationReceipt(operation, { generation })) };
-        } catch (_) {
-          throw error;
+        let receiptError = error;
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          try {
+            response = { ...(await filesFacadeClient.operationReceipt(operation, { generation })) };
+            receiptError = null;
+            break;
+          } catch (reconcileError) {
+            receiptError = reconcileError;
+            if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+          }
         }
+        if (receiptError) throw error;
       }
       if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) {
         setStatus('Creation completed, but Files access changed before refresh.', true);
@@ -3842,6 +3850,17 @@ function isHostInteropEntry(entry) {
   return Boolean(entryPath(entry));
 }
 
+function isNativeHostOpenEntry(entry) {
+  if (!isFacadeEntry(entry)) return false;
+  const provider = String(entry?.provider || '').toLowerCase();
+  const capabilities = new Set(entry?.capabilities || []);
+  return (provider === 'host' || capabilities.has('open'))
+    && capabilities.has('stat')
+    && capabilities.has('open')
+    && !isDirectory(entry)
+    && !['symlink', 'special', 'other'].includes(String(entry?.kind || '').toLowerCase());
+}
+
 function entryActionChoices(entry) {
   const capabilities = new Set(entry?.capabilities || []);
   const choices = [];
@@ -3850,6 +3869,10 @@ function entryActionChoices(entry) {
   }
   if (isHostInteropEntry(entry) && !isDirectory(entry) && isTextualEntry(entry) && !['symlink', 'special', 'other'].includes(String(entry?.kind || '').toLowerCase())) {
     choices.push({ action: 'code.open', label: 'Open in Editor', glyph: 'code', local: true });
+  }
+  if (isNativeHostOpenEntry(entry)) {
+    choices.push({ action: 'host.default', label: 'Open with default app', glyph: 'external', local: true });
+    choices.push({ action: 'host.open', label: 'Open with installed app…', glyph: 'external', local: true });
   }
   if (capabilities.has('favorite')) {
     const favored = entry?.provenance?.favorite === true;
@@ -3869,6 +3892,31 @@ function entryActionChoices(entry) {
 function closeManagedActionMenu() {
   state.actionMenu?.remove?.();
   state.actionMenu = null;
+}
+
+function chooseHostApplication(applications) {
+  return new Promise((resolve) => {
+    const overlay = el('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Open with installed app' });
+    const panel = el('div', { class: 'modal-content styled-confirm-box' });
+    const title = el('h4', { text: 'Open with installed app' });
+    const message = el('p', { text: 'Choose an installed application for this file.' });
+    const list = el('div', { class: 'files-action-menu', role: 'listbox', 'aria-label': 'Installed applications' });
+    const cancel = el('button', { type: 'button', class: 'confirm-btn confirm-btn-secondary', text: 'Cancel' });
+    const finish = (value) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(value); };
+    const onKey = (event) => { if (event.key === 'Escape') { event.preventDefault(); finish(null); } };
+    for (const application of applications) {
+      const item = el('button', { type: 'button', class: 'files-action-menu-item', role: 'option', text: application.name || application.id });
+      item.addEventListener('click', () => finish(application));
+      list.append(item);
+    }
+    cancel.addEventListener('click', () => finish(null));
+    panel.append(title, message, list, cancel);
+    overlay.append(panel);
+    overlay.addEventListener('click', (event) => { if (event.target === overlay) finish(null); });
+    document.addEventListener('keydown', onKey);
+    document.body.append(overlay);
+    list.querySelector('button')?.focus();
+  });
 }
 
 function updateManagedActionControl() {
@@ -3924,6 +3972,19 @@ async function performManagedAction(entry, choice) {
       if (controller.signal.aborted || generation !== state.contentGeneration) return false;
       await workspace.setWorkspace(bound.path, bound.id);
       setStatus(`Workspace: ${entry.name}`);
+      return true;
+    }
+    if (choice.action === 'host.default' || choice.action === 'host.open') {
+      const discovered = await filesFacadeClient.hostApps(entry.resource_ref, { signal: controller.signal });
+      const applications = Array.isArray(discovered?.applications) ? discovered.applications : [];
+      if (!applications.length) throw new Error('No installed app can open this file.');
+      const application = choice.action === 'host.default'
+        ? applications.find((candidate) => candidate.default)
+        : await chooseHostApplication(applications);
+      if (!application && choice.action === 'host.open') return false;
+      if (!application) throw new Error('No default application is registered for this file. Choose an installed app instead.');
+      await filesFacadeClient.openHost(entry.resource_ref, application.id, { signal: controller.signal });
+      setStatus(`Opened ${entry.name} with ${application.name}`);
       return true;
     }
     if (!entry.resource_ref) return false;
@@ -4682,6 +4743,13 @@ async function handleFilesPolicyChanged() {
   }
 
   if (snapshot.provider === 'host' && snapshot.hostPath) {
+    const result = await refreshRawFilesProjection(snapshot, lifecycle);
+    if (lifecycle !== state.lifecycleGeneration || result.status === 'stale') return false;
+    if (result.status === 'resolved') return true;
+    if (result.status === 'unavailable') {
+      setStatus('Current file access could not be refreshed; the prior view was retained', true);
+      return false;
+    }
     clearFilesAuthorityContent('The saved folder has expired; choose an authorized Files folder again');
     await openProvider('host');
     return false;
@@ -5045,6 +5113,7 @@ export async function revealWorkspaceResource(workspaceId, relativePath = '') {
 export async function revealResource(resourceRef) {
   const windowApi = mount();
   windowApi.show();
+  Modals.restore('files-window');
   const reveal = ++state.revealGeneration;
   setStatus('Locating resource…');
   try {

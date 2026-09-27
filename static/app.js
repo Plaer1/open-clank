@@ -52,6 +52,7 @@ import { initSectionCollapse, initSectionDrag } from './js/section-management.js
 import initPermissionModeControl from './js/permission-mode.js';
 import initInteractionModeControl from './js/interaction-mode.js';
 import { initCustomContextMenu } from './js/custom-context-menu.js';
+import chatWorkspaceModule from './js/chatWorkspace.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -60,9 +61,12 @@ window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
 window.copalModule = copalModule;
+window.chatWorkspaceModule = chatWorkspaceModule;
 window.filesModule = filesModule;
 settingsModule.setCopalModule(copalModule);
 window.settingsModule = settingsModule;
+
+// Usage is owned by static/js/usageEntry.js; targets resolve its global at use time.
 
 function _isMobileChatInput() {
   return window.innerWidth <= 768;
@@ -1260,6 +1264,7 @@ function initializeEventListeners() {
     tasks:    () => document.getElementById('tool-tasks-btn')?.click(),
     library:  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
     cookbook: () => document.getElementById('tool-cookbook-btn')?.click(),
+    usage:    () => window.__openStatsUsage?.(),
   };
   const _openResolvedTarget = (resolved) => {
     if (!resolved) return false;
@@ -2660,6 +2665,7 @@ function initializeEventListeners() {
     'tool-memory':         '#tool-memory-btn',
     'tool-notes':          '#tool-notes-btn',
     'tool-tasks':          '#tool-tasks-btn',
+    'tool-usage':          '#tool-usage-btn',
     'tool-theme':          '#tool-theme-btn',
     'user-bar':            '#user-bar-profile',
     'sidebar-settings-btn':'#user-bar-settings',
@@ -2675,6 +2681,7 @@ function initializeEventListeners() {
     'attach-btn':          '#overflow-attach-btn',
     'research-btn':        '#overflow-research-btn',
     'rail-new-chat':       '#rail-new-session',
+    'rail-usage':          '#rail-usage',
   };
 
   // Keys hidden by default on first run (no localStorage yet)
@@ -3615,6 +3622,8 @@ function initializeEventListeners() {
 // INITIALIZATION ON PAGE LOAD
 // ============================================
 function startOdysseusApp() {
+  // Usage entry ownership lives in usageEntry.js so optional app startup errors
+  // cannot create duplicate listeners or refresh owners.
   tasksModule?.startNotificationPolling?.();
   if (window.__odysseusAppStarted) return;
   window.__odysseusAppStarted = true;

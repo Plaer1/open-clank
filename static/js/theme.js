@@ -4342,7 +4342,11 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
     return rain;
   }
 
-  const consumer = createGraphicsConsumer({
+  // Reduced-motion owners paint synchronously during createGraphicsConsumer.
+  // Keep the callback valid before the returned consumer is assigned, then
+  // the resize below requests the authoritative viewport-sized repaint.
+  let consumer = null;
+  consumer = createGraphicsConsumer({
     canvas,
     id,
     draw: ({ backend, batch, scene, time, reduced }) => {
@@ -4355,7 +4359,7 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
       height = measured.nextHeight;
       dpr = measured.nextDpr;
       updateCanvasLayout();
-      if (geometryChanged) {
+      if (geometryChanged && consumer) {
         consumer.resize(width, height, dpr);
         field.invalidate();
       }

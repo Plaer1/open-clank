@@ -35,6 +35,8 @@
     { "$ref": "#/$defs/artifactDescriptor" },
     { "$ref": "#/$defs/executorInvokeRequest" },
     { "$ref": "#/$defs/operationExecuteRequest" },
+    { "$ref": "#/$defs/operationCancelRequest" },
+    { "$ref": "#/$defs/operationCancelResult" },
     { "$ref": "#/$defs/operationExecuteResult" },
     { "$ref": "#/$defs/sessionCwdChangeRequest" },
     { "$ref": "#/$defs/sessionCwdChangeResult" },
@@ -109,6 +111,7 @@
       "enum": [
         "chat.stream",
         "chat.complete",
+        "web.search",
         "vision.describe",
         "image.generate",
         "image.edit",
@@ -148,8 +151,10 @@
         "_openclank/operations/v1/artifact/write",
         "_openclank/operations/v1/executor/invoke",
         "_openclank/operations/v1/execute",
+        "_openclank/operations/v1/cancel",
         "_openclank/session/v1/cwd/change",
         "_openclank/session/v1/binding/read"
+        ,"_openclank/session/v1/settings/effective"
       ]
     },
     "capabilityDeclaration": {
@@ -810,6 +815,27 @@
       },
       "additionalProperties": false
     },
+    "sessionSettingsEffectiveRequest": {
+      "type": "object",
+      "required": ["providerID", "modelID"],
+      "properties": {
+        "providerID": { "type": "string", "minLength": 1 },
+        "modelID": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "sessionSettingsEffectiveResult": {
+      "type": "object",
+      "required": ["providerID", "modelID", "context", "compaction", "checkpoint"],
+      "properties": {
+        "providerID": { "type": "string", "minLength": 1 },
+        "modelID": { "type": "string", "minLength": 1 },
+        "context": { "type": "object", "required": ["hard", "effective", "usable", "source", "input", "output"], "properties": { "hard": { "type": "integer", "minimum": 0 }, "effective": { "type": "integer", "minimum": 0 }, "usable": { "type": "integer", "minimum": 0 }, "source": { "enum": ["model", "config"] }, "input": { "type": "integer", "minimum": 0 }, "output": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+        "compaction": { "type": "object", "required": ["auto", "prune", "tailTurns", "preserveRecentTokens", "reserved"], "properties": { "auto": { "type": "boolean" }, "prune": { "type": "boolean" }, "tailTurns": { "type": "integer", "minimum": 0 }, "preserveRecentTokens": { "type": "integer", "minimum": 0 }, "reserved": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+        "checkpoint": { "type": "object", "required": ["thresholds", "reserved", "maxWriterFailures", "fork", "pushCaps"], "properties": { "thresholds": { "type": "array", "items": { "type": "integer", "minimum": 0 } }, "reserved": { "type": "integer", "minimum": 0 }, "maxWriterFailures": { "type": "integer", "minimum": 1 }, "fork": { "type": "boolean" }, "pushCaps": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } } }, "additionalProperties": false }
+      },
+      "additionalProperties": false
+    },
     "operationJournalRequest": {
       "oneOf": [
         {
@@ -989,6 +1015,25 @@
       },
       "additionalProperties": false
     },
+    "operationCancelRequest": {
+      "type": "object",
+      "required": ["rootOperationID", "idempotencyKey"],
+      "properties": {
+        "rootOperationID": { "type": "string", "minLength": 1 },
+        "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 128 }
+      },
+      "additionalProperties": false
+    },
+    "operationCancelResult": {
+      "type": "object",
+      "required": ["operationID", "rootOperationID", "state"],
+      "properties": {
+        "operationID": { "type": "string", "minLength": 1 },
+        "rootOperationID": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["pending", "cancelled", "complete", "failed"] }
+      },
+      "additionalProperties": false
+    },
     "operationExecuteRequest": {
       "type": "object",
       "required": ["rootOperationID", "idempotencyKey", "operation", "routes", "input", "artifactInputs", "options"],
@@ -1154,6 +1199,11 @@
       "request": "#/$defs/operationExecuteRequest",
       "result": "#/$defs/operationExecuteResult"
     },
+    "_openclank/operations/v1/cancel": {
+      "direction": "host_to_engine",
+      "request": "#/$defs/operationCancelRequest",
+      "result": "#/$defs/operationCancelResult"
+    },
     "_openclank/session/v1/cwd/change": {
       "direction": "engine_to_host",
       "request": "#/$defs/sessionCwdChangeRequest",
@@ -1163,6 +1213,11 @@
       "direction": "engine_to_host",
       "request": "#/$defs/sessionBindingReadRequest",
       "result": "#/$defs/sessionBindingReadResult"
+    },
+    "_openclank/session/v1/settings/effective": {
+      "direction": "host_to_engine",
+      "request": "#/$defs/sessionSettingsEffectiveRequest",
+      "result": "#/$defs/sessionSettingsEffectiveResult"
     }
   }
 }

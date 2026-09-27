@@ -24,6 +24,10 @@ const EMAIL_DOC_SPLIT_WIDTH_KEY = 'odysseus-email-doc-split-width';
 const EDGE_DOCK_WIDTH_KEY_PREFIX = 'odysseus-edge-dock-width';
 const MIN_EDGE_DOCK_WIDTH = 320;
 
+function _chatWidthFloor() {
+  return document.body?.classList.contains('chat-workspace-hidden') ? 0 : MIN_CHAT_WIDTH;
+}
+
 let _edgeDockHandlePositioner = null;
 
 function _positionEdgeDockResizeHandles() {
@@ -110,7 +114,7 @@ function _clampRightDockWidth(width) {
   const min = _minEdgeDockWidth();
   const navRight = _leftNavRight();
   const leftDockW = _activeDockWidth('left');
-  const maxByChat = window.innerWidth - navRight - leftDockW - MIN_CHAT_WIDTH;
+  const maxByChat = window.innerWidth - navRight - leftDockW - _chatWidthFloor();
   const max = Math.min(Math.round(window.innerWidth * 0.82), maxByChat);
   return _clampDockWidthToSpace(width, min, max);
 }
@@ -119,7 +123,7 @@ function _clampLeftDockWidth(width, left = _leftNavRight()) {
   const min = _minEdgeDockWidth();
   const rightDockW = _activeDockWidth('right');
   const available = Math.max(0, window.innerWidth - left - rightDockW);
-  const max = Math.min(Math.round(available * 0.82), available - MIN_CHAT_WIDTH);
+  const max = Math.min(Math.round(available * 0.82), available - _chatWidthFloor());
   return _clampDockWidthToSpace(width, min, max);
 }
 
@@ -167,7 +171,7 @@ function _shouldAutoCollapseSidebar(dockW) {
     ? rail.getBoundingClientRect().width
     : 0;
   const remaining = window.innerWidth - sb - rl - _activeDockWidth('left') - dockW;
-  return remaining < MIN_CHAT_WIDTH;
+  return remaining < _chatWidthFloor();
 }
 
 // Right edge (px) of whatever left navigation is currently showing — the

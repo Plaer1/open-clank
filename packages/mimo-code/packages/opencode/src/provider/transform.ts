@@ -7,6 +7,7 @@ import type * as ModelsDev from "./models"
 import { iife } from "@/util/iife"
 import { Flag } from "@/flag/flag"
 import { compressImage, DEFAULT_MAX_IMAGE_BYTES } from "./image"
+import { describeNativeRejection, nativeRejectionFor } from "./capability-registry"
 
 type Modality = NonNullable<ModelsDev.Model["modalities"]>["input"][number]
 
@@ -503,39 +504,82 @@ function forceAnthropicReasoningContent(msgs: ModelMessage[], model: Provider.Mo
   })
 }
 
+export type NativePayload =
+  | { readonly kind: "inline"; readonly mimeType: string; readonly bytes: number; readonly payloadBytes: number }
+  | { readonly kind: "remote"; readonly mimeType: string; readonly url: URL }
+  | { readonly kind: "unknown"; readonly reason: string }
+  | { readonly kind: "malformed"; readonly reason: string }
+
+/** Parse every native media representation before provider-specific transforms. */
+export function parseNativePayload(value: unknown, declaredMime?: string): NativePayload {
+  const expected = declaredMime?.trim().toLowerCase()
+  if (value instanceof Uint8Array) {
+    return { kind: "inline", mimeType: expected || "application/octet-stream", bytes: value.byteLength, payloadBytes: Math.ceil(value.byteLength / 3) * 4 }
+  }
+  if (value instanceof ArrayBuffer) {
+    return { kind: "inline", mimeType: expected || "application/octet-stream", bytes: value.byteLength, payloadBytes: Math.ceil(value.byteLength / 3) * 4 }
+  }
+  if (value instanceof URL) {
+    if (value.protocol !== "http:" && value.protocol !== "https:") return { kind: "unknown", reason: `unsupported URL scheme ${value.protocol}` }
+    return { kind: "remote", mimeType: expected || "application/octet-stream", url: value }
+  }
+  if (typeof value !== "string") return { kind: "unknown", reason: "media bytes are unavailable" }
+  const compact = compactBase64(value)
+  if (value.startsWith("data:")) {
+    const parsed = parseDataUrl(value)
+    if (!parsed || !isRawBase64(compactBase64(parsed.base64))) return { kind: "malformed", reason: "malformed base64 data URL" }
+    const actualMime = parsed.mime.trim().toLowerCase()
+    if (expected && actualMime !== expected) return { kind: "malformed", reason: `data URL MIME ${actualMime} does not match declared ${expected}` }
+    const base64 = compactBase64(parsed.base64)
+    return { kind: "inline", mimeType: actualMime || expected || "application/octet-stream", bytes: base64ByteSize(base64), payloadBytes: base64.length }
+  }
+  if (isRawBase64(compact)) {
+    return { kind: "inline", mimeType: expected || "application/octet-stream", bytes: base64ByteSize(compact), payloadBytes: compact.length }
+  }
+  try {
+    const url = new URL(value)
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return { kind: "remote", mimeType: expected || "application/octet-stream", url }
+    }
+  } catch {
+    // The caller may still have a provider-specific opaque value; report it as unknown.
+  }
+  return { kind: "unknown", reason: "media bytes are unavailable" }
+}
+
 function unsupportedParts(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
   return msgs.map((msg) => {
     if (msg.role !== "user" || !Array.isArray(msg.content)) return msg
 
     const filtered = msg.content.map((part) => {
       if (part.type !== "file" && part.type !== "image") return part
-
-      // Check for empty base64 image data
-      if (part.type === "image") {
-        const imageStr = String(part.image)
-        if (imageStr.startsWith("data:")) {
-          const match = imageStr.match(/^data:([^;]+);base64,(.*)$/)
-          if (match && (!match[2] || match[2].length === 0)) {
-            return {
-              type: "text" as const,
-              text: "ERROR: Image file is empty or corrupted. Please provide a valid image.",
-            }
-          }
-        }
-      }
-
-      const mime = part.type === "image" ? String(part.image).split(";")[0].replace("data:", "") : part.mediaType
-      const filename = part.type === "file" ? part.filename : undefined
-      const modality = mimeToModality(mime)
+      const declaredMime = (part as { mediaType?: string }).mediaType
+      const value = part.type === "image" ? part.image : part.data
+      const initialMime = declaredMime || (typeof value === "string" && value.startsWith("data:") ? parseDataUrl(value)?.mime : undefined)
+      const modality = mimeToModality(initialMime || (part.type === "image" ? "image/png" : ""))
       if (!modality) return part
-      const supported = model.capabilities.input[modality]
-      if (supported) return part
-
-      const name = filename ? `"${filename}"` : modality
-      return {
-        type: "text" as const,
-        text: `ERROR: Cannot read ${name} (this model does not support ${modality} input). Inform the user.`,
+      const payload = parseNativePayload(value, declaredMime || initialMime)
+      const name = part.type === "file" && part.filename ? `"${part.filename}"` : modality
+      if (payload.kind === "malformed" && part.type === "image" && typeof value === "string" && parseDataUrl(value)?.base64 === "") {
+        return { type: "text" as const, text: "ERROR: Image file is empty or corrupted. Please provide a valid image." }
       }
+      if (payload.kind === "malformed") {
+        return { type: "text" as const, text: `ERROR: Cannot read ${name} (${payload.reason}). Provide a valid attachment or choose an explicit extraction/helper action.` }
+      }
+      if (payload.kind === "unknown") {
+        return { type: "text" as const, text: `ERROR: Cannot preflight ${name} (${payload.reason}). Choose an explicit extraction/helper action.` }
+      }
+      if (payload.kind === "remote") {
+        return { type: "text" as const, text: `ERROR: Cannot preflight ${name} (remote media size and adapter serialization are unproven). Choose an explicit extraction/helper action.` }
+      }
+      const rejection = nativeRejectionFor(model, {
+        modality,
+        mimeType: declaredMime || initialMime || (modality === "image" ? undefined : payload.mimeType),
+        bytes: payload.kind === "inline" ? payload.bytes : undefined,
+        payloadBytes: payload.kind === "inline" ? payload.payloadBytes : undefined,
+      })
+      if (!rejection) return part
+      return { type: "text" as const, text: `ERROR: Cannot read ${name} (${describeNativeRejection(rejection)}). Inform the user or choose an explicit extraction/helper action.` }
     })
 
     return { ...msg, content: filtered }
@@ -554,10 +598,9 @@ function base64ByteSize(base64: string): number {
 // that isn't a base64 data URL.
 function parseDataUrl(image: string): { mime: string; base64: string } | undefined {
   if (!image.startsWith("data:")) return undefined
-  const comma = image.indexOf(",")
-  if (comma === -1) return undefined
-  const mime = image.slice(5, image.indexOf(";") === -1 ? comma : image.indexOf(";"))
-  return { mime, base64: image.slice(comma + 1) }
+  const match = image.match(/^data:([^;,]+);base64,(.*)$/s)
+  if (!match) return undefined
+  return { mime: match[1], base64: match[2] }
 }
 
 type ImagePayload =

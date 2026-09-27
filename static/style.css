@@ -17092,6 +17092,33 @@ body.right-dock-active .chat-container,
 body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
   margin-right: var(--right-dock-w, 0px);
 }
+
+/* Chat is hidden as a mounted workspace: its DOM owns the current draft,
+   transcript and scroll position, while the background and other windows stay
+   alive. */
+body.chat-workspace-hidden .chat-container {
+  display: none !important;
+}
+.chat-workspace-restore {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 12000;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel, var(--bg));
+  color: var(--fg);
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 11px;
+  box-shadow: 0 5px 18px rgba(0,0,0,.24);
+  cursor: pointer;
+}
+.chat-workspace-restore:hover,
+.chat-workspace-restore:focus-visible {
+  border-color: var(--accent, var(--red));
+}
+.chat-workspace-restore[hidden] { display: none; }
 .modal.modal-right-docked {
   align-items: stretch;
   justify-content: flex-end;
@@ -45474,3 +45501,23 @@ body.theme-clanker-light [data-settings-panel="added-models"] > .provider-contro
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
+/* Stats Usage responsive/a11y primitives. */
+.stats-usage-shell { display: grid; gap: 1rem; min-width: 0; color: var(--text-primary, #f5f7fa); }
+.stats-usage-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: .65rem; }
+.stats-usage-toolbar label { display: grid; gap: .25rem; min-inline-size: 7rem; }
+.stats-usage-toolbar select, .stats-usage-toolbar input, .stats-usage-toolbar button { min-block-size: 2.25rem; }
+.stats-quota-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 1rem; }
+.stats-quota-card, .stats-overview-quota-strip, .stats-current-session { border: 1px solid color-mix(in srgb, currentColor 24%, transparent); border-radius: .75rem; padding: 1rem; background: color-mix(in srgb, currentColor 6%, transparent); }
+.stats-quota-ring, .stats-overall-ring { --stats-quota-progress: 0%; inline-size: 5rem; block-size: 5rem; border-radius: 50%; background: conic-gradient(var(--accent-color, #54d6c7) var(--stats-quota-progress), color-mix(in srgb, currentColor 18%, transparent) 0); display: grid; place-items: center; }
+.stats-quota-ring::after, .stats-overall-ring::after { content: ''; inline-size: 3.8rem; block-size: 3.8rem; border-radius: 50%; background: var(--surface, #15191f); }
+.stats-usage-timeline-chart { inline-size: 100%; min-block-size: 8rem; overflow: visible; outline: none; }
+.stats-usage-timeline-chart circle { fill: var(--accent-color, #54d6c7); stroke: var(--surface, #15191f); stroke-width: 1.5; cursor: pointer; }
+.stats-usage-timeline-chart circle:focus { stroke: currentColor; stroke-width: 3; outline: none; }
+.stats-timeline-reset { stroke: #f08b83; stroke-dasharray: 2 2; }
+.stats-timeline-axis { stroke: currentColor; opacity: .45; }
+.stats-timeline-bar { display: block; inline-size: 7rem; max-inline-size: 100%; block-size: .5rem; background: linear-gradient(to right, var(--accent-color, #54d6c7) var(--stats-timeline-progress), color-mix(in srgb, currentColor 18%, transparent) 0); border-radius: 999px; }
+.stats-usage-shell :focus-visible { outline: 3px solid currentColor; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .stats-usage-shell *, .stats-usage-shell *::before, .stats-usage-shell *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; scroll-behavior: auto !important; } }
+@media (forced-colors: active) { .stats-quota-ring, .stats-overall-ring { background: none; border: 3px solid CanvasText; } .stats-quota-ring::after, .stats-overall-ring::after { display: none; } .stats-timeline-bar { border: 2px solid CanvasText; background: none; } }
+@media (max-width: 600px) { .stats-usage-toolbar { align-items: stretch; } .stats-usage-toolbar label, .stats-usage-toolbar select, .stats-usage-toolbar input, .stats-usage-toolbar button { inline-size: 100%; } .stats-quota-grid { grid-template-columns: 1fr; } .stats-usage-panel { overflow-x: auto; } }
+[dir="rtl"] .stats-usage-toolbar { flex-direction: row-reverse; }

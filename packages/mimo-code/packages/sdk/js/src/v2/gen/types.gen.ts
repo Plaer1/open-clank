@@ -92,6 +92,21 @@ export type EventActorRegistered = {
     description: string
     agent: string
     background: boolean
+    requestedModel?: string
+    effectiveModel?: {
+      providerID: string
+      modelID: string
+    }
+    hostContext?: {
+      accountID?: string
+      grantID?: string
+      grantRevision?: number
+      credentialRevision?: number
+      chatID?: string
+      workspaceID?: string
+      cwd?: string
+      goalID?: string
+    }
   }
 }
 
@@ -105,6 +120,21 @@ export type EventActorStatus = {
     turnCount: number
     lastTurnTime: number
     error?: string
+    requestedModel?: string
+    effectiveModel?: {
+      providerID: string
+      modelID: string
+    }
+    hostContext?: {
+      accountID?: string
+      grantID?: string
+      grantRevision?: number
+      credentialRevision?: number
+      chatID?: string
+      workspaceID?: string
+      cwd?: string
+      goalID?: string
+    }
   }
 }
 
@@ -116,6 +146,21 @@ export type EventActorStuck = {
     description: string
     lastTurnTime: number
     stuckDuration: number
+    requestedModel?: string
+    effectiveModel?: {
+      providerID: string
+      modelID: string
+    }
+    hostContext?: {
+      accountID?: string
+      grantID?: string
+      grantRevision?: number
+      credentialRevision?: number
+      chatID?: string
+      workspaceID?: string
+      cwd?: string
+      goalID?: string
+    }
   }
 }
 
@@ -127,6 +172,21 @@ export type EventActorStalled = {
     description: string
     lastTurnTime: number
     stalledDuration: number
+    requestedModel?: string
+    effectiveModel?: {
+      providerID: string
+      modelID: string
+    }
+    hostContext?: {
+      accountID?: string
+      grantID?: string
+      grantRevision?: number
+      credentialRevision?: number
+      chatID?: string
+      workspaceID?: string
+      cwd?: string
+      goalID?: string
+    }
   }
 }
 
@@ -643,6 +703,14 @@ export type EventHookReactMaxReached = {
   }
 }
 
+export type EventSessionCwd = {
+  type: "session.cwd"
+  properties: {
+    sessionID: string
+    cwd: string
+  }
+}
+
 export type QuestionOption = {
   /**
    * Display text (1-5 words, concise)
@@ -730,18 +798,12 @@ export type EventQuestionRejected = {
   properties: QuestionRejected
 }
 
-export type EventSessionCwd = {
-  type: "session.cwd"
-  properties: {
-    sessionID: string
-    cwd: string
-  }
-}
-
 export type EventBashInteractiveAsked = {
   type: "bash.interactive.asked"
   properties: {
     id: string
+    sessionID: string
+    callID: string
     command: string
     cwd: string
     workspace: string
@@ -768,6 +830,8 @@ export type EventBashInteractiveReplied = {
   type: "bash.interactive.replied"
   properties: {
     id: string
+    sessionID: string
+    callID: string
     output: string
     exitCode: number
   }
@@ -780,8 +844,15 @@ export type SessionStatus =
   | {
       type: "retry"
       attempt: number
+      phaseAttempt?: number
       message: string
       next: number
+      phase?: "request" | "stream"
+      scope?: "request" | "live-step" | "max-candidate" | "max-judge"
+    }
+  | {
+      type: "notice"
+      message: string
     }
   | {
       type: "busy"
@@ -1429,6 +1500,8 @@ export type Session = {
     url: string
   }
   title: string
+  titleSource: "fallback" | "generated" | "user"
+  titleRevision: number
   version: string
   time: {
     created: number
@@ -1445,16 +1518,16 @@ export type Session = {
   }
 }
 
-export type EventSessionCreated = {
-  type: "session.created"
+export type EventSessionUpdated = {
+  type: "session.updated"
   properties: {
     sessionID: string
     info: Session
   }
 }
 
-export type EventSessionUpdated = {
-  type: "session.updated"
+export type EventSessionCreated = {
+  type: "session.created"
   properties: {
     sessionID: string
     info: Session
@@ -1519,26 +1592,15 @@ export type SyncEventMessagePartRemoved = {
   }
 }
 
-export type SyncEventSessionCreated = {
-  type: "sync"
-  name: "session.created.1"
-  id: string
-  seq: number
-  aggregateID: "sessionID"
-  data: {
-    sessionID: string
-    info: Session
-  }
-}
-
 export type SyncEventSessionUpdated = {
   type: "sync"
-  name: "session.updated.1"
+  name: "session.updated.2"
   id: string
   seq: number
   aggregateID: "sessionID"
   data: {
     sessionID: string
+    previousRevision?: number
     info: {
       id: string | null
       slug: string | null
@@ -1558,6 +1620,8 @@ export type SyncEventSessionUpdated = {
         url: string | null
       }
       title: string | null
+      titleSource: "fallback" | "generated" | "user" | null
+      titleRevision: number | null
       version: string | null
       time?: {
         created: number | null
@@ -1573,6 +1637,18 @@ export type SyncEventSessionUpdated = {
         diff?: string
       } | null
     }
+  }
+}
+
+export type SyncEventSessionCreated = {
+  type: "sync"
+  name: "session.created.1"
+  id: string
+  seq: number
+  aggregateID: "sessionID"
+  data: {
+    sessionID: string
+    info: Session
   }
 }
 
@@ -1638,10 +1714,10 @@ export type GlobalEvent = {
     | EventHookExecuted
     | EventHookReactReentered
     | EventHookReactMaxReached
+    | EventSessionCwd
     | EventQuestionAsked
     | EventQuestionReplied
     | EventQuestionRejected
-    | EventSessionCwd
     | EventBashInteractiveAsked
     | EventBashInteractiveCancelled
     | EventBashInteractiveReplied
@@ -1668,15 +1744,15 @@ export type GlobalEvent = {
     | EventMessageRemoved
     | EventMessagePartUpdated
     | EventMessagePartRemoved
-    | EventSessionCreated
     | EventSessionUpdated
+    | EventSessionCreated
     | EventSessionDeleted
     | SyncEventMessageUpdated
     | SyncEventMessageRemoved
     | SyncEventMessagePartUpdated
     | SyncEventMessagePartRemoved
-    | SyncEventSessionCreated
     | SyncEventSessionUpdated
+    | SyncEventSessionCreated
     | SyncEventSessionDeleted
 }
 
@@ -1709,6 +1785,20 @@ export type ServerConfig = {
    * Additional domains to allow for CORS
    */
   cors?: Array<string>
+}
+
+/**
+ * Defaults for temporary local LLM server token lifetimes
+ */
+export type LlmServerConfig = {
+  /**
+   * Default sliding lifetime for issued tokens, measured from last use (e.g. '30m', '12h', '1d', or 'none'). Default '1d'.
+   */
+  ttl?: string
+  /**
+   * Absolute ceiling from issue, regardless of activity (e.g. '7d', or 'none'). Default 'none', so an actively used token is not cut off.
+   */
+  maxAge?: string
 }
 
 export type PermissionActionConfig = "ask" | "allow" | "deny"
@@ -1851,6 +1941,180 @@ export type ProviderConfig = {
     chunkTimeout?: number
     [key: string]: unknown | string | boolean | number | false | number | false | number | undefined
   }
+  /**
+   * Provider-specific overrides for retry budgets
+   */
+  retry?: {
+    request?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    stream?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    maxCandidate?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    maxJudge?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    network?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    server?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    rateLimit?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    unknown?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    jitterRatio?: number
+  }
   models?: {
     [key: string]: {
       id?: string
@@ -1923,6 +2187,11 @@ export type ProviderConfig = {
   only_configured_models?: boolean
 }
 
+/**
+ * Policy for MCP client-side sampling (`sampling/createMessage`) from this server: deny, ask (default), or allow.
+ */
+export type McpSamplingPolicy = "deny" | "ask" | "allow"
+
 export type McpLocalConfig = {
   /**
    * Type of MCP server connection
@@ -1946,6 +2215,7 @@ export type McpLocalConfig = {
    * Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified.
    */
   timeout?: number
+  sampling?: McpSamplingPolicy
 }
 
 export type McpOAuthConfig = {
@@ -1994,6 +2264,7 @@ export type McpRemoteConfig = {
    * Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified.
    */
   timeout?: number
+  sampling?: McpSamplingPolicy
 }
 
 /**
@@ -2008,6 +2279,7 @@ export type Config = {
   $schema?: string
   logLevel?: LogLevel
   server?: ServerConfig
+  llmServer?: LlmServerConfig
   /**
    * Command configuration, see https://mimo.xiaomi.com/mimocode/commands
    */
@@ -2332,6 +2604,10 @@ export type Config = {
   }
   memory?: {
     /**
+     * Disable native memory/checkpoint writes while keeping memory reads available. Default: false.
+     */
+    disable_write?: boolean
+    /**
      * Index Claude Code memory (~/.claude/projects/<slug>/memory) and expose under scope='cc'. Default: false. Note: when enabled, every mimocode agent (build/explore/subagents) can search these memories via the builtin `memory` tool — including CC's `type: user` (your role/preferences) and `type: feedback` (your guidance) categories. CC originally writes them for future CC sessions; flipping this on widens the consumer set to mimocode agents on the same machine. Leave disabled (default) if you don't want personal context recallable from a prompt-injection-vulnerable agent.
      */
     cc_index?: boolean
@@ -2533,6 +2809,8 @@ export type NotFoundError = {
 export type Model = {
   id: string
   providerID: string
+  baseModelId?: string
+  preset?: string
   api: {
     id: string
     url: string
@@ -2679,6 +2957,8 @@ export type GlobalSession = {
     url: string
   }
   title: string
+  titleSource: "fallback" | "generated" | "user"
+  titleRevision: number
   version: string
   time: {
     created: number
@@ -2709,6 +2989,13 @@ export type ConflictError = {
   data: {
     message: string
   }
+}
+
+export type TitleSnapshot = {
+  sessionID: string
+  title: string
+  titleSource: "fallback" | "generated" | "user"
+  titleRevision: number
 }
 
 export type TextPartInput = {
@@ -2890,10 +3177,10 @@ export type Event =
   | EventHookExecuted
   | EventHookReactReentered
   | EventHookReactMaxReached
+  | EventSessionCwd
   | EventQuestionAsked
   | EventQuestionReplied
   | EventQuestionRejected
-  | EventSessionCwd
   | EventBashInteractiveAsked
   | EventBashInteractiveCancelled
   | EventBashInteractiveReplied
@@ -2920,8 +3207,8 @@ export type Event =
   | EventMessageRemoved
   | EventMessagePartUpdated
   | EventMessagePartRemoved
-  | EventSessionCreated
   | EventSessionUpdated
+  | EventSessionCreated
   | EventSessionDeleted
 
 export type McpStatusConnected = {
@@ -3987,6 +4274,39 @@ export type ToolIdsResponses = {
 
 export type ToolIdsResponse = ToolIdsResponses[keyof ToolIdsResponses]
 
+export type ToolMetadataData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/experimental/tool/metadata"
+}
+
+export type ToolMetadataErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ToolMetadataError = ToolMetadataErrors[keyof ToolMetadataErrors]
+
+export type ToolMetadataResponses = {
+  /**
+   * Tool metadata
+   */
+  200: Array<{
+    id: string
+    source: "builtin" | "extension"
+    registered: boolean
+    reason: string
+  }>
+}
+
+export type ToolMetadataResponse = ToolMetadataResponses[keyof ToolMetadataResponses]
+
 export type ToolListData = {
   body?: never
   path?: never
@@ -4120,6 +4440,57 @@ export type WorktreeResetResponses = {
 
 export type WorktreeResetResponse = WorktreeResetResponses[keyof WorktreeResetResponses]
 
+export type ExperimentalTitleGenerateData = {
+  body: {
+    text?: string
+    parts?: Array<
+      | {
+          type: "text"
+          text: string
+        }
+      | {
+          type: "image"
+          data: string
+          mime: "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+          filename?: string
+        }
+    >
+    locale?: string
+    model?: {
+      providerID: string
+      modelID: string
+    }
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/experimental/title"
+}
+
+export type ExperimentalTitleGenerateErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ExperimentalTitleGenerateError = ExperimentalTitleGenerateErrors[keyof ExperimentalTitleGenerateErrors]
+
+export type ExperimentalTitleGenerateResponses = {
+  /**
+   * Generated conversation title
+   */
+  200: {
+    title: string
+    status: "generated" | "fallback" | "untitled"
+  }
+}
+
+export type ExperimentalTitleGenerateResponse =
+  ExperimentalTitleGenerateResponses[keyof ExperimentalTitleGenerateResponses]
+
 export type ExperimentalSessionListData = {
   body?: never
   path?: never
@@ -4228,6 +4599,7 @@ export type SessionListResponse = SessionListResponses[keyof SessionListResponse
 
 export type SessionCreateData = {
   body?: {
+    id?: string
     parentID?: string
     contextFrom?: string
     contextWatermark?: string
@@ -4362,6 +4734,16 @@ export type SessionGoalGetResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -4421,6 +4803,16 @@ export type SessionGoalGetResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -4476,6 +4868,16 @@ export type SessionGoalGetResponses = {
         lease?: {
           id: string
           owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
           acquiredAt: number
           expiresAt: number
           attempt: number
@@ -4542,6 +4944,16 @@ export type SessionGoalGetResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -4597,6 +5009,16 @@ export type SessionGoalGetResponses = {
         lease?: {
           id: string
           owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
           acquiredAt: number
           expiresAt: number
           attempt: number
@@ -4660,6 +5082,16 @@ export type SessionGoalGetResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -4708,31 +5140,59 @@ export type SessionGoalUpdateData = {
       }
     | {
         action: "pause"
+        target: {
+          goalID: string
+          expectedRevision: number
+        }
       }
     | {
         action: "resume"
+        target: {
+          goalID: string
+          expectedRevision: number
+        }
       }
     | {
         action: "cancel"
+        target: {
+          goalID: string
+          expectedRevision: number
+        }
       }
     | {
         action: "clear_history"
+        expectedEnvelopeRevision: number
       }
     | {
         action: "edit"
-        expectedRevision: number
+        target: {
+          goalID: string
+          expectedRevision: number
+        }
         objective: string
       }
     | {
         action: "evidence"
-        evidence: {
-          kind: "model" | "command" | "file" | "user"
-          subject: string
-          sourceRef: string
-          observation: string
-          producer: string
-          verifier?: string
+        target: {
+          goalID: string
+          expectedRevision: number
         }
+        evidence:
+          | {
+              kind: "command"
+              subject: string
+              sourceRef: string
+            }
+          | {
+              kind: "file"
+              subject: string
+              sourceRef: string
+            }
+          | {
+              kind: "user"
+              subject: string
+              observation: string
+            }
       }
   path: {
     sessionID: string
@@ -4807,6 +5267,16 @@ export type SessionGoalUpdateResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -4866,6 +5336,16 @@ export type SessionGoalUpdateResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -4921,6 +5401,16 @@ export type SessionGoalUpdateResponses = {
         lease?: {
           id: string
           owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
           acquiredAt: number
           expiresAt: number
           attempt: number
@@ -4987,6 +5477,16 @@ export type SessionGoalUpdateResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -5046,6 +5546,16 @@ export type SessionGoalUpdateResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -5101,6 +5611,16 @@ export type SessionGoalUpdateResponses = {
         lease?: {
           id: string
           owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
           acquiredAt: number
           expiresAt: number
           attempt: number
@@ -5219,6 +5739,16 @@ export type SessionGoalJournalResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -5278,6 +5808,16 @@ export type SessionGoalJournalResponses = {
           expiresAt: number
           attempt: number
         }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
         requiredEvidence?: Array<"model" | "command" | "file" | "user">
         evidence?: Array<{
           id: string
@@ -5333,6 +5873,16 @@ export type SessionGoalJournalResponses = {
         lease?: {
           id: string
           owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
           acquiredAt: number
           expiresAt: number
           attempt: number
@@ -5435,6 +5985,7 @@ export type SessionGetResponse = SessionGetResponses[keyof SessionGetResponses]
 export type SessionUpdateData = {
   body?: {
     title?: string
+    expectedRevision?: number
     permission?: PermissionRuleset
     time?: {
       archived?: number
@@ -5459,6 +6010,15 @@ export type SessionUpdateErrors = {
    * Not found
    */
   404: NotFoundError
+  /**
+   * Title changed by another writer
+   */
+  409: {
+    name: "TitleConflictError"
+    data: {
+      current: TitleSnapshot
+    }
+  }
 }
 
 export type SessionUpdateError = SessionUpdateErrors[keyof SessionUpdateErrors]
@@ -5509,6 +6069,87 @@ export type SessionChildrenResponses = {
 }
 
 export type SessionChildrenResponse = SessionChildrenResponses[keyof SessionChildrenResponses]
+
+export type SessionRecoveryData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+    agentID?: string
+  }
+  url: "/session/{sessionID}/recovery"
+}
+
+export type SessionRecoveryErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionRecoveryError = SessionRecoveryErrors[keyof SessionRecoveryErrors]
+
+export type SessionRecoveryResponses = {
+  /**
+   * Recoverable interrupted turns
+   */
+  200: Array<{
+    assistantMessageID: string
+    parentMessageID: string
+    created: number
+  }>
+}
+
+export type SessionRecoveryResponse = SessionRecoveryResponses[keyof SessionRecoveryResponses]
+
+export type SessionResumeData = {
+  body?: never
+  path: {
+    sessionID: string
+    assistantMessageID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+    agentID?: string
+    task_id?: string
+    titleLocale?: string
+    modelProviderID?: string
+    modelID?: string
+  }
+  url: "/session/{sessionID}/turn/{assistantMessageID}/resume"
+}
+
+export type SessionResumeErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+  /**
+   * Conflict — session resource is busy
+   */
+  409: ConflictError
+}
+
+export type SessionResumeError = SessionResumeErrors[keyof SessionResumeErrors]
+
+export type SessionResumeResponses = {
+  /**
+   * Resume started
+   */
+  202: unknown
+}
 
 export type SessionTodoData = {
   body?: never
@@ -5589,6 +6230,41 @@ export type SessionTaskResponses = {
 
 export type SessionTaskResponse = SessionTaskResponses[keyof SessionTaskResponses]
 
+export type SessionDeleteToolOutputData = {
+  body?: never
+  path: {
+    sessionID: string
+    outputID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/tool-output/{outputID}"
+}
+
+export type SessionDeleteToolOutputErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionDeleteToolOutputError = SessionDeleteToolOutputErrors[keyof SessionDeleteToolOutputErrors]
+
+export type SessionDeleteToolOutputResponses = {
+  /**
+   * Whether the retained output existed in this session scope
+   */
+  200: boolean
+}
+
+export type SessionDeleteToolOutputResponse = SessionDeleteToolOutputResponses[keyof SessionDeleteToolOutputResponses]
+
 export type SessionInitData = {
   body?: {
     modelID: string
@@ -5630,6 +6306,7 @@ export type SessionInitResponse = SessionInitResponses[keyof SessionInitResponse
 export type SessionForkData = {
   body?: {
     messageID?: string
+    title?: string
   }
   path: {
     sessionID: string
@@ -5916,8 +6593,15 @@ export type SessionPromptData = {
      */
     task_id?: string
     source?: "user" | "spawn" | "hook"
+    command?: string
+    arguments?: string
+    titleLocale?: string
     provenance?: Provenance
     noReply?: boolean
+    verifyGoalTarget?: {
+      goalID: string
+      expectedRevision: number
+    }
     /**
      * @deprecated tools and permissions have been merged, you can set permissions on the session itself now
      */
@@ -6131,8 +6815,15 @@ export type SessionPromptAsyncData = {
      */
     task_id?: string
     source?: "user" | "spawn" | "hook"
+    command?: string
+    arguments?: string
+    titleLocale?: string
     provenance?: Provenance
     noReply?: boolean
+    verifyGoalTarget?: {
+      goalID: string
+      expectedRevision: number
+    }
     /**
      * @deprecated tools and permissions have been merged, you can set permissions on the session itself now
      */
@@ -6181,17 +6872,34 @@ export type SessionCommandData = {
     messageID?: string
     agent?: string
     model?: string
+    titleLocale?: string
     arguments: string
     command: string
     variant?: string
-    parts?: Array<{
-      id?: string
-      type: "file"
-      mime: string
-      filename?: string
-      url: string
-      source?: FilePartSource
-    }>
+    parts?: Array<
+      | {
+          id?: string
+          type: "text"
+          text: string
+          synthetic?: boolean
+          ignored?: boolean
+          time?: {
+            start: number
+            end?: number
+          }
+          metadata?: {
+            [key: string]: unknown
+          }
+        }
+      | {
+          id?: string
+          type: "file"
+          mime: string
+          filename?: string
+          url: string
+          source?: FilePartSource
+        }
+    >
   }
   path: {
     sessionID: string
@@ -6561,6 +7269,113 @@ export type PermissionSetSkipAllResponses = {
 
 export type PermissionSetSkipAllResponse = PermissionSetSkipAllResponses[keyof PermissionSetSkipAllResponses]
 
+export type PermissionAutoApproveDeleteData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/auto-approve-delete"
+}
+
+export type PermissionAutoApproveDeleteResponses = {
+  /**
+   * Current auto-approve-delete state
+   */
+  200: boolean
+}
+
+export type PermissionAutoApproveDeleteResponse =
+  PermissionAutoApproveDeleteResponses[keyof PermissionAutoApproveDeleteResponses]
+
+export type PermissionSetAutoApproveDeleteData = {
+  body?: {
+    /**
+     * Whether auto-approve-delete is enabled
+     */
+    enabled: boolean
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/auto-approve-delete"
+}
+
+export type PermissionSetAutoApproveDeleteErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type PermissionSetAutoApproveDeleteError =
+  PermissionSetAutoApproveDeleteErrors[keyof PermissionSetAutoApproveDeleteErrors]
+
+export type PermissionSetAutoApproveDeleteResponses = {
+  /**
+   * Updated auto-approve-delete state
+   */
+  200: boolean
+}
+
+export type PermissionSetAutoApproveDeleteResponse =
+  PermissionSetAutoApproveDeleteResponses[keyof PermissionSetAutoApproveDeleteResponses]
+
+export type PermissionAskTimeoutData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/ask-timeout"
+}
+
+export type PermissionAskTimeoutResponses = {
+  /**
+   * Current ask timeout in ms, or null
+   */
+  200: number | null
+}
+
+export type PermissionAskTimeoutResponse = PermissionAskTimeoutResponses[keyof PermissionAskTimeoutResponses]
+
+export type PermissionSetAskTimeoutData = {
+  body?: {
+    /**
+     * Timeout in ms, or null to disable
+     */
+    ms: number | null
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/ask-timeout"
+}
+
+export type PermissionSetAskTimeoutErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type PermissionSetAskTimeoutError = PermissionSetAskTimeoutErrors[keyof PermissionSetAskTimeoutErrors]
+
+export type PermissionSetAskTimeoutResponses = {
+  /**
+   * Updated ask timeout in ms, or null
+   */
+  200: number | null
+}
+
+export type PermissionSetAskTimeoutResponse = PermissionSetAskTimeoutResponses[keyof PermissionSetAskTimeoutResponses]
+
 export type WorkflowListData = {
   body?: never
   path?: never
@@ -6816,6 +7631,8 @@ export type BashInteractiveListResponses = {
    */
   200: Array<{
     id: string
+    sessionID: string
+    callID: string
     command: string
     cwd: string
     workspace: string
@@ -6834,6 +7651,14 @@ export type BashInteractiveListResponse = BashInteractiveListResponses[keyof Bas
 
 export type BashInteractiveReplyData = {
   body?: {
+    /**
+     * Session that owns the pending interactive command
+     */
+    sessionID: string
+    /**
+     * Tool call that owns the pending interactive command
+     */
+    callID: string
     /**
      * Captured output from the interactive command
      */
@@ -7991,12 +8816,14 @@ export type AppSkillsResponses = {
     owner?: string
     status?: string
     source?: string
+    sourceStatus?: string
     sourceURI?: string
     sourceRevision?: string
     platforms?: Array<string>
     requiresToolsets?: Array<string>
     trust?: string
     lastAudit?: number
+    disableModelInvocation?: boolean
   }>
 }
 

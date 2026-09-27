@@ -6,8 +6,19 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7777').replace(/\/$/, '');
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const localPython = path.join(repo, 'venv', 'bin', 'python');
+const python = process.env.PYTHON || (fs.existsSync(localPython) ? localPython : 'python3');
+
+let staticServer;
+let base = process.argv[2] ? process.argv[2].replace(/\/$/, '') : '';
+if (!base) {
+  const staticPort = await new Promise((resolve, reject) => { const server = net.createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const selected = server.address().port; server.close(() => resolve(selected)); }); });
+  staticServer = spawn(python, ['-m', 'http.server', String(staticPort), '--bind', '127.0.0.1'], { cwd: process.cwd(), stdio: 'ignore' });
+  base = `http://127.0.0.1:${staticPort}`;
+}
 const port = await new Promise((resolve, reject) => {
   const server = net.createServer();
   server.once('error', reject);
@@ -17,7 +28,10 @@ const port = await new Promise((resolve, reject) => {
   });
 });
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openclank-files-'));
-const chromium = spawn('/usr/bin/chromium', [
+const chromiumCandidates = [process.env.OPEN_CLANK_CHROME_BIN, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'].filter(Boolean);
+const chrome = chromiumCandidates.find(candidate => fs.existsSync(candidate));
+if (!chrome) { process.stdout.write(JSON.stringify({ skipped: 'Chrome/Chromium unavailable' }) + '\n'); process.exit(0); }
+const chromium = spawn(chrome, [
   '--headless=new', '--no-sandbox', '--disable-gpu',
   `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, 'about:blank',
 ], { stdio: 'ignore' });
@@ -122,5 +136,6 @@ try {
   if (socket) socket.close();
   chromium.kill('SIGTERM');
   await new Promise(resolve => chromium.once('exit', resolve));
+  if (staticServer) staticServer.kill('SIGTERM');
   fs.rmSync(profile, { recursive: true, force: true });
 }

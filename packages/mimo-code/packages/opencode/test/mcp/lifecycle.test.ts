@@ -28,6 +28,7 @@ interface MockClientState {
   notificationMaxInFlight: number
   notificationResolvers: Array<() => void>
   notificationError?: string
+  notificationThrow?: string
   notificationHangs?: boolean
 }
 
@@ -200,23 +201,30 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
       return { content: [{ type: "text", text: "ok" }] }
     }
 
-    async notification(notification: Record<string, unknown>) {
-      if (!this._state) return
+    notification(notification: Record<string, unknown>): Promise<void> {
+      if (!this._state) return Promise.resolve()
+      if (this._state.notificationThrow) {
+        const error = this._state.notificationThrow
+        this._state.notificationThrow = undefined
+        throw new Error(error)
+      }
       this._state.notificationCalls++
       this._state.notificationInFlight++
       this._state.notificationMaxInFlight = Math.max(
         this._state.notificationMaxInFlight,
         this._state.notificationInFlight,
       )
-      try {
-        if (this._state.notificationError) throw new Error(this._state.notificationError)
-        if (this._state.notificationHangs) {
-          await new Promise<void>((resolve) => this._state.notificationResolvers.push(resolve))
+      return (async () => {
+        try {
+          if (this._state.notificationError) throw new Error(this._state.notificationError)
+          if (this._state.notificationHangs) {
+            await new Promise<void>((resolve) => this._state!.notificationResolvers.push(resolve))
+          }
+          this._state!.notifications.push(notification)
+        } finally {
+          this._state!.notificationInFlight--
         }
-        this._state.notifications.push(notification)
-      } finally {
-        this._state.notificationInFlight--
-      }
+      })()
     }
 
     async listTools() {
@@ -574,6 +582,11 @@ test(
         { sessionId: "ses_2", turnId: "turn_2" },
         "completed",
       ).pipe(Effect.forkChild)
+      const third = yield* MCP.notifyTurnLifecycle(
+        clients,
+        { sessionId: "ses_3", turnId: "turn_3" },
+        "completed",
+      ).pipe(Effect.forkChild)
       yield* Effect.sleep(25)
       expect(serverState.notificationCalls).toBe(1)
       expect(serverState.notificationInFlight).toBe(1)
@@ -582,12 +595,14 @@ test(
       serverState.notificationResolvers.shift()?.()
       yield* Fiber.join(first)
       yield* Fiber.join(second)
+      yield* Fiber.join(third)
 
-      expect(serverState.notificationCalls).toBe(2)
+      expect(serverState.notificationCalls).toBe(3)
       expect(serverState.notificationMaxInFlight).toBe(1)
       expect(serverState.notifications.map((notification) => notification.params)).toEqual([
         { sessionId: "ses_1", turnId: "turn_1", status: "completed" },
         { sessionId: "ses_2", turnId: "turn_2", status: "completed" },
+        { sessionId: "ses_3", turnId: "turn_3", status: "completed" },
       ])
     }),
   ),
@@ -681,6 +696,63 @@ test(
       expect(serverState.notificationMaxInFlight).toBe(1)
       expect(serverState.notifications.map((notification) => notification.params)).toEqual([
         { sessionId: "ses_1", turnId: "turn_2", status: "completed" },
+      ])
+    }),
+  ),
+)
+
+test(
+  "turn lifecycle recovers after a synchronous notification throw",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "sync-throw-server"
+      const serverState = getOrCreateClientState("sync-throw-server")
+      serverState.serverCapabilities = { experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } } }
+      serverState.notificationThrow = "closed synchronously"
+      yield* mcp.add("sync-throw-server", { type: "local", command: ["echo", "test"] })
+      const clients = yield* mcp.clients()
+
+      yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_1" }, "completed")
+      yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_2" }, "completed")
+
+      expect(serverState.notificationCalls).toBe(1)
+      expect(serverState.notifications.map((notification) => notification.params)).toEqual([
+        { sessionId: "ses_1", turnId: "turn_2", status: "completed" },
+      ])
+    }),
+  ),
+)
+
+test(
+  "turn lifecycle removes an interrupted pending waiter without dropping later turns",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "interrupted-waiter-server"
+      const serverState = getOrCreateClientState("interrupted-waiter-server")
+      serverState.serverCapabilities = { experimental: { "com.xiaomi.mimo/turn-lifecycle": { version: 1 } } }
+      serverState.notificationHangs = true
+      yield* mcp.add("interrupted-waiter-server", { type: "local", command: ["echo", "test"] })
+      const clients = yield* mcp.clients()
+
+      const first = yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_1" }, "completed").pipe(
+        Effect.forkChild,
+      )
+      yield* Effect.sleep(20)
+      const second = yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_2" }, "completed").pipe(
+        Effect.forkChild,
+      )
+      yield* Effect.sleep(20)
+      yield* Fiber.interrupt(second)
+
+      serverState.notificationHangs = false
+      serverState.notificationResolvers.shift()?.()
+      yield* Fiber.join(first)
+      yield* MCP.notifyTurnLifecycle(clients, { sessionId: "ses_1", turnId: "turn_3" }, "completed")
+
+      expect(serverState.notificationCalls).toBe(2)
+      expect(serverState.notifications.map((notification) => notification.params)).toEqual([
+        { sessionId: "ses_1", turnId: "turn_1", status: "completed" },
+        { sessionId: "ses_1", turnId: "turn_3", status: "completed" },
       ])
     }),
   ),

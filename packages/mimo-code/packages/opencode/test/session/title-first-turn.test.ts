@@ -294,8 +294,13 @@ test("registered skill command titles use user arguments rather than the selecte
       const retry = await run(Session.Service.use(svc => svc.create()))
       Database.use(db => db.run(sql`CREATE TEMP TRIGGER reject_command_title BEFORE UPDATE OF title ON session WHEN NEW.title_source = 'fallback' BEGIN SELECT RAISE(ABORT, 'command title fault'); END`))
       try {
-        await expect(run(SessionPrompt.Service.use(svc => svc.command({ sessionID: retry.id, command: "title-fixture-skill", arguments: "Original command request", model: "main/text" })))).rejects.toThrow()
-        expect(await run(Session.Service.use(svc => svc.messages({ sessionID: retry.id })))).toHaveLength(0)
+        await run(SessionPrompt.Service.use(svc => svc.command({ sessionID: retry.id, command: "title-fixture-skill", arguments: "Original command request", model: "main/text" })))
+        // Title metadata failure must preserve the user turn for retry.
+        expect(
+          (await run(Session.Service.use(svc => svc.messages({ sessionID: retry.id })))).filter(
+            (message) => message.info.role === "user",
+          ),
+        ).toHaveLength(1)
       } finally { Database.use(db => db.run(sql`DROP TRIGGER reject_command_title`)) }
       await run(SessionPrompt.Service.use(svc => svc.command({ sessionID: retry.id, command: "title-fixture-skill", arguments: "Original command request", model: "main/text" })))
       await until(() => titles.length === 2)

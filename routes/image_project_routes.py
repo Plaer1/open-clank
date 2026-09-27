@@ -34,6 +34,7 @@ from src.openclank.image_projects import (
     ImageProjectRepository,
     ImageResourceIdentity,
     LoreCaptureFailed,
+    PartialMutation,
     ProjectNotFound,
     StaleImageRevision,
     StaleProjectRevision,
@@ -96,6 +97,7 @@ class ProjectCopy(BaseModel):
     name: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    operation_key: Optional[str] = None
 
 
 class ProjectImport(BaseModel):
@@ -158,6 +160,8 @@ def _map_error(exc: ImageProjectError) -> HTTPException:
     if isinstance(exc, LoreCaptureFailed):
         # Recovery state could not be captured — the save was refused.
         return HTTPException(503, str(exc))
+    if isinstance(exc, PartialMutation):
+        return HTTPException(503, {"code": exc.code, "message": str(exc), "recovery_action_id": exc.recovery_action_id})
     return HTTPException(500, str(exc))
 
 
@@ -202,12 +206,14 @@ def _gallery_row(resource_id: str, owner: str):
         db.close()
 
 
-def _gallery_image_io(resource_id: str, owner: str) -> Tuple[Optional[Callable[[], bytes]], Optional[Callable[[bytes], str]]]:
+def _gallery_image_io(provider: str, resource_id: str, owner: str) -> Tuple[Optional[Callable[[], bytes]], Optional[Callable[[bytes], str]]]:
     """Return (reader, writer) for a Gallery-managed image, or (None, None).
 
     Non-Gallery resources (drafts, external providers) have no byte store on
     this surface; callers fall back to the honest caller-owned stub.
     """
+    if str(provider or "").strip().lower() != "gallery":
+        return None, None
     row = _gallery_row(resource_id, owner)
     if row is None or not row.filename:
         return None, None
@@ -341,13 +347,21 @@ def setup_image_project_routes() -> APIRouter:
             record = repo().get_project(project_id=project_id, owner=owner)
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
-        reader, writer = _gallery_image_io(record.image_resource_id, owner)
+        reader, writer = _gallery_image_io(record.image_provider, record.image_resource_id, owner)
         before_bytes: Optional[bytes] = None
-        if content is not None and reader is not None:
+        if content is not None and (reader is None or writer is None):
+            raise HTTPException(409, "image bytes cannot be published for this provider")
+        def image_reader():
+            nonlocal before_bytes
             try:
-                before_bytes = reader()
-            except Exception:  # noqa: BLE001 — a missing original is honestly absent
-                before_bytes = None
+                observed = reader() if reader is not None else None
+            except Exception as exc:  # noqa: BLE001 — no preimage means no safe overwrite
+                raise HTTPException(409, "image preimage is unavailable; reload before saving") from exc
+            if observed is None:
+                raise HTTPException(409, "image preimage is unavailable; reload before saving")
+            if before_bytes is None:
+                before_bytes = observed
+            return observed
 
         written = {"value": body.new_image_revision, "bytes_written": False}
 
@@ -360,6 +374,23 @@ def setup_image_project_routes() -> APIRouter:
             # bytes. The client's revision is recorded under CAS only.
             return body.new_image_revision
 
+        def image_rollback(committed_revision: str):
+            if before_bytes is None or reader is None or writer is None:
+                raise RuntimeError("pixel preimage is unavailable")
+            current = reader()
+            observed = "sha256:" + hashlib.sha256(current).hexdigest()
+            if observed != committed_revision:
+                raise RuntimeError("published pixels changed after Save; refusing compensation")
+            writer(before_bytes)
+
+        def metadata_updater(db):
+            if record.image_provider != "gallery" or content is None:
+                return
+            row = db.query(GalleryImage).filter(GalleryImage.id == str(record.image_resource_id).removeprefix("image:"), GalleryImage.owner == owner).one_or_none()
+            if row is not None:
+                row.file_hash = hashlib.sha256(content).hexdigest()
+                row.file_size = len(content)
+
         try:
             outcome = repo().save_image_and_project(
                 owner=owner,
@@ -368,6 +399,9 @@ def setup_image_project_routes() -> APIRouter:
                 expected_image_revision=body.expected_image_revision,
                 new_image_revision=body.new_image_revision,
                 image_writer=image_writer,
+                image_reader=image_reader if content is not None else None,
+                image_rollback=image_rollback if content is not None else None,
+                metadata_updater=metadata_updater if content is not None else None,
                 state=body.state,
                 name=body.name,
                 width=body.width,
@@ -411,6 +445,7 @@ def setup_image_project_routes() -> APIRouter:
                 name=body.name,
                 width=body.width,
                 height=body.height,
+                operation_key=body.operation_key,
             )
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
@@ -441,14 +476,56 @@ def setup_image_project_routes() -> APIRouter:
             record = repo().get_project(project_id=project_id, owner=owner)
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
-        _reader, writer = _gallery_image_io(record.image_resource_id, owner)
+        _reader, writer = _gallery_image_io(record.image_provider, record.image_resource_id, owner)
         payload = read_captured_preimage(body.action_id)
+        if payload:
+            bound = payload.get("image_resource") or {}
+            if (str(bound.get("provider") or "") != record.image_provider
+                    or str(bound.get("resource_id") or "") != record.image_resource_id):
+                raise HTTPException(409, "preimage belongs to a different image resource")
+            if payload.get("image_bytes_captured") and writer is None:
+                raise HTTPException(409, "captured pixels cannot be restored for this provider")
         restore_writer = None
+        restore_rollback = None
+        restore_metadata_updater = None
+        current_bytes = None
+        rollback_bytes = None
         if writer is not None and payload and payload.get("image_bytes_captured"):
+            try:
+                current_bytes = _reader() if _reader is not None else None
+            except Exception as exc:  # noqa: BLE001 — restore must not overwrite an unknown source
+                raise HTTPException(409, "current image is unavailable; reload before restoring") from exc
+            if current_bytes is None:
+                raise HTTPException(409, "current image is unavailable; reload before restoring")
+            current_revision = str(record.expected_image_revision or "")
+            if not current_revision.startswith("sha256:"):
+                raise HTTPException(409, "image has no content-hash revision; reload and bind before restoring")
+            if "sha256:" + hashlib.sha256(current_bytes).hexdigest() != current_revision:
+                raise HTTPException(409, "image changed externally; reload before restoring")
             captured = base64.b64decode(str(payload.get("image_bytes") or ""), validate=True)
 
             def restore_writer() -> str:
                 return writer(captured)
+
+            def restore_reader() -> bytes:
+                nonlocal current_bytes, rollback_bytes
+                observed = _reader()
+                if rollback_bytes is None:
+                    rollback_bytes = observed
+                    current_bytes = observed
+                return observed
+
+            def restore_rollback(committed_revision: str):
+                latest = _reader()
+                if "sha256:" + hashlib.sha256(latest).hexdigest() != committed_revision:
+                    raise RuntimeError("restored pixels changed after Restore; refusing compensation")
+                writer(rollback_bytes)
+
+            def restore_metadata_updater(db):
+                row = db.query(GalleryImage).filter(GalleryImage.id == str(record.image_resource_id).removeprefix("image:"), GalleryImage.owner == owner).one_or_none()
+                if row is not None:
+                    row.file_hash = hashlib.sha256(captured).hexdigest()
+                    row.file_size = len(captured)
 
         try:
             outcome = repo().replay_preimage(
@@ -456,7 +533,11 @@ def setup_image_project_routes() -> APIRouter:
                 project_id=project_id,
                 action_id=body.action_id,
                 image_writer=restore_writer,
+                image_reader=restore_reader if writer is not None and payload and payload.get("image_bytes_captured") else None,
+                image_rollback=restore_rollback,
+                metadata_updater=restore_metadata_updater,
                 expected_project_revision=body.expected_project_revision,
+                current_image_bytes=current_bytes,
             )
         except ImageProjectError as exc:
             raise _map_error(exc) from exc

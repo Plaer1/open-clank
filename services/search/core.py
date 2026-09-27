@@ -2,7 +2,8 @@
 
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Set
 from urllib.parse import urlparse
@@ -42,6 +43,27 @@ from .content import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_sync(coro):
+    """Run the canonical async service from legacy synchronous callers."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    result = []
+    error = []
+    def runner():
+        try:
+            result.append(asyncio.run(coro))
+        except BaseException as exc:  # noqa: BLE001
+            error.append(exc)
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+    return result[0]
 
 # ========= CONFIG =========
 SEARCH_CONFIG: Dict[str, Any] = {
@@ -93,20 +115,23 @@ def update_search_config(api_key: str = None, **kwargs):
             SEARCH_CONFIG[k] = v
 
 
-def _call_provider(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
+def _call_provider(provider_name: str, query: str, count: int, time_filter: str = None, route=None) -> List[dict]:
     """Call a search provider by name. Returns list of results or empty list."""
     if provider_name == "searxng":
-        return searxng_search_api(query, count, time_filter=time_filter)
+        return searxng_search_api(query, count, time_filter=time_filter, route=route)
     elif provider_name == "brave":
-        return brave_search(query, count, time_filter)
+        return brave_search(query, count, time_filter, route=route)
+    elif provider_name == "kagi":
+        from .providers import kagi_search
+        return kagi_search(query, count, time_filter, route=route)
     elif provider_name == "duckduckgo":
-        return duckduckgo_search(query, count, time_filter)
+        return duckduckgo_search(query, count, time_filter, route=route)
     elif provider_name == "google_pse":
-        return google_pse_search(query, count, time_filter)
+        return google_pse_search(query, count, time_filter, route=route)
     elif provider_name == "tavily":
-        return tavily_search(query, count, time_filter)
+        return tavily_search(query, count, time_filter, route=route)
     elif provider_name == "serper":
-        return serper_search(query, count, time_filter)
+        return serper_search(query, count, time_filter, route=route)
     return []
 
 
@@ -264,55 +289,39 @@ def comprehensive_web_search(
     if time_filter:
         logger.info(f"Applying time filter: {time_filter}")
 
-    settings = _get_search_settings()
-    search_provider = settings.get("search_provider", "searxng")
-    result_count = _get_result_count()
-
-    if search_provider == "disabled":
-        logger.info("Search is disabled via admin settings")
-        msg = "Web search is disabled by the administrator."
-        return (msg, []) if return_sources else msg
-
-    # Use configured result count (at least max_pages for content fetching)
-    fetch_count = max(result_count, max_pages)
-
-    provider_chain = _build_provider_chain(search_provider)
-
-    search_results = []
-    provider_attempts = {}
-    for provider_name in provider_chain:
-        last_err = None
-        empty = False
-        for attempt in range(2):
-            try:
-                search_results = _call_provider(provider_name, query, fetch_count, time_filter)
-                if search_results:
-                    provider_attempts[provider_name] = f"ok ({len(search_results)})"
-                    logger.info(f"Comprehensive search: {provider_name} returned {len(search_results)} results")
-                    break
-                empty = True
-            except Exception as e:
-                last_err = e
-                logger.warning(f"Comprehensive search: {provider_name} attempt {attempt + 1} failed: {e}")
-        if search_results:
-            break
-        if last_err is not None:
-            provider_attempts[provider_name] = f"error: {last_err}"
-        elif empty:
-            provider_attempts[provider_name] = "empty"
-
+    from .service import SearchService
+    # Preserve the historical injection seam used by callers/tests while the
+    # canonical service performs the single shared fetch.
+    from . import service as _search_service_module
+    def _legacy_fetch(url, timeout=8, retry_attempt=0, route=None):
+        try:
+            return fetch_webpage_content(url, timeout=timeout, retry_attempt=retry_attempt, route=route)
+        except TypeError as error:
+            if "route" not in str(error):
+                raise
+            return fetch_webpage_content(url, timeout=timeout, retry_attempt=retry_attempt)
+    _legacy_fetch._core_compat_seam = True
+    if (_search_service_module.fetch_webpage_content is _search_service_module._DEFAULT_FETCH_WEBPAGE
+            or getattr(_search_service_module.fetch_webpage_content, "_core_compat_seam", False)):
+        _search_service_module.fetch_webpage_content = _legacy_fetch
+    if _search_service_module._call_provider is _search_service_module._DEFAULT_CALL_PROVIDER:
+        _search_service_module._call_provider = _call_provider
+    if _search_service_module._get_search_settings is _search_service_module._DEFAULT_GET_SETTINGS:
+        _search_service_module._get_search_settings = _get_search_settings
+    if _search_service_module._get_result_count is _search_service_module._DEFAULT_GET_COUNT:
+        _search_service_module._get_result_count = _get_result_count
+    response = _canonical_sync(SearchService(fetch_content=True).search(
+        query, caller="chat", mode="read", count=max(_get_result_count(), max_pages),
+        freshness=time_filter,
+        request_id=f"legacy-comprehensive-{id(fetch_webpage_content)}",
+    ))
+    search_results = [
+        {"url": item.url, "title": item.title, "snippet": item.snippet,
+         "content": item.content or "", "provider_metadata": item.provider_metadata}
+        for item in response.results
+    ]
     if not search_results:
-        tally = ", ".join(f"{p}:{r}" for p, r in provider_attempts.items()) or "no providers configured"
-        any_errors = any(r.startswith("error") for r in provider_attempts.values())
-        if any_errors:
-            msg = f"Web search failed — all providers errored or returned empty. Tried: {tally}"
-        else:
-            msg = (
-                f"No search results found. Tried: {tally}. "
-                "All providers returned empty — possibly a niche query or upstream rate-limiting; "
-                "rephrasing or using the browser tool for a specific URL may help."
-            )
-        logger.warning(msg)
+        msg = response.error.get("message") if response.error else "No search results found."
         return (msg, []) if return_sources else msg
 
     search_results = rank_search_results(query, search_results)
@@ -362,25 +371,21 @@ def comprehensive_web_search(
         r["url"]: i for i, r in enumerate(search_results, 1) if r.get("url")
     }
 
-    # Fetch content in parallel
+    # SearchService(mode="read") already fetched these URLs under the shared
+    # deadline. Reuse its content and status rather than starting a second,
+    # unbounded ThreadPoolExecutor pass here.
     fetched_content = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_url = {
-            executor.submit(fetch_webpage_content, url, 8, retry_attempt=0): url
-            for url in filtered_urls
-        }
-        for future in as_completed(future_to_url):
-            url = future_to_url[future]
-            try:
-                result = future.result()
-                if result["success"] and result["content"] and len(result["content"]) >= min_content_length:
-                    # Remember which source this fetch belongs to: redirects
-                    # can change result["url"] and completion order is
-                    # arbitrary, so the block label cannot be recomputed later.
-                    result["source_index"] = _url_index.get(url)
-                    fetched_content.append(result)
-            except Exception as e:
-                logger.error(f"Exception while fetching {url}: {str(e)}")
+    for result in search_results:
+        url = result.get("url", "")
+        content = result.get("content") or ""
+        if url not in filtered_urls or not content or len(content) < min_content_length:
+            continue
+        fetched_content.append({
+            "url": url,
+            "title": result.get("title", ""),
+            "content": content,
+            "source_index": _url_index.get(url),
+        })
 
     logger.info(f"Successfully fetched content from {len(fetched_content)} pages")
 

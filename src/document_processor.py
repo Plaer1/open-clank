@@ -14,6 +14,20 @@ logger = logging.getLogger(__name__)
 
 MAX_INLINE_ATTACHMENT_CHARS = 24000
 MIN_INLINE_ATTACHMENT_SLICE = 500
+NATIVE_MEDIA_SOURCE_BYTES = 150 * 1024 * 1024
+NATIVE_MEDIA_PAYLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _native_media_limit_message(display_name: str, mime: str, size: int) -> str | None:
+    """Return a typed result before reading/encoding an oversized media source."""
+    if size > NATIVE_MEDIA_SOURCE_BYTES:
+        return (f"\n\n[Attachment unavailable: {display_name} is {size:,} bytes, "
+                f"over the {NATIVE_MEDIA_SOURCE_BYTES:,}-byte source limit.]" )
+    encoded = ((size + 2) // 3) * 4
+    if encoded > NATIVE_MEDIA_PAYLOAD_BYTES:
+        return (f"\n\n[Attachment unavailable: {display_name} encodes to {encoded:,} bytes, "
+                f"over the {NATIVE_MEDIA_PAYLOAD_BYTES:,}-byte native payload limit.]" )
+    return None
 
 
 def _is_text_file(path: str) -> bool:
@@ -402,6 +416,7 @@ def build_user_content(
     owner: str | None = None,
     resolved_uploads: dict[str, Dict[str, Any]] | None = None,
     structured_resources: bool = False,
+    extract_attachments: bool = True,
 ) -> str | List[Dict[str, Any]]:
     """Build user content with attachments (text, images, audio, documents).
 
@@ -436,6 +451,17 @@ def build_user_content(
         _, ext = os.path.splitext(path.lower())
         mime = upload_info.get("mime") or mimetypes.guess_type(path)[0] or "application/octet-stream"
         display_name = upload_info.get("name") or upload_info.get("original_name") or path
+        try:
+            source_size = os.path.getsize(path)
+        except OSError:
+            source_size = -1
+        if source_size < 0:
+            limit_message = f"\n\n[Attachment unavailable: {display_name} could not be statted safely.]"
+        else:
+            limit_message = _native_media_limit_message(display_name, mime, source_size)
+        if limit_message:
+            content[0]["text"] += limit_message
+            continue
 
         if upload_handler.is_image_file(display_name, mime):
             try:
@@ -444,7 +470,9 @@ def build_user_content(
                 # Extensionless uploads (e.g. a pasted screenshot) have no ext,
                 # so fall back to the resolved MIME subtype rather than emitting
                 # an invalid "data:image/;base64," with an empty subtype.
-                image_format = ext[1:] or (mime.split("/", 1)[1] if mime.startswith("image/") else "png")
+                image_format = (mime.split("/", 1)[1] if mime.startswith("image/") else "png")
+                if image_format == "jpg":
+                    image_format = "jpeg"
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/{image_format};base64,{encoded_string}"},
@@ -473,7 +501,9 @@ def build_user_content(
                     content.insert(0, {"type": "text", "text": "[Audio attached but could not be processed]"})
 
         elif upload_handler.is_document_file(display_name, mime):
-            if mime == "application/pdf":
+            if not extract_attachments:
+                extracted_text = f"\n\n[Attachment retained as an original resource: {display_name}]"
+            elif mime == "application/pdf":
                 extracted_text = None
                 if session_id:
                     try:

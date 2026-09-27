@@ -34,6 +34,8 @@ import type {
   ExperimentalConsoleSwitchOrgResponses,
   ExperimentalResourceListResponses,
   ExperimentalSessionListResponses,
+  ExperimentalTitleGenerateErrors,
+  ExperimentalTitleGenerateResponses,
   ExperimentalWorkspaceAdaptorListResponses,
   ExperimentalWorkspaceCreateErrors,
   ExperimentalWorkspaceCreateResponses,
@@ -87,12 +89,18 @@ import type {
   PartUpdateErrors,
   PartUpdateResponses,
   PathGetResponses,
+  PermissionAskTimeoutResponses,
+  PermissionAutoApproveDeleteResponses,
   PermissionListResponses,
   PermissionReplyErrors,
   PermissionReplyResponses,
   PermissionRespondErrors,
   PermissionRespondResponses,
   PermissionRuleset,
+  PermissionSetAskTimeoutErrors,
+  PermissionSetAskTimeoutResponses,
+  PermissionSetAutoApproveDeleteErrors,
+  PermissionSetAutoApproveDeleteResponses,
   PermissionSetSkipAllErrors,
   PermissionSetSkipAllResponses,
   PermissionSkipAllResponses,
@@ -146,6 +154,8 @@ import type {
   SessionDeleteMessageErrors,
   SessionDeleteMessageResponses,
   SessionDeleteResponses,
+  SessionDeleteToolOutputErrors,
+  SessionDeleteToolOutputResponses,
   SessionDiffResponses,
   SessionForkResponses,
   SessionGetErrors,
@@ -169,6 +179,10 @@ import type {
   SessionPromptAsyncResponses,
   SessionPromptErrors,
   SessionPromptResponses,
+  SessionRecoveryErrors,
+  SessionRecoveryResponses,
+  SessionResumeErrors,
+  SessionResumeResponses,
   SessionRevertErrors,
   SessionRevertResponses,
   SessionShareErrors,
@@ -200,6 +214,8 @@ import type {
   ToolIdsResponses,
   ToolListErrors,
   ToolListResponses,
+  ToolMetadataErrors,
+  ToolMetadataResponses,
   TuiAppendPromptErrors,
   TuiAppendPromptResponses,
   TuiClearPromptResponses,
@@ -926,6 +942,69 @@ export class Console extends HeyApiClient {
   }
 }
 
+export class Title extends HeyApiClient {
+  /**
+   * Generate conversation title
+   *
+   * Generate a short conversation title with the configured lite model, optional source model, and deterministic fallback.
+   */
+  public generate<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      text?: string
+      parts?: Array<
+        | {
+            type: "text"
+            text: string
+          }
+        | {
+            type: "image"
+            data: string
+            mime: "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+            filename?: string
+          }
+      >
+      locale?: string
+      model?: {
+        providerID: string
+        modelID: string
+      }
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "text" },
+            { in: "body", key: "parts" },
+            { in: "body", key: "locale" },
+            { in: "body", key: "model" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      ExperimentalTitleGenerateResponses,
+      ExperimentalTitleGenerateErrors,
+      ThrowOnError
+    >({
+      url: "/experimental/title",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
 export class Session extends HeyApiClient {
   /**
    * List sessions
@@ -1011,6 +1090,11 @@ export class Experimental extends HeyApiClient {
   private _console?: Console
   get console(): Console {
     return (this._console ??= new Console({ client: this.client }))
+  }
+
+  private _title?: Title
+  get title(): Title {
+    return (this._title ??= new Title({ client: this.client }))
   }
 
   private _session?: Session
@@ -1550,6 +1634,36 @@ export class Tool extends HeyApiClient {
   }
 
   /**
+   * List authoritative tool metadata
+   *
+   * Return registry-owned IDs, source and registration state for Settings projection.
+   */
+  public metadata<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ToolMetadataResponses, ToolMetadataErrors, ThrowOnError>({
+      url: "/experimental/tool/metadata",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * List tools
    *
    * Get a list of available tools with their JSON schema parameters for a specific provider and model combination.
@@ -1788,31 +1902,59 @@ export class Goal extends HeyApiClient {
           }
         | {
             action: "pause"
+            target: {
+              goalID: string
+              expectedRevision: number
+            }
           }
         | {
             action: "resume"
+            target: {
+              goalID: string
+              expectedRevision: number
+            }
           }
         | {
             action: "cancel"
+            target: {
+              goalID: string
+              expectedRevision: number
+            }
           }
         | {
             action: "clear_history"
+            expectedEnvelopeRevision: number
           }
         | {
             action: "edit"
-            expectedRevision: number
+            target: {
+              goalID: string
+              expectedRevision: number
+            }
             objective: string
           }
         | {
             action: "evidence"
-            evidence: {
-              kind: "model" | "command" | "file" | "user"
-              subject: string
-              sourceRef: string
-              observation: string
-              producer: string
-              verifier?: string
+            target: {
+              goalID: string
+              expectedRevision: number
             }
+            evidence:
+              | {
+                  kind: "command"
+                  subject: string
+                  sourceRef: string
+                }
+              | {
+                  kind: "file"
+                  subject: string
+                  sourceRef: string
+                }
+              | {
+                  kind: "user"
+                  subject: string
+                  observation: string
+                }
           }
     },
     options?: Options<never, ThrowOnError>,
@@ -1923,6 +2065,7 @@ export class Session2 extends HeyApiClient {
     parameters?: {
       directory?: string
       workspace?: string
+      id?: string
       parentID?: string
       contextFrom?: string
       contextWatermark?: string
@@ -1939,6 +2082,7 @@ export class Session2 extends HeyApiClient {
           args: [
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "body", key: "id" },
             { in: "body", key: "parentID" },
             { in: "body", key: "contextFrom" },
             { in: "body", key: "contextWatermark" },
@@ -2066,6 +2210,7 @@ export class Session2 extends HeyApiClient {
       directory?: string
       workspace?: string
       title?: string
+      expectedRevision?: number
       permission?: PermissionRuleset
       time?: {
         archived?: number
@@ -2082,6 +2227,7 @@ export class Session2 extends HeyApiClient {
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
             { in: "body", key: "title" },
+            { in: "body", key: "expectedRevision" },
             { in: "body", key: "permission" },
             { in: "body", key: "time" },
           ],
@@ -2129,6 +2275,80 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).get<SessionChildrenResponses, SessionChildrenErrors, ThrowOnError>({
       url: "/session/{sessionID}/children",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List recoverable session turns
+   */
+  public recovery<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      agentID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "agentID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionRecoveryResponses, SessionRecoveryErrors, ThrowOnError>({
+      url: "/session/{sessionID}/recovery",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Resume an interrupted session turn
+   */
+  public resume<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      assistantMessageID: string
+      directory?: string
+      workspace?: string
+      agentID?: string
+      task_id?: string
+      titleLocale?: string
+      modelProviderID?: string
+      modelID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "assistantMessageID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "agentID" },
+            { in: "query", key: "task_id" },
+            { in: "query", key: "titleLocale" },
+            { in: "query", key: "modelProviderID" },
+            { in: "query", key: "modelID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionResumeResponses, SessionResumeErrors, ThrowOnError>({
+      url: "/session/{sessionID}/turn/{assistantMessageID}/resume",
       ...options,
       ...params,
     })
@@ -2199,6 +2419,44 @@ export class Session2 extends HeyApiClient {
   }
 
   /**
+   * Delete retained tool output
+   *
+   * Delete one retained tool-output spill owned by this session.
+   */
+  public deleteToolOutput<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      outputID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "path", key: "outputID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<
+      SessionDeleteToolOutputResponses,
+      SessionDeleteToolOutputErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/tool-output/{outputID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * Initialize session
    *
    * Analyze the current application and create an AGENTS.md file with project-specific agent configurations.
@@ -2252,6 +2510,7 @@ export class Session2 extends HeyApiClient {
       directory?: string
       workspace?: string
       messageID?: string
+      title?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -2264,6 +2523,7 @@ export class Session2 extends HeyApiClient {
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
             { in: "body", key: "messageID" },
+            { in: "body", key: "title" },
           ],
         },
       ],
@@ -2554,8 +2814,15 @@ export class Session2 extends HeyApiClient {
       agentID?: string
       task_id?: string
       source?: "user" | "spawn" | "hook"
+      command?: string
+      arguments?: string
+      titleLocale?: string
       provenance?: Provenance
       noReply?: boolean
+      verifyGoalTarget?: {
+        goalID: string
+        expectedRevision: number
+      }
       tools?: {
         [key: string]: boolean
       }
@@ -2581,8 +2848,12 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "agentID" },
             { in: "body", key: "task_id" },
             { in: "body", key: "source" },
+            { in: "body", key: "command" },
+            { in: "body", key: "arguments" },
+            { in: "body", key: "titleLocale" },
             { in: "body", key: "provenance" },
             { in: "body", key: "noReply" },
+            { in: "body", key: "verifyGoalTarget" },
             { in: "body", key: "tools" },
             { in: "body", key: "format" },
             { in: "body", key: "system" },
@@ -2696,8 +2967,15 @@ export class Session2 extends HeyApiClient {
       agentID?: string
       task_id?: string
       source?: "user" | "spawn" | "hook"
+      command?: string
+      arguments?: string
+      titleLocale?: string
       provenance?: Provenance
       noReply?: boolean
+      verifyGoalTarget?: {
+        goalID: string
+        expectedRevision: number
+      }
       tools?: {
         [key: string]: boolean
       }
@@ -2723,8 +3001,12 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "agentID" },
             { in: "body", key: "task_id" },
             { in: "body", key: "source" },
+            { in: "body", key: "command" },
+            { in: "body", key: "arguments" },
+            { in: "body", key: "titleLocale" },
             { in: "body", key: "provenance" },
             { in: "body", key: "noReply" },
+            { in: "body", key: "verifyGoalTarget" },
             { in: "body", key: "tools" },
             { in: "body", key: "format" },
             { in: "body", key: "system" },
@@ -2759,17 +3041,34 @@ export class Session2 extends HeyApiClient {
       messageID?: string
       agent?: string
       model?: string
+      titleLocale?: string
       arguments?: string
       command?: string
       variant?: string
-      parts?: Array<{
-        id?: string
-        type: "file"
-        mime: string
-        filename?: string
-        url: string
-        source?: FilePartSource
-      }>
+      parts?: Array<
+        | {
+            id?: string
+            type: "text"
+            text: string
+            synthetic?: boolean
+            ignored?: boolean
+            time?: {
+              start: number
+              end?: number
+            }
+            metadata?: {
+              [key: string]: unknown
+            }
+          }
+        | {
+            id?: string
+            type: "file"
+            mime: string
+            filename?: string
+            url: string
+            source?: FilePartSource
+          }
+      >
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -2784,6 +3083,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "messageID" },
             { in: "body", key: "agent" },
             { in: "body", key: "model" },
+            { in: "body", key: "titleLocale" },
             { in: "body", key: "arguments" },
             { in: "body", key: "command" },
             { in: "body", key: "variant" },
@@ -3259,6 +3559,148 @@ export class Permission extends HeyApiClient {
       },
     })
   }
+
+  /**
+   * Get auto-approve-delete state
+   *
+   * Whether irreversible deletes skip the extra bash_delete confirmation. Instance-scoped; defaults to the MIMOCODE_AUTO_APPROVE_DELETE env var. Does not cover bash_destructive or other forced-ask classes.
+   */
+  public autoApproveDelete<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<PermissionAutoApproveDeleteResponses, unknown, ThrowOnError>({
+      url: "/permission/auto-approve-delete",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Set auto-approve-delete state
+   *
+   * Trust the model with irreversible deletes, skipping the extra bash_delete confirmation. Distinct from skip-all, which deliberately does NOT cover forced-ask permissions. Does not cover bash_destructive or other forced-ask classes — those stay human-only. Applies instance-wide (this directory only, so other directories served by the same process are unaffected) and subagents inherit it. Explicit `bash: deny` rules still block. Already-pending delete asks are left for a human — the command they guard is irreversible.
+   */
+  public setAutoApproveDelete<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      enabled?: boolean
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "enabled" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      PermissionSetAutoApproveDeleteResponses,
+      PermissionSetAutoApproveDeleteErrors,
+      ThrowOnError
+    >({
+      url: "/permission/auto-approve-delete",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Get permission ask timeout
+   *
+   * Timeout in milliseconds for permission asks that require human confirmation. null means no timeout (wait indefinitely). Applies to all asks — normal and forced-ask. Orthogonal to skip-all.
+   */
+  public askTimeout<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<PermissionAskTimeoutResponses, unknown, ThrowOnError>({
+      url: "/permission/ask-timeout",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Set permission ask timeout
+   *
+   * Set the timeout in milliseconds for permission asks that require human confirmation. null disables the timeout (wait indefinitely). Applies instance-wide; subagents inherit it. Orthogonal to skip-all — both can be enabled independently.
+   */
+  public setAskTimeout<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      ms?: number | null
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "ms" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      PermissionSetAskTimeoutResponses,
+      PermissionSetAskTimeoutErrors,
+      ThrowOnError
+    >({
+      url: "/permission/ask-timeout",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
 }
 
 export class Workflow extends HeyApiClient {
@@ -3604,6 +4046,8 @@ export class Interactive extends HeyApiClient {
       id: string
       directory?: string
       workspace?: string
+      sessionID?: string
+      callID?: string
       output?: string
       exitCode?: number
     },
@@ -3617,6 +4061,8 @@ export class Interactive extends HeyApiClient {
             { in: "path", key: "id" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "body", key: "sessionID" },
+            { in: "body", key: "callID" },
             { in: "body", key: "output" },
             { in: "body", key: "exitCode" },
           ],

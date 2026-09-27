@@ -38,12 +38,12 @@ const parentTitlePrefix = "New session - "
 const childTitlePrefix = "Child session - "
 
 function createDefaultTitle(isChild = false) {
-  return (isChild ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString()
+  return isChild ? childTitlePrefix + new Date().toISOString() : "Untitled"
 }
 
 export function isDefaultTitle(title: string) {
   return new RegExp(
-    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
+    `^(?:Untitled|${parentTitlePrefix}\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z|${childTitlePrefix}\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z)$`,
   ).test(title)
 }
 
@@ -443,7 +443,7 @@ export interface Interface {
     permission?: Permission.Ruleset
     workspaceID?: WorkspaceID
   }) => Effect.Effect<Info>
-  readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info>
+  readonly fork: (input: { sessionID: SessionID; messageID?: MessageID; title?: string }) => Effect.Effect<Info>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
   readonly get: (id: SessionID) => Effect.Effect<Info>
   readonly setTitle: (input: SetTitleInput) => Effect.Effect<TitleSnapshot>
@@ -711,10 +711,10 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       })
     })
 
-    const fork = Effect.fn("Session.fork")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
+    const fork = Effect.fn("Session.fork")(function* (input: { sessionID: SessionID; messageID?: MessageID; title?: string }) {
       const directory = yield* InstanceState.directory
       const original = yield* get(input.sessionID)
-      const title = getForkedTitle(original.title)
+      const title = input.title?.trim() ? ManualTitle.parse(input.title) : getForkedTitle(original.title)
       const session = yield* createNext({
         directory,
         workspaceID: original.workspaceID,

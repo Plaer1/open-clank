@@ -58,7 +58,7 @@ export async function withCopalBrowser({ page, overrides = {}, request = null, c
     const cdp = (method, params = {}) => new Promise((resolve, reject) => {
       const id = ++sequence;
       const timer = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timeout: ${method}${method === 'Runtime.evaluate' ? ` (${String(params.expression || '').slice(0, 180)})` : ''}`)); }, cdpTimeoutMs);
-      pending.set(id, value => { clearTimeout(timer); value.error ? reject(new Error(value.error.message)) : resolve(value.result); });
+      pending.set(id, value => { clearTimeout(timer); value.error ? reject(new Error(`${value.error.message} [${String(params.expression || '').slice(0, 240)}]`)) : resolve(value.result); });
       ws.send(JSON.stringify({ id, method, params }));
     });
     const evaluate = async (expression, awaitPromise = true) => {

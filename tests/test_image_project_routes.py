@@ -8,12 +8,15 @@ allocation, and portable export/import including blank canvases.
 from __future__ import annotations
 
 import pytest
+import base64
+import hashlib
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from core.database import Base
+from core.database import Base, GalleryImage, ManagedImageProject
+import src.generated_images as generated_images
 import routes.image_project_routes as ipr
 from src.openclank import image_projects as image_projects_module
 from src.openclank.image_projects import ImageProjectRepository
@@ -127,6 +130,54 @@ def test_save_refuses_stale_revisions(client):
     assert stale_image.status_code == 409
 
 
+def test_save_endpoint_writes_gallery_bytes_and_compensates_commit_failure(monkeypatch, tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'gallery.db'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(ipr, "SessionLocal", factory)
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setenv("IMPS_PREIMAGE_DIR", str(tmp_path / "preimages"))
+    monkeypatch.setattr(generated_images, "GENERATED_IMAGE_DIR", tmp_path / "generated")
+    generated_images.GENERATED_IMAGE_DIR.mkdir()
+    original = b"original-gallery-pixels"
+    path = generated_images.GENERATED_IMAGE_DIR / "image-1.png"
+    path.write_bytes(original)
+    original_revision = "sha256:" + hashlib.sha256(original).hexdigest()
+    db = factory()
+    db.add(GalleryImage(id="image-1", filename="image-1.png", owner="local-installation", is_active=True, file_hash=hashlib.sha256(original).hexdigest(), file_size=len(original)))
+    db.commit(); db.close()
+    app = FastAPI(); app.include_router(ipr.setup_image_project_routes()); http = TestClient(app, raise_server_exceptions=False)
+    created = _create(http, expected_image_revision=original_revision)
+    updated = b"new-gallery-pixels"
+    fail = {"value": True}
+    def failing_sessions():
+        session = factory(); real_commit = session.commit
+        def commit():
+            if fail["value"]:
+                fail["value"] = False
+                raise RuntimeError("injected endpoint commit failure")
+            return real_commit()
+        session.commit = commit
+        return session
+    monkeypatch.setattr(ipr, "SessionLocal", failing_sessions)
+    response = http.post(f"/api/imps/projects/{created['id']}/save", json={
+        "expected_project_revision": 1, "expected_image_revision": original_revision,
+        "new_image_revision": "ignored", "image_bytes": base64.b64encode(updated).decode(),
+    })
+    assert response.status_code == 500, response.text
+    assert path.read_bytes() == original
+    check = factory(); row = check.get(ManagedImageProject, created['id']); check.close()
+    assert row.project_revision == 1
+    success = http.post(f"/api/imps/projects/{created['id']}/save", json={
+        "expected_project_revision": 1, "expected_image_revision": original_revision,
+        "new_image_revision": "ignored", "image_bytes": base64.b64encode(updated).decode(),
+    })
+    assert success.status_code == 200, success.text
+    check = factory(); gallery = check.get(GalleryImage, "image-1"); check.close()
+    assert gallery.file_hash == hashlib.sha256(updated).hexdigest()
+    assert gallery.file_size == len(updated)
+
+
 def test_save_refuses_when_lore_capture_fails(monkeypatch, client):
     """A Save that cannot be recovered is refused before mutation (503)."""
     created = _create(client)
@@ -198,6 +249,38 @@ def test_save_copy_allocates_separate_resource(client):
     source = client.get(f"/api/imps/projects/{created['id']}").json()
     assert source["expected_image_revision"] == "rev-a"
     assert source["project_revision"] == 1
+
+
+def test_save_copy_files_identity_replays_without_gallery_row(client):
+    """Save-copy binds one Files-owned identity and replays the same project."""
+    created = _create(client)
+    request = {
+        "provider": "gallery",
+        "resource_id": "image:files-owned-copy-1",
+        "expected_image_revision": "sha256:files-copy-revision",
+        "operation_key": "imps-copy-files-owned-1",
+        "state": {"v": 2, "layers": [{"id": 1, "name": "copy"}]},
+    }
+    first = client.post(f"/api/imps/projects/{created['id']}/save-copy", json=request)
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    assert first_body["allocated"] is True
+    assert first_body["image"] == {"provider": "gallery", "resource_id": "image:files-owned-copy-1"}
+
+    replay = client.post(f"/api/imps/projects/{created['id']}/save-copy", json=request)
+    assert replay.status_code == 200, replay.text
+    replay_body = replay.json()
+    assert replay_body["allocated"] is False
+    assert replay_body["project_id"] == first_body["project_id"]
+    assert replay_body["image"] == first_body["image"]
+
+    db = ipr.SessionLocal()
+    try:
+        assert db.query(GalleryImage).filter(GalleryImage.id == "files-owned-copy-1").one_or_none() is None
+        projects = db.query(ManagedImageProject).filter(ManagedImageProject.owner == "local-installation").all()
+        assert len([row for row in projects if row.id == first_body["project_id"]]) == 1
+    finally:
+        db.close()
 
 
 def test_export_import_round_trips_editable_state(client):
@@ -286,11 +369,8 @@ def test_save_without_gallery_bytes_reports_caller_owned(client):
             "image_bytes": "aW1hZ2UtYnl0ZXM=",
         },
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    # No Gallery row exists for resource_id "image-1", so the write stays
-    # caller-owned and the preimage honestly marks bytes as not captured.
-    assert body["refresh_receipt"]["image_write"] == "caller-owned"
+    assert resp.status_code == 409, resp.text
+    assert "cannot be published" in resp.text
 
 
 def test_restore_replays_captured_preimage(client):

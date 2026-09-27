@@ -325,6 +325,7 @@ export function createNotesFeature({
   importVault, loadDocuments, openDocument:openOtherView, persistActiveContext, deleteDocuments,
   activateNotes, renderTimeline, openEventEditor, renderBaseEditor = null, baseAdapter = null, resourceBufferRegistry = null, saveResource = null, uploadAttachment = null, commitAttachment = null, abortAttachment = null,
   makeEditableWikiCopy = null, previewWikiConversion = null,
+  createWikiArticle = null, importWikiMemes = null, exportWikiMemes = null,
 }) {
   let persistTimer = null;
   const buffers = resourceBufferRegistry || createBufferRegistry();
@@ -1073,6 +1074,8 @@ export function createNotesFeature({
         setLeafSaveState(docId, bufferState.status === 'conflict' ? 'conflict' : bufferState.status === 'error' ? 'error' : bufferState.dirty ? 'unsaved' : 'saved');
         return returnReceipt ? receipt : !resourceBuffer.state().dirty;
       }
+      const terminalState = resourceBuffer.state();
+      setLeafSaveState(docId, terminalState.status === 'conflict' ? 'conflict' : 'error');
       return returnReceipt ? receipt : false;
     }
     const run = (async () => {
@@ -1224,12 +1227,12 @@ export function createNotesFeature({
       cache.editor?.setValue(value);
       const liveDoc = workspaceDocuments().find((doc) => doc.id === docId) || null;
       if (cache.reading?.isConnected) {
-        cache.reading.replaceChildren(renderMarkdown(value, new Set([docId])));
+        cache.reading.replaceChildren(renderMarkdown(value, new Set([docId]), liveDoc));
         applyCompletedVisibility(cache.reading);
         if (liveDoc) wireInteractiveTables(cache.reading, value, liveDoc, cache);
       }
       if (cache.preview && !cache.preview.hidden) {
-        cache.preview.replaceChildren(renderMarkdown(value, new Set([docId])));
+        cache.preview.replaceChildren(renderMarkdown(value, new Set([docId]), liveDoc));
         applyCompletedVisibility(cache.preview);
         if (liveDoc) wireInteractiveTables(cache.preview, value, liveDoc, cache);
       }
@@ -1983,6 +1986,7 @@ export function createNotesFeature({
     const doc = activeDoc(workspace);
     const actions = [
       ['New note', 'Ctrl+N', () => createNew()],
+      ...(typeof createWikiArticle === 'function' ? [['New Wiki article', '', createWikiArticle]] : []),
       ['Open today’s note', '', openDailyNote],
       ['New from template', '', createFromTemplate],
       ['Insert template', '', insertTemplate],
@@ -1998,16 +2002,18 @@ export function createNotesFeature({
       ['Side-by-side preview layout', '', () => setPreviewLayout('side-by-side')],
       ['Split right', '', () => splitActive('horizontal')],
       ['Split below', '', () => splitActive('vertical')],
-      ['Toggle Editor sidebar', '', () => { workspace.left.open = !workspace.left.open; persist(true); render(); }],
-      ['Toggle linked sidebar', '', () => { workspace.right.open = !workspace.right.open; persist(true); render(); }],
+      ['Toggle Editor sidebar', '', () => toggleSidebar('left')],
+      ['Toggle linked sidebar', '', () => toggleSidebar('right')],
       ...(doc?.virtual ? [] : [['Toggle bookmark', '', () => doc && toggleBookmark(doc.id)]]),
       ['Reopen closed note', '', reopenClosed],
       ...(doc?.virtual ? [] : [['History', '', () => doc && showHistory(doc)]]),
       ['Open Trash', '', () => showTrash()],
       ...(doc && !doc.virtual && !doc.readOnly ? [['Move current note to Trash', '', () => deleteDocument(doc)]] : []),
       ['Import Markdown or Obsidian backup', '', importVault],
+      ...(typeof importWikiMemes === 'function' ? [['Import native .memes', '', importWikiMemes]] : []),
       ['Syntax gallery', '', () => { const gallery = state.docs.find((d) => d.name.includes('Syntax Gallery') || d.name.includes('syntax-gallery')); if (gallery) open(gallery.id); else showSyntaxGallery(); }],
       ['Export Markdown backup', '', () => { window.location.href = `/api/copal/export/obsidian?workspace=${encodeURIComponent(state.workspace)}`; }],
+      ...(typeof exportWikiMemes === 'function' ? [['Export native .memes', '', exportWikiMemes]] : []),
     ];
     const recentCommands = context().noteRecentCommands ||= [];
     const dialog = h('dialog', { class:'copal-dialog copal-command-palette' }, h('h2', { text:'Editor commands' }));
@@ -2243,9 +2249,12 @@ export function createNotesFeature({
       ['Open File', openFileFromPicker],
       ['Open Folder', openFolderFromPicker],
       ['New', () => createNew()],
+      ...(typeof createWikiArticle === 'function' ? [['New Wiki article', createWikiArticle]] : []),
       ['New from template', createFromTemplate],
       ['Insert template', insertTemplate],
       ['Choose template folder', configureTemplateFolder],
+      ...(typeof importWikiMemes === 'function' ? [['Import native .memes', importWikiMemes]] : []),
+      ...(typeof exportWikiMemes === 'function' ? [['Export native .memes', exportWikiMemes]] : []),
     ];
     const menu = h('div', { class:'copal-editor-file-menu-items', role:'menu', 'aria-label':'Editor File actions' });
     for (const [label, action] of menuItems) {
@@ -2677,7 +2686,7 @@ export function createNotesFeature({
   function renderFormattingDemoBody(doc) {
     const source = sourceValue(doc);
     const sourceLines = String(source || '').split('\n');
-    const rendered = renderMarkdown(source, new Set([doc.id]));
+    const rendered = renderMarkdown(source, new Set([doc.id]), doc);
     const shell = h('div', { class:'copal-md-source-reveal' });
     let inspector = null;
     const backToRendered = () => {
@@ -2788,7 +2797,7 @@ export function createNotesFeature({
       cache.body.replaceChildren(
         isFormattingDemoDocument(doc)
           ? renderFormattingDemoBody(doc)
-          : renderMarkdown(sourceValue(doc), new Set([doc.id])),
+          : renderMarkdown(sourceValue(doc), new Set([doc.id]), doc),
       );
       if (leaf.view === 'wiki') {
         cache.body.append(wikiArticleChrome(doc));
@@ -3346,7 +3355,7 @@ export function createNotesFeature({
 
   function updatePreview(cache, doc, value = sourceValue(doc)) {
     if (!cache.preview) return;
-    cache.preview.replaceChildren(renderMarkdown(value, new Set([doc.id])));
+    cache.preview.replaceChildren(renderMarkdown(value, new Set([doc.id]), doc));
     applyCompletedVisibility(cache.preview);
     wireInteractiveTables(cache.preview, value, doc, cache);
   }
@@ -3529,7 +3538,7 @@ export function createNotesFeature({
     cache.root.dataset.previewLayout = workspace.settings.previewLayout;
     if (leaf.mode === 'reading') {
       cache.reading ||= h('article', { class:'copal-note-reading' });
-      cache.reading.replaceChildren(renderMarkdown(sourceValue(doc), new Set([doc.id])));
+      cache.reading.replaceChildren(renderMarkdown(sourceValue(doc), new Set([doc.id]), doc));
       applyCompletedVisibility(cache.reading);
       // Reading view exposes the same table operations as live preview.
       wireInteractiveTables(cache.reading, sourceValue(doc), doc, cache);

@@ -22,10 +22,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from src.generated_images import (
-    discard_staged_gallery_image,
     gallery_owner_key,
-    publish_staged_gallery_image,
-    stage_gallery_image_bytes,
 )
 
 logger = logging.getLogger(__name__)
@@ -632,7 +629,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
       switch_model <model>    — Change the model for the current session
       set_theme <preset>      — Apply a built-in theme preset (clanker-dark, clanker-light, dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute)
       create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|clanker-sweep|clanker-blueprint|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
-      open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook)
+      open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook, usage)
       open_email_reply <uid> [folder] [reply|reply-all|ai-reply] [body text] — Open a reply draft document for an email; does not send. ALWAYS append the body text when the user told you what to say (one-shot draft); only omit body when the user just asked to "open a reply" without content.
       get_toggles             — Return current toggle states (server-side knowledge)
     """
@@ -864,10 +861,12 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
             "llm": "cookbook",
             "serve": "cookbook",
             "serving": "cookbook",
+            "usage": "usage",
+            "stats": "usage",
         }
         target = _panel_aliases.get(panel)
         if not target:
-            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, memories, skills, settings, cookbook."}
+            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, memories, skills, settings, cookbook, usage."}
         return {
             "ui_event": "open_panel",
             "panel": target,
@@ -967,9 +966,8 @@ def _save_managed_gallery_image(
     owner_key = gallery_owner_key(owner)
     if owner_key is None:
         raise RuntimeError("Gallery image owner provenance is unavailable")
-    filename = f"{uuid.uuid4().hex[:12]}{_managed_image_suffix(media_type)}"
-    staged = stage_gallery_image_bytes(image_bytes)
-    image_id = str(uuid.uuid4())
+    from src.openclank.files_image_store import FilesImageStore
+    image_id = None
     try:
         from src.database import GalleryImage, Session as DbSession, SessionLocal
 
@@ -984,6 +982,20 @@ def _save_managed_gallery_image(
         except Exception:
             pass
 
+        store = FilesImageStore(session_factory=SessionLocal)
+        gallery = store.ensure_photos(owner_key)
+        managed = store.import_image(
+            owner_key,
+            parent_id=gallery.id,
+            name=f"generated{_managed_image_suffix(media_type)}",
+            data=image_bytes,
+            mime_type=media_type,
+            operation_key=f"generated:{owner_key}:{session_id or 'none'}:{model_route_id}:{hashlib.sha256(image_bytes).hexdigest()}",
+            provenance={"prompt": prompt, "model": model_route_id, "size": size, "quality": quality},
+            source_provider="gallery",
+        )
+        image_id = managed.id
+        filename = managed.locator or f"{uuid.uuid4().hex[:12]}{_managed_image_suffix(media_type)}"
         with SessionLocal() as db:
             scoped_session_id = None
             if session_id:
@@ -1009,27 +1021,14 @@ def _save_managed_gallery_image(
             )
             db.add(image)
             db.commit()
-            try:
-                publish_staged_gallery_image(staged, filename)
-            except Exception:
-                try:
-                    db.delete(image)
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                    logger.exception(
-                        "Failed to retract unpublished managed image metadata"
-                    )
-                raise
+            # FilesImageStore has already published the immutable bytes.  The
+            # GalleryImage row is retained only as a compatibility projection.
     except Exception:
         logger.warning(
             "Failed to publish managed image with Gallery provenance",
             exc_info=True,
         )
         raise
-    finally:
-        discard_staged_gallery_image(staged)
-
     return f"/api/generated-image/{filename}", image_id
 
 

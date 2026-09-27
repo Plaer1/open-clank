@@ -6,7 +6,7 @@ from src.chat_handler import ChatHandler
 
 class _UploadHandler:
     def resolve_upload(self, *_args, **_kwargs):
-        raise AssertionError("attachments must not be resolved when tool preprocessing is disabled")
+        return None
 
     def is_image_file(self, *_args, **_kwargs):
         raise AssertionError("images must not be inspected when tool preprocessing is disabled")

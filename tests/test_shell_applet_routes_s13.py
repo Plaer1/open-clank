@@ -74,6 +74,7 @@ def _client_results():
     proc = subprocess.run(
         [sys.executable, "-c", _CLIENT_SCRIPT.format(root=str(ROOT)), json.dumps(checks)],
         capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        env={**os.environ, "DEBUG": "false", "OPENCLANK_DEBUG": "false"},
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
@@ -186,7 +187,7 @@ def test_applet_path_is_direct_never_copal():
     assert _node_eval("appletPath('editor')") == "/editor"
     assert _node_eval("appletPath('notes')") == "/editor"
     assert _node_eval("appletPath('files')") == "/files"
-    assert _node_eval("appletPath('wiki')") == "/wiki"
+    assert _node_eval("appletPath('wiki')") == "/editor"
     assert _node_eval("appletPath('graph', { mode: 'mind' })") == "/graph?mode=mind"
     assert _node_eval("appletPath('treehouse')") == "/treehouse"
     assert _node_eval("appletPath('editor', { doc: 'x1' })") == "/editor?doc=x1"

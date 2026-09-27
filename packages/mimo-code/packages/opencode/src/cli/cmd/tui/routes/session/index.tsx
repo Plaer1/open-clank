@@ -531,7 +531,7 @@ export function Session() {
     // 202 = engine accepted; both resume kinds start a run. Do not GET recovery here:
     // recovery without allowBusy returns [] while busy, which would false-report "nothing to recover".
     // Clearing relies on session.status→idle / session.error (see sync.tsx).
-    sync.set("session_recovery_active", route.sessionID, candidate.assistantMessageID)
+    sync.set("session_recovery_active", route.sessionID, true)
     toast.show({ message: t("tui.toast.session.recover.started"), variant: "info" })
   }
 
@@ -1504,7 +1504,7 @@ export function Session() {
                           recoveryCandidate()?.assistantMessageID === message.id &&
                           sync.session.status(route.sessionID) === "idle"
                         }
-                        recovering={sync.data.session_recovery_active[route.sessionID] === message.id}
+                        recovering={sync.data.session_recovery_active[route.sessionID] === true}
                         onRecover={recover}
                       />
                     </Match>

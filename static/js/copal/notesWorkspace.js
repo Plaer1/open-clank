@@ -379,7 +379,7 @@ export function navigationIntentFromEvent(event = null, { mac = undefined } = {}
 function normalizeNavigationIntent(options = {}) {
   if (typeof options.intent === 'string' && NAVIGATION_INTENTS.includes(options.intent)) return options.intent;
   // Legacy `reuse:false` is newTab; `reuse:true`/absent keeps find-or-create.
-  return options.intent === 'current' ? 'current' : options.reuse === false ? 'newTab' : null;
+  return options.reuse === false ? 'newTab' : null;
 }
 
 export function openWorkspaceDocument(workspace, doc, options = {}) {
@@ -395,7 +395,16 @@ export function openWorkspaceDocument(workspace, doc, options = {}) {
   }
   if (intent === 'current') {
     const active = group.tabs.find((item) => item.id === group.activeLeafId) || group.tabs[0] || null;
-    if (active) {
+    // Pinned leaves keep their document (close paths skip pins the same way);
+    // fall through to find-or-create instead of evicting a pin.
+    if (active && !active.pinned) {
+      if (active.docId === doc.id) {
+        // Same-document current keeps the leaf's selection and scroll; only an
+        // explicit mode request may change presentation.
+        if (active.view !== 'note' && options.mode && MODES.has(options.mode)) active.mode = options.mode;
+        activateWorkspaceLeaf(workspace, group.id, active.id);
+        return active;
+      }
       // Replace the active tab's document in place. The leaf id is retained
       // so note-buffer and editor-view bindings keyed by leaf stay coherent;
       // per-document dirty buffers live on the doc id and are not discarded.
@@ -408,7 +417,7 @@ export function openWorkspaceDocument(workspace, doc, options = {}) {
       activateWorkspaceLeaf(workspace, group.id, active.id);
       return active;
     }
-    // Empty group: fall through and create the first tab.
+    // Empty group or pinned active: fall through and create/activate a tab.
   }
   let leaf = intent === 'newTab' ? null : group.tabs.find((item) => item.docId === doc.id);
   if (!leaf) {

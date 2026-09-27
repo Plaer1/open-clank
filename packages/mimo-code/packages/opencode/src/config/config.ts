@@ -33,6 +33,7 @@ import { MIMOCODE_GITIGNORE_ENTRIES } from "./gitignore"
 import { ConfigHistory } from "./history"
 import { ConfigLayout } from "./layout"
 import { ConfigLSP } from "./lsp"
+import { ConfigLLMServer } from "./llm-server"
 import { ConfigManaged } from "./managed"
 import { ConfigMCP } from "./mcp"
 import { ConfigModelID } from "./model-id"
@@ -103,6 +104,9 @@ const InfoSchema = Schema.Struct({
   logLevel: Schema.optional(LogLevelRef).annotate({ description: "Log level" }),
   server: Schema.optional(ConfigServer.Server).annotate({
     description: "Server configuration for mimo serve and web commands",
+  }),
+  llmServer: Schema.optional(ConfigLLMServer.LLMServer).annotate({
+    description: "Defaults for temporary local LLM server token lifetimes",
   }),
   command: Schema.optional(Schema.Record(Schema.String, ConfigCommand.Info)).annotate({
     description: "Command configuration, see https://mimo.xiaomi.com/mimocode/commands",
@@ -345,6 +349,9 @@ const InfoSchema = Schema.Struct({
   ),
   memory: Schema.optional(
     Schema.Struct({
+      disable_write: Schema.optional(Schema.Boolean).annotate({
+        description: "Disable native memory/checkpoint writes while keeping memory reads available. Default: false.",
+      }),
       cc_index: Schema.optional(Schema.Boolean).annotate({
         description:
           "Index Claude Code memory (~/.claude/projects/<slug>/memory) and expose under scope='cc'. Default: false. Note: when enabled, every mimocode agent (build/explore/subagents) can search these memories via the builtin `memory` tool — including CC's `type: user` (your role/preferences) and `type: feedback` (your guidance) categories. CC originally writes them for future CC sessions; flipping this on widens the consumer set to mimocode agents on the same machine. Leave disabled (default) if you don't want personal context recallable from a prompt-injection-vulnerable agent.",
@@ -514,6 +521,37 @@ export type Info = z.output<typeof Info> & {
   // with the file and scope it came from so later runtime code can make location-sensitive decisions.
   plugin_origins?: ConfigPlugin.Origin[]
   mcp_origins?: Record<string, ConfigMCP.Origin>
+}
+
+/** Apply one immutable managed settings snapshot to an admitted turn. */
+export function withManagedAgentSettings(config: Info, raw: unknown): Info {
+  if (!isRecord(raw)) return config
+  const incoming = raw as Record<string, unknown>
+  const compaction = isRecord(incoming.compaction) ? incoming.compaction : undefined
+  const checkpoint = isRecord(incoming.checkpoint) ? incoming.checkpoint : undefined
+  if (!compaction && !checkpoint) return config
+  const next: Info = { ...config }
+  if (compaction) {
+    next.compaction = {
+      ...(config.compaction ?? {}),
+      ...(typeof compaction.auto === "boolean" ? { auto: compaction.auto } : {}),
+      ...(typeof compaction.prune === "boolean" ? { prune: compaction.prune } : {}),
+      ...(typeof compaction.tail_turns === "number" && Number.isSafeInteger(compaction.tail_turns) && compaction.tail_turns >= 0 ? { tail_turns: compaction.tail_turns } : {}),
+      ...(typeof compaction.preserve_recent_tokens === "number" && Number.isSafeInteger(compaction.preserve_recent_tokens) && compaction.preserve_recent_tokens >= 0 ? { preserve_recent_tokens: compaction.preserve_recent_tokens } : {}),
+      ...(typeof compaction.reserved === "number" && Number.isSafeInteger(compaction.reserved) && compaction.reserved >= 0 ? { reserved: compaction.reserved } : {}),
+      ...(typeof compaction.max_context === "number" || typeof compaction.max_context === "string" ? { max_context: compaction.max_context } : {}),
+    }
+  }
+  if (checkpoint) {
+    next.checkpoint = {
+      ...(config.checkpoint ?? {}),
+      ...(typeof checkpoint.reserved === "number" && Number.isSafeInteger(checkpoint.reserved) && checkpoint.reserved >= 0 ? { reserved: checkpoint.reserved } : {}),
+      ...(typeof checkpoint.max_writer_failures === "number" && Number.isSafeInteger(checkpoint.max_writer_failures) && checkpoint.max_writer_failures > 0 ? { max_writer_failures: checkpoint.max_writer_failures } : {}),
+      ...(typeof checkpoint.fork === "boolean" ? { fork: checkpoint.fork } : {}),
+      ...(isRecord(checkpoint.push_caps) ? { push_caps: checkpoint.push_caps } : {}),
+    }
+  }
+  return next
 }
 
 type State = {

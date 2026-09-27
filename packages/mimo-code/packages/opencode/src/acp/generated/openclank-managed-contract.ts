@@ -4,7 +4,7 @@ export const PROVIDER_STORE_VERSION = 1 as const
 export const OPERATION_ROUTER_VERSION = 1 as const
 export const SCHEMA_VERSION = 2 as const
 export const SCHEMA_ID = "https://openclank.dev/contracts/managed-provider/v2" as const
-export const SCHEMA_HASH = "e21dac877632b285e84fb84e7921d8c1c084e6002de25e2d59cf5da6f43dbb50" as const
+export const SCHEMA_HASH = "611c378cc61719f6290cd28e9c383b5a9f398fc174785c7c84b5269f366073ca" as const
 
 export const PROVIDER_STORE_METHODS = [
   "_openclank/provider-store/v1/account/bind",
@@ -32,14 +32,17 @@ export const OPERATION_METHODS = [
   "_openclank/operations/v1/artifact/write",
   "_openclank/operations/v1/executor/invoke",
   "_openclank/operations/v1/execute",
+  "_openclank/operations/v1/cancel",
 ] as const
 export const SESSION_METHODS = [
   "_openclank/session/v1/cwd/change",
   "_openclank/session/v1/binding/read",
+  "_openclank/session/v1/settings/effective",
 ] as const
 export const OPERATIONS = [
   "chat.stream",
   "chat.complete",
+  "web.search",
   "vision.describe",
   "image.generate",
   "image.edit",
@@ -76,8 +79,10 @@ export const METHOD_DIRECTIONS = {
   "_openclank/operations/v1/artifact/write": "engine_to_host",
   "_openclank/operations/v1/executor/invoke": "engine_to_host",
   "_openclank/operations/v1/execute": "host_to_engine",
+  "_openclank/operations/v1/cancel": "host_to_engine",
   "_openclank/session/v1/cwd/change": "engine_to_host",
   "_openclank/session/v1/binding/read": "engine_to_host",
+  "_openclank/session/v1/settings/effective": "host_to_engine",
 } as const
 
 export type ProviderStoreMethod = (typeof PROVIDER_STORE_METHODS)[number]

@@ -14,11 +14,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import posixpath
 import re
+import threading
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.openclank.files_facade import FilesFacadeError, ProviderContext, ProviderResource
+from src.openclank.history_capture import begin_file_capture, complete_file_capture
 from src.openclank.media_ownership import (
     MediaOwnershipError,
     MediaProvenance,
@@ -31,9 +34,40 @@ from src.openclank.media_ownership import (
     layout_for_absolute,
     rewrite_reference,
     scan_references,
+    text_fingerprint,
 )
 
 _LIMIT = 10 * 1024 * 1024
+_ADOPTION_MUTEX = threading.RLock()
+
+
+def _path_within(root: str, candidate: str) -> bool:
+    """Return true only for a real path contained by the authorized root."""
+    try:
+        return os.path.commonpath([os.path.realpath(root), os.path.realpath(candidate)]) == os.path.realpath(root)
+    except ValueError:
+        return False
+
+
+def _safe_receipt_path(root: str, value: Any, *, must_exist: bool = True) -> str | None:
+    """Resolve a recovery path without trusting receipt-controlled traversal."""
+    raw = str(value or "")
+    if not raw:
+        return None
+    candidate = raw if os.path.isabs(raw) else os.path.join(root, raw)
+    resolved = os.path.realpath(candidate)
+    if not _path_within(root, resolved) or os.path.islink(candidate):
+        return None
+    if must_exist and (not os.path.isfile(resolved) or os.path.islink(resolved)):
+        return None
+    return resolved
+
+
+def _relative_reference(document_id: str, destination_rel: str) -> str:
+    """Render a workspace destination relative to its source document."""
+    document = str(document_id or "").replace("\\", "/")
+    parent = posixpath.dirname(document) or "."
+    return posixpath.relpath(str(destination_rel).replace("\\", "/"), parent)
 
 
 def _digest_json(payload: Mapping[str, Any]) -> str:
@@ -474,7 +508,19 @@ def collect_media_provenance(operation_store: Any, *, owner_subject_id: str) -> 
             records.append(MediaProvenance.from_receipt(provenance))
         except MediaOwnershipError:
             continue
-    return records
+    # Workspace provenance supersedes the loose record for the same asset. Keep
+    # one active identity so a later workspace creation cannot re-adopt bytes
+    # that have already moved into an owned workspace.
+    workspace_keys = {
+        (item.asset_id or item.asset_digest, item.asset_name, item.document_id)
+        for item in records
+        if item.origin == "workspace"
+    }
+    return [
+        item for item in records
+        if item.origin == "workspace"
+        or (item.asset_id or item.asset_digest, item.asset_name, item.document_id) not in workspace_keys
+    ]
 
 
 def _scan_workspace_references(root: str) -> list[tuple[str, str, bool]]:
@@ -501,7 +547,7 @@ def _scan_workspace_references(root: str) -> list[tuple[str, str, bool]]:
     return found
 
 
-def adopt_loose_media_for_workspace(
+def _adopt_loose_media_for_workspace(
     *,
     operation_store: Any,
     owner_subject_id: str,
@@ -510,6 +556,10 @@ def adopt_loose_media_for_workspace(
     operation_id: str | None = None,
     document_sources: Any | None = None,
     lore_capture: Any | None = None,
+    history_context: Any | None = None,
+    phase_hook: Any | None = None,
+    post_terminal_hook: Any | None = None,
+    lease_ms: int = 30_000,
 ) -> dict[str, Any]:
     """Adopt provenance-backed loose assets into a newly created workspace.
 
@@ -525,6 +575,245 @@ def adopt_loose_media_for_workspace(
     if not root:
         raise FilesFacadeError("workspace root is required", code="invalid_media_request")
 
+    op_id = str(operation_id or f"adopt-{workspace_id}")
+    lease_owner = f"{os.getpid()}-{threading.get_ident()}-{op_id}"
+    existing_getter = getattr(operation_store, "get_operation", None)
+    if callable(existing_getter):
+        existing = existing_getter(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}")
+        existing_receipt = existing.get("receipt") if isinstance(existing, Mapping) else None
+        if isinstance(existing_receipt, Mapping):
+            # Validate the operation identity before honoring any terminal or
+            # recovery replay.  A reused operation id must never become an
+            # oracle for a different workspace request.
+            recorded_root = existing_receipt.get("workspace_root")
+            recorded_workspace = existing_receipt.get("workspace_id")
+            recorded_operation = existing_receipt.get("operation_id")
+            if (
+                (recorded_root and os.path.realpath(str(recorded_root)) != os.path.realpath(root))
+                or (recorded_workspace and str(recorded_workspace) != str(workspace_id))
+                or (recorded_operation and str(recorded_operation) != op_id)
+            ):
+                raise FilesFacadeError("adoption operation conflicts", code="idempotency_conflict")
+            # Claim before inspecting a recovery phase.  This is the durable
+            # fence that prevents a live foreign claimant from touching the
+            # filesystem, and lets only an expired lease enter recovery.
+            claimer = getattr(operation_store, "claim_operation", None)
+            if callable(claimer):
+                claimed = claimer(
+                    owner_subject_id=str(owner_subject_id),
+                    operation_id=f"__host_media_adopt__{op_id}",
+                    request_digest=str(existing.get("digest") or ""),
+                    generation=0,
+                    receipt=dict(existing_receipt),
+                    lease_owner=lease_owner,
+                    lease_ms=lease_ms,
+                )
+                if claimed is not None:
+                    previous = claimed.get("receipt") if isinstance(claimed, Mapping) else {}
+                    if isinstance(previous, Mapping) and str(previous.get("phase") or "") in {"complete", "recovery_required"} and isinstance(previous.get("resource_receipt"), Mapping):
+                        resource = dict(previous["resource_receipt"])
+                        return {"status": str(resource.get("status") or "conflict"), "adopted": list(previous.get("adopted") or []), "conflicts": list(previous.get("conflicts") or []), "rejected": list(previous.get("rejected") or []), "resource_receipt": resource}
+                    raise FilesFacadeError("adoption operation is pending reconciliation", code="operation_pending")
+            if existing_receipt.get("phase") == "staged":
+                # A claimant must observe the durable lease before candidate
+                # scanning can turn the same operation into a false collision.
+                raise FilesFacadeError("adoption operation is pending reconciliation", code="operation_pending")
+            if existing_receipt.get("phase") == "source_removal_pending":
+                stored_resource = dict(existing_receipt.get("resource_receipt") or {})
+                stored_adopted = list(existing_receipt.get("adopted") or [])
+                stored_conflicts = list(existing_receipt.get("conflicts") or [])
+                stored_rejected = list(existing_receipt.get("rejected") or [])
+                if bool(existing_receipt.get("history_expected")) and existing_receipt.get("history_state") != "complete":
+                    history_conflict = {"code": "history_capture_failed", "reason": "history completion could not be resumed"}
+                    recovery_conflicts = stored_conflicts if history_conflict in stored_conflicts else stored_conflicts + [history_conflict]
+                    recovery = {**stored_resource, "status": "conflict", "phase": "recovery_required", "durable": False, "recovery": "history_capture_failed"}
+                    recorder = getattr(operation_store, "record_operation", None)
+                    if callable(recorder):
+                        recorder(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}", request_digest=str(existing.get("digest") or ""), generation=0, receipt={**dict(existing_receipt), "phase": "recovery_required", "lease_owner": lease_owner, "adopted": stored_adopted, "conflicts": recovery_conflicts, "rejected": stored_rejected, "resource_receipt": recovery}, phase="recovery_required")
+                    return {"status": "conflict", "adopted": stored_adopted, "conflicts": recovery_conflicts, "rejected": stored_rejected, "resource_receipt": recovery}
+                destinations = list(existing_receipt.get("destinations") or [])
+                valid = True
+                for item in destinations:
+                    destination = _safe_receipt_path(root, item.get("destination"))
+                    if destination is None:
+                        valid = False
+                        break
+                    with open(destination, "rb") as handle:
+                        if binary_digest(handle.read()) != str(item.get("digest") or ""):
+                            valid = False
+                            break
+                for item in list(existing_receipt.get("documents") or []):
+                    path = _safe_receipt_path(root, item.get("document_id"))
+                    if path is None:
+                        valid = False
+                        break
+                    with open(path, "r", encoding="utf-8") as handle:
+                        if handle.read() != str(item.get("after") or ""):
+                            valid = False
+                            break
+                if valid:
+                    for item in destinations:
+                        source = _safe_receipt_path(root, item.get("source"), must_exist=False)
+                        if source is None:
+                            valid = False
+                            break
+                        if os.path.exists(source):
+                            try:
+                                os.remove(source)
+                            except OSError:
+                                valid = False
+                                break
+                if not valid:
+                    raise FilesFacadeError("adoption receipt requires reconciliation", code="resource_changed")
+                _ensure_workspace_provenance(operation_store, owner_subject_id=str(owner_subject_id), operation_id=op_id, request_digest=str(existing.get("digest") or ""), records=list(existing_receipt.get("provenance_records") or []))
+                terminal = {**stored_resource, "action_id": stored_resource.get("action_id") or f"adopt-{op_id}", "status": "complete", "phase": "complete", "durable": True, "operation_id": op_id, "workspace_id": str(workspace_id), "adopted_count": len(stored_adopted) or len(destinations), "conflict_count": len(stored_conflicts)}
+                recorder = getattr(operation_store, "record_operation", None)
+                if callable(recorder):
+                    recorder(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}", request_digest=str(existing.get("digest") or ""), generation=0, receipt={**dict(existing_receipt), "phase": "complete", "lease_owner": lease_owner, "resource_receipt": terminal}, phase="complete")
+                return {"status": "complete", "adopted": stored_adopted, "conflicts": stored_conflicts, "rejected": stored_rejected, "resource_receipt": terminal}
+            if existing_receipt.get("phase") in {"destination_published", "documents_rewritten"}:
+                receipt_destination = _safe_receipt_path(root, existing_receipt.get("destination"), must_exist=False)
+                receipt_source = _safe_receipt_path(root, existing_receipt.get("source"), must_exist=False)
+                if receipt_destination is None or receipt_source is None:
+                    raise FilesFacadeError("adoption receipt is corrupt", code="idempotency_conflict")
+            multi_destinations = list(existing_receipt.get("destinations") or [])
+            planned_assets = list(existing_receipt.get("assets") or [])
+            known_destinations = {str(item.get("destination") or "") for item in multi_destinations}
+            for item in planned_assets:
+                if str(item.get("destination") or "") not in known_destinations:
+                    multi_destinations.append(item)
+            if existing_receipt.get("phase") in {"destination_published", "documents_rewritten"} and len(multi_destinations) >= 1:
+                valid = True
+                for item in multi_destinations:
+                    destination = _safe_receipt_path(root, item.get("destination"), must_exist=False)
+                    source = _safe_receipt_path(root, item.get("source"), must_exist=False)
+                    if destination is None or source is None:
+                        valid = False
+                        break
+                    if os.path.isfile(destination):
+                        with open(destination, "rb") as handle:
+                            if binary_digest(handle.read()) != str(item.get("digest") or ""):
+                                valid = False
+                                break
+                    else:
+                        if not os.path.isfile(source):
+                            valid = False
+                            break
+                        with open(source, "rb") as handle:
+                            data = handle.read(_LIMIT + 1)
+                        if binary_digest(data) != str(item.get("digest") or ""):
+                            valid = False
+                            break
+                        os.makedirs(os.path.dirname(destination), exist_ok=True)
+                        _write_atomic(destination, data)
+                documents = list(existing_receipt.get("documents") or [])
+                if valid:
+                    for item in documents:
+                        path = _safe_receipt_path(root, item.get("document_id"))
+                        if path is None:
+                            valid = False
+                            break
+                        with open(path, "r", encoding="utf-8") as handle:
+                            current = handle.read()
+                            if current == str(item.get("after") or ""):
+                                continue
+                            if current != str(item.get("before") or ""):
+                                valid = False
+                                break
+                            _write_atomic_text(path, str(item.get("after") or ""))
+                sources = [_safe_receipt_path(root, item.get("source"), must_exist=False) for item in multi_destinations]
+                if valid:
+                    for source in sources:
+                        if source is not None and os.path.exists(source):
+                            try:
+                                os.remove(source)
+                            except OSError:
+                                valid = False
+                                break
+                if valid:
+                    stored_resource = dict(existing_receipt.get("resource_receipt") or {})
+                    terminal = {**stored_resource, "action_id": stored_resource.get("action_id") or f"adopt-{op_id}", "status": "complete", "phase": "complete", "durable": True, "operation_id": op_id, "workspace_id": str(workspace_id), "adopted_count": len(existing_receipt.get("adopted") or multi_destinations), "conflict_count": len(existing_receipt.get("conflicts") or [])}
+                    recorder = getattr(operation_store, "record_operation", None)
+                    if callable(recorder):
+                        _ensure_workspace_provenance(operation_store, owner_subject_id=str(owner_subject_id), operation_id=op_id, request_digest=str(existing.get("digest") or ""), records=list(existing_receipt.get("provenance_records") or []))
+                        recorder(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}", request_digest=str(existing.get("digest") or ""), generation=0, receipt={**dict(existing_receipt), "phase": "complete", "lease_owner": lease_owner, "resource_receipt": terminal}, phase="complete")
+                    return {"status": "complete", "adopted": list(existing_receipt.get("adopted") or []), "conflicts": list(existing_receipt.get("conflicts") or []), "rejected": list(existing_receipt.get("rejected") or []), "resource_receipt": terminal}
+                raise FilesFacadeError("adoption receipt requires reconciliation", code="resource_changed")
+        if isinstance(existing_receipt, Mapping) and existing_receipt.get("phase") == "destination_published":
+            destination = _safe_receipt_path(root, existing_receipt.get("destination"))
+            source = _safe_receipt_path(root, existing_receipt.get("source"))
+            valid = destination is not None
+            if valid:
+                with open(destination, "rb") as handle:
+                    valid = binary_digest(handle.read()) == str(existing_receipt.get("digest") or "")
+            documents = list(existing_receipt.get("documents") or [])
+            if valid and documents:
+                for item in documents:
+                    path = _safe_receipt_path(root, item.get("document_id"))
+                    if path is None:
+                        valid = False
+                        break
+                    with open(path, "r", encoding="utf-8") as handle:
+                        current = handle.read()
+                    if current == str(item.get("after") or ""):
+                        continue
+                    if current != str(item.get("before") or ""):
+                        valid = False
+                        break
+                    _write_atomic_text(path, str(item.get("after") or ""))
+            if valid and documents:
+                recorder = getattr(operation_store, "record_operation", None)
+                if callable(recorder):
+                    recorder(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}", request_digest=str(existing.get("digest") or ""), generation=0, receipt={**dict(existing_receipt), "phase": "documents_rewritten", "documents": documents}, phase="documents_rewritten")
+                try:
+                    if source is not None and os.path.exists(source):
+                        os.remove(source)
+                    terminal = {"action_id": f"adopt-{op_id}", "status": "complete", "phase": "complete", "durable": True, "operation_id": op_id, "workspace_id": str(workspace_id), "adopted_count": 1, "conflict_count": 0}
+                    if callable(recorder):
+                        recorder(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}", request_digest=str(existing.get("digest") or ""), generation=0, receipt={"operation_id": op_id, "phase": "complete", "lease_owner": lease_owner, "resource_receipt": terminal}, phase="complete")
+                    return {"status": "complete", "adopted": [], "conflicts": [], "rejected": [], "resource_receipt": terminal}
+                except OSError:
+                    return {"status": "conflict", "adopted": [], "conflicts": [{"code": "retained_duplicate", "reason": "source removal failed"}], "rejected": [], "resource_receipt": {"action_id": f"adopt-{op_id}", "status": "conflict", "phase": "recovery_required", "recovery": "retained_duplicate"}}
+        if isinstance(existing_receipt, Mapping) and existing_receipt.get("phase") == "documents_rewritten":
+            destination = _safe_receipt_path(root, existing_receipt.get("destination"))
+            source = _safe_receipt_path(root, existing_receipt.get("source"), must_exist=False)
+            manifest = existing_receipt.get("documents") or []
+            valid = destination is not None
+            if valid:
+                with open(destination, "rb") as handle:
+                    valid = binary_digest(handle.read()) == str(existing_receipt.get("digest") or "")
+            for item in manifest:
+                path = _safe_receipt_path(root, item.get("document_id"))
+                if path is None:
+                    valid = False
+                    break
+                with open(path, "r", encoding="utf-8") as handle:
+                    current_text = handle.read()
+                current_fingerprint = text_fingerprint(current_text)
+                expected_after = str(item.get("after_digest") or item.get("after") or "")
+                if current_text != str(item.get("after") or "") and current_fingerprint != expected_after:
+                    valid = False
+                    break
+            if valid and source is not None and os.path.isfile(source):
+                try:
+                    os.remove(source)
+                except OSError:
+                    valid = False
+            if valid:
+                replay_receipt = {"action_id": f"adopt-{op_id}", "status": "complete", "phase": "complete", "durable": True, "operation_id": op_id, "workspace_id": str(workspace_id), "adopted_count": 1, "conflict_count": 0}
+                recorder = getattr(operation_store, "record_operation", None)
+                if callable(recorder):
+                    recorder(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}", request_digest=str(existing.get("digest") or ""), generation=0, receipt={"operation_id": op_id, "phase": "complete", "lease_owner": lease_owner, "resource_receipt": replay_receipt}, phase="complete")
+                return {"status": "complete", "adopted": [], "conflicts": [], "rejected": [], "resource_receipt": replay_receipt}
+        if isinstance(existing_receipt, Mapping) and isinstance(existing_receipt.get("resource_receipt"), Mapping) and existing_receipt["resource_receipt"].get("status") in {"complete", "conflict"}:
+            _ensure_workspace_provenance(operation_store, owner_subject_id=str(owner_subject_id), operation_id=op_id, request_digest=str(existing.get("digest") or ""), records=list(existing_receipt.get("provenance_records") or []))
+            return {
+                "status": str(existing_receipt["resource_receipt"].get("status")),
+                "adopted": list(existing_receipt.get("adopted") or []),
+                "conflicts": list(existing_receipt.get("conflicts") or []),
+                "rejected": list(existing_receipt.get("rejected") or []),
+                "resource_receipt": dict(existing_receipt["resource_receipt"]),
+            }
     candidates = collect_media_provenance(operation_store, owner_subject_id=owner_subject_id)
     if not candidates:
         return {"status": "noop", "adopted": [], "conflicts": [], "rejected": []}
@@ -549,9 +838,28 @@ def adopt_loose_media_for_workspace(
         sources = list(document_sources())
     else:
         sources = _scan_workspace_references(root)
+    # Registered nested, archived, or other-owner roots remain independent
+    # authorities.  Do not scan their documents through the new workspace,
+    # including aliases that resolve through symlinks.
+    authorized_sources: list[tuple[str, str, bool]] = []
+    for doc_id, text, protected in sources:
+        document_abs = os.path.realpath(os.path.join(root, str(doc_id).replace("/", os.sep)))
+        if not _path_within(root, document_abs):
+            continue
+        nested_owner = any(
+            os.path.realpath(record.canonical_root) != os.path.realpath(root)
+            and _path_within(record.canonical_root, document_abs)
+            for record in registered
+        )
+        if not nested_owner:
+            authorized_sources.append((str(doc_id), str(text), bool(protected)))
+    sources = authorized_sources
 
-    op_id = str(operation_id or f"adopt-{workspace_id}")
     adopted: list[dict[str, Any]] = []
+    sources_to_remove: list[str] = []
+    published_for_rollback: list[tuple[str, dict[str, str]]] = []
+    history_handles: list[tuple[Any, str]] = []
+    published_manifest: list[dict[str, str]] = []
     conflicts: list[dict[str, str]] = []
     preimages: dict[str, str] = {}
     # Reference rewrites are collected first so a protected reference blocks
@@ -570,10 +878,13 @@ def adopt_loose_media_for_workspace(
                 if not normalized or re.match(r"^[a-z][a-z\d+.-]*:", normalized, re.IGNORECASE):
                     continue
                 matched = False
-                if normalized.startswith("media/") and normalized.endswith(f"/{record.asset_name}"):
-                    matched = normalized == f"media/{_document_stem(record.document_path)}/{record.asset_name}" or normalized == old_rel
-                elif normalized.endswith(f"/{record.asset_name}") and "media/" in normalized:
-                    matched = normalized.endswith(old_rel)
+                # Resolve each reference from its own document.  Equal names
+                # in sibling loose folders are unrelated assets.
+                document_abs = os.path.realpath(os.path.join(root, str(doc_id).replace("/", os.sep)))
+                if not _path_within(root, document_abs) or not os.path.isfile(document_abs):
+                    continue
+                resolved = os.path.realpath(os.path.join(os.path.dirname(document_abs), normalized))
+                matched = resolved == os.path.realpath(candidate.source_path)
                 if not matched:
                     continue
                 if site.protected:
@@ -585,11 +896,166 @@ def adopt_loose_media_for_workspace(
                         "asset_name": record.asset_name,
                     })
                     continue
-                edits.append((str(doc_id), site, new_rel, text))
+                edits.append((str(doc_id), site, _relative_reference(str(doc_id), new_rel), text))
         if local_conflicts:
             conflicts.extend(local_conflicts)
             continue
         pending.append((candidate, edits, preimages))
+
+    # Every destination and source must be safe before the first byte or
+    # document write.  The staged receipt is the durable preflight boundary.
+    # Existing unrelated bytes are never replaced; allocation is handled by
+    # the plan only when the exact destination is free.
+    if callable(existing_getter):
+        raced = existing_getter(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}")
+        raced_receipt = raced.get("receipt") if isinstance(raced, Mapping) else None
+        if isinstance(raced_receipt, Mapping):
+            raced_phase = str(raced_receipt.get("phase") or "")
+            if raced_phase in {"complete", "recovery_required"} and isinstance(raced_receipt.get("resource_receipt"), Mapping):
+                resource = dict(raced_receipt["resource_receipt"])
+                return {"status": str(resource.get("status") or "conflict"), "adopted": list(raced_receipt.get("adopted") or []), "conflicts": list(raced_receipt.get("conflicts") or []), "rejected": list(raced_receipt.get("rejected") or []), "resource_receipt": resource}
+            if raced_phase in {"staged", "destination_published", "documents_rewritten", "source_removal_pending"} and str(raced_receipt.get("lease_owner") or "") != f"{os.getpid()}-{threading.get_ident()}-{op_id}":
+                raise FilesFacadeError("adoption operation is pending reconciliation", code="operation_pending")
+    for candidate, _edits, _preimages in pending:
+        destination_abs = os.path.join(root, candidate.destination_rel.replace("/", os.sep))
+        if os.path.lexists(destination_abs):
+            conflicts.append({
+                "code": "destination_exists",
+                "document_id": candidate.provenance.document_id,
+                "reason": "adoption destination already exists",
+                "asset_name": candidate.provenance.asset_name,
+            })
+    if conflicts:
+        if operation_id is not None and any(item.get("code") == "destination_exists" for item in conflicts):
+            # An explicit operation racing a publisher can observe the
+            # destination before SQLite exposes the publisher's staged row.
+            # Return the same typed pending result rather than converting the
+            # rival's publication into a terminal collision receipt.
+            raise FilesFacadeError("adoption operation is pending reconciliation", code="operation_pending")
+        pending = []
+
+    staged_preimages: dict[str, str] = {}
+    staged_assets: list[dict[str, str]] = []
+    staged_documents: list[dict[str, str]] = []
+    for candidate, edits, _preimages in pending:
+        if not os.path.isfile(candidate.source_path):
+            conflicts.append({
+                "code": "missing_asset",
+                "document_id": candidate.provenance.document_id,
+                "reason": "loose asset disappeared before adoption",
+                "asset_name": candidate.provenance.asset_name,
+            })
+            continue
+        with open(candidate.source_path, "rb") as handle:
+            staged_data = handle.read(_LIMIT + 1)
+        if len(staged_data) > _LIMIT or not candidate.provenance.digest_matches(staged_data):
+            conflicts.append({
+                "code": "digest_mismatch",
+                "document_id": candidate.provenance.document_id,
+                "reason": "loose asset bytes changed since provenance was recorded",
+                "asset_name": candidate.provenance.asset_name,
+            })
+            continue
+        staged_assets.append({
+            "document_id": str(candidate.provenance.document_id),
+            "asset_name": str(candidate.provenance.asset_name),
+            "digest": str(candidate.provenance.asset_digest),
+            "destination": str(candidate.destination_rel),
+            "source": str(candidate.source_path),
+        })
+        for doc_id, _site, _new_rel, text in edits:
+            staged_preimages.setdefault(doc_id, text)
+        for doc_id in sorted({item[0] for item in edits}):
+            doc_edits = [item for item in edits if item[0] == doc_id]
+            after = next(item[3] for item in doc_edits)
+            for _doc, site, new_rel, _text in sorted(doc_edits, key=lambda item: item[1].start, reverse=True):
+                after = after[:site.start] + rewrite_reference(site, new_rel) + after[site.end:]
+            staged_documents.append({
+                "document_id": doc_id,
+                "before": next(item[3] for item in doc_edits),
+                "before_digest": text_fingerprint(next(item[3] for item in doc_edits)),
+                "after": after,
+                "after_digest": text_fingerprint(after),
+            })
+    if conflicts:
+        pending = []
+    if pending:
+        recorder = getattr(operation_store, "record_operation", None)
+        reserver = getattr(operation_store, "reserve_operation", None)
+        request_digest = _digest_json({
+            "owner_subject_id": str(owner_subject_id),
+            "workspace_root": os.path.realpath(root),
+            "workspace_id": str(workspace_id),
+            "operation_id": op_id,
+            "assets": sorted(staged_assets, key=lambda item: (item["document_id"], item["asset_name"])),
+            "documents": sorted(
+                {key: text_fingerprint(value) for key, value in staged_preimages.items()}.items(),
+            ),
+        })
+        staged_receipt = {
+            "operation_id": op_id,
+            "workspace_id": str(workspace_id),
+            "workspace_root": os.path.realpath(root),
+            "phase": "staged",
+            "preimages": staged_preimages,
+            "assets": staged_assets,
+            "documents": staged_documents,
+            "lease_owner": f"{os.getpid()}-{threading.get_ident()}-{op_id}",
+        }
+        claimer = getattr(operation_store, "claim_operation", None)
+        lease_owner = str(staged_receipt["lease_owner"])
+        if callable(claimer):
+            existing = claimer(
+                owner_subject_id=str(owner_subject_id),
+                operation_id=f"__host_media_adopt__{op_id}",
+                request_digest=request_digest,
+                generation=0,
+                receipt=staged_receipt,
+                lease_owner=lease_owner,
+                lease_ms=lease_ms,
+            )
+            if existing is not None:
+                previous = existing.get("receipt") if isinstance(existing, Mapping) else {}
+                if isinstance(previous, Mapping) and previous.get("phase") in {"complete", "recovery_required"}:
+                    return {
+                        "status": str((previous.get("resource_receipt") or {}).get("status") or "conflict"),
+                        "adopted": list(previous.get("adopted") or []),
+                        "conflicts": list(previous.get("conflicts") or []),
+                        "rejected": list(previous.get("rejected") or []),
+                        "resource_receipt": dict(previous.get("resource_receipt") or {}),
+                    }
+                raise FilesFacadeError("adoption operation is pending reconciliation", code="operation_pending")
+        elif callable(reserver):
+            existing = reserver(
+                owner_subject_id=str(owner_subject_id),
+                operation_id=f"__host_media_adopt__{op_id}",
+                request_digest=request_digest,
+                generation=0,
+                receipt=staged_receipt,
+                phase="staged",
+            )
+            if existing is not None:
+                previous = existing.get("receipt") if isinstance(existing, Mapping) else {}
+                if isinstance(previous, Mapping) and previous.get("phase") == "complete":
+                    return {
+                        "status": "complete",
+                        "adopted": list(previous.get("adopted") or []),
+                        "conflicts": list(previous.get("conflicts") or []),
+                        "rejected": list(previous.get("rejected") or []),
+                        "resource_receipt": dict(previous.get("resource_receipt") or {}),
+                    }
+                raise FilesFacadeError("adoption operation is pending reconciliation", code="operation_pending")
+        elif not callable(recorder):
+            raise MediaOwnershipError("operation storage is unavailable", code="provider_unavailable")
+        else:
+            recorder(
+                owner_subject_id=str(owner_subject_id),
+                operation_id=f"__host_media_adopt__{op_id}",
+                request_digest=request_digest,
+                generation=0,
+                receipt=staged_receipt,
+                phase="staged",
+            )
 
     for candidate, edits, preimages in pending:
         record = candidate.provenance
@@ -610,6 +1076,18 @@ def adopt_loose_media_for_workspace(
                     })
             if any(item.get("code") == "lore_capture_failed" for item in conflicts):
                 continue
+        if by_document and history_context is not None:
+            for doc_id in by_document:
+                document_abs = os.path.realpath(os.path.join(root, str(doc_id).replace("/", os.sep)))
+                handle = begin_file_capture(
+                    document_abs,
+                    operation="workspace-media-adoption",
+                    context=history_context,
+                    action_id=f"adopt-{op_id}-{hashlib.sha256(document_abs.encode()).hexdigest()[:16]}",
+                )
+                if getattr(handle, "status", "") != "prepared":
+                    raise MediaOwnershipError("history preimage capture failed", code="lore_capture_failed")
+                history_handles.append((handle, document_abs))
         preimages.update(by_document)
 
         # Stage: verify the loose asset bytes before touching the destination.
@@ -632,38 +1110,92 @@ def adopt_loose_media_for_workspace(
                 "asset_name": record.asset_name,
             })
             continue
-        os.makedirs(os.path.dirname(destination_abs), exist_ok=True)
-        _write_atomic(destination_abs, data)
-
-        # Repair references surgically, never with global string replacement.
-        for doc_id, site, new_rel, text in edits:
-            new_text = rewrite_reference(site, new_rel)
-            document_abs = os.path.join(root, doc_id.replace("/", os.sep))
-            if not os.path.isfile(document_abs):
-                continue
-            with open(document_abs, "r", encoding="utf-8") as handle:
-                current = handle.read()
-            # Spans refer to the captured preimage; recompute against current.
-            sites_now = scan_references(doc_id, current)
-            match = next(
-                (item for item in sites_now if item.start == site.start and item.target == site.target),
-                None,
-            )
-            if match is None:
-                match = next((item for item in sites_now if item.target == site.target), None)
-            if match is None:
-                continue
-            updated = current[: match.start] + rewrite_reference(match, new_rel) + current[match.end :]
-            _write_atomic_text(document_abs, updated)
-
-        # Remove the now-empty loose media file and its directory when empty.
+        original_documents: dict[str, str] = {}
+        document_manifest: list[dict[str, str]] = []
         try:
-            os.remove(candidate.source_path)
-            parent = os.path.dirname(candidate.source_path)
-            if parent and parent != root and not os.listdir(parent):
-                os.rmdir(parent)
-        except OSError:
-            pass
+            if os.path.lexists(destination_abs):
+                raise FilesFacadeError("adoption operation is pending reconciliation", code="operation_pending")
+            os.makedirs(os.path.dirname(destination_abs), exist_ok=True)
+            _write_atomic(destination_abs, data)
+            published_manifest.append({
+                "destination": candidate.destination_rel,
+                "source": candidate.source_path,
+                "digest": record.asset_digest,
+            })
+            if callable(recorder) and "request_digest" in locals():
+                recorder(
+                    owner_subject_id=str(owner_subject_id),
+                    operation_id=f"__host_media_adopt__{op_id}",
+                    request_digest=request_digest,
+                    generation=0,
+                    receipt={"operation_id": op_id, "workspace_root": os.path.realpath(root), "lease_owner": f"{os.getpid()}-{threading.get_ident()}-{op_id}", "phase": "destination_published", "destination": candidate.destination_rel, "digest": record.asset_digest, "source": candidate.source_path, "destinations": list(published_manifest), "assets": list(staged_assets), "preimages": original_documents, "documents": staged_documents},
+                    phase="destination_published",
+                )
+            if callable(phase_hook):
+                phase_hook("destination_published", destination_abs)
+
+            # Repair references surgically, never with global string replacement.
+            for doc_id, site, new_rel, text in edits:
+                new_text = rewrite_reference(site, new_rel)
+                document_abs = os.path.join(root, doc_id.replace("/", os.sep))
+                if not os.path.isfile(document_abs):
+                    continue
+                with open(document_abs, "r", encoding="utf-8") as handle:
+                    current = handle.read()
+                original_documents.setdefault(document_abs, current)
+                # Spans refer to the captured preimage; recompute against current.
+                sites_now = scan_references(doc_id, current)
+                match = next(
+                    (item for item in sites_now if item.start == site.start and item.target == site.target),
+                    None,
+                )
+                if match is None:
+                    match = next((item for item in sites_now if item.target == site.target), None)
+                if match is None:
+                    raise MediaOwnershipError(
+                        "document reference changed during adoption",
+                        code="resource_changed",
+                    )
+                updated = current[: match.start] + rewrite_reference(match, new_rel) + current[match.end :]
+                _write_atomic_text(document_abs, updated)
+                document_manifest.append({"document_id": str(doc_id), "before": text_fingerprint(current), "after": text_fingerprint(updated)})
+            if callable(recorder) and "request_digest" in locals():
+                recorder(
+                    owner_subject_id=str(owner_subject_id),
+                    operation_id=f"__host_media_adopt__{op_id}",
+                    request_digest=request_digest,
+                    generation=0,
+                    receipt={"operation_id": op_id, "workspace_root": os.path.realpath(root), "lease_owner": f"{os.getpid()}-{threading.get_ident()}-{op_id}", "phase": "documents_rewritten", "destination": candidate.destination_rel, "digest": record.asset_digest, "source": candidate.source_path, "destinations": list(published_manifest), "assets": list(staged_assets), "preimages": original_documents, "documents": staged_documents},
+                    phase="documents_rewritten",
+                )
+            if callable(phase_hook):
+                phase_hook("documents_rewritten", [item[0] for item in edits])
+
+            # Keep the original until the final operation receipt is durable.
+            sources_to_remove.append(candidate.source_path)
+            published_for_rollback.append((destination_abs, original_documents))
+        except Exception as error:
+            if isinstance(error, FilesFacadeError) and getattr(error, "code", None) == "operation_pending":
+                raise
+            # A mid-publication failure leaves the original asset and links
+            # usable.  The staged receipt remains available for reconciliation.
+            for document_abs, original in original_documents.items():
+                try:
+                    _write_atomic_text(document_abs, original)
+                except OSError:
+                    pass
+            try:
+                if os.path.isfile(destination_abs):
+                    os.remove(destination_abs)
+            except OSError:
+                pass
+            conflicts.append({
+                "code": "publication_failed",
+                "document_id": record.document_id,
+                "reason": str(error) or "media publication failed",
+                "asset_name": record.asset_name,
+            })
+            continue
 
         adopted.append({
             "asset_name": record.asset_name,
@@ -671,6 +1203,17 @@ def adopt_loose_media_for_workspace(
             "digest": record.asset_digest,
             "document_id": record.document_id,
         })
+
+    # A rival may have committed while this claimant was doing its read-only
+    # preflight. Never overwrite that terminal receipt with a collision result.
+    if callable(existing_getter):
+        raced = existing_getter(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}")
+        raced_receipt = raced.get("receipt") if isinstance(raced, Mapping) else None
+        if isinstance(raced_receipt, Mapping) and str(raced_receipt.get("phase") or "") in {"complete", "recovery_required"} and isinstance(raced_receipt.get("resource_receipt"), Mapping):
+            resource = dict(raced_receipt["resource_receipt"])
+            return {"status": str(resource.get("status") or "conflict"), "adopted": list(raced_receipt.get("adopted") or []), "conflicts": list(raced_receipt.get("conflicts") or []), "rejected": list(raced_receipt.get("rejected") or []), "resource_receipt": resource}
+        if isinstance(raced_receipt, Mapping) and str(raced_receipt.get("phase") or "") in {"staged", "destination_published", "documents_rewritten", "source_removal_pending"} and str(raced_receipt.get("lease_owner") or "") != f"{os.getpid()}-{threading.get_ident()}-{op_id}":
+            raise FilesFacadeError("adoption operation is pending reconciliation", code="operation_pending")
 
     receipt = {
         "action_id": f"adopt-{op_id}",
@@ -688,33 +1231,169 @@ def adopt_loose_media_for_workspace(
             recorder(
                 owner_subject_id=str(owner_subject_id),
                 operation_id=f"__host_media_adopt__{op_id}",
-                request_digest=_digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
+                request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
                 generation=0,
                 receipt={
                     "operation_id": op_id,
                     "workspace_id": str(workspace_id),
-                    "phase": "complete",
+                    "workspace_root": os.path.realpath(root),
+                    "phase": "source_removal_pending",
+                    "lease_owner": f"{os.getpid()}-{threading.get_ident()}-{op_id}",
                     "adopted": adopted,
                     "conflicts": conflicts,
                     "rejected": list(plan.rejected),
                     "preimages": preimages,
-                    "resource_receipt": receipt,
-                    "provenance": {
-                        "canonical_root": root,
-                        "origin": "workspace",
-                        "owner_subject_id": str(owner_subject_id),
-                        "workspace_id": str(workspace_id),
-                        "document_id": "",
-                        "document_path": "",
-                        "asset_name": "",
-                        "asset_digest": binary_digest(b""),
-                        "references": [],
-                    },
+                    "destinations": list(published_manifest),
+                    "assets": list(staged_assets),
+                    "documents": list(staged_documents),
+                    "history_state": "pending",
+                    "history_expected": bool(history_handles),
+                    "provenance_expected_count": len(pending),
+                    "resource_receipt": {**receipt, "status": "pending", "phase": "source_removal_pending", "durable": False},
+                    "provenance_records": [
+                        {
+                            **candidate.provenance.as_receipt(),
+                            "canonical_root": os.path.realpath(root),
+                            "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"),
+                            "origin": "workspace",
+                            "owner_subject_id": str(owner_subject_id),
+                            "workspace_id": str(workspace_id),
+                            "references": [str(item[0]) for item in edits],
+                        }
+                        for candidate, edits, _ in pending
+                    ],
                 },
-                phase="complete",
+                phase="source_removal_pending",
             )
         except Exception:
-            pass
+            for destination_abs, original_documents in published_for_rollback:
+                for document_abs, original in original_documents.items():
+                    try:
+                        _write_atomic_text(document_abs, original)
+                    except OSError:
+                        pass
+                try:
+                    if os.path.isfile(destination_abs):
+                        os.remove(destination_abs)
+                except OSError:
+                    pass
+            raise
+    removal_failures: list[str] = []
+    for source_path in sources_to_remove:
+        try:
+            os.remove(source_path)
+            parent = os.path.dirname(source_path)
+            if parent and parent != root and not os.listdir(parent):
+                os.rmdir(parent)
+        except OSError:
+            removal_failures.append(source_path)
+        if not removal_failures and callable(phase_hook):
+            phase_hook("source_removed", source_path)
+    if not removal_failures and callable(phase_hook):
+        phase_hook("sources_removed", list(sources_to_remove))
+    history_results: list[Mapping[str, Any]] = []
+    if history_handles:
+        for handle, document_abs in history_handles:
+            if receipt.get("status") == "complete":
+                history_results.append(complete_file_capture(handle, document_abs, committed=True))
+            else:
+                history_results.append(handle.abort())
+    history_failure = any(str(result.get("history_status") or "") != "complete" for result in history_results)
+    if not removal_failures and not history_failure and history_handles and callable(recorder):
+        recorder(
+            owner_subject_id=str(owner_subject_id),
+            operation_id=f"__host_media_adopt__{op_id}",
+            request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
+            generation=0,
+            receipt={"operation_id": op_id, "workspace_id": str(workspace_id), "workspace_root": os.path.realpath(root), "phase": "source_removal_pending", "history_state": "complete", "history_expected": True, "provenance_expected_count": len(pending), "adopted": adopted, "conflicts": conflicts, "rejected": list(plan.rejected), "resource_receipt": receipt, "provenance_records": [{**candidate.provenance.as_receipt(), "canonical_root": os.path.realpath(root), "origin": "workspace", "owner_subject_id": str(owner_subject_id), "workspace_id": str(workspace_id), "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"), "references": [str(item[0]) for item in edits]} for candidate, edits, _ in pending], "destinations": list(published_manifest), "assets": list(staged_assets), "documents": list(staged_documents), "preimages": preimages},
+            phase="source_removal_pending",
+        )
+        if callable(phase_hook):
+            phase_hook("history_completed", op_id)
+    if not removal_failures and not history_failure and callable(recorder):
+        _persist_workspace_provenance(
+            operation_store,
+            owner_subject_id=str(owner_subject_id),
+            operation_id=op_id,
+            request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
+            records=[
+                {
+                    **candidate.provenance.as_receipt(),
+                    "canonical_root": os.path.realpath(root),
+                    "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"),
+                    "origin": "workspace",
+                    "owner_subject_id": str(owner_subject_id),
+                    "workspace_id": str(workspace_id),
+                    "references": [str(item[0]) for item in edits],
+                }
+                for candidate, edits, _ in pending
+            ],
+        )
+        recorder(
+            owner_subject_id=str(owner_subject_id),
+            operation_id=f"__host_media_adopt__{op_id}",
+            request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
+            generation=0,
+            receipt={
+                "operation_id": op_id,
+                "workspace_id": str(workspace_id),
+                "workspace_root": os.path.realpath(root),
+                "phase": "complete",
+                "lease_owner": lease_owner,
+                "adopted": adopted,
+                "conflicts": conflicts,
+                "rejected": list(plan.rejected),
+                "preimages": preimages,
+                "resource_receipt": receipt,
+            },
+            phase="complete",
+        )
+        _persist_workspace_provenance(
+            operation_store,
+            owner_subject_id=str(owner_subject_id),
+            operation_id=op_id,
+            request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
+            records=[
+                {
+                    **candidate.provenance.as_receipt(),
+                    "canonical_root": os.path.realpath(root),
+                    "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"),
+                    "origin": "workspace",
+                    "owner_subject_id": str(owner_subject_id),
+                    "workspace_id": str(workspace_id),
+                    "references": [str(item[0]) for item in edits],
+                }
+                for candidate, edits, _ in pending
+            ],
+        )
+    if history_failure and not removal_failures:
+        receipt = {**receipt, "status": "conflict", "durable": False, "recovery": "history_capture_failed"}
+        if callable(recorder):
+            _persist_workspace_provenance(operation_store, owner_subject_id=str(owner_subject_id), operation_id=op_id, request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}), records=[{**candidate.provenance.as_receipt(), "canonical_root": os.path.realpath(root), "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"), "origin": "workspace", "owner_subject_id": str(owner_subject_id), "workspace_id": str(workspace_id), "references": [str(item[0]) for item in edits]} for candidate, edits, _ in pending])
+            recorder(owner_subject_id=str(owner_subject_id), operation_id=f"__host_media_adopt__{op_id}", request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}), generation=0, receipt={"operation_id": op_id, "workspace_id": str(workspace_id), "workspace_root": os.path.realpath(root), "phase": "recovery_required", "lease_owner": lease_owner, "adopted": adopted, "conflicts": conflicts, "rejected": list(plan.rejected), "preimages": preimages, "destinations": list(published_manifest), "assets": list(staged_assets), "documents": list(staged_documents), "provenance_records": [{**candidate.provenance.as_receipt(), "canonical_root": os.path.realpath(root), "document_path": os.path.relpath(os.path.join(candidate.provenance.canonical_root, candidate.provenance.document_path), root).replace(os.sep, "/"), "origin": "workspace", "owner_subject_id": str(owner_subject_id), "workspace_id": str(workspace_id), "references": [str(item[0]) for item in edits]} for candidate, edits, _ in pending], "resource_receipt": receipt, "history_results": history_results}, phase="recovery_required")
+    elif removal_failures:
+        receipt = {
+            **receipt,
+            "status": "conflict",
+            "durable": False,
+            "recovery": "retained_duplicate",
+            "removal_failures": removal_failures,
+        }
+        if callable(recorder):
+            recorder(
+                owner_subject_id=str(owner_subject_id),
+                operation_id=f"__host_media_adopt__{op_id}",
+                request_digest=locals().get("request_digest") or _digest_json({"operation_id": op_id, "workspace_id": str(workspace_id)}),
+                generation=0,
+                receipt={"operation_id": op_id, "phase": "recovery_required", "lease_owner": lease_owner, "resource_receipt": receipt, "adopted": adopted, "conflicts": conflicts, "rejected": list(plan.rejected), "preimages": preimages},
+                phase="recovery_required",
+            )
+    elif receipt.get("status") == "complete" and callable(post_terminal_hook):
+        # This hook is deliberately after the durable terminal receipt and all
+        # source disposition.  Crash fixtures use it to model a lost response;
+        # replay must therefore return the stored terminal receipt without
+        # publishing another destination or rewriting a document.
+        post_terminal_hook("terminal", dict(receipt))
     return {
         "status": receipt["status"],
         "adopted": adopted,
@@ -722,6 +1401,17 @@ def adopt_loose_media_for_workspace(
         "rejected": list(plan.rejected),
         "resource_receipt": receipt,
     }
+
+
+def adopt_loose_media_for_workspace(**kwargs: Any) -> dict[str, Any]:
+    """Serialize adoption publication while the durable operation is claimed.
+
+    The Files repository remains the cross-process authority; this mutex closes
+    the same-process race between two workspace creation requests sharing one
+    operation id, so the second caller observes the completed receipt.
+    """
+    with _ADOPTION_MUTEX:
+        return _adopt_loose_media_for_workspace(**kwargs)
 
 
 def _write_atomic_text(path: str, text: str) -> None:
@@ -733,6 +1423,34 @@ def _write_atomic_text(path: str, text: str) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temp, path)
+
+
+def _persist_workspace_provenance(operation_store: Any, *, owner_subject_id: str, operation_id: str, request_digest: str, records: Sequence[Mapping[str, Any]]) -> None:
+    recorder = getattr(operation_store, "record_operation", None)
+    if not callable(recorder):
+        return
+    for index, provenance in enumerate(records):
+        recorder(
+            owner_subject_id=str(owner_subject_id),
+            operation_id=f"__host_media__adopted-{operation_id}-{index}",
+            request_digest=f"{request_digest}:provenance:{index}",
+            generation=0,
+            receipt={"provenance": dict(provenance), "phase": "complete"},
+            phase="complete",
+        )
+
+
+def _ensure_workspace_provenance(operation_store: Any, *, owner_subject_id: str, operation_id: str, request_digest: str, records: Sequence[Mapping[str, Any]]) -> None:
+    """Repair missing per-asset provenance before honoring terminal replay."""
+    lister = getattr(operation_store, "list_operations", None)
+    expected = [f"__host_media__adopted-{operation_id}-{index}" for index, _ in enumerate(records)]
+    present: set[str] = set()
+    if callable(lister):
+        for row in lister(owner_subject_id=str(owner_subject_id), operation_prefix="__host_media__adopted-", limit=256):
+            if isinstance(row, Mapping) and str(row.get("operation_id") or "") in expected:
+                present.add(str(row["operation_id"]))
+    if len(present) != len(expected):
+        _persist_workspace_provenance(operation_store, owner_subject_id=owner_subject_id, operation_id=operation_id, request_digest=request_digest, records=records)
 
 
 def _all_registered_roots(operation_store: Any) -> list[WorkspaceRootRecord]:

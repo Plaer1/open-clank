@@ -334,8 +334,6 @@ await withCopalBrowser({ page, request:async (req, res) => {
   await until('document.querySelector(\'.copal-note-leaf[data-view-type="base"] .copal-leaf-menu summary\')');
   await evaluate(`(()=>{const leaf=document.querySelector('.copal-note-leaf[data-view-type="base"]');leaf.querySelector('.copal-leaf-menu summary')?.click();})()`);
   await evaluate(`(()=>{const leaf=document.querySelector('.copal-note-leaf[data-view-type="base"]');const button=[...leaf.querySelectorAll('.copal-popover-menu button')].find((item)=>item.textContent==='Split right');if(!button)throw new Error('Split right action missing');button.click();})()`);
-  await until('document.querySelector(".copal-quick-switcher")');
-  await evaluate(`(()=>{const row=[...document.querySelectorAll('.copal-quick-switcher .copal-doc-row')].find((button)=>button.textContent.includes('Projects/To Watch.base'));if(!row)throw new Error('Base duplicate chooser row missing');row.click();})()`);
   await until('document.querySelectorAll(".copal-note-leaf[data-view-type=base]").length === 2 && document.querySelectorAll(".copal-sheet-surface").length === 2');
   const duplicateTargetLeaf = await evaluate('document.querySelectorAll(".copal-note-leaf[data-view-type=base]")[0].dataset.leafId');
   const duplicateSiblingLeaf = await evaluate('document.querySelectorAll(".copal-note-leaf[data-view-type=base]")[1].dataset.leafId');

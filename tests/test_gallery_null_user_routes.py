@@ -104,7 +104,10 @@ def test_auth_enabled_null_user_gallery_routes_fail_closed(monkeypatch, tmp_path
     assert shuffled["total"] == 0
 
     assert client.get("/api/gallery/tags").json() == {"tags": []}
-    assert client.get("/api/gallery/albums").json() == {"albums": []}
+    assert client.get("/api/gallery/albums").json() == {
+        "albums": [],
+        "retired": "album",
+    }
     assert client.get("/api/gallery/stats").json() == {
         "total_photos": 0,
         "total_size": 0,
@@ -131,9 +134,10 @@ def test_auth_disabled_null_user_gallery_routes_use_durable_local_owner(monkeypa
     assert library["models"] == ["model-local"]
 
     assert client.get("/api/gallery/tags").json() == {"tags": ["local-tag"]}
-    assert [
-        album["id"] for album in client.get("/api/gallery/albums").json()["albums"]
-    ] == ["album-local"]
+    assert client.get("/api/gallery/albums").json() == {
+        "albums": [],
+        "retired": "album",
+    }
     assert client.get("/api/gallery/stats").json() == {
         "total_photos": 1,
         "total_size": 30,
@@ -160,8 +164,10 @@ def test_authenticated_gallery_routes_remain_owner_scoped(monkeypatch, tmp_path)
     assert library["models"] == ["model-a"]
 
     assert client.get("/api/gallery/tags").json() == {"tags": ["alice-tag"]}
-    albums = client.get("/api/gallery/albums").json()["albums"]
-    assert [album["id"] for album in albums] == ["album-alice"]
+    assert client.get("/api/gallery/albums").json() == {
+        "albums": [],
+        "retired": "album",
+    }
     assert client.get("/api/gallery/stats").json() == {
         "total_photos": 1,
         "total_size": 10,
@@ -175,3 +181,31 @@ def test_authenticated_gallery_routes_remain_owner_scoped(monkeypatch, tmp_path)
         "total_untagged": 1,
         "image_ids": ["img-alice"],
     }
+
+
+def test_retired_album_mutations_are_typed_and_do_not_change_gallery(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    client = _client_with_gallery(monkeypatch, tmp_path)
+
+    before_library = client.get("/api/gallery/library").json()
+    before_stats = client.get("/api/gallery/stats").json()
+    expected_list = {"albums": [], "retired": "album"}
+    assert client.get("/api/gallery/albums").json() == expected_list
+
+    requests = [
+        ("post", "/api/gallery/albums", {"name": "must-not-exist"}),
+        ("put", "/api/gallery/albums/album-local", {}),
+        ("delete", "/api/gallery/albums/album-local", None),
+        ("post", "/api/gallery/albums/album-local/add", {"image_ids": ["img-local"]}),
+        ("post", "/api/gallery/albums/album-local/remove", {"image_ids": ["img-local"]}),
+    ]
+    for method, path, body in requests:
+        response = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
+        assert response.status_code == 410
+        assert response.json()["detail"]["retired"] == "album"
+
+    assert client.get("/api/gallery/albums").json() == expected_list
+    assert client.get("/api/gallery/library").json() == before_library
+    assert client.get("/api/gallery/stats").json() == before_stats

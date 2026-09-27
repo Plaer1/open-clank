@@ -297,3 +297,15 @@ def test_disabled_or_deleted_last_account_denies_dispatch(host_store):
     )
     assert deleted.deleted_at is not None
     assert not store.route_has_permitted_account(owner="alice", model_route_id=route.id)
+
+
+def test_deleted_connection_tolerates_pre_stats_schema(host_store):
+    store, _factory = host_store
+    connection = _connection(store, connection_id="pcn_pre_stats")
+    _persist(store, account_id="pac_pre_stats", connection_id=connection.id, routes=[_route("pmr_pre_stats")])
+
+    deleted = store.delete_connection(
+        owner="alice", connection_id=connection.id, expected_revision=connection.revision + 1
+    )
+
+    assert deleted.deleted_at is not None

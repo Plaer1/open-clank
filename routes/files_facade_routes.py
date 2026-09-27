@@ -38,6 +38,7 @@ from src.openclank.media_attachment_targets import (
     HostDocumentAttachmentTarget,
     adopt_loose_media_for_workspace,
 )
+from src.openclank.history_capture import trusted_tool_context
 from src.openclank.treehouse_files_adapter import TreeHouseLessonAttachmentTarget
 from src.constants import DATA_DIR
 from src.openclank.workspace_policy_service import (
@@ -79,6 +80,11 @@ class ActionRequest(_StrictModel):
 
 class OpenResourceRequest(_StrictModel):
     resource_ref: str = Field(min_length=8, max_length=16_384)
+
+
+class HostOpenRequest(_StrictModel):
+    resource_ref: str = Field(min_length=8, max_length=16_384)
+    app_id: str = Field(min_length=1, max_length=512)
 
 
 class HostRevisionRequest(_StrictModel):
@@ -676,6 +682,24 @@ def setup_files_facade_routes(
         except FilesFacadeError as error:
             _raise(error)
 
+    @router.post("/host-apps")
+    async def host_apps(body: OpenResourceRequest, request: Request):
+        try:
+            return await facade(request).host_applications(
+                context_for_ref(request, body.resource_ref), resource_ref=body.resource_ref,
+            )
+        except FilesFacadeError as error:
+            _raise(error)
+
+    @router.post("/open-host")
+    async def open_host(body: HostOpenRequest, request: Request):
+        try:
+            return await facade(request).open_on_host(
+                context_for_ref(request, body.resource_ref), resource_ref=body.resource_ref, app_id=body.app_id,
+            )
+        except FilesFacadeError as error:
+            _raise(error)
+
     @router.post("/save-resource")
     async def save_resource(body: SaveResourceRequest, request: Request):
         try:
@@ -739,7 +763,14 @@ def setup_files_facade_routes(
                     owner_subject_id=owner_subject_id,
                     workspace_root=workspace_root,
                     workspace_id=workspace_id,
+                    history_context=trusted_tool_context(
+                        actor_id=owner_subject_id,
+                        account_id=owner_subject_id,
+                        workspace_id=workspace_id,
+                        workspace_root=workspace_root,
+                    ),
                 ),
+                media_receipt=getattr(getattr(request, "state", None), "history_capture", None),
             )
         except FilesFacadeError as error:
             _raise(error)

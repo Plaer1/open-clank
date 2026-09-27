@@ -27,6 +27,7 @@ export const SHELL_PATHS = Object.freeze([
   '/tasks',
   '/library',
   '/cookbook',
+  '/usage',
   '/settings',
 ]);
 
@@ -37,7 +38,7 @@ export const SHELL_PATH_PREFIXES = Object.freeze(['/settings/', '/copal/']);
 // Editor workspace; they only differ by view/mode intent.
 const DIRECT = Object.freeze({
   editor: '/editor',
-  wiki: '/wiki',
+  wiki: '/editor',
   graph: '/graph',
   treehouse: '/treehouse',
   timeline: '/timeline',
@@ -52,6 +53,7 @@ const DIRECT = Object.freeze({
   tasks: '/tasks',
   library: '/library',
   cookbook: '/cookbook',
+  usage: '/usage',
   settings: '/settings',
 });
 
@@ -78,13 +80,14 @@ const SEGMENTS = {
   tasks:     { target: 'tasks' },
   library:   { target: 'library' },
   cookbook:  { target: 'cookbook' },
+  usage:     { target: 'usage' },
   settings:  { target: 'settings' },
 };
 
 // Editor-family view -> canonical address.
 const VIEW_PATH = Object.freeze({
   notes: '/editor',
-  wiki: '/wiki',
+  wiki: '/editor',
   timeline: '/timeline',
   todo: '/todo',
   graph: '/graph',

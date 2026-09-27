@@ -1192,10 +1192,10 @@ class ResearchHandler:
 
         except Exception as e:
             logger.error(f"DeepResearcher failed: {e}", exc_info=True)
-            return await self._fallback_research(query, max_time, str(e))
+            return await self._fallback_research(query, max_time, str(e), owner=owner, provider=search_provider)
 
     async def _fallback_research(
-        self, query: str, max_time: int, primary_error: str,
+        self, query: str, max_time: int, primary_error: str, *, owner: str = "", provider: str | None = None,
     ) -> str:
         """Fall back to legacy engine, then to basic web search."""
         # Try legacy orchestrator
@@ -1214,7 +1214,7 @@ class ResearchHandler:
                 logger.error(f"Legacy engine also failed: {e}")
 
         # Fall back to basic web search
-        return self._handle_research_failure(query, primary_error)
+        return await self._handle_research_failure(query, primary_error, owner=owner, provider=provider)
 
     def _get_legacy_stats(self) -> dict:
         """Get statistics from the legacy research engine."""
@@ -1275,13 +1275,16 @@ class ResearchHandler:
 - Review logs for initialization errors
 """
 
-    def _handle_research_failure(self, query: str, error: str) -> str:
+    async def _handle_research_failure(self, query: str, error: str, *, owner: str = "", provider: str | None = None) -> str:
         """Handle research failure with fallback to basic search."""
         try:
             logger.info("Attempting fallback to basic web search...")
-            from src.search import comprehensive_web_search
-
-            search_result = comprehensive_web_search(query)
+            from services.search import SearchService
+            response = await SearchService().search(query, caller="research", mode="results",
+                                                    owner=owner or "", provider=provider, deadline=30)
+            search_result = "\n\n".join(f"{item.title}\n{item.snippet}" for item in response.results)
+            if response.error:
+                search_result = f"Search unavailable ({response.error.get('code', response.status)})."
 
             return f"""## Research Failed - Basic Search Fallback
 

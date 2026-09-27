@@ -100,6 +100,11 @@ def test_every_lesson_uses_the_shared_app_link_resolver():
             bodies.append(lesson["body"])
             bodies.append(lesson["explanation"])
     joined = "\n".join(bodies)
+    assert APP_DESTINATIONS["wiki"] == {
+        "label": "Wiki in Editor",
+        "href": "/wiki",
+        "locator": "[data-copal-view=notes]",
+    }
     assert "/copal/" not in joined
     assert "clank://" in joined
     # No stale standalone launchers are taught.

@@ -39,6 +39,9 @@ from core.database import (
     UserTool,
     UserToolData,
 )
+# Register additive Stats owner rows in the same dynamically discovered
+# lifecycle registry as the canonical application tables.
+from core import stats_models  # noqa: F401
 
 
 _SPECIAL_OWNER_COLUMNS = {

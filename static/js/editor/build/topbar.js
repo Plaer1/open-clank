@@ -109,6 +109,10 @@ export function buildTopbar() {
             <span>Save as copy</span>
             <span class="dropdown-shortcut">Ctrl+Shift+S</span>
           </button>
+          <button class="dropdown-item-compact" id="ge-retry-save-copy" title="Retry binding the already imported copy" hidden>
+            <span class="dropdown-icon">↻</span>
+            <span>Retry saving copy</span>
+          </button>
           <button class="dropdown-item-compact" id="ge-download" title="Download PNG to your computer">
             <span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>
             <span>Download PNG</span>

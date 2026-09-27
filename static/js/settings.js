@@ -1425,18 +1425,20 @@ var _searchProviderHints = {
   searxng: 'Private, self-hosted instance. Leave URL empty to use the SEARXNG_INSTANCE env var.',
   duckduckgo: 'No API key needed, but rate-limited — heavy use can return empty results. Configure a fallback below.',
   brave: 'Get your API key from ' + _LINK('https://brave.com/search/api/', 'brave.com/search/api'),
+  kagi: 'Premium search API. Generate a token at ' + _LINK('https://kagi.com/api', 'kagi.com/api'),
   google_pse: 'Requires a Google API key and a Programmable Search Engine ID (CX). Create one at ' + _LINK('https://programmablesearchengine.google.com/', 'programmablesearchengine.google.com'),
   tavily: 'AI-optimized search. 1,000 free credits/month at ' + _LINK('https://tavily.com/', 'tavily.com'),
   serper: 'Google results via API. 2,500 free queries at ' + _LINK('https://serper.dev/', 'serper.dev'),
+  mimo: 'Managed hosted search. Select a Search purpose binding in Provider Control; no browser credential is used.',
   disabled: 'Web search and deep research tools will be unavailable.',
 };
-var _searchNeedsKey = { brave: 1, google_pse: 1, tavily: 1, serper: 1 };
+var _searchNeedsKey = { brave: 1, kagi: 1, google_pse: 1, tavily: 1, serper: 1 };
 var _searchLabels = {
-  searxng: 'SearXNG', duckduckgo: 'DuckDuckGo', brave: 'Brave Search',
-  google_pse: 'Google PSE', tavily: 'Tavily', serper: 'Serper', disabled: 'Disabled',
+  searxng: 'SearXNG', duckduckgo: 'DuckDuckGo', brave: 'Brave Search', kagi: 'Kagi Search',
+  google_pse: 'Google PSE', tavily: 'Tavily', serper: 'Serper', mimo: 'MiMo hosted search', disabled: 'Disabled',
 };
 var _searchKeyFields = {
-  brave: 'brave_api_key', google_pse: 'google_pse_key',
+  brave: 'brave_api_key', kagi: 'kagi_api_key', google_pse: 'google_pse_key',
   tavily: 'tavily_api_key', serper: 'serper_api_key',
 };
 
@@ -1468,6 +1470,7 @@ async function initSearchSettings() {
     cxRow.style.display = prov === 'google_pse' ? 'flex' : 'none';
     hint.innerHTML = _searchProviderHints[prov] || '';
     if (prov === 'brave') keyInput.placeholder = 'Brave API key';
+    else if (prov === 'kagi') keyInput.placeholder = 'Kagi API token';
     else if (prov === 'google_pse') keyInput.placeholder = 'Google API key';
     else if (prov === 'tavily') keyInput.placeholder = 'Tavily API key';
     else if (prov === 'serper') keyInput.placeholder = 'Serper API key';
@@ -1963,14 +1966,110 @@ async function initAgentSettings() {
   var roundsInput = el('set-agentMaxRounds');
   var supInput = el('set-agentSupervisorLadder');
   var msg = el('set-agentMsg');
-  if (!toolsInput) return;
+  var nativeStatus = el('set-agentNativeStatus');
+  var nativeEffective = el('set-agentNativeEffective');
+  var nativeSave = el('set-agentNativeSave');
+  var resetNative = el('set-agentNativeReset');
+  if (!toolsInput && !nativeSave) return;
+  var native = {};
+  var settings = {};
+  var nativeOverride = false;
+  var reloadGeneration = 0;
+  var reloadController = null;
+  var nativeFields = {
+    auto: el('set-agentCompactionAuto'), prune: el('set-agentCompactionPrune'),
+    tail: el('set-agentTailTurns'), recent: el('set-agentPreserveRecent'),
+    reserved: el('set-agentCompactionReserved'), maxContext: el('set-agentMaxContext'),
+    thresholds: el('set-agentCheckpointThresholds'), checkpointReserved: el('set-agentCheckpointReserved'),
+    failures: el('set-agentMaxWriterFailures'), fork: el('set-agentCheckpointFork'), caps: el('set-agentPushCaps'),
+  };
 
-  try {
-    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await res.json();
-    if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
+  function showNativeState() {
+    var c = native.compaction || {}, k = native.checkpoint || {};
+    if (nativeFields.auto) nativeFields.auto.checked = c.auto !== false;
+    if (nativeFields.prune) nativeFields.prune.checked = c.prune !== false;
+    if (nativeFields.tail) nativeFields.tail.value = c.tail_turns == null ? 2 : c.tail_turns;
+    if (nativeFields.recent) nativeFields.recent.value = c.preserve_recent_tokens == null ? '' : c.preserve_recent_tokens;
+    if (nativeFields.reserved) nativeFields.reserved.value = c.reserved == null ? '' : c.reserved;
+    if (nativeFields.maxContext) nativeFields.maxContext.value = c.max_context == null ? '' : c.max_context;
+    if (nativeFields.thresholds) nativeFields.thresholds.value = (k.thresholds || []).join(',');
+    if (nativeFields.checkpointReserved) nativeFields.checkpointReserved.value = k.reserved == null ? '' : k.reserved;
+    if (nativeFields.failures) nativeFields.failures.value = k.max_writer_failures == null ? 3 : k.max_writer_failures;
+    if (nativeFields.fork) nativeFields.fork.checked = !!k.fork;
+    if (nativeFields.caps) nativeFields.caps.value = k.push_caps ? JSON.stringify(k.push_caps) : '';
+    if (nativeStatus) nativeStatus.textContent = nativeOverride ? 'Saved override · owner scope · next admitted turn' : 'Inherited native defaults · next admitted turn';
+    var readback = settings && settings.agent_settings_effective;
+    if (nativeEffective) {
+      if (readback && readback.status === 'available' && readback.value) {
+        var value = readback.value;
+        nativeEffective.textContent = 'Effective native values: ' + value.context.hard + ' hard / ' + value.context.usable + ' usable tokens · ' + value.compaction.tailTurns + ' tail turns · reserve ' + value.compaction.reserved;
+      } else nativeEffective.textContent = 'Effective native values: ' + ((readback && readback.status) || 'pending') + ((readback && readback.reason) ? ' (' + readback.reason + ')' : '');
+    }
+  }
+
+  function nativePayload() {
+    var c = {};
+    if (!nativeFields.auto.checked) c.auto = false;
+    if (!nativeFields.prune.checked) c.prune = false;
+    var tail = clampInt(nativeFields.tail.value, 0, 1000, 2);
+    if (tail !== 2) c.tail_turns = tail;
+    var reservedRaw = String(nativeFields.reserved.value || '').trim();
+    if (reservedRaw) c.reserved = clampInt(reservedRaw, 0, 2000000, 20000);
+    var recent = parseInt(nativeFields.recent.value, 10);
+    if (!isNaN(recent)) c.preserve_recent_tokens = Math.max(2000, Math.min(recent, 8000));
+    var max = String(nativeFields.maxContext.value || '').trim(); if (max) c.max_context = max;
+    var k = {};
+    var checkpointReservedRaw = String(nativeFields.checkpointReserved.value || '').trim();
+    if (checkpointReservedRaw) k.reserved = clampInt(checkpointReservedRaw, 0, 2000000, 13000);
+    var failures = clampInt(nativeFields.failures.value, 1, 100, 3);
+    if (failures !== 3) k.max_writer_failures = failures;
+    if (nativeFields.fork.checked) k.fork = true;
+    var thresholds = String(nativeFields.thresholds.value || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    if (thresholds.length) k.thresholds = thresholds;
+    if (String(nativeFields.caps.value || '').trim()) k.push_caps = JSON.parse(nativeFields.caps.value);
+    return { compaction: c, checkpoint: k };
+  }
+
+  async function reloadNativeSettings() {
+    var generation = ++reloadGeneration;
+    if (reloadController) reloadController.abort();
+    reloadController = new AbortController();
+    var res;
+    try {
+      res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin', signal: reloadController.signal });
+    } catch (error) {
+      if (error && (error.name === 'AbortError' || error.code === 20)) return;
+      throw error;
+    }
+    var nextSettings = await res.json();
+    if (generation !== reloadGeneration) return;
+    settings = nextSettings;
+    native = settings.agent_settings || {};
+    nativeOverride = settings.agent_settings_override === true;
+    showNativeState();
+    if (toolsInput && settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
+  }
+
+  try {
+    await reloadNativeSettings();
+    if (resetNative) resetNative.onclick = async () => {
+      try {
+        await checkedFetch('/api/auth/settings', { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agent_settings:null}) });
+        await reloadNativeSettings();
+      } catch (e) { if (nativeStatus) nativeStatus.textContent = 'Failed to reset native settings'; }
+    };
+    if (nativeSave) nativeSave.onclick = async () => {
+      try {
+        var saved = nativePayload();
+        await checkedFetch('/api/auth/settings', { method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agent_settings:saved}) });
+        await reloadNativeSettings();
+      } catch (e) { if (nativeStatus) nativeStatus.textContent = 'Invalid native settings: ' + e.message; }
+    };
+    window.addEventListener('openclank:default-chat-changed', function() {
+      reloadNativeSettings().catch(function() { if (nativeStatus) nativeStatus.textContent = 'Native settings readback unavailable'; });
+    });
   } catch (e) {}
 
   // Clamp + coerce a raw input to an int in [lo, hi]; falls back to `dflt`
@@ -2001,6 +2100,7 @@ async function initAgentSettings() {
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
 
+  if (!toolsInput) return;
   toolsInput.addEventListener('change', save);
   if (roundsInput) roundsInput.addEventListener('change', save);
   if (supInput) supInput.addEventListener('change', save);
@@ -2234,6 +2334,7 @@ const SHORTCUT_DEFAULTS = {
   open_notes:     '',
   open_tasks:     '',
   open_theme:     '',
+  open_usage:     '',
 };
 
 const SHORTCUT_ICONS = {
@@ -2257,6 +2358,7 @@ const SHORTCUT_ICONS = {
   open_notes:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg>',
   open_tasks:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>',
   open_theme:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg>',
+  open_usage:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M7 15l3-4 3 2 4-6"/></svg>',
 };
 
 const SHORTCUT_LABELS = {
@@ -2280,13 +2382,14 @@ const SHORTCUT_LABELS = {
   open_notes:     'Open Editor',
   open_tasks:     'Open Clanker Tasks',
   open_theme:     'Open Theme',
+  open_usage:     'Open Usage',
 };
 
 const SHORTCUT_CATEGORIES = [
   { name: 'Navigation', keys: ['search', 'toggle_sidebar', 'focus_input', 'settings'] },
   { name: 'Sessions', keys: ['new_session', 'fav_session', 'delete_session'] },
   { name: 'Tools', keys: ['incognito', 'tts', 'cancel'] },
-  { name: 'Open Tools', keys: ['open_calendar', 'open_compare', 'open_cookbook', 'open_research', 'open_gallery', 'open_library', 'open_memory', 'open_notes', 'open_tasks', 'open_theme'] },
+  { name: 'Open Tools', keys: ['open_calendar', 'open_compare', 'open_cookbook', 'open_research', 'open_gallery', 'open_library', 'open_memory', 'open_notes', 'open_tasks', 'open_theme', 'open_usage'] },
 ];
 
 function _formatKeyCaps(combo) {
@@ -2761,8 +2864,10 @@ function initAll() {
   if (window._isAdmin) {
     initSearchSettings();
     initResearchSearchSettings();
-    initAgentSettings();
   }
+  // Agent settings are owner-scoped runtime policy, so regular authenticated
+  // users must receive the same load/save/readback path as administrators.
+  window.__agentSettingsReady = initAgentSettings();
   initAppearance();
   initShortcuts();
   initAccount();

@@ -12,7 +12,7 @@ const _defaultKeybinds = {
   // Open-tool shortcuts (Calendar bound by default; rest unbound).
   open_calendar: 'ctrl+alt+c', open_compare: '', open_cookbook: '',
   open_research: '', open_gallery: '', open_library: '', open_memory: '',
-  open_notes: '', open_tasks: '', open_theme: '',
+  open_notes: '', open_tasks: '', open_theme: '', open_usage: '',
 };
 
 export function _matchesCombo(e, combo, isMac = IS_MAC) {
@@ -273,6 +273,7 @@ export function initKeyboardShortcuts(modules) {
       open_notes:    'tool-notes-btn',
       open_tasks:    'tool-tasks-btn',
       open_theme:    'tool-theme-btn',
+      open_usage:    'tool-usage-btn',
     };
     for (const action in _toolBtns) {
       if (_matchesCombo(e, kb[action])) {

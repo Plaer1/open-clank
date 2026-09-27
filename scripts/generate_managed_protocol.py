@@ -62,10 +62,10 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
     mapping = schema.get("x-openclank-methods")
     if not isinstance(methods, list) or not isinstance(operations, list) or not isinstance(mapping, dict):
         raise RuntimeError("managed schema is missing method or operation metadata")
-    if len(methods) != 23 or len(set(methods)) != 23:
-        raise RuntimeError(f"managed contract must contain 23 unique methods; found {len(methods)}")
-    if len(operations) != 15 or len(set(operations)) != 15:
-        raise RuntimeError(f"managed contract must contain 15 unique operations; found {len(operations)}")
+    if len(methods) != 25 or len(set(methods)) != 25:
+        raise RuntimeError(f"managed contract must contain 25 unique methods; found {len(methods)}")
+    if len(operations) != 16 or len(set(operations)) != 16:
+        raise RuntimeError(f"managed contract must contain 16 unique operations; found {len(operations)}")
     if set(mapping) != set(methods):
         raise RuntimeError("managed method wire mappings do not cover the exact method set")
 
@@ -73,13 +73,13 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
     provider_control = [method for method in methods if method.startswith("_openclank/provider-control/")]
     operation_methods = [method for method in methods if method.startswith("_openclank/operations/")]
     session_methods = [method for method in methods if method.startswith("_openclank/session/")]
-    if (len(provider_store), len(provider_control), len(operation_methods), len(session_methods)) != (9, 7, 5, 2):
-        raise RuntimeError("managed method families must contain 9 store, 7 control, 5 operation, and 2 session methods")
+    if (len(provider_store), len(provider_control), len(operation_methods), len(session_methods)) != (9, 7, 6, 3):
+        raise RuntimeError("managed method families must contain 9 store, 7 control, 6 operation, and 3 session methods")
     directions = {method: mapping[method].get("direction") for method in methods}
     if any(direction not in {"engine_to_host", "host_to_engine"} for direction in directions.values()):
         raise RuntimeError("managed method wire mappings must declare a valid callback direction")
     engine_methods = [method for method in methods if directions[method] == "host_to_engine"]
-    expected_engine_methods = provider_control + ["_openclank/operations/v1/execute"]
+    expected_engine_methods = provider_control + ["_openclank/operations/v1/execute", "_openclank/operations/v1/cancel", "_openclank/session/v1/settings/effective"]
     if set(engine_methods) != set(expected_engine_methods):
         raise RuntimeError("managed callback directions do not preserve host engine authority")
     return {

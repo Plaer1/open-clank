@@ -189,10 +189,24 @@ class ACPClient:
 
         if not isinstance(params, dict):
             raise TypeError("managed operation parameters must be an object")
-        return await self._send_request(
-            "_openclank/operations/v1/execute",
-            params,
-        )
+        try:
+            return await self._send_request("_openclank/operations/v1/execute", params)
+        except asyncio.CancelledError:
+            cancel = {
+                "rootOperationID": params.get("rootOperationID"),
+                "idempotencyKey": params.get("idempotencyKey"),
+            }
+            if all(isinstance(value, str) and value for value in cancel.values()):
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(self._send_request("_openclank/operations/v1/cancel", cancel)),
+                        timeout=0.25,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("managed operation cancellation notification timed out")
+                except Exception:
+                    logger.warning("managed operation cancellation could not reach the engine")
+            raise
 
     async def close(self) -> None:
         if self._closed:

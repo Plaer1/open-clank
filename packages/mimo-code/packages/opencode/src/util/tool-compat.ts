@@ -12,6 +12,20 @@ export function canonical(name: string, ignoreCase = true): string {
   return ignoreCase ? collapsed.toLowerCase() : collapsed
 }
 
+/** Resolve provider tool-name spelling back to the locally registered tool. */
+export function resolveName(name: string, registered: readonly string[]): string | undefined {
+  if (registered.includes(name)) return name
+  const wanted = canonical(name)
+  const exact = registered.find((candidate) => canonical(candidate) === wanted)
+  if (exact) return exact
+  const stripped = name.replace(/^(?:functions?|tools?)\./i, "")
+  if (stripped !== name) {
+    const normalized = canonical(stripped)
+    return registered.find((candidate) => canonical(candidate) === normalized)
+  }
+  return undefined
+}
+
 export function schemaPropertyKeys(schema: JSONSchema7): string[] {
   if (!isRecord(schema.properties)) return []
   return Object.keys(schema.properties)

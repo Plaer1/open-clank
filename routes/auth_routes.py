@@ -31,6 +31,7 @@ from src.settings import (
     DEFAULT_SETTINGS,
     PER_USER_MODEL_SETTING_KEYS,
 )
+from src.agent_settings import validate_agent_settings
 from routes.prefs_routes import (
     _load as _load_prefs,
     _load_for_user,
@@ -329,6 +330,7 @@ def _settings_for_user(settings: dict, user: str) -> dict:
     scoped = dict(settings)
     for key in PER_USER_MODEL_SETTING_KEYS:
         scoped[key] = prefs[key] if key in prefs else DEFAULT_SETTINGS[key]
+    scoped["agent_settings_override"] = bool(user and "agent_settings" in prefs)
     return scoped
 
 
@@ -4033,6 +4035,34 @@ def setup_auth_routes(
         settings = _load_settings()
         if user:
             settings = _settings_for_user(settings, user)
+            supervisor = getattr(getattr(request.app, "state", None), "mimo_supervisor", None)
+            # Resolve the actual normalized chat route.  Legacy endpoint/model
+            # display selectors are not provider authority; the durable chat
+            # purpose binding (with its catalog fallback) is.
+            route = None
+            try:
+                from src.openclank.modality_facade import _configured_text_route
+                from src.openclank.chat_routing import resolve_chat_model_spec
+
+                route = _configured_text_route(
+                    owner=str(user), purpose="chat", operation="chat.complete"
+                )
+                if route is None:
+                    route = resolve_chat_model_spec(owner=str(user), model_spec="auto")
+            except Exception:
+                route = None
+            provider_id = str(getattr(route, "connection_id", "") or "").strip()
+            model_id = str(getattr(route, "provider_model_id", "") or "").strip()
+            if supervisor is not None and provider_id and model_id:
+                try:
+                    settings["agent_settings_effective"] = {"status": "available", "value": await supervisor.ready_effective_agent_settings(user, provider_id, model_id)}
+                except Exception as exc:
+                    code = str(getattr(exc, "code", "") or "")
+                    if code not in {"SUPERVISOR_UNAVAILABLE", "MODEL_NOT_PROJECTED"}:
+                        code = "ENGINE_READBACK_UNAVAILABLE"
+                    settings["agent_settings_effective"] = {"status": "unavailable", "reason": code}
+            else:
+                settings["agent_settings_effective"] = {"status": "pending", "reason": "CHAT_ROUTE_UNAVAILABLE"}
         elif auth_manager.is_configured and not _auth_disabled():
             # The route is intentionally readable before login for UI boot.
             # Never expose the operator's selected endpoints/models there.
@@ -4071,6 +4101,11 @@ def setup_auth_routes(
             for key in PER_USER_MODEL_SETTING_KEYS
             if key in body
         }
+        if "agent_settings" in body:
+            try:
+                model_update["agent_settings"] = validate_agent_settings(body["agent_settings"])
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         if "reminder_endpoints" in model_update:
             try:
                 model_update["reminder_endpoints"] = normalize_endpoints(
@@ -4110,6 +4145,9 @@ def setup_auth_routes(
         if user:
             if model_update:
                 prefs = _load_for_user(user)
+                if "agent_settings" in body and body["agent_settings"] is None:
+                    model_update.pop("agent_settings", None)
+                    prefs.pop("agent_settings", None)
                 prefs.update(model_update)
                 _save_for_user(user, prefs)
             if global_update:
@@ -4119,6 +4157,9 @@ def setup_auth_routes(
 
         # Explicit auth-disabled mode retains the historical single-user
         # settings.json behavior for every setting, including model choices.
+        if "agent_settings" in body and body["agent_settings"] is None:
+            model_update.pop("agent_settings", None)
+            current.pop("agent_settings", None)
         current.update(model_update)
         _save_settings(current)
         return current

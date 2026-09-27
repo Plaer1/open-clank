@@ -29,6 +29,7 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
+    "agent_settings": {"compaction": {"auto": True, "prune": True, "tail_turns": 2, "preserve_recent_tokens": None, "reserved": 20000, "max_context": None}, "checkpoint": {"reserved": 13000, "max_writer_failures": 3, "fork": False, "push_caps": {}}},
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a
@@ -42,6 +43,8 @@ DEFAULT_SETTINGS = {
     "image_quality": "medium",
     "vision_model": "",
     "vision_enabled": True,
+    # Desktop capture is a separate owner-scoped opt-in and is never model-controlled.
+    "desktop_capture_enabled": False,
     # Ordered fallback chain for the Vision model (image analysis, OCR, tagging).
     "vision_model_fallbacks": [],
     # Public base URL used to build clickable deep-links in outgoing alerts
@@ -82,6 +85,7 @@ DEFAULT_SETTINGS = {
     # niche search instances.
     "search_safesearch": "strict",
     "brave_api_key": "",
+    "kagi_api_key": "",
     "google_pse_key": "",
     "google_pse_cx": "",
     "tavily_api_key": "",
@@ -281,7 +285,7 @@ PER_USER_MODEL_SETTING_KEYS = frozenset({
     "memory_endpoint_id", "memory_model", "memory_model_fallbacks",
     "research_endpoint_id", "research_model",
     "task_endpoint_id", "task_model",
-    "vision_model", "vision_enabled", "vision_model_fallbacks",
+    "vision_model", "vision_enabled", "vision_model_fallbacks", "desktop_capture_enabled",
     "image_model", "image_gen_enabled", "image_quality",
     "teacher_model", "teacher_enabled", "teacher_tier2_enabled",
     "tts_enabled", "tts_provider", "tts_model", "tts_voice", "tts_speed",
@@ -293,6 +297,7 @@ PER_USER_MODEL_SETTING_KEYS = frozenset({
     "reminder_ntfy_topic", "reminder_email_to", "reminder_email_account_id",
     "reminder_webhook_integration_id", "reminder_webhook_payload_template",
     "reminder_endpoints",
+    "agent_settings",
 })
 
 

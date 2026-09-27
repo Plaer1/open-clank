@@ -1111,6 +1111,15 @@ app.include_router(setup_preset_routes(preset_manager))
 from routes.diagnostics_routes import setup_diagnostics_routes
 app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler, memory_vector))
 
+from routes.stats_routes import setup_stats_routes
+app.include_router(setup_stats_routes())
+from routes.stats_analysis_routes import setup_stats_analysis_routes
+app.include_router(setup_stats_analysis_routes())
+from routes.stats_activity_routes import setup_stats_activity_routes
+app.include_router(setup_stats_activity_routes())
+from routes.stats_preferences_routes import setup_stats_preferences_routes
+app.include_router(setup_stats_preferences_routes())
+
 # Cleanup
 from routes.cleanup.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))
@@ -1348,6 +1357,7 @@ _SHELL_APPLET_PATHS = (
     "/files",
     "/calendar",
     "/cookbook",
+    "/usage",
     "/email",
     "/memory",
     "/gallery",

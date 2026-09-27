@@ -5,8 +5,11 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { withCopalBrowser } from './helpers/copal_browser_fixture.mjs';
 
+const childEnvironment = { ...process.env };
+delete childEnvironment.NODE_TEST_CONTEXT;
+
 const PRODUCTION_JOURNEYS = [
-  ['theme-pink-default', 'tests/theme_browser_acceptance.mjs', 'test'],
+  ['theme-pink-default', 'tests/theme_browser_acceptance.mjs', 'script'],
   ['shared-provider-label', 'tests/model_labels.mjs', 'script'],
   ['modelled-children', 'tests/provider_add_models_browser_acceptance.mjs', 'script'],
   ['template-source', 'tests/copal_host_template_provider_browser_acceptance.mjs', 'script'],
@@ -14,7 +17,7 @@ const PRODUCTION_JOURNEYS = [
   ['rich-comments-source', 'tests/copal_multicursor_browser_acceptance.mjs', 'script'],
   ['files-history-treehouse', 'tests/copal_mounted_editor_memes_acceptance.mjs', 'script', [
     ['tests/history_settings_production_browser_acceptance.mjs', 'script'],
-    ['tests/treehouse_field_guide_browser_acceptance.mjs', 'test'],
+    ['tests/treehouse_field_guide_browser_acceptance.mjs', 'script'],
   ]],
   ['locale-account-reload-persistence', 'tests/i18n_browser_acceptance.mjs', 'script'],
   ['reminders-retained', 'tests/reminder_settings_production_browser_acceptance.mjs', 'script'],
@@ -26,7 +29,7 @@ function runProductionJourney(label, fixture, mode, supplementalSpecs = []) {
     const result = spawnSync(process.execPath, args, {
       cwd: process.cwd(),
       encoding: 'utf8',
-      env: process.env,
+      env: childEnvironment,
       maxBuffer: 16 * 1024 * 1024,
     });
     const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();

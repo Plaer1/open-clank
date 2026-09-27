@@ -481,7 +481,7 @@ repo.create_workspace(
   })()`);
   assert.equal(copalDocument.status, 200, JSON.stringify(copalDocument));
   const copalId = copalDocument.body.doc.id;
-  await navigatePage(`${base}/copal/editor`);
+  await navigatePage(`${base}/editor`);
   await until('document.querySelector("#copal-notes-modal:not(.hidden) .copal-notes-workspace") != null');
   await evaluate('document.querySelector("#copal-notes-modal button[aria-label=\\"Quick switcher\\"]").dispatchEvent(new Event("click", {bubbles:true}))');
   await until('document.querySelector("dialog.copal-quick-switcher[open] input") != null');

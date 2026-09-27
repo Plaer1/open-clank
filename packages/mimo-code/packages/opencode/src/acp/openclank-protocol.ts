@@ -433,6 +433,15 @@ export interface OperationExecuteResult {
   readonly output: Record<string, unknown>
   readonly artifacts: readonly ArtifactDescriptor[]
   readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number; readonly totalTokens?: number }
+  /** Bounded passive API capacity; never raw headers or provider bodies. */
+      readonly quota?: {
+        readonly transport?: "documented"
+        readonly adapterRevision?: string
+        readonly requests?: { readonly limit?: number; readonly remaining?: number; readonly resetAt?: string }
+        readonly tokens?: { readonly limit?: number; readonly remaining?: number; readonly resetAt?: string }
+        readonly inputTokens?: { readonly limit?: number; readonly remaining?: number; readonly resetAt?: string }
+        readonly outputTokens?: { readonly limit?: number; readonly remaining?: number; readonly resetAt?: string }
+  }
   readonly modelFingerprint?: string
   readonly dimension?: number
   readonly replayed: boolean
@@ -479,6 +488,30 @@ export interface SessionBindingReadResult {
   readonly mappingRevision: number
 }
 
+export interface OperationCancelRequest {
+  readonly rootOperationID: string
+  readonly idempotencyKey: string
+}
+
+export interface OperationCancelResult {
+  readonly operationID: string
+  readonly rootOperationID: string
+  readonly state: "pending" | "cancelled" | "complete" | "failed"
+}
+
+export interface SessionSettingsEffectiveRequest {
+  readonly providerID: string
+  readonly modelID: string
+}
+
+export interface SessionSettingsEffectiveResult {
+  readonly providerID: string
+  readonly modelID: string
+  readonly context: { readonly hard: number; readonly effective: number; readonly usable: number; readonly source: "model" | "config"; readonly input: number; readonly output: number }
+  readonly compaction: { readonly auto: boolean; readonly prune: boolean; readonly tailTurns: number; readonly preserveRecentTokens: number; readonly reserved: number }
+  readonly checkpoint: { readonly thresholds: readonly number[]; readonly reserved: number; readonly maxWriterFailures: number; readonly fork: boolean; readonly pushCaps: Record<string, number> }
+}
+
 export interface MethodRequestMap {
   "_openclank/provider-store/v1/account/bind": AccountSelection.SelectionRequest
   "_openclank/provider-store/v1/account/commit": AccountCommitRequest
@@ -493,6 +526,7 @@ export interface MethodRequestMap {
   "_openclank/operations/v1/artifact/read": ArtifactReadRequest
   "_openclank/operations/v1/artifact/write": ArtifactWriteRequest
   "_openclank/operations/v1/executor/invoke": ExecutorInvokeRequest
+  "_openclank/operations/v1/cancel": OperationCancelRequest
   "_openclank/session/v1/cwd/change": SessionCwdChangeRequest
   "_openclank/session/v1/binding/read": SessionBindingReadRequest
 }
@@ -511,6 +545,7 @@ export interface MethodResultMap {
   "_openclank/operations/v1/artifact/read": ArtifactReadResult
   "_openclank/operations/v1/artifact/write": ArtifactDescriptor
   "_openclank/operations/v1/executor/invoke": ArtifactDescriptor
+  "_openclank/operations/v1/cancel": OperationCancelResult
   "_openclank/session/v1/cwd/change": SessionCwdChangeResult
   "_openclank/session/v1/binding/read": SessionBindingReadResult
 }
@@ -524,6 +559,8 @@ export interface EngineMethodRequestMap {
   "_openclank/provider-control/v1/oauth/callback": OAuthCompletionRequest
   "_openclank/provider-control/v1/oauth/cancel": OAuthCompletionRequest
   "_openclank/operations/v1/execute": OperationExecuteRequest
+  "_openclank/operations/v1/cancel": OperationCancelRequest
+  "_openclank/session/v1/settings/effective": SessionSettingsEffectiveRequest
 }
 
 export interface EngineMethodResultMap {
@@ -535,6 +572,8 @@ export interface EngineMethodResultMap {
   "_openclank/provider-control/v1/oauth/callback": OAuthCompletionResult
   "_openclank/provider-control/v1/oauth/cancel": OAuthCancelResult
   "_openclank/operations/v1/execute": OperationExecuteResult
+  "_openclank/operations/v1/cancel": OperationCancelResult
+  "_openclank/session/v1/settings/effective": SessionSettingsEffectiveResult
 }
 
 const ENGINE_METHOD_SET: ReadonlySet<string> = new Set(

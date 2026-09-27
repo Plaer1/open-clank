@@ -97,8 +97,8 @@ try {
     window.fetch = async (input, options = {}) => {
       const url = String(input);
       requests.push({ url, method:options.method || 'GET' });
-      if (url.endsWith('/api/v1/providers/families')) {
-        return json({ families:[
+      if (url.includes('/api/v1/providers/families')) {
+        return json({ schema_version:1, families:[
           {
             id:'openai', display_name:'OpenAI', adapters:['openai-responses'],
             kinds:['official'], billing_lanes:['metered_api'], model_count:1,
@@ -114,24 +114,15 @@ try {
           },
         ] });
       }
-      if (url.endsWith('/api/v1/providers/connections')) {
-        return json({ connections:[{
+      if (url.includes('/api/v1/providers/management-snapshot')) {
+        return json({ schema_version:1, connections:[{
           id:'pcn-browser', family_id:'openai', adapter_id:'openai-responses',
           kind:'official', billing_lane:'metered_api', label:'OpenAI API',
           url:null, enabled:true, revision:1,
-        }] });
-      }
-      if (url.endsWith('/api/v1/providers/connections/pcn-browser/accounts')) {
-        return json({ accounts:[{
-          id:'pac-browser', connection_id:'pcn-browser', label:'Primary',
-          auth_method:'api_key', auth_class:'metered', order:0, enabled:true, revision:1,
-        }] });
-      }
-      if (url.endsWith('/api/v1/providers/models')) {
-        return json({ models:[{
+        }], models:[{
           id:'pmr-browser', connection_id:'pcn-browser', model_id:'gpt-browser',
           display_name:'GPT Browser', operations:['chat.stream'], enabled:true, revision:1,
-        }] });
+        }], shares:{received:[]} });
       }
       if (url.endsWith('/api/v1/providers/bindings')) return json({ bindings:[] });
       if (url.endsWith('/api/v1/providers/shares')) return json({ shares:[] });
@@ -145,8 +136,11 @@ try {
     };
     const providers = await import('/static/js/providerControl.js?added-models-regression=2');
     providers.init();
-    await providers.load();
+    await providers.load({ view: 'services' });
+    await providers.load({ view: 'added-models' });
+    const initialRequests = [...requests];
     providers.selectConnection('pcn-browser');
+    document.querySelector('.provider-control-connection-toggle')?.click();
     HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
     return {
       quickAdd: document.getElementById('provider-control-create')?.textContent.trim() || '',
@@ -166,6 +160,7 @@ try {
       addedTabHidden: document.querySelector('[data-settings-tab="added-models"]')?.classList.contains('hidden'),
       selected,
       requests,
+      initialRequests,
       errors,
     };
   })()`);
@@ -184,15 +179,15 @@ try {
     'normal model rows do not expose operation identifiers');
   assert.deepEqual(addedModelsState.connectionGroups, ['api'], 'Added Models groups API connection rows');
   assert.equal(addedModelsState.expandButtons.length, 1);
-  assert.equal(addedModelsState.expandButtons[0].expanded, 'false', 'compact connection row begins collapsed');
+  assert.equal(addedModelsState.expandButtons[0].expanded, 'true', 'selected connection expands its model routes');
   assert.ok(addedModelsState.expandButtons[0].controls, 'compact connection row identifies its managed details');
   assert.equal(addedModelsState.addedTabHidden, false, 'Added Models remains a visible settings destination');
   assert.equal(addedModelsState.selected, 'pcn-browser', 'connection selection reaches the sibling Added Models panel');
-  assert.ok(addedModelsState.requests.some(request => request.url.includes('/api/v1/providers/connections')));
+  assert.ok(addedModelsState.requests.some(request => request.url.includes('/api/v1/providers/management-snapshot')));
   assert.equal(addedModelsState.requests.some(request => (
     request.url.includes('/api/model-endpoints') || request.url.includes('/api/mimo/providers')
   )), false, 'provider views do not fall back to retired provider APIs');
-  assert.equal(addedModelsState.requests.some(request => request.url.includes('/eligibility')), false,
+  assert.equal(addedModelsState.initialRequests.some(request => request.url.includes('/eligibility')), false,
     'Added Models first paint does not wait for per-model health');
   assert.deepEqual(addedModelsState.errors, [], 'Added Models renders without browser errors');
 

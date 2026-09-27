@@ -178,6 +178,75 @@ async def test_refs_and_cursors_cannot_cross_owner_policy_or_query():
 
 
 @pytest.mark.asyncio
+async def test_open_on_host_rejects_cross_owner_and_stale_refs_before_native_work():
+    facade = FilesFacade([FakeProvider()])
+    context = _context()
+    token = issue_resource_ref(
+        owner_subject_id=context.owner_subject_id,
+        provider="gallery",
+        origin_id="image-0",
+        kind="image",
+        capabilities=("stat", "open"),
+        policy_generation=context.policy_generation,
+    ).token
+    with pytest.raises(FilesFacadeError) as wrong_owner:
+        await facade.host_applications(_context(owner_subject_id="account-bob"), resource_ref=token)
+    assert wrong_owner.value.code == "resource_unavailable"
+    with pytest.raises(FilesFacadeError) as stale:
+        await facade.open_on_host(replace(context, policy_generation=context.policy_generation + 1), resource_ref=token, app_id="com.example.Editor")
+    assert stale.value.code == "resource_ref_stale"
+
+
+@pytest.mark.asyncio
+async def test_native_content_path_rejects_symlink_and_preserves_provider_auth_error(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("secret")
+
+    class PathProvider(FakeProvider):
+        async def stat(self, context, *, origin_id):
+            return ProviderResource(origin_id, "Asset", "file", ("stat", "open"))
+
+        async def content(self, context, *, origin_id):
+            return ProviderContent(origin_id, "Asset", "text/plain", path=tmp_path / "link.txt")
+
+    (tmp_path / "link.txt").symlink_to(target)
+    context = _context()
+    token = issue_resource_ref(
+        owner_subject_id=context.owner_subject_id,
+        provider="gallery",
+        origin_id="asset",
+        kind="file",
+        capabilities=("stat", "open"),
+        policy_generation=context.policy_generation,
+    ).token
+    with pytest.raises(FilesFacadeError) as symlink:
+        await FilesFacade([PathProvider()]).host_applications(context, resource_ref=token)
+    assert symlink.value.code == "native_open_unsupported"
+
+    class DeniedProvider(PathProvider):
+        async def content(self, context, *, origin_id):
+            raise FilesFacadeError("resource is unavailable", code="resource_unavailable")
+
+    with pytest.raises(FilesFacadeError) as auth:
+        await FilesFacade([DeniedProvider()]).host_applications(context, resource_ref=token)
+    assert auth.value.code == "resource_unavailable"
+
+    class StaleProvider(PathProvider):
+        async def content(self, context, *, origin_id):
+            return ProviderContent(
+                origin_id,
+                "Asset",
+                "text/plain",
+                path=target,
+                expected_identity=(0, 0, 0, 0),
+            )
+
+    with pytest.raises(FilesFacadeError) as stale:
+        await FilesFacade([StaleProvider()]).host_applications(context, resource_ref=token)
+    assert stale.value.code == "resource_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_folder_sort_capabilities_are_public_enforced_and_cursor_bound():
     class NegotiatedProvider(FakeProvider):
         sort_keys = ("name", "modified")

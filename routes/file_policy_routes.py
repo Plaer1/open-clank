@@ -14,6 +14,7 @@ from src.openclank.file_policy import FilePolicyError, FilePolicyRepository
 from src.openclank.files_service_client import close_all_clients
 from src.openclank.filesystem_registry import FilesystemRegistryError, FilesystemRootRegistry
 from src.openclank.media_attachment_targets import adopt_loose_media_for_workspace
+from src.openclank.history_capture import trusted_tool_context
 from src.openclank.permission_grants import GrantStore
 from src.openclank.workspace_policy_service import (
     WorkspacePolicyServiceError,
@@ -753,7 +754,14 @@ def setup_file_policy_routes(
                     owner_subject_id=owner_subject_id,
                     workspace_root=workspace_root,
                     workspace_id=workspace_id,
+                    history_context=trusted_tool_context(
+                        actor_id=_username,
+                        account_id=subject_id,
+                        workspace_id=workspace_id,
+                        workspace_root=workspace_root,
+                    ),
                 ),
+                media_receipt=getattr(getattr(request, "state", None), "history_capture", None),
             )
         except WorkspacePolicyServiceError as error:
             raise_workspace(error)

@@ -62,9 +62,12 @@ export function createSceneOwner(options = {}) {
 
   let animationFrame = 0;
   let paintOnceFrame = 0;
+  let paintOnceToken = 0;
   let disposed = false;
   let suspended = false;
   let started = false;
+  let painting = false;
+  let repaintAfterPaint = false;
   let lastTime = 0;
   let frames = 0;
 
@@ -77,6 +80,7 @@ export function createSceneOwner(options = {}) {
       win.cancelAnimationFrame(paintOnceFrame);
     }
     paintOnceFrame = 0;
+    paintOnceToken += 1;
   }
 
   function scheduleFrame() {
@@ -103,9 +107,20 @@ export function createSceneOwner(options = {}) {
       scene.advance(0, true);
     }
     lastTime = time;
-    paint(time, reduced, scene);
-    frames += 1;
-    if (scene && typeof scene.markPainted === 'function') scene.markPainted();
+    painting = true;
+    try {
+      paint(time, reduced, scene);
+      frames += 1;
+      if (scene && typeof scene.markPainted === 'function') scene.markPainted();
+    } finally {
+      painting = false;
+    }
+    if (reduced && repaintAfterPaint && !disposed && !suspended) {
+      repaintAfterPaint = false;
+      paintOnce();
+    } else {
+      repaintAfterPaint = false;
+    }
     scheduleFrame();
   }
 
@@ -121,9 +136,29 @@ export function createSceneOwner(options = {}) {
     }
     const reduced = reducedMotionOf();
     if (reduced) {
-      paint(performanceNow(), true, scene);
-      frames += 1;
-      if (scene && typeof scene.markPainted === 'function') scene.markPainted();
+      if (painting) {
+        repaintAfterPaint = true;
+        return;
+      }
+      // Defer the one-shot paint. Consumers can call owner.start() while
+      // their draw callback is still being assigned; a synchronous reduced
+      // paint would re-enter that callback before construction completes.
+      if (paintOnceFrame) return;
+      if (typeof win.requestAnimationFrame !== 'function') {
+        const token = ++paintOnceToken;
+        paintOnceFrame = 1;
+        Promise.resolve().then(() => {
+          if (token !== paintOnceToken || disposed || suspended || !reducedMotionOf()) return;
+          paintOnceFrame = 0;
+          frame(performanceNow());
+        });
+        return;
+      }
+      paintOnceFrame = win.requestAnimationFrame((time) => {
+        paintOnceFrame = 0;
+        if (disposed || suspended || !reducedMotionOf()) return;
+        frame(time);
+      });
       return;
     }
     scheduleFrame();

@@ -258,6 +258,24 @@ export class FilesFacadeClient {
     });
   }
 
+  hostApps(resourceRef, { signal = null } = {}) {
+    const value = String(resourceRef || '').trim();
+    if (!value) throw new TypeError('resource reference is required');
+    return this._request('/host-apps', {
+      method: 'POST', signal, body: { resource_ref: value },
+    });
+  }
+
+  openHost(resourceRef, appId, { signal = null } = {}) {
+    const value = String(resourceRef || '').trim();
+    const application = String(appId || '').trim();
+    if (!value) throw new TypeError('resource reference is required');
+    if (!application || application.length > 512) throw new TypeError('host application is invalid');
+    return this._request('/open-host', {
+      method: 'POST', signal, body: { resource_ref: value, app_id: application },
+    });
+  }
+
   workspace(resourceRef, purpose = 'app_folder', { signal = null } = {}) {
     const normalized = String(purpose || '').trim();
     if (!['app_folder', 'agent_workspace'].includes(normalized)) {

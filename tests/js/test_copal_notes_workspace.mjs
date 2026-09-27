@@ -349,6 +349,44 @@ assert.ok(!workspacePanelsForSide(panelWs, 'right').includes('outline'));
   assert.equal(workspaceLeaves(ws3).length, 2);
 }
 
+// ── S15 nit-fix: pin guard, same-doc scroll/selection, dirty-buffer survival ──
+{
+  const ws = normalizeNotesWorkspace({}, docs, 'a');
+  const active = findWorkspaceLeaf(ws);
+  active.pinned = true;
+  active.selection = { anchor:1, head:3 };
+  active.scrollTop = 40;
+  const opened = openWorkspaceDocument(ws, docs[1], { intent:'current' });
+  assert.notEqual(opened.id, active.id, 'current intent does not replace a pinned leaf');
+  assert.equal(active.docId, 'a', 'pinned leaf keeps its document');
+  assert.equal(opened.docId, 'b');
+  assert.equal(workspaceLeaves(ws).length, 2, 'pinned replace falls through to a new tab');
+  const group = workspaceGroups(ws)[0];
+  assert(activateWorkspaceLeaf(ws, group.id, active.id));
+  const again = openWorkspaceDocument(ws, docs[0], { intent:'current' });
+  assert.equal(again.id, active.id, 'pinned tab showing the target is activated');
+  assert.equal(workspaceLeaves(ws).length, 2, 'no duplicate tab for an already-open pinned doc');
+
+  const ws4 = normalizeNotesWorkspace({}, docs, 'a');
+  const leaf4 = findWorkspaceLeaf(ws4);
+  leaf4.selection = { anchor:2, head:5 };
+  leaf4.scrollTop = 120;
+  const same = openWorkspaceDocument(ws4, docs[0], { intent:'current' });
+  assert.equal(same.id, leaf4.id);
+  assert.deepEqual(same.selection, { anchor:2, head:5 }, 'same-doc current keeps selection');
+  assert.equal(same.scrollTop, 120, 'same-doc current keeps scrollTop');
+
+  const ws5 = normalizeNotesWorkspace({}, docs, 'a');
+  const dirtyBuffers = new Map([['a', { dirty:true, text:'unsaved alpha' }]]);
+  const leaf5 = findWorkspaceLeaf(ws5);
+  const replaced5 = openWorkspaceDocument(ws5, docs[1], { intent:'current' });
+  assert.equal(replaced5.id, leaf5.id);
+  assert.equal(replaced5.docId, 'b');
+  assert.equal(dirtyBuffers.get('a')?.text, 'unsaved alpha', 'dirty buffer for the replaced doc survives');
+  assert.equal(dirtyBuffers.get('a')?.dirty, true);
+  assert.equal(dirtyBuffers.has('b'), false, 'replace does not fabricate a buffer for the new doc');
+}
+
 // ── S15: navigationIntentFromEvent modifier mapping ──
 {
   assert.equal(navigationIntentFromEvent(null), 'current');

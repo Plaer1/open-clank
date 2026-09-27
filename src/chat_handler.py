@@ -15,7 +15,7 @@ from src.constants import (
 )
 from core.models import ChatMessage
 from src.chat_helpers import extract_urls
-from src.document_processor import build_user_content, analyze_image_with_vl_result_async
+from src.document_processor import build_user_content
 from src.generated_images import gallery_owner_key
 from src.openclank.chat_routing import ChatRouteUnavailable, resolve_chat_route
 from src.youtube_handler import (
@@ -174,7 +174,10 @@ class ChatHandler:
                 has_youtube = True
                 logger.info(f"Processing YouTube URL: {url}")
                 # Fetch transcript and comments in parallel
-                transcript_task = extract_transcript_async(url, video_id)
+                # Let transcript retrieval search the complete timed caption
+                # stream for the user's actual question before it bounds the
+                # context passed to the model. This preserves late matches.
+                transcript_task = extract_transcript_async(url, video_id, query=message)
                 comments_task = fetch_youtube_comments(video_id)
                 transcript_data, comments_data = await asyncio.gather(
                     transcript_task, comments_task
@@ -197,7 +200,9 @@ class ChatHandler:
         # bearer-like references; never trust them without an owner check.
         files_by_id: Dict[str, Dict] = {}
         owner = getattr(sess, "owner", None)
-        effective_att_ids = att_ids if allow_tool_preprocessing else []
+        # Original attachments belong to the user turn even when optional tool
+        # preprocessing is disabled. Only extraction/OCR/URL enrichment is gated.
+        effective_att_ids = att_ids
         if effective_att_ids:
             for att_id in effective_att_ids:
                 fi = self.upload_handler.resolve_upload(att_id, owner=owner)
@@ -223,7 +228,7 @@ class ChatHandler:
         # so guide-only/no-tools turns must not reach it.
         vision_enabled = False
         main_is_vision = False
-        if effective_att_ids:
+        if allow_tool_preprocessing and effective_att_ids:
             from src.settings import get_user_setting
             vision_enabled = get_user_setting("vision_enabled", owner or "", True)
             if vision_enabled:
@@ -236,14 +241,15 @@ class ChatHandler:
                             sess, "provider_model_route_id", None
                         ),
                     )
-                    main_is_vision = bool(
-                        "vision.describe" in selected_route.operations
-                        or selected_route.capabilities.get("vision") is True
-                    )
+                    # Only the admitted route capability authorizes native
+                    # image input. The legacy vision.describe operation may
+                    # represent an extraction/helper tool and is not proof
+                    # that the selected chat transport accepts image bytes.
+                    main_is_vision = selected_route.capabilities.get("vision") is True
                 except ChatRouteUnavailable:
                     main_is_vision = False
 
-        if effective_att_ids and vision_enabled:
+        if allow_tool_preprocessing and effective_att_ids and vision_enabled:
             meta_by_id = {m["id"]: m for m in attachment_meta}
             for att_id in effective_att_ids:
                 file_info = files_by_id.get(att_id)
@@ -275,55 +281,18 @@ class ChatHandler:
                             except Exception:
                                 pass
                     else:
-                        # Main model is text-only — use VL model for description.
-                        # Prefer the cached/user-edited text in UPLOAD_DIR/.vision/{id}.txt
-                        # so a manual correction (via the chat attachment dropdown's
-                        # editable textarea) overrides what the vision model would say.
-                        _vcache = os.path.join(UPLOAD_DIR, ".vision", att_id + ".txt")
-                        vl_desc = None
-                        vl_model = get_user_setting("vision_model", owner or "", "") or ""
-                        if os.path.exists(_vcache):
-                            try:
-                                with open(_vcache, encoding="utf-8") as _vf:
-                                    cached_desc = _vf.read().strip()
-                                if cached_desc and not cached_desc.startswith("["):
-                                    vl_desc = cached_desc
-                                    _sync_upload_vision_to_gallery(file_info, owner, vl_desc)
-                            except Exception:
-                                vl_desc = None
-                        if not vl_desc:
-                            selected_vl_route = str(vl_model or "").strip() or None
-                            vl_result = await analyze_image_with_vl_result_async(
-                                file_info["path"],
-                                owner=owner,
-                                root_operation_id=root_operation_id,
-                                model_route_id=selected_vl_route,
-                                grant_id=(
-                                    provider_grant_id
-                                    if selected_vl_route
-                                    and selected_vl_route
-                                    == getattr(sess, "provider_model_route_id", None)
-                                    else None
-                                ),
-                            )
-                            vl_desc = vl_result.get("text", "")
-                            vl_model = vl_result.get("model", "")
-                            if vl_desc and not vl_desc.startswith("["):
-                                try:
-                                    os.makedirs(os.path.join(UPLOAD_DIR, ".vision"), exist_ok=True)
-                                    with open(_vcache, "w", encoding="utf-8") as _vf:
-                                        _vf.write(vl_desc)
-                                    _sync_upload_vision_to_gallery(file_info, owner, vl_desc)
-                                except Exception:
-                                    pass
-                        enhanced_message = f"{enhanced_message}\n\n[Image: {file_info['name']}]\n{vl_desc}"
-                        # Surface the description to the client live so it renders as a
-                        # collapsible "image description" on the user bubble (not just
-                        # after a refresh that re-parses the stored message).
+                        # A text-only selected route must not silently substitute a
+                        # helper model. Keep the attachment identity in metadata and
+                        # expose an explicit capability result to the caller.
+                        enhanced_message = (
+                            f"{enhanced_message}\n\n[Image attached: {file_info['name']} — "
+                            "the selected route does not declare native vision input; "
+                            "choose an explicit image extraction action.]"
+                        )
                         _m = meta_by_id.get(att_id)
                         if _m is not None:
-                            _m["vision"] = vl_desc
-                            _m["vision_model"] = vl_model
+                            _m["native_status"] = "unsupported"
+                            _m["native_reason"] = "selected route lacks vision capability"
 
         user_content = build_user_content(
             enhanced_message, effective_att_ids, UPLOAD_DIR, self.upload_handler,
@@ -331,11 +300,14 @@ class ChatHandler:
             auto_opened_docs=auto_opened_docs,
             owner=owner,
             resolved_uploads=files_by_id,
-            structured_resources=structured_resources,
+            structured_resources=structured_resources or not allow_tool_preprocessing,
+            # ACP/native structured delivery owns original bytes; do not also
+            # run PDF/OCR/office extraction as an incidental side effect.
+            extract_attachments=allow_tool_preprocessing and not structured_resources,
         )
 
         # Strip image_url entries for text-only models (VL description is already in the text)
-        if (not vision_enabled or not main_is_vision) and isinstance(user_content, list):
+        if allow_tool_preprocessing and (not vision_enabled or not main_is_vision) and isinstance(user_content, list):
             user_content = [
                 item for item in user_content
                 if not isinstance(item, dict) or item.get("type") != "image_url"

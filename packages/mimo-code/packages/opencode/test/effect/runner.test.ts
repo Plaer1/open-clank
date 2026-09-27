@@ -4,6 +4,28 @@ import { Runner } from "../../src/effect"
 import { it } from "../lib/effect"
 
 describe("Runner", () => {
+  it.live("exclusive resume rejects reentry and uses its configured cancellation fallback", Effect.gen(function* () {
+    const scope = yield* Scope.Scope
+    const entered = yield* Deferred.make<void>()
+    const replacementRan = yield* Ref.make(false)
+    const runner = Runner.make<string, never, string>(scope, {
+      busy: () => "busy",
+      onInterrupt: Effect.succeed("interrupted-result"),
+    })
+    const original = yield* runner.startAndWait(
+      Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+    ).pipe(Effect.forkChild)
+    yield* Deferred.await(entered)
+    const rejected = yield* runner.startAndWait(
+      Ref.set(replacementRan, true).pipe(Effect.as("unrelated-result")),
+    ).pipe(Effect.exit)
+    expect(Exit.isFailure(rejected)).toBe(true)
+    expect(yield* Ref.get(replacementRan)).toBe(false)
+    yield* runner.cancel
+    expect(yield* Fiber.join(original)).toBe("interrupted-result")
+    expect(yield* runner.startAndWait(Effect.succeed("next-result"))).toBe("next-result")
+  }))
+
   it.live("start reports busy as a failure instead of a defect", Effect.gen(function* () {
     const s = yield* Scope.Scope
     const runner = Runner.make<string>(s)

@@ -29,6 +29,22 @@ _HISTORY_INLINE_MEDIA_THRESHOLD = 200_000
 _DATA_IMAGE_RE = re.compile(r"data:image/[^;,\"]+;base64,[A-Za-z0-9+/=\s]+")
 
 
+def _leading_system_prefix(messages):
+    """Return genuine authority before any prior compaction projection."""
+    prefix = []
+    for message in messages:
+        if _message_role(message) != "system":
+            break
+        metadata = getattr(message, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = message.get("metadata", {}) if isinstance(message, dict) else {}
+        content = _message_text(message)
+        if metadata.get("compacted") or content.startswith("[Conversation summary"):
+            break
+        prefix.append(message)
+    return prefix
+
+
 def _history_display_content(content: Any) -> Any:
     """Return a lightweight browser-display copy of stored message content.
 
@@ -317,8 +333,15 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
 
     @router.post("/api/session/{session_id}/truncate")
     async def truncate_session(request: Request, session_id: str):
-        _verify_session_owner(request, session_id)
-        await _prepare_context_mutation(request, session_id)
+        verified_owner = _verify_session_owner(request, session_id)
+        try:
+            session = session_manager.get_session(session_id)
+        except KeyError:
+            raise HTTPException(404, "Session not found")
+        mutation_owner = await _prepare_context_mutation(
+            request, session_id, session_owner=getattr(session, "owner", None),
+            verified_owner=verified_owner,
+        )
         try:
             body = await request.json()
             keep_count = body.get("keep_count", 0)
@@ -780,13 +803,17 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
     @router.post("/api/session/{session_id}/compact")
     async def compact_session(request: Request, session_id: str):
         """Manually trigger context compaction for a session."""
-        _verify_session_owner(request, session_id)
+        verified_owner = _verify_session_owner(request, session_id)
         from src.auth_helpers import effective_user
         owner = effective_user(request)
         try:
             session = session_manager.get_session(session_id)
         except KeyError:
             raise HTTPException(404, "Session not found")
+        # Auth-disabled requests may have no effective user; the persisted
+        # session owner is the authority used by projection purge and utility
+        # completion after the ownership check above.
+        owner = getattr(session, "owner", None) or owner
 
         # One active compactor per execution context: refuse host compaction
         # when a persistent ACP engine compactor owns the session. Bind on the
@@ -801,12 +828,20 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "(session.summarize); host compaction is reserved for "
                 "finite contexts.",
             )
-        await _prepare_context_mutation(request, session_id)
+        mutation_owner = await _prepare_context_mutation(
+            request, session_id, session_owner=getattr(session, "owner", None),
+            verified_owner=verified_owner,
+        )
+        owner = mutation_owner or getattr(session, "owner", None) or owner
         try:
             from src.model_context import estimate_tokens, get_context_length
             from src.openclank.modality_facade import complete_text
 
-            if len(session.history) < 6:
+            system_prefix = _leading_system_prefix(session.history)
+            conversation = session.history[len(system_prefix):]
+            keep_count = 4
+            older = conversation[:-keep_count]
+            if not older:
                 return {"status": "ok", "message": "Not enough messages to compact"}
 
             ctx_len = get_context_length(session.endpoint_url, session.model)
@@ -815,10 +850,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             pct_before = round((used_before / ctx_len) * 100, 1) if ctx_len else 0
             msg_count_before = len(session.history)
 
-            # Keep only last 4 messages, summarize the rest
-            keep_count = 4
-            older = session.history[:-keep_count]
-            recent = session.history[-keep_count:]
+            # Keep only last 4 conversation messages, summarize the rest.
+            # System/persona authority is split out before this boundary.
+            recent = conversation[-keep_count:]
 
             # Build text to summarize
             convo_text = "\n".join(
@@ -850,8 +884,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             )
             summary = normalize_compaction_summary(summary)
 
-            # Replace session history: summary as system message + recent messages
-            # System message holds the full summary for AI context
+            # Replace session history: preserve the leading system/persona
+            # prefix, then add the summary and recent conversation.  The
+            # prefix is active authority, not source text to summarize away.
             system_summary = ChatMessage(
                 role="system",
                 content=f"[Conversation summary — {len(older)} earlier messages were compacted]\n\n{summary}",
@@ -869,7 +904,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 content=f"**Conversation compacted** — {len(older)} messages summarized, {len(recent)} kept.",
                 metadata={"compacted": True, "messages_removed": len(older)},
             )
-            new_history = [system_summary, summary_msg] + list(recent)
+            new_history = system_prefix + [system_summary, summary_msg] + list(recent)
             # Projection writer: archives source parts first, preserves
             # retained message IDs, never rekeys original history identity.
             # Archive failure raises recoverable-unavailable and leaves source

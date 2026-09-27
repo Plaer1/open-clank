@@ -16,6 +16,7 @@ export const ActorNotificationEvent = z
     effectiveModel: ActorModel.optional(),
     hostContext: ActorHostContext.optional(),
     stalledForMs: z.number().int().nonnegative().optional(),
+    warnings: z.array(z.string()).optional(),
   })
   .strict()
 export type ActorNotificationEvent = z.infer<typeof ActorNotificationEvent>
@@ -78,11 +79,12 @@ export function renderActorNotification(event: ActorNotificationEvent): string {
     const reported = event.reportedStatus?.toLowerCase()
     const summaryLine = event.reportedSummary ? `\nSummary: ${escapeText(event.reportedSummary)}` : ""
     const resultLine = `\nResult: ${escapeText(event.result ?? "(no output)")}`
+    const warningLines = event.warnings?.map((warning) => `\nWarning: ${escapeText(warning.split("\\n", 1)[0] ?? warning)}`).join("") ?? ""
     // success/partial (or absent → treat as a plain completion) keep the
     // affirmative "completed" verb.
     if (!reported || reported === "success" || reported === "partial") {
       const statusLine = reported ? `\nStatus: ${reported}` : ""
-      return `<actor-notification>\n${header}${identity} completed.${statusLine}${summaryLine}${resultLine}\n</actor-notification>`
+      return `<actor-notification>\n${header}${identity} completed.${statusLine}${summaryLine}${resultLine}${warningLines}\n</actor-notification>`
     }
     // failed/blocked → the sub-session ran to the end but the task did not
     // succeed. State the outcome; never say "completed".
@@ -113,6 +115,7 @@ export type ParsedActorNotification = {
   status: "completed" | "failed" | "cancelled" | "stalled" | "ended"
   description: string
   summary?: string
+  warnings?: string[]
 }
 
 // Inverse of renderActorNotification: recover the structured fields from the
@@ -152,5 +155,6 @@ export function parseActorNotification(text: string): ParsedActorNotification | 
   const beforeResult = resultIdx === -1 ? text : text.slice(0, resultIdx)
   const line = (label: string, scope: string) => scope.match(new RegExp(`^${label}:\\s*(.+)$`, "m"))?.[1]?.trim()
   const summary = line("Summary", beforeResult) ?? line("Result", text) ?? line("Error", text)
-  return summary ? { status, description, summary } : { status, description }
+  const warnings = [...text.matchAll(/^Warning:\s*(.+)$/gm)].map((match) => match[1]!.trim()).filter(Boolean)
+  return summary || warnings.length ? { status, description, ...(summary ? { summary } : {}), ...(warnings.length ? { warnings } : {}) } : { status, description }
 }

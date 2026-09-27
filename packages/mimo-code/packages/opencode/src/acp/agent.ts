@@ -56,6 +56,9 @@ import { OpenClankManagedProtocol } from "./openclank-protocol"
 import { ManagedProvider } from "./managed-provider"
 import { ManagedProviderControl } from "./provider-control"
 import { ManagedOperations } from "./managed-operations"
+import { contextWindow } from "@/session/overflow"
+import { preserveRecentBudgetFor, tailTurnsFor } from "@/session/compaction"
+import { defaultThresholdsFor, resolveThresholds } from "@/session/prune"
 
 type ModeOption = { id: string; name: string; description?: string }
 export type ModelOption = {
@@ -188,6 +191,34 @@ export class Agent implements ACPAgent {
         throw RequestError.invalidParams("managed operations require Open Clank managed mode")
       }
       return (await this.managedOperations.handle(params)) as unknown as Record<string, unknown>
+    }
+    if (method === "_openclank/operations/v1/cancel") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed operations require Open Clank managed mode")
+      return (await this.managedOperations.cancel(params)) as unknown as Record<string, unknown>
+    }
+    if (method === "_openclank/session/v1/settings/effective") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed settings require Open Clank managed mode")
+      if (Object.keys(params).length !== 2 || typeof params.providerID !== "string" || typeof params.modelID !== "string") {
+        throw RequestError.invalidParams("providerID and modelID are required")
+      }
+      const providers = await this.sdk.config.providers({ directory: process.cwd() }).then((x) => x.data?.providers ?? [])
+      const provider = providers.find((item) => item.id === params.providerID)
+      const model = provider?.models?.[params.modelID]
+      if (!provider || !model) throw RequestError.invalidParams("selected model is unavailable")
+      const nativeModel = model as unknown as Provider.Model
+      const output = model.limit.output
+      const input = model.limit.input ?? model.limit.context
+      const settings = (model.options?._openclankAgentSettings ?? provider.options?._openclankAgentSettings) as Record<string, any> | undefined
+      const compaction = settings?.compaction ?? {}
+      const checkpoint = settings?.checkpoint ?? {}
+      const cfg = { compaction, checkpoint } as unknown as Config.Info
+      const window = contextWindow({ cfg, model: nativeModel })
+      const tailTurns = tailTurnsFor(cfg)
+      const recent = preserveRecentBudgetFor(cfg, nativeModel)
+      const reserved = cfg.compaction?.reserved ?? Math.min(20000, output)
+      const rawThresholds = cfg.checkpoint?.thresholds ?? defaultThresholdsFor(window.effective)
+      const thresholds = resolveThresholds(rawThresholds, window.effective, cfg.checkpoint?.reserved)
+      return { providerID: params.providerID, modelID: params.modelID, context: { hard: window.hard, effective: window.effective, usable: window.usable, source: window.source, input, output }, compaction: { auto: compaction.auto !== false, prune: compaction.prune !== false, tailTurns, preserveRecentTokens: recent, reserved }, checkpoint: { thresholds, reserved: cfg.checkpoint?.reserved ?? 13000, maxWriterFailures: cfg.checkpoint?.max_writer_failures ?? 3, fork: checkpoint.fork === true, pushCaps: checkpoint.push_caps && typeof checkpoint.push_caps === "object" ? checkpoint.push_caps : {} } }
     }
     if (method === "_odysseus/session/reserve") {
       // Reserve-without-create: mint a provisional engine `ses_…` and create
@@ -1654,7 +1685,16 @@ export class Agent implements ACPAgent {
       }
     }
 
-    log.info("parts", { parts })
+    // Media parts may contain large base64 payloads. Keep diagnostics bounded and
+    // content-free so ACP logs never become an attachment exfiltration path.
+    const partSummary = parts.reduce(
+      (summary, part) => {
+        summary[part.type] = (summary[part.type] ?? 0) + 1
+        return summary
+      },
+      {} as Record<string, number>,
+    )
+    log.info("parts", { count: parts.length, types: partSummary })
 
     if (odysseus?.root_turn_id) {
       await this.startActorFeed(sessionID, odysseus.root_turn_id)
