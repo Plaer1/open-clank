@@ -143,6 +143,36 @@ def _materialize_index(root: Path, destination: Path) -> None:
     )
 
 
+def check_export(root: Path, export: Path, *, gitleaks: str | None, paths_only: bool) -> int:
+    """Check an already assembled package/tree, without applying ignore rules.
+
+    Ignore files cannot certify an archive's actual contents. External links
+    are rejected because the packaged path list cannot qualify their payloads.
+    """
+    export = export.resolve()
+    if not export.is_dir():
+        raise ArtifactHygieneError("export root must be an existing directory")
+    paths: list[str] = []
+    for directory, names, filenames in os.walk(export, followlinks=False):
+        for name in names + filenames:
+            source = Path(directory) / name
+            relative = source.relative_to(export).as_posix()
+            if source.is_symlink():
+                target = Path(os.readlink(source))
+                if target.is_absolute() or not source.resolve().is_relative_to(export):
+                    raise ArtifactHygieneError(f"export contains external symlink: {relative}")
+                if not source.exists():
+                    raise ArtifactHygieneError(f"export contains broken symlink: {relative}")
+            if source.is_file() or source.is_symlink():
+                paths.append(relative)
+    assert_path_contract(paths, scope="export")
+    if not paths_only:
+        if not gitleaks:
+            raise ArtifactHygieneError("gitleaks executable is required for content scans")
+        _scan_directory(gitleaks, export, root=root, label="export secret scan")
+    return len(paths)
+
+
 def _scan_directory(gitleaks: str, directory: Path, *, root: Path, label: str) -> None:
     executable = Path(gitleaks)
     if not executable.is_absolute():
