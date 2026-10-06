@@ -78,15 +78,15 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def ensure_policy_schema(db_path: str) -> None:
-    """Initialize a fresh policy store or validate current schema without upgrades."""
-    expected = {'fm_v2_projects': ['owner_id', 'project_id', 'workspace_id', 'created_at', 'updated_at'], 'fm_v2_project_locators': ['owner_id', 'project_id', 'locator_revision', 'canonical_root', 'root_identity', 'git_identity', 'worktree_identity', 'active', 'authorized_at'], 'fm_v2_policy_projections': ['owner_id', 'project_id', 'contract_path', 'contract_hash', 'engine_version', 'summary_json', 'source_revision', 'state', 'updated_at', 'workspace_id', 'canonical_root', 'root_identity', 'git_identity', 'worktree_identity', 'activation_revision', 'activated_by', 'activated_at'], 'fm_v2_spells': ['owner_id', 'spell_id', 'project_id', 'title', 'suggestion_json', 'source_evidence_json', 'status', 'created_at', 'updated_at', 'workspace_id', 'path_scope', 'revision', 'review_state', 'lifecycle', 'reviewed_by', 'reviewed_at', 'expires_at', 'rationale', 'confidence', 'promoted_contract_hash', 'promoted_transition_id'], 'fm_v2_policy_transitions': ['owner_id', 'transition_id', 'project_id', 'phase', 'contract_hash', 'actor_id', 'payload_hash', 'created_at', 'contract_path', 'old_contract_hash', 'new_contract_hash', 'old_bytes', 'new_bytes', 'spell_id', 'spell_revision', 'payload_json', 'updated_at', 'operation_id', 'sequence', 'state', 'previous_transition_id', 'previous_event_hash', 'event_hash', 'old_bytes_ref', 'new_bytes_ref', 'error_json'], 'fm_v2_policy_trust': ['owner_id', 'project_id', 'canonical_root', 'worktree_identity', 'branch', 'contract_hash', 'engine_version', 'manifest_hash', 'capability_hash', 'expires_at', 'revoked_at', 'created_at', 'trust_id', 'created_by', 'reason', 'revoked_by', 'revocation_reason'], 'fm_v2_policy_trust_events': ['owner_id', 'event_id', 'project_id', 'action', 'binding_hash', 'payload_json', 'previous_event_hash', 'event_hash', 'created_at']}
+    """Initialize or validate the current native policy schema without upgrades."""
+    expected = {'fm_v2_projects': ['owner_id', 'project_id', 'workspace_id', 'created_at', 'updated_at'], 'fm_v2_project_locators': ['owner_id', 'project_id', 'locator_revision', 'canonical_root', 'root_identity', 'git_identity', 'worktree_identity', 'active', 'authorized_at'], 'fm_v2_policy_projections': ['owner_id', 'project_id', 'contract_path', 'contract_hash', 'engine_version', 'summary_json', 'source_revision', 'state', 'updated_at', 'workspace_id', 'canonical_root', 'root_identity', 'git_identity', 'worktree_identity', 'activation_revision', 'activated_by', 'activated_at'], 'fm_v2_spells': ['owner_id', 'spell_id', 'project_id', 'title', 'suggestion_json', 'source_evidence_json', 'status', 'created_at', 'updated_at', 'workspace_id', 'path_scope', 'revision', 'review_state', 'lifecycle', 'reviewed_by', 'reviewed_at', 'expires_at', 'rationale', 'confidence', 'promoted_contract_hash', 'promoted_transition_id'], 'fm_v2_policy_transitions': ['owner_id', 'transition_id', 'project_id', 'phase', 'contract_hash', 'actor_id', 'payload_hash', 'created_at', 'contract_path', 'old_contract_hash', 'new_contract_hash', 'old_bytes', 'new_bytes', 'spell_id', 'spell_revision', 'payload_json', 'updated_at', 'operation_id', 'sequence', 'state', 'previous_transition_id', 'previous_event_hash', 'event_hash', 'old_bytes_ref', 'new_bytes_ref', 'error_json'], 'fm_v2_policy_trust': ['owner_id', 'project_id', 'trust_id', 'revision', 'canonical_root', 'worktree_identity', 'branch', 'contract_hash', 'engine_version', 'manifest_hash', 'capability_hash', 'expires_at', 'revoked_at', 'created_by', 'created_reason', 'revoked_by', 'revoked_reason', 'created_at'], 'fm_v2_policy_profiles': ['owner_id', 'project_id', 'profile_id', 'os_uid', 'credential_hash', 'activation_revision', 'allowed_actions_json', 'expires_at', 'revoked_at', 'created_by', 'created_reason', 'revoked_by', 'revoked_reason', 'created_at', 'updated_at']}
     with sqlite3.connect(db_path, timeout=30) as conn:
         present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if present.intersection(expected):
             for table, columns in expected.items():
                 found = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
                 if not set(columns).issubset(found):
-                    raise HexResolutionError("Legacy Hex schema requires .clanker/tools/migrations/python/secondary.py project-hex-schema")
+                    raise HexResolutionError("Hex policy store does not match the current native schema")
             return
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript("""
@@ -197,43 +197,53 @@ def ensure_policy_schema(db_path: str) -> None:
                 PRIMARY KEY (owner_id, transition_id),
                 CHECK (phase IN ('prepared','blessing_consumed','file_published','activation_advanced','validated','projection_enqueued','spell_linked','committed','rollback_required','rolled_back'))
             );
-            CREATE TABLE IF NOT EXISTS fm_v2_policy_trust (
-                owner_id TEXT NOT NULL,
-                project_id TEXT NOT NULL,
-                canonical_root TEXT NOT NULL,
-                worktree_identity TEXT NOT NULL,
-                branch TEXT NOT NULL,
-                contract_hash TEXT NOT NULL,
-                engine_version TEXT NOT NULL,
-                manifest_hash TEXT NOT NULL,
-                capability_hash TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                revoked_at TEXT,
-                created_at TEXT NOT NULL,
-                trust_id TEXT,
-                created_by TEXT,
-                reason TEXT NOT NULL DEFAULT '',
-                revoked_by TEXT,
-                revocation_reason TEXT,
-                PRIMARY KEY (
-                    owner_id,project_id,canonical_root,worktree_identity,branch,
-                    contract_hash,engine_version,manifest_hash,capability_hash
-                )
-            );
-            CREATE TABLE IF NOT EXISTS fm_v2_policy_trust_events (
-                owner_id TEXT NOT NULL,
-                event_id TEXT NOT NULL,
-                project_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                binding_hash TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                previous_event_hash TEXT,
-                event_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (owner_id,event_id),
-                CHECK (action IN ('grant','revoke'))
-            );
-            
+CREATE TABLE IF NOT EXISTS fm_v2_policy_trust (
+            owner_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            trust_id TEXT NOT NULL DEFAULT '',
+            revision INTEGER NOT NULL DEFAULT 1,
+            canonical_root TEXT NOT NULL,
+            worktree_identity TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            contract_hash TEXT NOT NULL,
+            engine_version TEXT NOT NULL,
+            manifest_hash TEXT NOT NULL,
+            capability_hash TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_reason TEXT NOT NULL DEFAULT '',
+            revoked_by TEXT,
+            revoked_reason TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (
+                owner_id, project_id, canonical_root, worktree_identity, branch,
+                contract_hash, engine_version, manifest_hash, capability_hash
+            ),
+            FOREIGN KEY (owner_id, project_id)
+                REFERENCES fm_v2_projects(owner_id, project_id)
+        );
+CREATE TABLE IF NOT EXISTS fm_v2_policy_profiles (
+            owner_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            os_uid INTEGER NOT NULL,
+            credential_hash TEXT NOT NULL DEFAULT '',
+            activation_revision INTEGER NOT NULL DEFAULT 0,
+            allowed_actions_json TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_reason TEXT NOT NULL DEFAULT '',
+            revoked_by TEXT,
+            revoked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (owner_id, project_id, profile_id),
+            FOREIGN KEY (owner_id, project_id)
+                REFERENCES fm_v2_projects(owner_id, project_id),
+            CHECK (os_uid >= 0)
+        );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fm_v2_policy_transition_sequence ON fm_v2_policy_transitions(owner_id,operation_id,sequence) WHERE operation_id IS NOT NULL;
         """)
 
@@ -1153,7 +1163,7 @@ def require_executable_trust(
     ensure_policy_schema(db_path)
     with sqlite3.connect(db_path, timeout=30) as conn:
         row = conn.execute(
-            "SELECT trust_id,expires_at,created_by,reason FROM fm_v2_policy_trust "
+            "SELECT trust_id,expires_at,created_by,created_reason FROM fm_v2_policy_trust "
             "WHERE owner_id=? AND project_id=? AND canonical_root=? "
             "AND worktree_identity=? AND branch=? AND contract_hash=? "
             "AND engine_version=? AND manifest_hash=? AND capability_hash=? "

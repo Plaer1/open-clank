@@ -37,6 +37,10 @@ Agent processes inherit the server account's OS access. Account privileges,
 agent scopes and typed approvals are application controls, not a process
 sandbox. [SECURITY.md](../SECURITY.md) explains deployment boundaries.
 
+Declarative Hexes activation does not authorize custom executable checks. Beta 1
+does not yet provide a supported fresh-install workflow to grant or revoke that
+execution trust. Missing, expired or revoked trust remains refused.
+
 ## Data and evidence
 
 - Fresh setup is not a universal migration. Use [upgrading](upgrading.md) for
@@ -72,6 +76,20 @@ still open the shared read-only handbook; personal pages remain personal.
 Windows Files, Editor and native image/video thumbnails are implemented and
 tested. Native ARM64 and x64 frozen release artifacts remain unqualified; Linux
 remains unqualified.
+
+## Fresh source-install evidence — October 6, 2026
+
+A fresh macOS arm64 source install passed normal onboarding and authenticated
+Copal New file creation/opening, Editor manual Save/reopen and Discard, native
+PNG/SVG display, one real provider Chat and Usage observation, and both read-only
+Help destinations. A native note with `type=template` appeared in the picker;
+creating a note from it and closing/reopening preserved the exact saved body.
+Authenticated Hexes contexts, General entries and preview reads returned 200
+after current native-schema alignment.
+These bounded checks supersede the older New file, save and native-note template
+failures and Hexes server error below for this fresh install. They do not qualify every template source,
+configured folder, provider or platform. The executable Hexes trust-workflow gap
+above remains open.
 
 ## Historical documentation preview
 
