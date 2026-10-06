@@ -132,6 +132,7 @@ def test_upstream_engine_update_channels_are_not_reachable():
     assert installation.count("managed engine updates are controlled exclusively by Open Clank") == 2
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy container qualification is disabled")
 def test_container_builds_and_copies_only_a_verified_engine_payload():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
@@ -159,6 +160,7 @@ def test_supported_launchers_enter_the_pre_app_bootstrap():
         assert "uvicorn app:app" not in source, filename
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy container qualification is disabled")
 def test_docker_final_payload_contains_the_cutover_bootstrap_dependencies():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")

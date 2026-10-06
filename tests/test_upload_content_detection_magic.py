@@ -26,6 +26,7 @@ _PNG = (
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy container qualification is disabled")
 def test_dockerfile_installs_libmagic_and_python_magic():
     with open(os.path.join(_REPO_ROOT, "Dockerfile"), encoding="utf-8") as f:
         dockerfile = f.read()

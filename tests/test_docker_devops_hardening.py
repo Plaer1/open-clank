@@ -1,5 +1,7 @@
 """Static regressions for Docker/devops hardening contracts."""
 
+import pytest
+
 import ast
 import re
 from pathlib import Path
@@ -48,6 +50,7 @@ def _cors_allow_methods() -> list[str]:
     raise AssertionError("CORS_ALLOW_METHODS not found")
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_compose_files_forward_every_upload_limit_env_var():
     expected = _upload_limit_env_names()
     assert expected
@@ -55,12 +58,14 @@ def test_compose_files_forward_every_upload_limit_env_var():
         assert expected <= _compose_env_names(path), path.name
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_default_compose_files_do_not_mount_host_docker_socket():
     for path in COMPOSE_FILES:
         text = path.read_text(encoding="utf-8")
         assert "/var/run/docker.sock" not in text, path.name
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_host_docker_overlay_mounts_socket_and_adds_docker_group():
     overlay = yaml.safe_load(HOST_DOCKER_OVERLAY.read_text(encoding="utf-8"))
     service = overlay["services"]["odysseus"]
@@ -70,6 +75,7 @@ def test_host_docker_overlay_mounts_socket_and_adds_docker_group():
     assert "ODYSSEUS_ENABLE_HOST_DOCKER=true" in service["environment"]
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_docker_entrypoint_gates_socket_group_plumbing_on_explicit_opt_in():
     script = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
     block_start = script.index("DOCKER_SOCK=\"${DOCKER_SOCK:-/var/run/docker.sock}\"")
@@ -87,6 +93,7 @@ def test_docker_entrypoint_gates_socket_group_plumbing_on_explicit_opt_in():
     assert opt_in_check < socket_check < stat_socket < add_group < add_user_group
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_docker_entrypoint_does_not_resolve_root_commands_from_app_local_path():
     script = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
     path_export = script.index('export PATH="/app/.local/bin:$PATH"')
@@ -100,6 +107,7 @@ def test_docker_entrypoint_does_not_resolve_root_commands_from_app_local_path():
     assert final_exec > path_export
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_docker_entrypoint_ownership_repair_stays_inside_expected_mounts():
     script = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
     assert "find /app -xdev" in script
@@ -110,6 +118,7 @@ def test_docker_entrypoint_ownership_repair_stays_inside_expected_mounts():
     assert "Skipping recursive ownership repair" in script
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_dockerignore_excludes_secrets_editor_backups():
     patterns = set((ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
     assert {

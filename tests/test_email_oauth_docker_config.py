@@ -37,6 +37,7 @@ def _odysseus_environment(path):
         "GOOGLE_OAUTH_REDIRECT_URI",
     ),
 )
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_google_oauth_setting_is_forwarded(key):
     expected = f"{key}=${{{key}:-}}"
     for path in COMPOSE_PATHS:

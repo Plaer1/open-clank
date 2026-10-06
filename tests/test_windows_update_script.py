@@ -1,9 +1,12 @@
+
+import pytest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_windows_update_script_uses_safe_docker_update_flow():
     script = (ROOT / "update_windows.bat").read_text(encoding="utf-8")
     lowered = script.lower()

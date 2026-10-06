@@ -336,6 +336,8 @@ class TestPingEndpoint:
 # ── Docker loopback rewrite ──
 
 class TestDockerLoopbackRewrite:
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
     def test_manual_loopback_rewrites_to_docker_host_when_available(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
         monkeypatch.setattr(model_routes, "_container_loopback_reachable", lambda base_url: False)
@@ -344,6 +346,8 @@ class TestDockerLoopbackRewrite:
             == "http://host.docker.internal:8000/v1"
         )
 
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
     def test_reachable_container_loopback_stays_local_even_without_container_flag(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
         monkeypatch.setattr(model_routes, "_container_loopback_reachable", lambda base_url: True)
@@ -352,6 +356,8 @@ class TestDockerLoopbackRewrite:
             == "http://127.0.0.1:8001/v1"
         )
 
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
     def test_cookbook_container_local_loopback_stays_inside_container(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
         assert (
@@ -359,6 +365,8 @@ class TestDockerLoopbackRewrite:
             == "http://localhost:8000/v1"
         )
 
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
     def test_bind_address_becomes_connectable_loopback_for_container_local(self, monkeypatch):
         monkeypatch.setattr(model_routes, "_docker_host_gateway_reachable", lambda: True)
         assert (

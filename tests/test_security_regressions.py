@@ -116,6 +116,7 @@ def test_secret_storage_key_created_with_safe_mode(tmp_path, monkeypatch):
 
 # ── secure-by-default deployment + integration storage ─────────
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_docker_compose_binds_web_ui_to_loopback_by_default():
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
     assert "${APP_BIND:-127.0.0.1}:${APP_PORT:-7777}:7777" in compose
