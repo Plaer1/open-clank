@@ -324,7 +324,7 @@ export async function uploadPending(opts = {}) {
     uploaded = (data.files || []);
     if (uploaded.some(x => x && x.gallery_id)) {
       try { localStorage.setItem('gallery-fresh-chat-upload', String(Date.now())); } catch (_) {}
-      window.dispatchEvent(new CustomEvent('gallery-refresh', { detail: { source: 'chat-upload' } }));
+      window.dispatchEvent(new CustomEvent('imps-refresh', { detail: { source: 'chat-upload' } }));
     }
     pendingFiles = [];          // clear only on success
     // Stash the full meta (incl. width/height for images) on the module so

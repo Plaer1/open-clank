@@ -1,21 +1,20 @@
 // static/sw.js — Odysseus PWA Service Worker
 // Strategy:
-//   - HTML (navigation): network-first, cache fallback. The HTML and module
-//     graph must move together after an update.
+//   - Protected HTML: network only; a cached app shell cannot prove a session.
 //   - JS/CSS (/static/*.js|.css): network-first, cache fallback for offline.
 //     (So code/style edits show up on a normal reload, no manual cache clear.)
-//   - Other static assets (images/fonts/libs): cache-first with bg refresh.
+//   - Other allowed static assets (icons/fonts/libs/translations): network-first, offline fallback.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'open-clank-v357-usage-workspace';
+const CACHE_NAME = 'open-clank-v360-wiki-app';
 
 // Mirror of static/js/appletRoutes.js SHELL_PATHS + SHELL_PATH_PREFIXES.
 // The service worker cannot import the ES module, so keep this list in sync
 // with the registry (pinned by tests/test_shell_applet_routes_s13.py).
 const SHELL_NAV_PATHS = [
-  '/', '/editor', '/files', '/wiki', '/graph', '/treehouse', '/timeline',
+  '/', '/editor', '/wiki', '/files', '/graph', '/treehouse', '/timeline',
   '/todo', '/calendar', '/notes', '/code', '/bases', '/mind', '/galaxy',
-  '/email', '/memory', '/gallery', '/tasks', '/library', '/cookbook', '/usage', '/settings',
+  '/email', '/memory', '/tasks', '/library', '/cookbook', '/usage', '/settings',
 ];
 const SHELL_NAV_PREFIXES = ['/settings/', '/copal/'];
 
@@ -25,11 +24,8 @@ function isShellNavigation(pathname) {
   return SHELL_NAV_PREFIXES.some((prefix) => path === prefix.replace(/\/$/, '') || path.startsWith(prefix));
 }
 
-// Core shell precached on install so repeat opens are instant without any
-// network wait. Keep this list in sync with the <script type="module"> tags
-// and <link rel="stylesheet"> in index.html.
+// Cache static code/assets for offline use; protected HTML is never precached.
 const PRECACHE = [
-  '/',
   '/static/style.css',
   '/static/app.js',
   '/static/js/i18n.js',
@@ -113,6 +109,9 @@ const PRECACHE = [
   '/static/js/codeRunner.js',
   '/static/js/chatStream.js',
   '/static/js/chat.js',
+  '/static/js/chatModelProvenance.js',
+  '/static/js/chatStreamErrors.js',
+  '/static/js/liveThinkingThrottle.js',
   '/static/js/cookbook.js',
   '/static/js/search-chat.js',
   '/static/js/compare/index.js',
@@ -142,87 +141,64 @@ const PRECACHE = [
   '/static/lib/mermaid.min.js',
 ];
 
+function cacheableAsset(path) {
+  if (!path.startsWith('/static/') || path.split('/').some(p => p === '.' || p === '..')) return false;
+  return /\.(js|css|woff2?|ttf|otf)$/.test(path)
+    || /^\/static\/icons\/[^/]+\.(png|svg|ico)$/.test(path)
+    || /^\/static\/i18n\/[A-Za-z0-9_-]+\.json$/.test(path)
+    || /^\/static\/manifest(?:\.[A-Za-z0-9_-]+)?\.json$/.test(path);
+}
+
+function safeAssetResponse(response) {
+  return response && response.ok && !response.redirected
+    && !/text\/html/i.test(response.headers.get('content-type') || '');
+}
+
 self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches.open(CACHE_NAME).then(cache =>
-      // addAll is atomic — if any item fails, none are cached. Use individual
-      // puts so a single 404 can't block the whole install.
-      Promise.all(
-        PRECACHE.map(url =>
-          fetch(url, { cache: 'reload' })
-            .then(res => res.ok ? cache.put(url, res) : null)
-            .catch(() => null)
-        )
-      )
+  e.waitUntil(caches.open(CACHE_NAME).then(cache => Promise.all(
+    PRECACHE.filter(path => cacheableAsset(path)).map(path =>
+      fetch(path, { cache: 'reload' })
+        .then(response => safeAssetResponse(response) ? cache.put(path, response) : null)
+        .catch(() => null)
     )
-  );
+  )));
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {
-  e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
-  );
+  e.waitUntil(caches.keys().then(keys => Promise.all(keys.map(async key => {
+    if (key !== CACHE_NAME) return caches.delete(key);
+    const cache = await caches.open(key);
+    // Purge shells/private resources even if they were placed in this cache
+    // by an older worker or a partially completed installation.
+    const requests = await cache.keys();
+    await Promise.all(requests.filter(request => !cacheableAsset(new URL(request.url).pathname))
+      .map(request => cache.delete(request)));
+  }))).then(() => self.clients.claim()));
 });
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
+  if (url.origin !== self.location.origin || url.pathname.startsWith('/api/') || e.request.method !== 'GET') return;
 
-  // Never touch API calls or non-GET.
-  if (url.pathname.startsWith('/api/') || e.request.method !== 'GET') return;
-
-  // HTML navigation: network-first for the app shell — but ONLY for known
-  // shell/applet paths (direct applet addresses, /settings/<panel>, legacy
-  // /copal/*). Other navigations (e.g. a deep-linked /static/*.html page)
-  // must go to the network/static handlers below; otherwise every navigation
-  // was served the app index, replacing the page the user actually asked for.
-  // Unknown applet-ish URLs are deliberately NOT shell-caught so they keep
-  // meaningful errors.
-  if (e.request.mode === 'navigate' && isShellNavigation(url.pathname)) {
-    e.respondWith(
-      caches.open(CACHE_NAME).then(async cache => {
-        const cached = await cache.match('/');
-        try {
-          const network = await fetch(e.request);
-          if (network && network.ok) cache.put('/', network.clone());
-          return network;
-        } catch {
-          return cached || Response.error();
-        }
-      })
-    );
+  // App HTML always reaches the authenticated server, including direct static
+  // HTML and old shell aliases. Public login remains available from the server.
+  if (e.request.mode === 'navigate' || /\.html?$/.test(url.pathname)) {
+    e.respondWith(fetch(e.request, { cache: 'no-store' }).catch(() => Response.error()));
     return;
   }
+  if (!cacheableAsset(url.pathname)) return;
 
-  // JS/CSS: network-first — always try the network so code/style edits show up
-  // on a normal reload; fall back to cache only when offline.
-  if (url.pathname.startsWith('/static/') && /\.(js|css)(\?|$)/.test(url.pathname + url.search)) {
-    e.respondWith(
-      fetch(e.request).then(res => {
-        if (res && res.ok) {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(e.request, copy));
-        }
-        return res;
-      }).catch(() => caches.match(e.request))
-    );
-    return;
-  }
-
-  // Other static assets (images, fonts, libs): cache-first with background refresh.
-  if (url.pathname.startsWith('/static/')) {
-    e.respondWith(
-      caches.open(CACHE_NAME).then(async cache => {
-        const cached = await cache.match(e.request);
-        const fetching = fetch(e.request).then(res => {
-          if (res && res.ok) cache.put(e.request, res.clone());
-          return res;
-        }).catch(() => cached);
-        return cached || fetching;
-      })
-    );
-    return;
-  }
+  // Preserve the PWA's offline static assets. Authentication redirects or HTML
+  // never enter an asset cache and cannot become a cached app shell.
+  e.respondWith(fetch(e.request).then(async response => {
+    if (safeAssetResponse(response)) {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(e.request, response.clone());
+    }
+    return response;
+  }).catch(async () => {
+    const cached = await caches.match(e.request);
+    return safeAssetResponse(cached) ? cached : Response.error();
+  }));
 });

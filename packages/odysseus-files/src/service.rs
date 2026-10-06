@@ -88,6 +88,10 @@ impl StageStore {
 
     fn ensure_root() -> std::io::Result<PathBuf> {
         let root = Self::root();
+        #[cfg(windows)]
+        { crate::windows_fs::ensure_private_directory(&root)?; return Ok(root); }
+        #[cfg(not(windows))]
+        {
         match fs::symlink_metadata(&root) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                 return Err(std::io::Error::new(std::io::ErrorKind::Other, "staging root is not a directory"));
@@ -99,6 +103,7 @@ impl StageStore {
         #[cfg(unix)]
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
         Ok(root)
+        }
     }
 
     fn valid_stage_id(value: &str) -> bool {
@@ -194,6 +199,8 @@ impl StageStore {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObjectIdentity {
+    #[cfg(windows)]
+    native: crate::windows_fs::OpenedIdentity,
     size: u64,
     modified_ns: Option<u128>,
     #[cfg(unix)]
@@ -207,8 +214,11 @@ struct ObjectIdentity {
 }
 
 impl ObjectIdentity {
-    fn from_metadata(metadata: &Metadata) -> Self {
-        Self {
+    fn from_file(file: &File) -> std::io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Self {
+            #[cfg(windows)]
+            native: crate::windows_fs::opened_identity(file)?,
             size: metadata.len(),
             modified_ns: metadata
                 .modified()
@@ -223,7 +233,11 @@ impl ObjectIdentity {
             ctime_seconds: metadata.ctime(),
             #[cfg(unix)]
             ctime_nanoseconds: metadata.ctime_nsec(),
-        }
+        })
+    }
+
+    fn from_path(path: &Path) -> std::io::Result<Self> {
+        Self::from_file(&File::open(path)?)
     }
 
     fn opaque_tag(&self) -> String {
@@ -253,6 +267,7 @@ struct HandleTable {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ThumbnailCacheKey {
     object_tag: String,
+    icon: bool,
     policy_generation: u64,
     width: u32,
     height: u32,
@@ -428,9 +443,11 @@ pub struct FileService {
     identity: ServiceIdentity,
     handles: Mutex<HandleTable>,
     thumbnail_broker: Option<ThumbnailBroker>,
+    native_icon_broker: Option<ThumbnailBroker>,
     thumbnail_policy_generation: PolicyGeneration,
     thumbnail_cache: Mutex<ThumbnailCache>,
     staged_uploads: StageStore,
+    mutation_receipt_lock: Mutex<()>,
 }
 
 /// Internal authorization result for the private watch transport. The
@@ -453,9 +470,10 @@ impl FileService {
         staged_uploads.reap_for_identity(&identity);
         Self {
             engine,
-            identity,
+            mutation_receipt_lock: Mutex::new(()),            identity,
             handles: Mutex::new(HandleTable::default()),
             thumbnail_broker: None,
+            native_icon_broker: None,
             thumbnail_policy_generation: PolicyGeneration::new(policy_generation),
             thumbnail_cache: Mutex::new(ThumbnailCache::default()),
             staged_uploads,
@@ -476,6 +494,11 @@ impl FileService {
 
     pub fn with_thumbnail_broker(mut self, broker: ThumbnailBroker) -> Self {
         self.thumbnail_broker = Some(broker);
+        self
+    }
+
+    pub fn with_native_icon_broker(mut self, broker: ThumbnailBroker) -> Self {
+        self.native_icon_broker = Some(broker);
         self
     }
 
@@ -592,15 +615,12 @@ impl FileService {
         let descriptor_metadata = file
             .metadata()
             .map_err(|error| engine_protocol(EngineError::Io(error), audit_id))?;
-        let path_metadata = fs::metadata(&canonical)
-            .map_err(|error| engine_protocol(EngineError::Io(error), audit_id))?;
+        #[cfg(windows)]
+        crate::windows_fs::validate_opened_path(&file, &canonical).map_err(|_| self.stale_handle(audit_id))?;
+        let identity = ObjectIdentity::from_file(&file).map_err(|_| self.stale_handle(audit_id))?;
         if !descriptor_metadata.is_file()
-            || ObjectIdentity::from_metadata(&descriptor_metadata)
-                != ObjectIdentity::from_metadata(&path_metadata)
-        {
-            return Err(self.stale_handle(audit_id));
-        }
-        let identity = ObjectIdentity::from_metadata(&descriptor_metadata);
+            || identity != ObjectIdentity::from_path(&canonical).map_err(|_| self.stale_handle(audit_id))?
+        { return Err(self.stale_handle(audit_id)); }
         let object_tag = identity.opaque_tag();
         let mut random = [0_u8; 32];
         getrandom::fill(&mut random).map_err(|_| {
@@ -920,13 +940,12 @@ impl FileService {
         if fs::canonicalize(&path).map_err(|_| self.stale_handle(audit_id))? != path {
             return Err(self.stale_handle(audit_id));
         }
-        let path_metadata = fs::metadata(&path).map_err(|_| self.stale_handle(audit_id))?;
+        #[cfg(windows)]
+        crate::windows_fs::validate_opened_path(&file, &path).map_err(|_| self.stale_handle(audit_id))?;
         let descriptor_metadata = file.metadata().map_err(|_| self.stale_handle(audit_id))?;
-        if ObjectIdentity::from_metadata(&path_metadata) != expected
-            || ObjectIdentity::from_metadata(&descriptor_metadata) != expected
-        {
-            return Err(self.stale_handle(audit_id));
-        }
+        if ObjectIdentity::from_path(&path).map_err(|_| self.stale_handle(audit_id))? != expected
+            || ObjectIdentity::from_file(&file).map_err(|_| self.stale_handle(audit_id))? != expected
+        { return Err(self.stale_handle(audit_id)); }
         Ok((file, path, descriptor_metadata))
     }
 
@@ -1079,8 +1098,8 @@ impl FileService {
                 ))
             }
         };
-        let (_file, path, metadata) = self.resolve_file_handle(handle, &audit_id)?;
-        let broker = self.thumbnail_broker.as_ref().ok_or_else(|| {
+        let (file, path, _metadata) = self.resolve_file_handle(handle, &audit_id)?;
+        let broker = (if args.icon { self.native_icon_broker.as_ref() } else { self.thumbnail_broker.as_ref() }).ok_or_else(|| {
             ProtocolError::new(
                 ProtocolErrorCode::Unsupported,
                 "native content thumbnails are unavailable on this host",
@@ -1088,7 +1107,8 @@ impl FileService {
             )
         })?;
         let cache_key = ThumbnailCacheKey {
-            object_tag: ObjectIdentity::from_metadata(&metadata).opaque_tag(),
+            object_tag: ObjectIdentity::from_file(&file).map_err(|_| self.stale_handle(&audit_id))?.opaque_tag(),
+            icon: args.icon,
             policy_generation: self.thumbnail_policy_generation.current(),
             width: args.width,
             height: args.height,
@@ -1149,7 +1169,17 @@ impl FileService {
 
     pub fn dispatch(&self, request: ClientRequest) -> Result<Value, ProtocolError> {
         let (operation, envelope, audit_id) = self.bind_request(request)?;
-        match operation {
+        let mutation = matches!(operation, Operation::Create | Operation::Replace | Operation::Patch
+            | Operation::Copy | Operation::Move | Operation::Rename | Operation::Mkdir
+            | Operation::Trash | Operation::Restore | Operation::StageFinish);
+        // A hook's last action belongs to this operation only while mutations
+        // are serialized. Read-only requests never attach stale recovery status.
+        let _receipt_guard = if mutation {
+            Some(self.mutation_receipt_lock.lock().map_err(|_| ProtocolError::new(
+                ProtocolErrorCode::RootUnavailable, "mutation receipt lock unavailable", Some(audit_id.clone())))?)
+        } else { None };
+        let before_action = if mutation { self.last_capture_status().map(|s| s.action_id) } else { None };
+        let result = (|| { match operation {
             Operation::Health => Ok(json!({
                 "protocol": crate::PROTOCOL_VERSION,
                 "lane": self.identity.lane,
@@ -1162,6 +1192,7 @@ impl FileService {
                 "lane": self.identity.lane,
                 "operations": ["health", "capabilities", "list_directory", "stat", "open_handle", "read_range", "read_lines", "read_text_preview", "create", "stage_begin", "stage_chunk", "stage_finish", "stage_abort", "replace", "patch", "copy", "move", "rename", "mkdir", "trash", "restore", "filename_search", "content_search"],
                 "native_thumbnails": self.native_thumbnails_available(),
+                "native_icons": self.native_icon_broker.is_some(),
                 "max_page_size": self.engine.config().directory_page_size,
                 "max_read_bytes": self.engine.config().max_read_bytes,
             })),
@@ -1669,6 +1700,23 @@ impl FileService {
                 Some(audit_id),
             )),
         }
+        })();
+        result.map(|mut response| {
+            #[cfg(windows)]
+            { response["native_thumbnails"] = json!(self.native_thumbnails_available()); response["native_icons"] = json!(self.native_icon_broker.is_some()); }
+            if mutation {
+                if let Some(status) = self.last_capture_status() {
+                    if before_action.as_deref() != Some(status.action_id.as_str()) {
+                        response["live_status"] = json!("Committed");
+                        response["history"] = json!({"action_id": status.action_id,
+                            "status": status.status, "phase": status.phase, "error": status.error,
+                            "durable": status.status == "complete",
+                            "message": if status.status == "complete" { "Saved" } else { "Saved; recovery copy unavailable" }});
+                    }
+                }
+            }
+            response
+        })
     }
 }
 
@@ -1710,6 +1758,8 @@ struct StatArgs {
 
 #[derive(Debug, Deserialize)]
 struct ThumbnailArgs {
+    #[serde(default)]
+    icon: bool,
     width: u32,
     height: u32,
     scale_milli: u32,
@@ -1949,6 +1999,9 @@ fn serialize_engine<T: serde::Serialize>(
 }
 
 fn engine_protocol(error: EngineError, audit_id: &str) -> ProtocolError {
+    if matches!(&error, EngineError::HistoryCapture(_)) {
+        return ProtocolError::new(ProtocolErrorCode::RootUnavailable, "required recovery preimage unavailable; original preserved", Some(audit_id.into()));
+    }
     let code = match &error {
         EngineError::Conflict
         | EngineError::DestinationExists
@@ -2018,6 +2071,7 @@ mod thumbnail_cache_tests {
     fn key(index: u32) -> ThumbnailCacheKey {
         ThumbnailCacheKey {
             object_tag: format!("object-{index}"),
+            icon: false,
             policy_generation: 7,
             width: 160,
             height: 160,

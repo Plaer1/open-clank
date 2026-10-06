@@ -13,8 +13,7 @@ from services.stats.alerts import (
 )
 from services.stats.privacy import owner_scope
 from services.stats.quota import quota_snapshot
-from src.auth_helpers import _auth_disabled, effective_user, require_user
-from src.owner_identity import LOCAL_INSTALLATION_OWNER
+from src.auth_helpers import effective_user, require_authenticated_request
 import threading
 
 _PREFERENCE_LOCK = threading.RLock()
@@ -25,23 +24,11 @@ _ALERT_STATE_KEY = "stats_alert_state"
 
 
 def _identity(request: Request, *, test_state: bool = False) -> tuple[str, str | None]:
+    require_authenticated_request(request)
     owner = str(effective_user(request) or "").strip().lower()
-    user: str | None = owner or None
-    # The explicit test seam must remain usable in auth-disabled fixtures;
-    # production callers never enable this flag and still use the canonical
-    # installation owner below.
-    if not owner and test_state:
-        owner = str(getattr(request.state, "stats_owner", "") or "").strip().lower()
-        user = owner or None
-    if not owner and _auth_disabled():
-        return LOCAL_INSTALLATION_OWNER, None
-    if not owner:
-        require_user(request)
-        owner = str(effective_user(request) or "").strip().lower()
-        user = owner or None
     if not owner:
         raise HTTPException(401, "trusted Stats owner scope is required")
-    return owner, user
+    return owner, owner
 
 
 def _default_pref_loader(user: str | None) -> dict:

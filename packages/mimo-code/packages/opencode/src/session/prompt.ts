@@ -60,6 +60,7 @@ import {
   EMPTY_STEP_RECOVERY_REPLAN,
   isEmptyStep,
 } from "../session/prompt/empty-step-detection"
+import { applyPersistedCrops, cropMetadata, detectStreak, extractAllCrops, streakKey } from "../session/prompt/loop-streak"
 import { builtinSkillRoot, matchDocumentSkills } from "@/skill/builtin/extract"
 import { Skill } from "@/skill"
 import { ToolRegistry } from "../tool"
@@ -87,6 +88,7 @@ import {
   sessionErrorText,
 } from "./trajectory"
 import { prefixCaptureRef } from "./prefix-capture-ref"
+import { SessionPrefixSnapshot } from "./prefix-snapshot"
 import { spawnRef } from "@/actor/spawn-ref"
 import { Inbox } from "@/inbox"
 import { sessionPromptRef, defaultModelRef } from "@/inbox/inbox-ref"
@@ -394,11 +396,29 @@ export const layer = Layer.effect(
         // parity, so fall through to empty rather than emit a divergent date.
         const captureSession = yield* sessions.get(input.sessionID).pipe(Effect.catch(() => Effect.succeed(undefined)))
         if (!captureSession) return empty
-        const [skills, env, instructions] = yield* Effect.all([
-          sys.skills(ag, model),
-          sys.environment(model, captureSession.time.created),
-          instruction.system().pipe(Effect.orDie),
-        ])
+        const captureMessages = input.msgs as Parameters<typeof buildLLMRequestPrefix>[0]["msgs"]
+        const captureUser = captureMessages.findLast((message) => message.info.role === "user")
+        if (!captureUser || captureUser.info.role !== "user") return empty
+        const runtimePermission = Agent.runtimePermission(ag, captureSession.permission)
+        const profileKey = SessionPrefixSnapshot.profileKey({
+          providerID: model.providerID,
+          modelID: model.id,
+          agent: ag.name,
+          agentID: captureUser.info.agentID ?? "main",
+          harness: "default",
+          systemMode: "append",
+          system: captureUser.info.system ?? "",
+          format: captureUser.info.format ?? { type: "text" },
+          permission: runtimePermission,
+        })
+        const frozen = yield* SessionPrefixSnapshot.get(input.sessionID, profileKey)
+        const [skills, env, instructions] = frozen
+          ? [undefined, [] as string[], { content: [] as string[] }]
+          : yield* Effect.all([
+              sys.skills(ag, model),
+              sys.environment(model, captureSession.time.created),
+              instruction.system().pipe(Effect.orDie),
+            ])
         // (checkpoint-writer never requests json_schema output, so STRUCTURED_OUTPUT_SYSTEM_PROMPT
         // is not included; parent's runLoop adds it conditionally based on user.format)
         const additions = [...env, ...(skills ? [skills] : []), ...instructions.content]
@@ -406,14 +426,22 @@ export const layer = Layer.effect(
           sessionID: input.sessionID,
           agent: ag,
           model,
-          msgs: input.msgs as Parameters<typeof buildLLMRequestPrefix>[0]["msgs"],
+          msgs: captureMessages,
           additions,
         }).pipe(
           Effect.provideService(LLM.Service, llm),
           Effect.provideService(ToolRegistry.Service, registry),
           Effect.catch(() => Effect.succeed(empty)),
         )
-        return { ...prefix, parentPermission: ag.permission }
+        return {
+          ...prefix,
+          system: frozen?.system ?? prefix.system,
+          // A checkpoint fork must advertise the same schemas as the durable
+          // prefix it inherited. These restored definitions deliberately have
+          // no execute closures, so capture cannot create another authority.
+          tools: frozen?.tools ? SessionPrefixSnapshot.restoreTools(frozen.tools) : prefix.tools,
+          parentPermission: ag.permission,
+        }
       })
     prefixCaptureRef.current = capture
     yield* Effect.addFinalizer(() =>
@@ -470,6 +498,9 @@ export const layer = Layer.effect(
           sessionID: input.sessionID,
           boundary,
           lastMessageInfo: computeLastMessageInfo(input.msgs.map((m) => m.info)),
+          // Freeze the exact tail represented by the activity digest. Messages
+          // created after this insert remain live in the next model request.
+          digestUpTo: input.msgs.at(-1)?.info.id,
           agentID: input.agentID,
           agent: input.agent,
           model: { providerID: input.model.providerID, modelID: input.model.id },
@@ -3449,6 +3480,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             contextWatermark: session.contextWatermark,
             agentID: agentID ?? "main",
           })
+          // Persisted crop spans are request-view projections: the durable
+          // transcript stays intact while poisoned assistant steps cannot re-enter.
+          const persistedCrops = extractAllCrops(msgs)
+          if (persistedCrops.length) msgs = applyPersistedCrops(msgs, persistedCrops).kept as typeof msgs
 
           let lastUser: MessageV2.User | undefined
           let lastAssistant: MessageV2.Assistant | undefined
@@ -4222,13 +4257,38 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // task creates, etc.) so each step doesn't replay from the bare
             // user prompt. The watermark is for fork capture only (frozen
             // snapshot of parent-view at spawn time).
-            const { system: prebuiltSystem, inheritedMessages: modelMsgs } = yield* buildLLMRequestPrefix({
+            // Current session schema has no harness/systemMode; these defaults are stable.
+            const profileKey = SessionPrefixSnapshot.profileKey({
+              providerID: model.providerID,
+              modelID: model.id,
+              agent: agent.name,
+              agentID: lastUser.agentID ?? "main",
+              harness: "default",
+              systemMode: "append",
+              system: lastUser.system ?? "",
+              format,
+              permission: Agent.runtimePermission(agent, session.permission),
+            })
+            const frozen = yield* SessionPrefixSnapshot.get(sessionID, profileKey)
+            const built = yield* buildLLMRequestPrefix({
               sessionID,
               agent,
               model,
               msgs,
               additions,
+              // The boundary already records the historical assistant tail as
+              // bounded Recent activity. Keep only later live turns here.
+              collapseCheckpointTail: true,
             }).pipe(Effect.provideService(LLM.Service, llm), Effect.provideService(ToolRegistry.Service, registry))
+            const toolsHash = SessionPrefixSnapshot.toolsHash(tools, activeTools)
+            const currentTools = yield* Effect.promise(() => SessionPrefixSnapshot.snapshotTools(tools, activeTools))
+            const snapshot = !frozen
+              ? yield* SessionPrefixSnapshot.pin({ sessionID, profileKey, system: built.system, toolsHash, tools: currentTools, watermarkMessageID: lastUser.id })
+              : SessionPrefixSnapshot.isCurrent(frozen, built.system, toolsHash)
+                ? frozen
+                : yield* SessionPrefixSnapshot.rotate({ sessionID, profileKey, system: built.system, toolsHash, tools: currentTools, watermarkMessageID: lastUser.id })
+            const prebuiltSystem = snapshot!.system
+            const modelMsgs = built.inheritedMessages
             lastSystemPrompt = prebuiltSystem
             const maxModeCfg = (yield* config.get()).experimental?.maxMode
             const useMaxMode =
@@ -4329,6 +4389,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   .pipe(Effect.ignore),
               ),
             )
+            if (handle.message.time.completed && !handle.message.error) yield* SessionPrefixSnapshot.advance({ sessionID, profileKey, revision: snapshot!.revision, watermarkMessageID: handle.message.id })
 
             if (result === "continue" && (yield* autoContinueOutputLength({ lastUser, assistant: handle.message }))) {
               return "continue" as const
@@ -4443,6 +4504,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           // --- Text Loop Detection (cross-step) ---
           const completedParts = MessageV2.parts(handle.message.id)
+          const crop = detectStreak(
+            [...msgs, { info: handle.message, parts: completedParts }]
+              .filter(
+                (message) =>
+                  message.info.role === "assistant" &&
+                  !!message.info.finish &&
+                  !message.info.error,
+              )
+              .map((message) => ({ id: message.info.id, key: streakKey(message.parts) })),
+          )
+          const croppedStreak = !!crop && crop.toId === handle.message.id
+          if (croppedStreak) {
+            yield* sessions.updatePart({ id: PartID.ascending(), messageID: lastUser.id, sessionID, type: "text", synthetic: true, ignored: true, text: "", metadata: cropMetadata(crop) } satisfies MessageV2.TextPart)
+          }
           const stepText = completedParts
             .filter((p): p is MessageV2.TextPart => p.type === "text" && !p.synthetic)
             .map((p) => p.text)
@@ -4460,7 +4535,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             if (textLoopBuffer.length >= TEXT_LOOP_TRIGGER_COUNT) {
               const isTextLoop = detectTextLoop(textLoopBuffer, TEXT_LOOP_TRIGGER_COUNT)
 
-              if (isTextLoop) {
+              if (isTextLoop && !croppedStreak) {
                 if (textLoopRecoveryAttempts >= TEXT_LOOP_MAX_RECOVERY) {
                   yield* slog.info("text loop: max recovery exceeded, terminating")
                   yield* bus.publish(Session.Event.Error, {

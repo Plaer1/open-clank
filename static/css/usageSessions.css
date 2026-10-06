@@ -1,0 +1,132 @@
+/* AgentsView geometry inside the native Open Clank applet; theme stays native. */
+.usage-sessions { --usage-muted: color-mix(in srgb,var(--fg,#e5e7eb) 55%,transparent); display:flex;flex-direction:column;min-height:0;height:100%;container-type:inline-size;color:var(--fg);font-size:12px; }
+.usage-sessions *, .usage-sessions *::before, .usage-sessions *::after { box-sizing:border-box; }
+.usage-sessions button,.usage-sessions input,.usage-sessions select,.usage-sessions summary { font:inherit; }
+.usage-sessions button { min-height:24px;padding:3px 7px;border:1px solid var(--border,#353746);border-radius:calc(4px * var(--theme-radius-scale,1));background:var(--panel,var(--bg));color:var(--fg);cursor:pointer;width:auto;box-shadow:none; }
+.usage-sessions button:hover { background:color-mix(in srgb,var(--accent,#8aa9ff) 12%,var(--panel,var(--bg))); }
+.usage-sessions input:not([type=checkbox]),.usage-sessions select { width:100%;min-width:0;height:29px;padding:4px 7px;border:1px solid var(--border,#353746);border-radius:calc(4px * var(--theme-radius-scale,1));background:var(--bg);color:var(--fg); }
+.usage-sessions input[type=checkbox] { width:12px;height:12px;min-width:12px;accent-color:var(--accent); }
+.usage-sessions .logs-columns { display:flex;flex:1;min-height:0;min-width:0;gap:0;overflow:hidden; }
+.usage-session-rail { width:260px;flex:0 0 260px;min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--border,#353746);background:var(--panel,var(--bg));overflow:auto; }
+.usage-session-rail > .logs-field { padding:8px 10px;margin:0; }
+.usage-session-rail > .logs-field > span { display:none; }
+.usage-rail-tools { display:flex;gap:6px;padding:0 10px 8px; }
+.usage-rail-tools select { flex:1;width:0;font-size:11px; }
+.usage-session-options { margin:0;border-top:1px solid var(--border);border-bottom:1px solid var(--border); }
+.usage-session-options > summary { padding:7px 10px;cursor:pointer;color:var(--usage-muted);font-size:11px; }
+.usage-session-options[open] { flex-shrink:0; }
+.usage-session-options .logs-toolbar { display:flex;flex-wrap:wrap;gap:6px;padding:8px;align-items:center; }
+.usage-sessions .logs-field { display:flex;flex-direction:column;gap:3px;min-width:0; }
+.usage-session-options .logs-field { width:calc(50% - 3px);font-size:10px; }
+.usage-session-options .logging-status { padding:0 8px;font-size:11px; }
+.usage-session-options label { color:var(--usage-muted); }
+.usage-session-list { min-height:0;min-width:0;display:flex;flex-direction:column;padding:0; }
+.usage-session-list > h3 { margin:0;padding:9px 10px 5px;text-transform:uppercase;font-size:10px;letter-spacing:.06em;color:var(--usage-muted);font-weight:500; }
+.usage-session-list > .logs-toolbar { display:flex;flex-wrap:wrap;gap:4px;padding:4px 8px; }
+.usage-session-list > .logs-toolbar:empty { display:none; }
+.usage-session-list .logs-toolbar button { font-size:10px; }
+.usage-session-list .logs-viewport { overflow:auto;min-height:0; }
+.usage-sessions .logs-session-row { display:flex;gap:5px;align-items:center;padding:3px 7px;position:relative;border:0;border-left:3px solid transparent;min-width:0; }
+.usage-sessions .logs-session-row > input { opacity:.25; }
+.usage-sessions .logs-session-row:hover > input,.usage-sessions .logs-session-row > input:checked,.usage-sessions .logs-session-row > input:focus-visible { opacity:1; }
+.usage-sessions .logs-session-row.is-selected { border-left-color:var(--accent);background:color-mix(in srgb,var(--accent,#8aa9ff) 16%,var(--panel,var(--bg))); }
+.usage-sessions .usage-session-open { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 6px;flex:1;min-width:0;text-align:left;background:none;border:0;padding:7px 3px;border-radius:0; }
+.usage-session-name { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px; }
+.usage-session-badge { font-size:8px;max-width:65px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-transform:uppercase;color:var(--accent);align-self:center; }
+.usage-session-meta { grid-column:1/-1;color:var(--usage-muted);font-size:10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.usage-session-pin { font-size:8px;color:var(--accent);grid-row:1; }
+.usage-session-center { flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:auto;background:var(--bg); }
+.usage-session-heading { position:sticky;top:0;z-index:2;display:flex;gap:8px;align-items:center;min-height:39px;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--panel,var(--bg));flex-shrink:0; }
+.usage-session-heading strong { flex:1;min-width:0;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+.usage-session-heading button { border:0;background:none;font-size:11px;white-space:nowrap; }
+.usage-session-actions,.usage-actor-tree { padding:4px 12px;color:var(--usage-muted);font-size:10px;flex-shrink:0; }
+.usage-session-actions summary,.usage-actor-tree summary { cursor:pointer; }
+.usage-session-actions .logs-toolbar { display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:7px 0; }
+.usage-session-actions .logs-field { max-width:230px; }
+.usage-session-actions .settings-hint { font-size:10px;margin:2px 0; }
+.usage-transcript { padding:12px;display:flex;flex-direction:column;gap:9px;min-width:0; }
+.usage-message { margin:0;padding:10px 12px;border:0;border-left:3px solid var(--accent,#8aa9ff);background:color-mix(in srgb,var(--accent,#8aa9ff) 5%,var(--panel,var(--bg)));border-radius:0 calc(4px * var(--theme-radius-scale,1)) calc(4px * var(--theme-radius-scale,1)) 0;min-width:0; }
+.usage-message-assistant,.usage-message-thinking { border-left-color:var(--hl-keyword,var(--accent));background:color-mix(in srgb,var(--hl-keyword,var(--accent)) 5%,var(--panel,var(--bg))); }
+.usage-message-tool { border-left-color:var(--color-warning,var(--hl-function,var(--accent)));background:color-mix(in srgb,var(--color-warning,var(--hl-function,var(--accent))) 5%,var(--panel,var(--bg))); }
+.usage-message-technical { border-left-color:var(--border);background:var(--panel,var(--bg)); }
+.usage-message-heading { display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px; }
+.usage-message-heading strong { font-size:12px;color:var(--accent); }
+.usage-message-assistant .usage-message-heading strong,.usage-message-thinking .usage-message-heading strong { color:var(--hl-keyword,var(--accent)); }
+.usage-message-tool .usage-message-heading strong { color:var(--color-warning,var(--hl-function,var(--accent))); }
+.usage-message-technical .usage-message-heading strong { color:var(--usage-muted);font-size:11px; }
+.usage-message-heading time { color:var(--usage-muted);font-size:10px;white-space:nowrap; }
+.usage-prose { white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6; }
+.usage-message-part { min-width:0; }
+.usage-message-part + .usage-message-part { margin-top:9px; }
+.usage-message .logging-source,.usage-code { white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto;max-height:420px;font-size:11px;line-height:1.5;background:var(--bg);padding:8px;border-radius:calc(4px * var(--theme-radius-scale,1));margin:6px 0; }
+.usage-code { white-space:pre; }
+.usage-evidence { margin-top:5px;font-size:10px;color:var(--usage-muted); }
+.usage-evidence > summary { cursor:pointer;padding:3px 0; }
+.usage-message-thinking .usage-evidence:first-child,.usage-message-tool .usage-evidence:first-child { color:inherit;font-size:12px; }
+.usage-part-controls { display:flex;gap:5px;margin-top:5px; }
+.usage-part-controls button { background:none;border:0;font-size:10px;color:var(--usage-muted);padding:2px 0; }
+.usage-sessions .logging-status { margin:0;padding:5px 10px;flex-shrink:0;font-size:10px;color:var(--usage-muted); }
+.usage-sessions .logging-status:empty { display:none; }
+.usage-session-vitals { display:none;width:300px;flex:0 0 300px;overflow:auto;padding:12px;border-left:1px solid var(--border);background:var(--panel,var(--bg)); }
+.usage-vitals-open .usage-session-vitals { display:block; }
+.usage-session-vitals h3 { font-size:12px;margin:0 0 14px; }
+.usage-vitals-section { padding:8px 0;border-top:1px solid var(--border); }
+.usage-vitals-section h4 { font-size:10px;color:var(--usage-muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.04em; }
+.usage-vitals-section dl { display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:0;font-size:11px; }
+.usage-vitals-section dt { color:var(--usage-muted); }
+.usage-vitals-section dd { margin:0;text-align:right;overflow-wrap:anywhere; }
+.usage-empty { padding:20px;color:var(--usage-muted);font-size:12px; }
+.usage-search-match { outline:2px solid var(--accent);outline-offset:4px; }
+.usage-rail-toggle { display:none; }
+@container (max-width: 1040px) { .usage-vitals-open .usage-session-vitals { width:230px;flex-basis:230px; } }
+@container (max-width: 760px) {
+ .usage-sessions .usage-rail-toggle { display:block;align-self:flex-start;margin:5px 8px; }
+ .usage-session-rail { display:none; }
+ .usage-rail-open .usage-session-rail { display:flex;width:240px;flex-basis:240px; }
+ .usage-rail-open .usage-session-center { min-width:150px; }
+ .usage-vitals-open .usage-session-vitals { width:220px;flex-basis:220px; }
+ .usage-session-heading { flex-wrap:wrap; }
+ .usage-session-heading strong { min-width:80px; }
+ .usage-transcript { padding:8px; }
+ .usage-message { padding:9px; }
+}
+@container (max-width: 520px) {
+ .usage-rail-open .usage-session-rail { width:100%;flex-basis:100%; }
+ .usage-rail-open .usage-session-center { display:none; }
+ .usage-vitals-open .usage-session-vitals { width:100%;flex-basis:100%; }
+ .usage-vitals-open .usage-session-center { display:none; }
+ .usage-message-heading { flex-wrap:wrap; }
+}
+
+.usage-message-technical > summary { cursor:pointer;color:var(--usage-muted);font-size:11px; }
+.usage-message-body { overflow-wrap:anywhere;line-height:1.6;font-size:13px; }
+.usage-message-body > :first-child { margin-top:0; }
+.usage-message-body > :last-child { margin-bottom:0; }
+.usage-message-body pre { overflow:auto;max-width:100%;font-size:11px; }
+.usage-message-body table { border-collapse:collapse;font-size:11px; }
+.usage-message-body th,.usage-message-body td { padding:4px 6px;border:1px solid var(--border); }
+.usage-message-body a { color:var(--accent); }
+
+.usage-sessions .logs-session-row { margin:0;border-radius:0;contain-intrinsic-size:auto 52px; }
+.usage-sessions .logs-viewport { max-height:none; }
+.usage-sessions .logs-part { margin:0;contain-intrinsic-size:auto 92px; }
+.usage-sessions .usage-message-technical { content-visibility:visible;contain-intrinsic-size:none; }
+
+.usage-session-rail > .logs-field { flex:none; }
+.usage-session-rail > .logs-field > input { flex:none;min-height:29px;max-height:29px; }
+
+.usage-sessions .logs-session-row .usage-session-open { height:auto!important;min-height:48px!important;max-height:none!important;box-shadow:none!important;background:transparent!important;border:0!important; }
+
+.usage-sessions .usage-search-result{display:block;width:100%;height:auto!important;min-height:50px;max-height:none;padding:8px 4px!important;border:0!important;border-bottom:1px solid var(--border)!important;box-shadow:none!important;background:transparent!important;text-align:left}.usage-search-result strong{display:block;font-size:10px;opacity:.65;margin-bottom:4px}.usage-search-result span{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:normal;font-size:11px;line-height:1.4}
+
+/* Quiet native disclosure controls preserve full actions/source evidence. */
+.usage-sessions .usage-session-batch[hidden]{display:none!important}
+.usage-sessions .usage-session-center details,.usage-sessions .usage-session-vitals details{margin:5px 0!important;border:0!important;box-shadow:none!important;background:transparent!important;border-radius:0!important;padding:0!important}
+.usage-sessions .usage-session-center details>summary,.usage-sessions .usage-session-vitals details>summary{display:list-item!important;width:auto!important;min-height:0!important;height:auto!important;padding:4px 2px!important;margin:0!important;box-shadow:none!important;border:0!important;background:transparent!important;color:var(--usage-muted)!important;border-radius:0!important;font-size:10px!important;line-height:16px!important;font-weight:400!important;letter-spacing:normal!important;text-transform:none!important;cursor:pointer}
+.usage-sessions .usage-message-technical{padding:8px 11px!important;background:color-mix(in srgb,var(--fg) 3%,var(--bg))!important;border-left:2px solid var(--border)!important}
+
+/* Compact Copy/evidence row; open evidence still receives the full card width. */
+.usage-sessions .usage-message{padding:8px 10px}.usage-sessions .usage-message-heading{min-height:18px;line-height:18px;margin-bottom:4px}.usage-message-footer{display:flex;flex-wrap:wrap;align-items:center;gap:3px 10px;margin-top:3px;min-height:20px}.usage-sessions .usage-message-footer .usage-part-controls{margin:0;padding:0;flex:none}.usage-sessions .usage-message-footer .usage-part-controls button{height:20px!important;min-height:0!important;padding:1px 3px!important;font-size:10px!important;line-height:16px!important;background:transparent!important;border:0!important}.usage-sessions .usage-message-footer>details{flex:1 1 auto;min-width:120px;margin:0!important}.usage-sessions .usage-message-footer>details[open]{flex-basis:100%}.usage-sessions .usage-message-footer>details>summary{padding:2px 0!important;line-height:16px!important}.usage-sessions .usage-message-part>details.usage-evidence:first-child{margin:0!important}.usage-sessions .usage-message-part>details.usage-evidence:first-child>summary{padding:2px 0!important;line-height:14px!important}.usage-sessions .usage-message-body{line-height:1.5}
+
+/* Transcript cards keep intrinsic height; the conversation pane owns scrolling. */
+.usage-sessions .usage-session-center>.usage-transcript{flex:0 0 auto!important;min-height:min-content!important;height:auto!important;max-height:none!important;overflow:visible!important}.usage-sessions .usage-transcript>.usage-message{flex:0 0 auto!important;min-height:min-content!important;height:auto!important;max-height:none!important;overflow:visible!important}.usage-sessions .usage-session-center>.logs-toolbar{flex-shrink:0}

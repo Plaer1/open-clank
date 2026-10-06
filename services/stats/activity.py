@@ -13,11 +13,12 @@ from sqlalchemy import and_, or_
 
 from core.database import AgentTurn, ChatMessage, Session as DbSession, TurnActor
 from core.stats_models import StatsEvent
-from services.stats.query import _install_progress_handler
+from services.stats.query import _install_progress_handler, _aggregate
 from services.stats.ledger import select_admitted_events
 from services.stats.privacy import identity_handle, owner_scope
+from services.stats.tool_evidence import load_evidence, coalesce_facts, cohort, measured_concurrency
 
-FORMULA_REVISION = "s08-activity-v1"
+FORMULA_REVISION = "l02-activity-v2"
 MAX_ROWS = 100_000
 MAX_BUCKETS = 366
 MAX_PAGE_SIZE = 100
@@ -70,20 +71,11 @@ def _percentile(values: list[float], fraction: float) -> dict:
 
 
 def _typed_sum(values):
-    values = list(values)
-    numeric = []
-    states = []
-    for value, state in values:
-        if value is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
-            numeric.append(value)
-            states.append(state if state in {"reported", "estimated"} else "unavailable")
-    if not numeric:
+    result = _aggregate(list(values))
+    value = result["value"]
+    if isinstance(value, float) and not math.isfinite(value):
         return None, "unavailable"
-    total = sum(numeric)
-    if isinstance(total, float) and not math.isfinite(total):
-        return None, "unavailable"
-    state = "unavailable" if "unavailable" in states else "estimated" if "estimated" in states or len(states) != len(values) else "reported"
-    return (str(total) if abs(total) > 2**53 - 1 else total), state
+    return (str(value) if value is not None and abs(value) > 2**53 - 1 else value), result["state"]
 
 
 def _breakdown(values: Iterable[str | None], owner: str, kind: str) -> list[dict]:
@@ -135,7 +127,7 @@ def project_activity(*, owner: str, messages: list[dict], sessions: list[dict], 
                      timezone_name: str = "UTC", resolution: str = "day", page: int = 1,
                      page_size: int = 50, sort: str = "messages", direction: str = "desc",
                      cancel_event=None, deadline=None, truncated: bool = False, scope: dict | None = None,
-                     display_end=None) -> dict:
+                     display_end=None, tool_evidence: dict | None = None) -> dict:
     if not str(owner or "").strip():
         raise ActivityError("owner is required")
     _check(cancel_event, deadline)
@@ -151,6 +143,13 @@ def project_activity(*, owner: str, messages: list[dict], sessions: list[dict], 
         raise ActivityError("invalid session sort")
     for row in messages + sessions + events + actors:
         _check(cancel_event, deadline)
+    evidence = tool_evidence or {"facts": [], "coverage": {"state": "unavailable", "reason": "archive_evidence_unavailable"}}
+    tool_facts = coalesce_facts(owner, evidence["facts"])
+    skill_facts = [fact for fact in tool_facts if fact.get("skill_name") or fact.get("tool_name") == "skill"]
+    tools_by_session = defaultdict(list)
+    for fact in tool_facts:
+        _check(cancel_event, deadline)
+        tools_by_session[fact.get("session_id")].append(fact)
 
     timeline = defaultdict(lambda: {"messages": 0, "user_messages": 0, "assistant_messages": 0, "sessions": set()})
     heatmap = Counter()
@@ -187,8 +186,7 @@ def project_activity(*, owner: str, messages: list[dict], sessions: list[dict], 
         session_id = event.get("session_id")
         if not session_id:
             continue
-        if event.get("output_tokens") is not None:
-            token_values_by_session[session_id].append((event["output_tokens"], event.get("output_tokens_state", "reported")))
+        token_values_by_session[session_id].append((event.get("output_tokens"), event.get("output_tokens_state", "reported")))
     session_rows = []
     for session in sessions:
         _check(cancel_event, deadline)
@@ -198,10 +196,19 @@ def project_activity(*, owner: str, messages: list[dict], sessions: list[dict], 
         elapsed = (max(times) - min(times)).total_seconds() if len(times) > 1 else None
         active_seconds = _active_seconds(times)
         session_rows.append({"open_handle": identity_handle(owner, "session_id", session_id),
+                             "name": session.get("name") or "Saved conversation",
+                             "model_identities": session.get("model_identities", []),
+                             "provider_identities": session.get("provider_identities", []),
+                             "workspace_identity": session.get("workspace_identity"),
                              "message_count": len(session_messages),
                              "output_tokens": _typed_sum(token_values_by_session.get(session_id, []))[0],
                              "output_tokens_state": _typed_sum(token_values_by_session.get(session_id, []))[1],
                              "elapsed_seconds": elapsed, "active_seconds": active_seconds,
+                             "active_seconds_state": "estimated" if active_seconds is not None else "unavailable",
+                             "active_seconds_method": "inter_message_gap_capped_30m",
+                             "tool_count": len(tools_by_session[session_id]) if evidence["coverage"].get("state") != "unavailable" else None,
+                             "skill_count": sum(bool(fact.get("skill_name")) or fact.get("tool_name") == "skill" for fact in tools_by_session[session_id]) if evidence["coverage"].get("state") != "unavailable" else None,
+                             "measured_tool_ms": cohort(tools_by_session[session_id], evidence["coverage"])["duration_ms"],
                              "automation": session.get("mode") in {"agent", "research"},
                              "actor_shape": ("subagent" if any(row.get("nested") for row in actors_by_session.get(session_id, []))
                                              else "automation" if actors_by_session.get(session_id) or session.get("mode") in {"agent", "research"}
@@ -268,9 +275,33 @@ def project_activity(*, owner: str, messages: list[dict], sessions: list[dict], 
     for index, (mode, count) in enumerate(sorted(actor_counts.items(), key=lambda item: (-item[1], item[0])), 1):
         actor_sessions = {row.get("session_id") for row in actors if (row.get("mode") or "unknown") == mode}
         actor_messages = sum(row.get("session_id") in actor_sessions for row in messages)
+        actor_members = {(row.get("session_id"), row.get("actor_id")) for row in actors if (row.get("mode") or "unknown") == mode}
+        member_tools = [fact for fact in tool_facts if (fact.get("session_id"), fact.get("actor_id")) in actor_members]
+        lifecycle = []
+        for actor in actors:
+            if (actor.get("mode") or "unknown") != mode:
+                continue
+            began, ended = _dt(actor.get("created_at"), zone), _dt(actor.get("completed_at"), zone)
+            if began and ended and ended >= began:
+                lifecycle.append((ended - began).total_seconds() * 1000)
         actor_comparison.append({"label": f"actor {index}", "handle": _handle(owner, "actor", mode),
                                  "count": count, "sessions": len(actor_sessions), "messages": actor_messages,
-                                 "timing": {"state": "unavailable"}})
+                                 "timing": {**_percentile(lifecycle, .5), "method": "recorded_actor_lifecycle_elapsed"},
+                                 "tools": cohort(member_tools, evidence["coverage"])})
+
+    response_actors = defaultdict(list)
+    response_sizes = defaultdict(list)
+    for event in events:
+        if event.get("duration_ms") is None:
+            continue
+        if event.get("actor_kind"):
+            response_actors[event["actor_kind"]].append(float(event["duration_ms"]))
+        size = event.get("output_tokens")
+        if isinstance(size, (int, float)) and not isinstance(size, bool):
+            response_sizes["small" if size <= 256 else "medium" if size <= 2048 else "large"].append(float(event["duration_ms"]))
+    actor_velocity = [{"label": f"actor {index + 1}", "handle": _handle(owner, "actor", kind),
+                       "p50_ms": _percentile(values, .5), "p90_ms": _percentile(values, .9)}
+                      for index, (kind, values) in enumerate(sorted(response_actors.items()))]
 
     active_dates = {current.date() for row in messages + events for current in [_dt(row.get("timestamp", row.get("event_time")), zone)] if current}
     return {
@@ -294,7 +325,9 @@ def project_activity(*, owner: str, messages: list[dict], sessions: list[dict], 
         "heatmap": {"timezone": timezone_name, "points": heatmap_rows},
         "breakdowns": {"workspace": _workspace_breakdown(sessions, messages, actors, owner),
                        "model": _breakdown((row.get("model") for row in sessions), owner, "model"),
-                       "actor": _breakdown((row.get("mode") for row in actors), owner, "actor")},
+                       "actor": _breakdown((row.get("mode") for row in actors), owner, "actor"),
+                       "tool": _breakdown((fact.get("tool_name") for fact in tool_facts), owner, "tool"),
+                       "skill": _breakdown((fact.get("skill_name") for fact in skill_facts), owner, "skill")},
         "sessions": {"rows": page_rows, "page": page, "page_size": page_size,
                      "total": len(session_rows), "truncated": truncated},
         "automation": {"state": "reported", "shapes": Counter(row["actor_shape"] for row in session_rows),
@@ -302,19 +335,25 @@ def project_activity(*, owner: str, messages: list[dict], sessions: list[dict], 
                        "automation": sum(row["actor_shape"] == "automation" for row in session_rows),
                        "subagent": sum(row["actor_shape"] == "subagent" for row in session_rows)},
         "session_shapes": {"archetypes": Counter("quick" if row["message_count"] <= 5 else "standard" if row["message_count"] <= 20 else "deep" if row["message_count"] <= 100 else "marathon" for row in session_rows),
-                            "active_seconds": _percentile([row["active_seconds"] for row in session_rows if row["active_seconds"] is not None], .5),
+                            "active_seconds": {**_percentile([row["active_seconds"] for row in session_rows if row["active_seconds"] is not None], .5),
+                                               "state": "estimated" if any(row["active_seconds"] is not None for row in session_rows) else "unavailable",
+                                               "method": "inter_message_gap_capped_30m"},
                             "elapsed_seconds": _percentile([row["elapsed_seconds"] for row in session_rows if row["elapsed_seconds"] is not None], .5),
-                            "peak_context": {"state": "unavailable"}, "tools": {"state": "unavailable"}},
+                            "peak_context": {"state": "unavailable"}, "tools": cohort(tool_facts, evidence["coverage"]),
+                            "skills": cohort(skill_facts, evidence["coverage"])},
         "velocity": {"p50_ms": _percentile(durations, .5), "p90_ms": _percentile(durations, .9),
                       "mean_ms": round(sum(durations) / len(durations), 3) if durations else None,
-                      "by_actor": {"state": "unavailable", "reason": "timing_evidence_has_no_actor_join"},
-                      "by_size": {"state": "unavailable"}},
+                      "by_actor": {"state": "reported" if actor_velocity else "unavailable", "rows": actor_velocity},
+                      "by_size": {"state": "reported" if response_sizes else "unavailable", "method": "reported_output_token_cohort",
+                                  "rows": [{"label": label, "p50_ms": _percentile(values, .5), "p90_ms": _percentile(values, .9)} for label, values in sorted(response_sizes.items())]}},
         "actor_comparison": actor_comparison,
         "concurrency": {"state": "estimated", "active_sessions": active, "peak": peak,
                          "idle_sessions": max(0, len(session_rows) - active),
+                         "measured_tools": measured_concurrency(owner, tool_facts),
                          "coverage": {"state": "partial" if truncated else "complete"}},
-        "capabilities": {name: {"state": "unavailable", "reason": "canonical_evidence_unavailable"}
-                         for name in ("tools", "skills", "machine", "git_branch", "peak_context", "cost")},
+        "capabilities": {**{name: {"state": "unavailable", "reason": "canonical_evidence_unavailable"}
+                         for name in ("machine", "git_branch", "peak_context", "cost")},
+                         "tools": evidence["coverage"], "skills": evidence["coverage"]},
         "coverage": {"state": "partial" if truncated else "complete", "truncated": truncated},
         "warnings": ["row_cap_reached"] if truncated else [],
     }
@@ -333,8 +372,18 @@ def _progress(db, cancel_event, deadline):
 def _load_activity(db, *, owner: str, timezone_name="UTC", resolution="day", page=1, page_size=50,
                   sort="messages", direction="desc",
                   cancel_event=None, deadline=None, start_utc=None, end_utc=None, scope=None,
-                  display_end=None) -> dict:
+                  display_end=None, filters=None) -> dict:
     _check(cancel_event, deadline)
+    from services.stats.presentation import event_cohort, canonical_labels, catalogs
+    from services.stats.privacy import IdentityCatalog
+    request_filters = dict(filters or {})
+    request_filters.update(timezone=timezone_name, period="all")
+    if start_utc is not None: request_filters["start"] = start_utc.replace(tzinfo=timezone.utc).isoformat()
+    if end_utc is not None: request_filters["end"] = end_utc.replace(tzinfo=timezone.utc).isoformat()
+    _, projection, event_truncated, selected_ids = event_cohort(db, owner, request_filters,
+        cancel_event=cancel_event, deadline=deadline)
+    labels = canonical_labels(db, owner)
+    _install_progress_handler(db, cancel_event, deadline)
     message_query = (db.query(ChatMessage.session_id, ChatMessage.role, ChatMessage.timestamp)
                 .join(DbSession, DbSession.id == ChatMessage.session_id)
                 .filter(DbSession.owner == owner))
@@ -342,20 +391,17 @@ def _load_activity(db, *, owner: str, timezone_name="UTC", resolution="day", pag
         message_query = message_query.filter(ChatMessage.timestamp >= start_utc)
     if end_utc is not None:
         message_query = message_query.filter(ChatMessage.timestamp < end_utc)
+    if selected_ids is not None:
+        message_query = message_query.filter(ChatMessage.session_id.in_(selected_ids))
     rows = message_query.order_by(ChatMessage.timestamp.desc(), ChatMessage.id.desc()).limit(MAX_ROWS + 1).all()
     messages = [{"session_id": row[0], "role": row[1], "timestamp": row[2]} for row in reversed(rows[:MAX_ROWS])]
-    event_query = db.query(StatsEvent).filter(StatsEvent.owner == owner)
-    if start_utc is not None:
-        event_query = event_query.filter(StatsEvent.event_time >= start_utc)
-    if end_utc is not None:
-        event_query = event_query.filter(StatsEvent.event_time < end_utc)
-    event_rows = event_query.order_by(StatsEvent.event_time.desc(), StatsEvent.id.desc()).limit(MAX_ROWS + 1).all()
-    admitted_events = select_admitted_events(list(reversed(event_rows[:MAX_ROWS])))
+    admitted_events = projection.events
     events = [{"duration_ms": row.duration_ms, "output_tokens": row.output_tokens,
                "output_tokens_state": row.output_tokens_state, "event_time": row.event_time,
-               "session_id": row.session_id} for row in admitted_events]
+               "session_id": row.session_id, "actor_kind": row.actor_kind,
+               "actual_model": row.actual_model, "workspace_id": row.workspace_id} for row in admitted_events]
     referenced_sessions = {row[0] for row in rows} | {row.session_id for row in admitted_events if row.session_id}
-    session_query = db.query(DbSession.id, DbSession.workspace_id, DbSession.model, DbSession.mode, DbSession.created_at).filter(DbSession.owner == owner)
+    session_query = db.query(DbSession.id, DbSession.workspace_id, DbSession.model, DbSession.mode, DbSession.created_at, DbSession.name).filter(DbSession.owner == owner)
     if start_utc is not None or end_utc is not None:
         created_in_scope = []
         if start_utc is not None:
@@ -364,12 +410,15 @@ def _load_activity(db, *, owner: str, timezone_name="UTC", resolution="day", pag
             created_in_scope.append(DbSession.created_at < end_utc)
         created_clause = and_(*created_in_scope)
         session_query = session_query.filter(or_(created_clause, DbSession.id.in_(referenced_sessions)) if referenced_sessions else created_clause)
+    if selected_ids is not None:
+        session_query = session_query.filter(DbSession.id.in_(selected_ids))
     sessions = session_query.order_by(DbSession.created_at.desc(), DbSession.id).limit(MAX_ROWS + 1).all()
     session_values = [{"session_id": row[0], "workspace": row[1], "model": row[2], "mode": row[3],
-                       "created_at": row[4], "actor_shape": "automation" if row[3] in {"agent", "research"} else "human"}
+                       "created_at": row[4], "name": row[5], "actor_shape": "automation" if row[3] in {"agent", "research"} else "human"}
                       for row in sessions[:MAX_ROWS]]
     actor_rows = db.query(TurnActor.mode, TurnActor.root_turn_id, TurnActor.status, ChatMessage.session_id,
-                          TurnActor.parent_actor_id, TurnActor.background).join(AgentTurn, AgentTurn.root_turn_id == TurnActor.root_turn_id)
+                          TurnActor.parent_actor_id, TurnActor.background, TurnActor.actor_id,
+                          TurnActor.created_at, TurnActor.completed_at).join(AgentTurn, AgentTurn.root_turn_id == TurnActor.root_turn_id)
     actor_rows = (actor_rows
               .join(ChatMessage, ChatMessage.id == AgentTurn.root_turn_id).join(DbSession, DbSession.id == ChatMessage.session_id)
               .filter(DbSession.owner == owner))
@@ -377,24 +426,58 @@ def _load_activity(db, *, owner: str, timezone_name="UTC", resolution="day", pag
         actor_rows = actor_rows.filter(ChatMessage.timestamp >= start_utc)
     if end_utc is not None:
         actor_rows = actor_rows.filter(ChatMessage.timestamp < end_utc)
+    if selected_ids is not None:
+        actor_rows = actor_rows.filter(ChatMessage.session_id.in_(selected_ids))
     actor_rows = actor_rows.order_by(ChatMessage.timestamp.desc(), TurnActor.root_turn_id.desc(), TurnActor.actor_id.desc()).limit(MAX_ROWS + 1).all()
     actors = [{"mode": row[0], "root_turn_id": row[1], "status": row[2], "session_id": row[3],
-               "nested": bool(row[4])} for row in reversed(actor_rows[:MAX_ROWS])]
-    truncated = len(sessions) > MAX_ROWS or len(rows) > MAX_ROWS or len(event_rows) > MAX_ROWS or len(actor_rows) > MAX_ROWS
-    return project_activity(owner=owner, messages=messages, sessions=session_values, events=events, actors=actors,
+               "nested": bool(row[4]), "actor_id": row[6], "created_at": row[7], "completed_at": row[8]} for row in reversed(actor_rows[:MAX_ROWS])]
+    truncated = len(sessions) > MAX_ROWS or len(rows) > MAX_ROWS or event_truncated or len(actor_rows) > MAX_ROWS
+    by_session = defaultdict(list)
+    for event in admitted_events:
+        if event.session_id: by_session[event.session_id].append(event)
+    workspace_catalog = IdentityCatalog(owner, "workspace_id", [row.get('workspace') for row in session_values], labels=labels.get('workspace_id', {}))
+    for row in session_values:
+        choices = catalogs(owner, by_session.get(row['session_id'], []), labels)
+        row['model_identities'] = choices['actual_model'].choices()
+        row['provider_identities'] = choices['provider_id'].choices()
+        row['workspace_identity'] = workspace_catalog.project(row.get('workspace'))
+    evidence = load_evidence(owner, start_utc=start_utc, end_utc=end_utc,
+                             cancel_event=cancel_event, deadline=deadline)
+    if selected_ids is not None:
+        evidence = {**evidence, "facts": [fact for fact in evidence['facts'] if fact.get('session_id') in selected_ids]}
+    result = project_activity(owner=owner, messages=messages, sessions=session_values, events=events, actors=actors,
                             timezone_name=timezone_name, resolution=resolution, page=page, page_size=page_size,
-                            sort=sort, direction=direction,
-                            cancel_event=cancel_event, deadline=deadline, truncated=truncated, scope=scope,
-                            display_end=display_end)
+                            sort=sort, direction=direction, cancel_event=cancel_event, deadline=deadline,
+                            truncated=truncated, scope=scope, display_end=display_end, tool_evidence=evidence)
+    # Canonical observed model attribution and workspace handles can drive the
+    # shared filter bar; configured session model is not historical usage.
+    models = Counter(event.actual_model for event in admitted_events if event.actual_model)
+    model_catalog = IdentityCatalog(owner, 'actual_model', models, labels=labels.get('actual_model', {}))
+    result['breakdowns']['model'] = [{**model_catalog.project(value), 'count': count} for value, count in models.most_common(15)]
+    workspace_handles = { _handle(owner, 'workspace', value): workspace_catalog.project(value) for value in labels.get('workspace_id', {})}
+    workspace_handles.update({_handle(owner, 'workspace', row['workspace']): workspace_catalog.project(row['workspace']) for row in session_values if row.get('workspace')})
+    for row in result['breakdowns']['workspace']:
+        if row['handle'] in workspace_handles: row.update(workspace_handles[row['handle']])
+        elif row['label'] == 'Other': row['handle'] = None
+    if result['summary']['most_active_workspace']:
+        row = result['summary']['most_active_workspace']
+        if row['handle'] in workspace_handles: row.update(workspace_handles[row['handle']])
+    result['filter_semantics'] = 'session_cohort'
+    result['source_coverage'] = {'stats': {'state': 'partial_truncated' if event_truncated else projection.coverage},
+                                 'messages': result['coverage'], 'tools': evidence['coverage']}
+    result['populations'] = {'sessions': 'host_sessions', 'messages': 'dated_host_messages',
+                             'tokens': 'matching_admitted_events', 'tools': 'dated_archive_tools'}
+    result['scope']['filters'] = dict(filters or {})
+    return result
 
 
 def load_activity(db, *, owner: str, timezone_name="UTC", resolution="day", page=1, page_size=50,
                   sort="messages", direction="desc",
-                  cancel_event=None, deadline=None, start_utc=None, end_utc=None, scope=None) -> dict:
+                  cancel_event=None, deadline=None, start_utc=None, end_utc=None, scope=None, filters=None) -> dict:
     with _progress(db, cancel_event, deadline):
         zone = ZoneInfo(timezone_name)
         display_end = end_utc or datetime.now(zone)
         return _load_activity(db, owner=owner, timezone_name=timezone_name, resolution=resolution,
                               page=page, page_size=page_size, sort=sort, direction=direction,
                               cancel_event=cancel_event, deadline=deadline, start_utc=start_utc, end_utc=end_utc,
-                              scope=scope, display_end=display_end)
+                              scope=scope, display_end=display_end, filters=filters)

@@ -45,12 +45,12 @@ def create_dirs():
 
 
 def init_database():
-    """Create all SQLAlchemy tables."""
+    """Initialize or validate the current schema through its canonical authority."""
     sys.path.insert(0, BASE_DIR)
     os.environ.setdefault("DATABASE_URL", f"sqlite:///{os.path.join(DATA_DIR, 'app.db')}")
 
-    from core.database import Base, engine
-    Base.metadata.create_all(bind=engine)
+    from core.database import init_db
+    init_db()
     print("  [ok] Database initialized")
 
 
@@ -97,8 +97,7 @@ def create_default_admin():
         return "exists"
 
     try:
-        import bcrypt
-        import json
+        from core.auth import AuthManager
 
         # Priority: env vars > interactive prompt > random password
         username = (os.getenv("OPEN_CLANK_ADMIN_USER") or os.getenv("ODYSSEUS_ADMIN_USER") or "").strip().lower()
@@ -121,17 +120,9 @@ def create_default_admin():
             password = password or __import__("secrets").token_urlsafe(18)
 
         username = username or "admin"
-        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        auth_data = {
-            "users": {
-                username: {
-                    "password_hash": hashed,
-                    "is_admin": True,
-                }
-            }
-        }
-        with open(auth_path, "w", encoding="utf-8") as f:
-            json.dump(auth_data, f, indent=2)
+        if not AuthManager(auth_path).setup(username, password):
+            print("  [error] Initial admin account could not be created")
+            return "failed"
 
         if sys.stdin.isatty() and not (os.getenv("OPEN_CLANK_ADMIN_PASSWORD") or os.getenv("ODYSSEUS_ADMIN_PASSWORD")):
             print(f"  [ok] Admin account created ({username})")
@@ -294,38 +285,13 @@ def ensure_managed_engine():
     print(f"  [ok] Managed engine verified: {result.binary}")
 
 
-def ensure_provider_cutover():
-    """Complete the provider hard cut before importing ``core.database``."""
-
-    from src.openclank.provider_migration import PROVIDER_ENV_AUTHORITIES
-    from src.openclank.provider_cutover import run_provider_cutover
-
-    configured = sorted(
-        name
-        for name in PROVIDER_ENV_AUTHORITIES
-        if str(os.environ.get(name) or "").strip()
-    )
+def validate_existing_provider_store():
+    """Validate existing provider state; setup never upgrades an installation."""
+    from src.openclank.provider_startup import PROVIDER_ENV_AUTHORITIES, validate_provider_store
+    configured = sorted(name for name in PROVIDER_ENV_AUTHORITIES if str(os.environ.get(name) or "").strip())
     if configured:
-        raise RuntimeError(
-            "retired provider environment settings are configured: "
-            + ", ".join(configured)
-            + "; add the connection in Providers and remove these variables"
-        )
-
-    auth_enabled = os.getenv("AUTH_ENABLED", "true").strip().lower() != "false"
-    result = run_provider_cutover(
-        data_dir=DATA_DIR,
-        auth_enabled=auth_enabled,
-        verify_engine=False,
-    )
-    if not result.complete:
-        raise RuntimeError(
-            f"provider cutover did not complete (phase={result.phase})"
-        )
-    if result.needed:
-        print(f"  [ok] Provider cutover complete ({result.phase})")
-    else:
-        print("  [ok] Provider cutover not required")
+        raise RuntimeError("retired provider environment settings are configured: " + ", ".join(configured))
+    validate_provider_store(DATA_DIR)
 
 
 def main():
@@ -356,11 +322,8 @@ def main():
     print("\n4. Checking dependencies...")
     check_deps()
 
-    print("\n5. Completing provider cutover...")
-    # This is deliberately outside the database initialization catch below.
-    # A cutover failure is a pre-launch installation error, never a condition
-    # setup may downgrade to a warning.
-    ensure_provider_cutover()
+    print("\n5. Validating existing provider store...")
+    validate_existing_provider_store()
 
     print("\n6. Initializing database...")
     try:

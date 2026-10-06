@@ -18,6 +18,15 @@ from .core import _call_provider
 from .providers import PROVIDER_INFO, _get_provider_key, _get_search_settings, _get_result_count
 from src.constants import SEARXNG_INSTANCE
 
+ANTIGRAVITY_PREREQUISITES = (
+    "subscription_selected_account_credential_lease",
+    "provider_authoritative_retrieval_source_events",
+)
+ANTIGRAVITY_UNAVAILABLE_REASON = (
+    "Antigravity subscription adapter unshipped: upstream must expose selected-account OAuth credential leases "
+    "and authoritative retrieval source events. Installed CLI keyring sign-in and Gemini API-key SDK mode do not supply this authority."
+)
+
 SCHEMA_VERSION = 1
 _VALID_CALLERS = {"chat", "research", "code"}
 _VALID_MODES = {"results", "read", "answer"}
@@ -217,7 +226,10 @@ class SearchService:
         purpose_key = {"research": "research_search_provider", "code": "code_search_provider"}.get(caller, "search_provider")
         selected = provider if provider is not None else str(settings.get(purpose_key) or settings.get("search_provider") or "searxng")
         if selected == "antigravity":
-            return self._failure(query, caller, mode, selected, "unsupported_capability", "Antigravity search is unverified and unavailable until an owner-bound subscription adapter is qualified", started, status="unavailable")
+            response = self._failure(query, caller, mode, selected, "unsupported_capability", ANTIGRAVITY_UNAVAILABLE_REASON, started, status="unavailable")
+            response.actual_provider = ""  # No provider was dispatched.
+            response.account_scope = "subscription-unbound"
+            return response
         if mode == "answer" and selected != "mimo":
             return self._failure(query, caller, mode, selected, "unsupported_mode", "grounded answer helper is not qualified", started)
         if selected not in PROVIDER_INFO and selected != "mimo":

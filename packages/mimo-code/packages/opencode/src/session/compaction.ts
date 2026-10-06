@@ -18,6 +18,7 @@ import { InstanceState } from "@/effect"
 import { isOverflow as overflow, usable } from "./overflow"
 import { makeRuntime } from "@/effect/run-service"
 import { fn } from "@/util/fn"
+import { SessionPrefixSnapshot } from "./prefix-snapshot"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -344,8 +345,28 @@ export const layer: Layer.Layer<
       const prompt = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, { stripMedia: true })
+      const modelMessages = yield* MessageV2.toModelMessagesEffect(
+        msgs,
+        model,
+        input.overflow ? { stripMedia: true } : { collapseCheckpointTail: true },
+      )
       const ctx = yield* InstanceState.context
+      // Match the parent request's stable profile defaults. Compaction has no
+      // separate session-prompt configuration in this owner.
+      const parentSession = yield* session.get(input.sessionID)
+      const parentAgent = yield* agents.get(userMessage.agent)
+      const profileKey = SessionPrefixSnapshot.profileKey({
+        providerID: userMessage.model.providerID,
+        modelID: userMessage.model.modelID,
+        agent: userMessage.agent,
+        agentID: userMessage.agentID ?? "main",
+        harness: "default",
+        systemMode: "append",
+        system: userMessage.system ?? "",
+        format: userMessage.format ?? { type: "text" },
+        permission: Agent.runtimePermission(parentAgent, parentSession.permission),
+      })
+      const frozenPrefix = yield* SessionPrefixSnapshot.get(input.sessionID, profileKey)
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
         role: "assistant",
@@ -383,8 +404,13 @@ export const layer: Layer.Layer<
         user: userMessage,
         agent,
         sessionID: input.sessionID,
-        tools: {},
+        // Preserve the frozen advertised prefix without granting compaction a
+        // second execution authority: restored entries contain schemas only.
+        tools: frozenPrefix?.tools ? SessionPrefixSnapshot.restoreTools(frozenPrefix.tools) : {},
+        activeTools: frozenPrefix?.tools?.map((item) => item.name),
+        toolChoice: "auto",
         system: [],
+        prebuiltSystem: frozenPrefix?.system,
         messages: [
           ...modelMessages,
           {

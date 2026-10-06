@@ -4,7 +4,7 @@
  * Returns the string — caller creates the wrapper element, attaches its
  * own touch / swipe-to-dismiss listeners, then sets innerHTML. Per-tool
  * sections are all toggled `display:none` here; the tool-switch handler
- * in galleryEditor.js shows the section matching the active tool.
+ * in imps.js shows the section matching the active tool.
  *
  * @param {{ color: string, brushSize: number, wandTolerance: number }} ctx
  * @returns {string}

@@ -1,3 +1,4 @@
+import { uiIcon, mountUiIcons } from './js/uiIcons.js';
 // ============================================
 // Odysseus UI — Main Application Orchestrator
 // ES6 module — entry point, no exports (wires all modules together)
@@ -32,7 +33,7 @@ import codeEditorModule from './js/codeEditor.js';
 import filesModule from './js/files.js';
 import { appletPath, resolveAppletLocation } from './js/appletRoutes.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
-import './js/modalManager.js?v=20260723compareicon2';
+import modalManagerDock from './js/modalManager.js';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
 import './js/tileManager.js';
 import themeModule from './js/theme.js';
@@ -43,15 +44,17 @@ import themeModule from './js/theme.js';
 // unversioned so this can't recur.
 import cookbookModule from './js/cookbook.js';
 import groupModule from './js/group.js';
-import * as researchPanelModule from './js/research/panel.js?v=20260630researchthumb';
+import * as researchPanelModule from './js/research/panel.js';
 import ttsModule from './js/tts-ai.js';
 import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
-import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20260715startupclean';
+import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20261004sidebarhamburger1';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
 import initPermissionModeControl from './js/permission-mode.js';
 import initInteractionModeControl from './js/interaction-mode.js';
 import { initCustomContextMenu } from './js/custom-context-menu.js';
+import { initWorkbenchMenu } from './js/workbenchMenu.js';
+import { openHelp } from './js/contextualHelp.js';
 import chatWorkspaceModule from './js/chatWorkspace.js';
 
 const API_BASE = window.location.origin;
@@ -181,9 +184,7 @@ function initRailHoverLabels() {
     'rail-cookbook': 'Cookbook',
     'rail-research': 'Research',
     'rail-email': 'Email',
-    'rail-gallery': 'Gallery',
-    'rail-archive': 'Library',
-    'rail-memory': 'Menmery',
+    'rail-memory': 'Memery',
     'rail-notes': 'Editor',
     'rail-tasks': 'Tasks',
     'rail-theme': 'Theme',
@@ -767,22 +768,9 @@ function initializeEventListeners() {
       };
 
       // Dynamic modals (removed from DOM on close)
-      const dynamicModals = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal', 'email-lib-modal'];
+      const dynamicModals = ['library-modal', 'archive-modal', 'doclib-modal', 'tasks-modal', 'email-lib-modal'];
       for (const id of dynamicModals) {
         const m = document.getElementById(id);
-        if (id === 'gallery-modal') {
-          const editor = document.getElementById('gallery-editor-container');
-          const editing = !!window.__galleryEditLive || !!(
-            editor &&
-            getComputedStyle(editor).display !== 'none' &&
-            editor.querySelector('.gallery-editor')
-          );
-          if (editing) {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            return;
-          }
-        }
         if (m) { dismissModal(m); return; }
       }
 
@@ -815,18 +803,9 @@ function initializeEventListeners() {
     'memory-modal': null,
     'theme-modal': null,
   };
-  const _dynamicModalIds = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal'];
+  const _dynamicModalIds = ['library-modal', 'archive-modal', 'doclib-modal', 'tasks-modal'];
   function dismissModal(modal) {
     if (!modal || modal.classList.contains('hidden')) return;
-    if (modal.id === 'gallery-modal') {
-      const editor = document.getElementById('gallery-editor-container');
-      const editing = !!window.__galleryEditLive || !!(
-        editor &&
-        getComputedStyle(editor).display !== 'none' &&
-        editor.querySelector('.gallery-editor')
-      );
-      if (editing) return;
-    }
     const content = modal.querySelector('.modal-content') || modal.querySelector('#theme-popup');
     if (content && !content.classList.contains('modal-closing')) {
       content.classList.remove('sheet-ready');
@@ -959,7 +938,7 @@ function initializeEventListeners() {
     const welcomeName = document.querySelector('.welcome-name');
     const welcomeSub = el('welcome-sub');
     const tipEl = el('welcome-tip');
-    const _resIco = '<svg class="welcome-boat" style="position:relative;top:0.5px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
+    const _resIco = uiIcon("research",16,{"role":"inherit","className":"welcome-boat","style":"position:relative;top:0.5px;"});
     if (active) {
       if (welcomeName) {
         if (!welcomeName.dataset.researchOrigHtml) welcomeName.dataset.researchOrigHtml = welcomeName.innerHTML;
@@ -1073,25 +1052,6 @@ function initializeEventListeners() {
     });
   }
 
-  // Gallery tool button — the Gallery applet is retired. Its browse
-  // entry opens Files (the provisioned Gallery folder lives there) and
-  // image edit opens Imps. No Gallery modal is created or shown.
-  const toolGalleryBtn = el('tool-gallery-btn');
-  if (toolGalleryBtn) {
-    toolGalleryBtn.addEventListener('click', async () => {
-      try {
-        if (filesModule && typeof filesModule.open === 'function') {
-          filesModule.open();
-          return;
-        }
-      } catch {}
-      try {
-        const editor = await import('./js/galleryEditor.js');
-        editor.openEditor?.(null, null, null, 'Imps');
-      } catch {}
-    });
-  }
-
   // Tasks tool button
   const toolTasksBtn = el('tool-tasks-btn');
   if (toolTasksBtn) {
@@ -1143,6 +1103,32 @@ function initializeEventListeners() {
     event.preventDefault();
     history.pushState({}, '', appletPath('files'));
     filesModule.open();
+  });
+  let imageEditorOpening = false;
+  document.querySelectorAll('[data-image-editor-launcher]').forEach((launcher) => {
+    launcher.addEventListener('click', async (event) => {
+      event.preventDefault();
+      if (imageEditorOpening) return;
+      imageEditorOpening = true;
+      try {
+        const editor = window.impsModule || await import('./js/imps.js');
+        if (editor.isEditorOpen?.()) {
+          const host = document.getElementById('imps-editor-container');
+          if (host) {
+            host.style.display = 'flex';
+            host.querySelector('button, input, [tabindex="0"]')?.focus();
+          }
+          const Modals = await import('./js/modalManager.js');
+          Modals.restore('imps-editor-container');
+        } else {
+          await editor.openEditor(null, null, { w: 1024, h: 1024 }, 'Image Editor');
+        }
+      } catch (error) {
+        uiModule.showError(error.message || 'Image Editor could not be opened');
+      } finally {
+        imageEditorOpening = false;
+      }
+    });
   });
   // Refresh notes due-reminder badge on load and every 5 minutes
   if (notesModule && notesModule.refreshDueBadge) {
@@ -1260,7 +1246,6 @@ function initializeEventListeners() {
       setTimeout(_goFullscreen, 200);
     },
     memory:   () => document.getElementById('tool-memory-btn')?.click(),
-    gallery:  () => document.getElementById('tool-gallery-btn')?.click(),
     tasks:    () => document.getElementById('tool-tasks-btn')?.click(),
     library:  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
     cookbook: () => document.getElementById('tool-cookbook-btn')?.click(),
@@ -1295,31 +1280,6 @@ function initializeEventListeners() {
     if (!resolved) return;
     _openResolvedTarget(resolved);
   });
-
-  // Archive browser tool button
-  const toolLibraryBtn = el('tool-library-btn');
-  if (toolLibraryBtn) {
-    toolLibraryBtn.addEventListener('click', () => {
-      if (sessionModule) sessionModule.openLibrary();
-    });
-  }
-
-  // "+" on the Library row → create a new blank document and open it in the
-  // editor (mirrors the email section's compose "+"). stopPropagation so it
-  // doesn't also fire the row's open-library click.
-  const libraryNewDocBtn = el('library-new-doc-btn');
-  if (libraryNewDocBtn) {
-    libraryNewDocBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      if (libraryNewDocBtn.dataset.docNewWired === '1') return;
-      try {
-        if (documentModule && documentModule.newDocument) await documentModule.newDocument();
-      } catch (err) {
-        console.error('New document from Library failed:', err);
-        if (uiModule && uiModule.showError) uiModule.showError('Could not create document');
-      }
-    });
-  }
 
   // Manage Chats — opens Full Library modal (decoupled from Chats accordion toggle)
   const chatsLibraryBtn = el('chats-library-btn');
@@ -1568,7 +1528,6 @@ function initializeEventListeners() {
         web_search:      ['web-toggle-btn'],
         deep_research:   ['research-toggle-btn', 'tool-research-btn', 'overflow-research-btn', 'rail-research'],
         document_editor: ['overflow-doc-btn', 'rail-documents'],
-        gallery:         ['tool-gallery-btn', 'rail-gallery'],
       };
       Object.entries(map).forEach(([key, ids]) => {
         if (features[key] === false) {
@@ -1968,6 +1927,24 @@ function initializeEventListeners() {
   });
   setChatMode(getChatMode(), { silent: true });
   initCustomContextMenu();
+  // Shared command launchers and one shortcut router; applets mount local menus.
+  initWorkbenchMenu({
+    editor:() => copalModule.open('notes'),
+    files:() => filesModule.open(),
+    settings:() => settingsModule.open(),
+    appearance:() => settingsModule.open('appearance'),
+    chatSearch:() => searchChatModule.openSearch(),
+    help:(captured) => openHelp({ surface:captured.modal?.classList.contains('copal-notes-window') ? 'editor' : captured.modal?.classList.contains('files-window') ? 'files' : 'assistant' }),
+    docs:async (captured) => {
+      const presentation = captured.modal?.classList.contains('copal-wiki-window') ? 'wiki' : 'copal';
+      try {
+        const opened = await window.openClankHandbook?.({ presentation });
+        if (!opened) throw new Error('The handbook is not available yet. Retry opening Wiki documentation or the Copal handbook.');
+      } catch (error) {
+        uiModule.showError(error.message || 'Could not open the handbook.');
+      }
+    },
+  });
 
   try { workspaceModule.initWorkspace(); } catch (_) {}
 
@@ -2538,10 +2515,10 @@ function initializeEventListeners() {
 
   // ── Incognito mode toggle (on welcome screen) ──
   const incognitoBtn = el('incognito-btn');
-  const INCOGNITO_EYE_OPEN = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
-  const INCOGNITO_EYE_CLOSED = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>';
-  const SESSION_ICON_CHAT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-  const SESSION_ICON_INCOGNITO = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+  const INCOGNITO_EYE_OPEN = uiIcon("eye",18,{"role":"inherit"});
+  const INCOGNITO_EYE_CLOSED = uiIcon("eye-off",18,{"role":"inherit"});
+  const SESSION_ICON_CHAT = uiIcon("chat",12,{"role":"inherit"});
+  const SESSION_ICON_INCOGNITO = uiIcon("eye-off",12,{"role":"inherit"});
 
   function _syncSessionIncognitoIcon(active) {
     const activeSession = document.querySelector('.list-item.active-session .session-icon');
@@ -2567,7 +2544,7 @@ function initializeEventListeners() {
         incognitoBtn.innerHTML = INCOGNITO_EYE_CLOSED + '<span class="incognito-label">Temporary Agent</span>';
         if (welcomeName) {
           welcomeName.dataset.originalHtml = welcomeName.innerHTML;
-          welcomeName.innerHTML = '<svg class="welcome-boat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>Temporary Agent';
+          welcomeName.innerHTML = uiIcon("eye-off",16,{"role":"inherit","className":"welcome-boat"}) + "Temporary Agent";
           // Restart the L→R clip-wipe reveal on the new label
           welcomeName.style.animation = 'none';
           welcomeName.offsetHeight;
@@ -2656,14 +2633,10 @@ function initializeEventListeners() {
     'tools-section':       '#tools-section',
     // Per-tool visibility — fine-grained control over which entries show
     // inside the Tools section in the sidebar.
-    'tool-calendar':       '#tool-calendar-btn',
     'tool-compare':        '#tool-compare-btn',
     'tool-cookbook':       '#tool-cookbook-btn',
     'tool-research':       '#tool-research-btn',
-    'tool-gallery':        '#tool-gallery-btn',
-    'tool-library':        '#tool-library-btn',
     'tool-memory':         '#tool-memory-btn',
-    'tool-notes':          '#tool-notes-btn',
     'tool-tasks':          '#tool-tasks-btn',
     'tool-usage':          '#tool-usage-btn',
     'tool-theme':          '#tool-theme-btn',
@@ -2988,170 +2961,72 @@ function initializeEventListeners() {
     } catch (e) { console.error('Dialog drag init error:', e); }
   })();
 
-  // ── Modal minimize → dock ──
-  // Adds a "_" button next to every modal's close button. Clicking it hides
-  // the modal and adds an entry to a fixed bottom dock; clicking the dock
-  // entry restores the modal. Works for hand-rolled and dynamically-created
-  // modals via a MutationObserver on document.body.
+  // Unmanaged applets use the same registry and bottom row as built-ins.
+  // Register on first minimize so a tool's explicit controller keeps ownership.
   (function initModalMinimize() {
-    // custom-preset-modal (the Prompt window) is handled by the new
-    // modalManager dock (registered in _AUTO_WIRE), so the legacy dock must
-    // not also inject a `_`/chip for it.
     const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal']);
-    const dockEntries = new Map(); // modal element -> dock entry element
-
-    let dock = document.getElementById('modal-dock');
-    if (!dock) {
-      dock = document.createElement('div');
-      dock.id = 'modal-dock';
-      document.body.appendChild(dock);
-    }
-
-    // Keep the dock clear of the sidebar (which can be collapsed, resized,
-    // hidden, or flipped to the right side).
-    function updateDockOffset() {
-      const sidebar = document.getElementById('sidebar');
-      const iconRail = document.getElementById('icon-rail');
-      let leftPx = 0;
-      let rightPx = 0;
-      const sidebarRight = sidebar && sidebar.classList.contains('right-side');
-      const sidebarVisible = sidebar &&
-        !sidebar.classList.contains('hidden') &&
-        sidebar.offsetWidth > 0;
-      const railVisible = iconRail && iconRail.offsetWidth > 0;
-      const sidebarW = sidebarVisible ? sidebar.offsetWidth : 0;
-      const railW = railVisible ? iconRail.offsetWidth : 0;
-      if (sidebarRight) {
-        rightPx = sidebarW + railW;
-      } else {
-        leftPx = sidebarW + railW;
-      }
-      dock.style.left = leftPx + 'px';
-      dock.style.right = rightPx + 'px';
-    }
-    updateDockOffset();
-    // Recompute when sidebar resizes, collapses, or moves sides
-    if (window.ResizeObserver) {
-      const ro = new ResizeObserver(updateDockOffset);
-      const sb = document.getElementById('sidebar');
-      const ir = document.getElementById('icon-rail');
-      if (sb) ro.observe(sb);
-      if (ir) ro.observe(ir);
-    }
-    window.addEventListener('resize', updateDockOffset);
-    // Side-flip / collapse toggles class names on body or sidebar
-    new MutationObserver(updateDockOffset).observe(document.body, {
-      attributes: true, attributeFilter: ['class'],
-    });
-    const sbEl = document.getElementById('sidebar');
-    if (sbEl) {
-      new MutationObserver(updateDockOffset).observe(sbEl, {
-        attributes: true, attributeFilter: ['class', 'style'],
-      });
-    }
-
-    function modalTitle(modal) {
-      const h = modal.querySelector('.modal-header h4, .modal-header h3, .modal-header h2');
-      if (h && h.textContent.trim()) return h.textContent.trim();
-      if (modal.id) return modal.id.replace(/-modal$|-overlay$|-popup$/, '').replace(/-/g, ' ');
-      return 'Window';
-    }
-
-    function removeDockEntry(modal) {
-      const entry = dockEntries.get(modal);
-      if (entry) {
-        entry.remove();
-        dockEntries.delete(modal);
-      }
-    }
-
-    function restoreModal(modal) {
-      modal.classList.remove('minimized');
-      modal.classList.remove('hidden');
-      removeDockEntry(modal);
-      // Bring to front (matches existing focus-on-click behavior)
-      modal.style.zIndex = '';
-    }
-
-    function minimizeModal(modal) {
-      if (modal.classList.contains('hidden')) return;
-      modal.classList.add('minimized');
-      if (dockEntries.has(modal)) return;
-
-      const entry = document.createElement('div');
-      entry.className = 'modal-dock-item';
-      entry.title = `Restore ${modalTitle(modal)}`;
-
-      const label = document.createElement('span');
-      label.className = 'modal-dock-label';
-      label.textContent = modalTitle(modal);
-
-      const closeX = document.createElement('button');
-      closeX.className = 'modal-dock-close';
-      closeX.textContent = '×';
-      closeX.title = 'Close';
-      closeX.addEventListener('click', (e) => {
-        e.stopPropagation();
-        modal.classList.remove('minimized');
-        modal.classList.add('hidden');
-        modal.style.display = '';
-        removeDockEntry(modal);
-      });
-
-      entry.appendChild(label);
-      entry.appendChild(closeX);
-      entry.addEventListener('click', () => restoreModal(modal));
-      dock.appendChild(entry);
-      dockEntries.set(modal, entry);
-    }
-
+    let anonymousId = 0;
     function injectMinimizeButton(modal) {
-      if (!modal || !modal.classList || !modal.classList.contains('modal')) return;
-      if (modal.id && SKIP_IDS.has(modal.id)) return;
-      // Modals managed by the new modalManager (Modals.register) get their own
-      // .modal-minimize-btn and chips via the .minimized-dock-chip system.
-      // Skip them entirely so we don't double-up minimize buttons or chips.
-      if (modal.id && /^email-reader-/.test(modal.id)) return;
-      if (modal.id && window.Modals && window.Modals.isRegistered && window.Modals.isRegistered(modal.id)) return;
+      if (!modal?.classList?.contains('modal')) return;
+      if (SKIP_IDS.has(modal.id) || /^email-reader-/.test(modal.id)) return;
+      if (modalManagerDock.isRegistered(modal.id)) return;
       const header = modal.querySelector('.modal-header');
-      if (!header) return;
-      if (header.querySelector('.minimize-btn, .modal-minimize-btn')) return;
+      if (!header || header.querySelector('.minimize-btn, .modal-minimize-btn')) return;
       const closeBtn = header.querySelector('.close-btn, .modal-close');
       if (!closeBtn) return;
-
+      if (!modal.id) {
+        do { anonymousId += 1; } while (document.getElementById(`applet-window-${anonymousId}`));
+        modal.id = `applet-window-${anonymousId}`;
+      }
       const minBtn = document.createElement('button');
       minBtn.className = 'minimize-btn';
       minBtn.type = 'button';
       minBtn.title = 'Minimize';
-      minBtn.textContent = '_';
-      minBtn.addEventListener('mousedown', (e) => e.stopPropagation()); // don't start drag
-      minBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        minimizeModal(modal);
+      minBtn.setAttribute('aria-label', 'Minimize');
+      minBtn.innerHTML = uiIcon('remove', 14);
+      minBtn.addEventListener('mousedown', (event) => event.stopPropagation());
+      minBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (!modalManagerDock.isRegistered(modal.id)) {
+          const title = header.querySelector('h4, h3, h2')?.textContent?.trim()
+            || modal.id.replace(/-modal$|-overlay$|-popup$/, '').replace(/-/g, ' ');
+          modalManagerDock.register(modal.id, {
+            label: title,
+            icon: 'document',
+            closeFn: () => {
+              // Delegate confirmation/veto and teardown to the original button.
+              // Keep the registry until that controller actually closes; an
+              // asynchronous confirmation must never be interpreted as consent.
+              if (modalManagerDock.isMinimized(modal.id)) modalManagerDock.restore(modal.id);
+              closeBtn.click();
+              return false;
+            },
+          });
+        }
+        modalManagerDock.minimize(modal.id);
       });
       closeBtn.parentElement.insertBefore(minBtn, closeBtn);
-
-      // Watch this modal's class so close-from-elsewhere clears the dock entry
       new MutationObserver(() => {
-        if (modal.classList.contains('hidden') && !modal.classList.contains('minimized')) {
-          removeDockEntry(modal);
+        if (!modalManagerDock.isMinimized(modal.id)
+            && (modal.classList.contains('hidden') || modal.style.display === 'none')) {
+          modalManagerDock.unregister(modal.id);
         }
-      }).observe(modal, { attributes: true, attributeFilter: ['class'] });
+      }).observe(modal, { attributes: true, attributeFilter: ['class', 'style'] });
     }
-
-    // Initial pass over existing modals
     document.querySelectorAll('.modal').forEach(injectMinimizeButton);
-
-    // Watch for dynamically-created modals
     new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        for (const n of m.addedNodes) {
-          if (n.nodeType !== 1) continue;
-          if (n.classList && n.classList.contains('modal')) {
-            injectMinimizeButton(n);
-          }
-          if (n.querySelectorAll) {
-            n.querySelectorAll('.modal').forEach(injectMinimizeButton);
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          injectMinimizeButton(node);
+          node.querySelectorAll?.('.modal').forEach(injectMinimizeButton);
+        }
+        for (const node of mutation.removedNodes) {
+          if (node.nodeType !== 1 || node.isConnected) continue;
+          const removed = node.matches?.('.modal') ? [node] : [];
+          removed.push(...(node.querySelectorAll?.('.modal') || []));
+          for (const modal of removed) {
+            if (modalManagerDock.isRegistered(modal.id)) modalManagerDock.unregister(modal.id);
           }
         }
       }
@@ -3622,6 +3497,7 @@ function initializeEventListeners() {
 // INITIALIZATION ON PAGE LOAD
 // ============================================
 function startOdysseusApp() {
+  mountUiIcons(document);
   // Usage entry ownership lives in usageEntry.js so optional app startup errors
   // cannot create duplicate listeners or refresh owners.
   tasksModule?.startNotificationPolling?.();
@@ -3712,8 +3588,6 @@ function startOdysseusApp() {
     'rail-compare':   'tool-compare-btn',
     'rail-research':  'tool-research-btn',
     'rail-cookbook':   'tool-cookbook-btn',
-    'rail-archive':   'tool-library-btn',
-    'rail-gallery':   'tool-gallery-btn',
     'rail-tasks':     'tool-tasks-btn',
     'rail-calendar':  'tool-calendar-btn',
     'rail-notes':     'tool-code-btn',
@@ -3755,18 +3629,9 @@ function startOdysseusApp() {
     });
   }
 
-  // Rail: settings button
+  // The compact rail opens the same Settings window as the full sidebar.
   const _railSettings = el('rail-settings');
-  if (_railSettings) {
-    _railSettings.addEventListener('click', () => {
-      const sidebar = document.getElementById('sidebar');
-      if (sidebar) sidebar.classList.remove('hidden');
-      syncRailSide();
-      // Scroll to bottom where settings typically are
-      const sidebarInner = document.querySelector('.sidebar-inner');
-      if (sidebarInner) sidebarInner.scrollTo({ top: sidebarInner.scrollHeight, behavior: 'smooth' });
-    });
-  }
+  if (_railSettings) _railSettings.addEventListener('click', () => settingsModule.open());
 
   // Rail: admin button
   const _railAdmin = el('rail-admin');
@@ -3946,10 +3811,10 @@ function startOdysseusApp() {
     }, true);
   }
 
-  const _sendIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
-  const _micIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
-  const _stopIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
-  const _newChatIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  const _sendIcon = uiIcon("up",16,{"role":"inherit"});
+  const _micIcon = uiIcon("microphone",16,{"role":"inherit"});
+  const _stopIcon = uiIcon("stop",16,{"role":"inherit"});
+  const _newChatIcon = uiIcon("add",16,{"role":"inherit"});
 
   // Expose icons globally so chat.js updateSubmitButton can use them
   window._odysseusBtnIcons = { send: _sendIcon, mic: _micIcon, stop: _stopIcon, newChat: _newChatIcon };
@@ -4352,11 +4217,21 @@ function startOdysseusApp() {
     });
 
     // Load sessions first (critical path) — remove loader when done
+    let sessionsLoaded = false;
     sessionModule.loadSessions()
+      .then((loaded) => { sessionsLoaded = loaded === true; })
       .catch(e => console.warn('loadSessions error:', e))
       .finally(() => {
         const loader = document.getElementById('app-loader');
-        if (loader) { loader.style.opacity = '0'; setTimeout(() => loader.remove(), 300); }
+        if (loader) {
+          loader.style.opacity = '0';
+          setTimeout(() => {
+            loader.remove();
+            if (sessionsLoaded) window.__openClankShellMounted?.(true);
+          }, 300);
+        } else if (sessionsLoaded) {
+          window.__openClankShellMounted?.(true);
+        }
         // Fire any URL route opener now that sessions + module wiring are
         // ready. Deferred from up top of init for exactly this reason.
         if (window._odysseusRouteOpener) {

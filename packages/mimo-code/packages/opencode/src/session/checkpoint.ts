@@ -31,7 +31,7 @@ import {
   memoryPath,
   notesPath,
   globalMemoryPath,
-  migrateProjectMemory,
+  assertCurrentProjectMemory,
 } from "./checkpoint-paths"
 import { readBudgeted, readBudgetedSectionAware } from "./budgeted-read"
 import type { LastMessageInfo } from "./last-message-info"
@@ -41,6 +41,7 @@ import { alignToNonToolResultUser } from "./checkpoint-align"
 import { loadPriorDiscoveredTitles } from "./checkpoint-retry"
 import * as CheckpointContext from "./checkpoint-context"
 import { buildProgressDiff } from "./checkpoint-progress-reconcile"
+import { renderTailDigest } from "./tail-digest"
 
 const log = Log.create({ service: "session.checkpoint" })
 
@@ -500,6 +501,8 @@ export interface Interface {
     sessionID: SessionID
     boundary: MessageID
     lastMessageInfo?: LastMessageInfo
+    /** Last message present when the boundary was inserted. */
+    digestUpTo?: MessageID
     agentID?: string
     agent: string
     model: { providerID: string; modelID: string }
@@ -646,8 +649,8 @@ export const layer: Layer.Layer<
       yield* Effect.promise(() => fs.mkdir(taskMemDir, { recursive: true }))
       yield* Effect.promise(() => fs.mkdir(projectMemDir, { recursive: true }))
 
-      // Migrate legacy lowercase memory.md → MEMORY.md before templating/reading.
-      yield* Effect.promise(() => migrateProjectMemory(projectID))
+      // Refuse historical filenames before templating/reading.
+      yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
 
       // Test first-run state before bootstrapping; creating the template first
       // made the first-checkpoint prompt branch unreachable.
@@ -1093,9 +1096,9 @@ export const layer: Layer.Layer<
       return lines.join("\n")
     })
 
-    const renderRebuildContext = Effect.fn("SessionCheckpoint.renderRebuildContext")(function* (
+    const renderRebuildContextWithActivity = Effect.fn("SessionCheckpoint.renderRebuildContextWithActivity")(function* (
       sessionID: SessionID,
-      opts?: { lastMessageInfo?: LastMessageInfo; agentID?: string },
+      opts?: { lastMessageInfo?: LastMessageInfo; agentID?: string; digestUpTo?: MessageID; boundary?: MessageID },
     ) {
       // renderRebuildContext is for the user-facing main agent's context rebuild.
       // Subagent-mode actors (system-spawned writers, model-spawned subagents)
@@ -1106,7 +1109,7 @@ export const layer: Layer.Layer<
       // message-v2.ts populates info.agentID from agent_id column), and the
       // runLoop calls this with that value. Treating "main" as subagent here
       // would skip rebuild → fall through to F39 compaction → context loss.
-      if (opts?.agentID && opts.agentID !== "main") return ""
+      if (opts?.agentID && opts.agentID !== "main") return { text: "", hasActivity: false }
 
       // Decide whether a usable checkpoint exists using the WATERMARK
       // (last_checkpoint_message_id), not the on-disk file's text. The writer's
@@ -1180,7 +1183,7 @@ export const layer: Layer.Layer<
       )
       const checkpointText = checkpointResult?.text ?? ""
 
-      yield* Effect.promise(() => migrateProjectMemory(projectID))
+      yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
       const memoryResult = yield* Effect.promise(() =>
         readBudgetedSectionAware(memoryPath(projectID), caps.memory ?? 10_000),
       )
@@ -1245,7 +1248,7 @@ export const layer: Layer.Layer<
         actors.length === 0 &&
         recentUserEntries.length === 0
       ) {
-        return ""
+        return { text: "", hasActivity: false }
       }
 
       const lines: string[] = []
@@ -1387,22 +1390,28 @@ export const layer: Layer.Layer<
         lines.push("")
       }
 
+      // Messages already present after the watermark are represented as a
+      // bounded activity list in this same boundary. Slicing by ID avoids
+      // same-millisecond ordering races with the synthetic boundary message.
+      let hasActivity = false
+      if (opts?.digestUpTo && opts.boundary) {
+        const all = yield* session.messages({ sessionID })
+        const activity = renderTailDigest(
+          all.filter((m) => m.info.id > opts.boundary! && m.info.id <= opts.digestUpTo!),
+        )
+        if (activity) {
+          hasActivity = true
+          lines.push("")
+          lines.push(activity)
+        }
+      }
+
       // Section 10: explicit seam framing for LLM continuity post-rebuild.
-      // Compaction-summary pattern: tells the model
-      // that preserved messages below are real history, not pseudo-content,
-      // so it resumes mid-loop instead of asking "what would you like me
-      // to do".
       lines.push("")
       lines.push(
-        "This session is being continued from a previous conversation that hit a checkpoint. The session checkpoint and project memory above cover the earlier portion of the conversation.",
-      )
-      lines.push("")
-      lines.push(
-        "Recent messages are preserved verbatim below — the assistant turn (and any tool results) you'll see is real history, not pseudo-content. Continue your task by responding to the most recent state.",
-      )
-      lines.push("")
-      lines.push(
-        "Resume directly. Do not acknowledge this memory dump, do not recap, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
+        hasActivity
+          ? "This session is continued from a checkpoint. The blocks above cover earlier history and the recent activity list. Resume the last task from that list and any live messages after it. Do not recap this dump."
+          : "This session is continued from a checkpoint. The blocks above cover earlier history. Resume the last task from the most recent live messages. Do not recap this dump.",
       )
 
       // Section 11: tail-aware system reminder. Picks the appropriate nudge
@@ -1428,7 +1437,14 @@ export const layer: Layer.Layer<
         }
       }
 
-      return lines.join("\n")
+      return { text: lines.join("\n"), hasActivity }
+    })
+
+    const renderRebuildContext = Effect.fn("SessionCheckpoint.renderRebuildContext")(function* (
+      sessionID: SessionID,
+      opts?: { lastMessageInfo?: LastMessageInfo; agentID?: string },
+    ) {
+      return (yield* renderRebuildContextWithActivity(sessionID, opts)).text
     })
 
     const lastBoundary = Effect.fn("SessionCheckpoint.lastBoundary")(function* (sessionID: SessionID) {
@@ -1451,16 +1467,19 @@ export const layer: Layer.Layer<
       sessionID: SessionID
       boundary: MessageID
       lastMessageInfo?: LastMessageInfo
+      digestUpTo?: MessageID
       agentID?: string
       agent: string
       model: { providerID: string; modelID: string }
       boundaryCreatedAt?: number
     }) {
-      const rebuildContext = yield* renderRebuildContext(input.sessionID, {
+      const rendered = yield* renderRebuildContextWithActivity(input.sessionID, {
         lastMessageInfo: input.lastMessageInfo,
         agentID: input.agentID,
-      }).pipe(Effect.catch(() => Effect.succeed("")))
-      if (!rebuildContext) return false
+        digestUpTo: input.digestUpTo,
+        boundary: input.boundary,
+      }).pipe(Effect.catch(() => Effect.succeed({ text: "", hasActivity: false })))
+      if (!rendered.text) return false
 
       const indexText = yield* renderIndex(input.sessionID).pipe(Effect.catch(() => Effect.succeed("")))
 
@@ -1482,6 +1501,7 @@ export const layer: Layer.Layer<
         checkpointDir: "",
         checkpointNumber: 0,
         coveredUpTo: input.boundary,
+        ...(input.digestUpTo && rendered.hasActivity ? { digestUpTo: input.digestUpTo } : {}),
       })
 
       if (indexText) {
@@ -1501,7 +1521,7 @@ export const layer: Layer.Layer<
         sessionID: input.sessionID,
         type: "text",
         synthetic: true,
-        text: rebuildContext,
+        text: rendered.text,
       })
 
       const actorsText = yield* actorRegistry

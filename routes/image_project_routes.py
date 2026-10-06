@@ -9,7 +9,7 @@ Ownership is enforced per row. The writable original keeps its identity across
 Save; only Save a copy allocates a new image resource.
 
 The ``image_writer`` on this surface writes real image bytes when the request
-supplies them for a Gallery-managed resource. When the caller owns the byte
+supplies them for a Files-managed resource. When the caller owns the byte
 write (no bytes supplied), the response says ``image_write: "caller-owned"``
 rather than claiming this endpoint published pixels.
 """
@@ -19,13 +19,16 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from core.database import GalleryImage, SessionLocal
+from core.database import SessionLocal
+from src.openclank.files_image_store import FilesImageStore
 from src.openclank.image_projects import (
     EXPORT_KIND,
     EXPORT_SCHEMA_VERSION,
@@ -39,13 +42,15 @@ from src.openclank.image_projects import (
     StaleImageRevision,
     StaleProjectRevision,
     read_captured_preimage,
+    complete_portable_export,
+    validate_portable_import,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class ProjectCreate(BaseModel):
-    provider: str = "gallery"
+    provider: str = "files"
     resource_id: str
     name: str = "Untitled"
     width: Optional[int] = None
@@ -75,7 +80,7 @@ class ProjectSave(BaseModel):
     height: Optional[int] = None
     operation_id: Optional[str] = None
     # New image bytes (base64 or a data URL). When supplied for a
-    # Gallery-managed resource this endpoint writes them; when omitted the
+    # Files-managed resource this endpoint writes them; when omitted the
     # response honestly reports the byte write as caller-owned.
     image_bytes: Optional[str] = None
 
@@ -90,7 +95,7 @@ class ProjectRestore(BaseModel):
 class ProjectCopy(BaseModel):
     """Save a copy — allocates a separate image resource and project."""
 
-    provider: str = "gallery"
+    provider: str = "files"
     resource_id: str
     expected_image_revision: str
     state: Optional[Dict[str, Any]] = None
@@ -101,7 +106,7 @@ class ProjectCopy(BaseModel):
 
 
 class ProjectImport(BaseModel):
-    provider: str = "gallery"
+    provider: str = "files"
     resource_id: str
     bundle: Dict[str, Any]
     expected_image_revision: str = ""
@@ -153,6 +158,10 @@ def _require_owner(request: Request) -> str:
 
 
 def _map_error(exc: ImageProjectError) -> HTTPException:
+    if exc.code == "copy_conflict":
+        return HTTPException(409, str(exc))
+    if exc.code == "invalid_export":
+        return HTTPException(422, str(exc))
     if isinstance(exc, ProjectNotFound):
         return HTTPException(404, str(exc))
     if isinstance(exc, (StaleProjectRevision, StaleImageRevision)):
@@ -181,75 +190,44 @@ def _decode_image_bytes(value: Optional[str]) -> Optional[bytes]:
     return data
 
 
-def _gallery_row(resource_id: str, owner: str):
-    """Resolve an owner-scoped Gallery row for a managed image resource."""
+def _files_image(resource_id: str, owner: str):
+    """Resolve an owner-scoped Files image for a managed resource."""
     rid = str(resource_id or "").strip()
     if rid.startswith("image:"):
         rid = rid.split(":", 1)[1]
     if not rid:
         return None
-    db = SessionLocal()
     try:
-        row = (
-            db.query(GalleryImage)
-            .filter(
-                GalleryImage.id == rid,
-                GalleryImage.owner == owner,
-                GalleryImage.is_active == True,  # noqa: E712
-            )
-            .first()
-        )
-        if row is not None:
-            db.expunge(row)
-        return row
-    finally:
-        db.close()
+        return FilesImageStore(session_factory=SessionLocal).image(owner, rid)
+    except Exception:
+        return None
 
 
-def _gallery_image_io(provider: str, resource_id: str, owner: str) -> Tuple[Optional[Callable[[], bytes]], Optional[Callable[[bytes], str]]]:
-    """Return (reader, writer) for a Gallery-managed image, or (None, None).
+def _files_image_io(provider: str, resource_id: str, owner: str) -> Tuple[Optional[Callable[[], bytes]], Optional[Callable[[bytes], str]]]:
+    """Return (reader, writer) for a Files-managed image, or (None, None).
 
-    Non-Gallery resources (drafts, external providers) have no byte store on
+    Non-Files image resources (drafts, external providers) have no byte store on
     this surface; callers fall back to the honest caller-owned stub.
     """
-    if str(provider or "").strip().lower() != "gallery":
+    if str(provider or "").strip().lower() != "files":
         return None, None
-    row = _gallery_row(resource_id, owner)
-    if row is None or not row.filename:
+    row = _files_image(resource_id, owner)
+    if row is None or not row.locator:
         return None, None
+    store = FilesImageStore(session_factory=SessionLocal)
+    revision = {"value": row.revision}
 
     def reader() -> bytes:
         from src.generated_images import resolve_gallery_image_path
 
-        path = resolve_gallery_image_path(row.filename, require_exists=True)
+        path = resolve_gallery_image_path(row.locator, require_exists=True)
         return path.read_bytes()
 
     def writer(content: bytes) -> str:
-        from src.generated_images import (
-            discard_staged_gallery_image,
-            publish_staged_gallery_image,
-            resolve_gallery_image_path,
-            stage_gallery_image_bytes,
+        changed = store.replace_bytes(
+            owner, row.id, content, expected_revision=revision["value"]
         )
-
-        destination = resolve_gallery_image_path(row.filename, require_exists=True)
-        previous = destination.read_bytes()
-        staged = stage_gallery_image_bytes(content)
-        published = False
-        try:
-            publish_staged_gallery_image(staged, row.filename, replace=True)
-            published = True
-        except Exception:
-            if published:
-                restore = None
-                try:
-                    restore = stage_gallery_image_bytes(previous)
-                    publish_staged_gallery_image(restore, row.filename, replace=True)
-                finally:
-                    discard_staged_gallery_image(restore)
-            raise
-        finally:
-            discard_staged_gallery_image(staged)
+        revision["value"] = changed.revision
         return "sha256:" + hashlib.sha256(content).hexdigest()
 
     return reader, writer
@@ -272,6 +250,52 @@ def setup_image_project_routes() -> APIRouter:
         records = repo().list_projects(owner=owner)
         return {"projects": [_record_dict(r) for r in records]}
 
+    @router.get("/api/imps/images/{resource_id}")
+    async def get_files_image(request: Request, resource_id: str) -> Dict[str, Any]:
+        """Files-owned image metadata for the Imps source picker."""
+        owner = _require_owner(request)
+        try:
+            row = FilesImageStore(session_factory=SessionLocal).image(owner, resource_id)
+        except Exception as exc:
+            raise HTTPException(404, "Files image not found") from exc
+        provenance = row.provenance or {}
+        return {
+            "provider": "files", "resource_id": f"image:{row.id}",
+            "filename": row.display_name, "prompt": str(provenance.get("prompt") or ""),
+            "caption": str(provenance.get("caption") or ""), "model": str(provenance.get("model") or ""),
+            "favorite": bool(row.favorite), "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "width": provenance.get("width"), "height": provenance.get("height"),
+            "file_size": row.size, "media_type": row.mime_type, "read_only": False,
+        }
+
+    @router.get("/api/imps/images/{resource_id}/content")
+    async def get_files_image_content(request: Request, resource_id: str):
+        owner = _require_owner(request)
+        try:
+            row = FilesImageStore(session_factory=SessionLocal).image(owner, resource_id)
+            from src.generated_images import resolve_gallery_image_path
+            path = resolve_gallery_image_path(row.locator, require_exists=True)
+        except Exception as exc:
+            raise HTTPException(404, "Files image not found") from exc
+        return FileResponse(path, media_type=row.mime_type or "application/octet-stream", filename=row.display_name)
+
+    @router.post("/api/imps/images/{resource_id}/transform")
+    async def transform_files_image(request: Request, resource_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the retained Imps transform capability against a Files image."""
+        owner = _require_owner(request)
+        action = str(body.get("action") or "").strip().lower()
+        if action == "style-transfer":
+            action = "harmonize"
+        from src.tools.image import do_edit_image
+        result = await do_edit_image(
+            json.dumps({"image_id": resource_id, "action": action, "prompt": body.get("prompt") or ""}),
+            owner=owner,
+        )
+        if result.get("exit_code"):
+            raise HTTPException(400, str(result.get("error") or "Files image transform failed"))
+        return result
+
     @router.get("/api/imps/projects/for-image/{provider}/{resource_id:path}")
     async def project_for_image(
         request: Request, provider: str, resource_id: str
@@ -290,7 +314,8 @@ def setup_image_project_routes() -> APIRouter:
     async def get_project(request: Request, project_id: str) -> Dict[str, Any]:
         owner = _require_owner(request)
         try:
-            return _record_dict(repo().get_project(project_id=project_id, owner=owner))
+            record = repo().get_project(project_id=project_id, owner=owner)
+            return _record_dict(record)
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
 
@@ -327,13 +352,20 @@ def setup_image_project_routes() -> APIRouter:
             )
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
+        from src.openclank.achievement_producers import record_activity
+        layers = [layer for layer in (record.state.get("layers") or []) if isinstance(layer, dict)]
+        record_activity(request, "imps.project.saved", f"{project_id}:{record.project_revision}", {
+            "projectId": project_id, "revisionId": str(record.project_revision),
+            "layerIds": [str(layer["id"]) for layer in layers if layer.get("id") is not None],
+            "editableLayerCount": sum(1 for layer in layers if not layer.get("locked", False) and layer.get("dataUrl")),
+        })
         return _record_dict(record)
 
     @router.post("/api/imps/projects/{project_id}/save")
     async def save_project(request: Request, project_id: str, body: ProjectSave) -> Dict[str, Any]:
         """Recoverable Save: Lore preimages, then image + project commit.
 
-        When ``image_bytes`` is supplied for a Gallery-managed resource this
+        When ``image_bytes`` is supplied for a Files-managed resource this
         endpoint writes them through the managed image store and returns the
         content-hash revision. Otherwise the byte write stays caller-owned and
         the response says so. Refused before mutation if preimage capture fails.
@@ -347,7 +379,7 @@ def setup_image_project_routes() -> APIRouter:
             record = repo().get_project(project_id=project_id, owner=owner)
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
-        reader, writer = _gallery_image_io(record.image_provider, record.image_resource_id, owner)
+        reader, writer = _files_image_io(record.image_provider, record.image_resource_id, owner)
         before_bytes: Optional[bytes] = None
         if content is not None and (reader is None or writer is None):
             raise HTTPException(409, "image bytes cannot be published for this provider")
@@ -383,14 +415,6 @@ def setup_image_project_routes() -> APIRouter:
                 raise RuntimeError("published pixels changed after Save; refusing compensation")
             writer(before_bytes)
 
-        def metadata_updater(db):
-            if record.image_provider != "gallery" or content is None:
-                return
-            row = db.query(GalleryImage).filter(GalleryImage.id == str(record.image_resource_id).removeprefix("image:"), GalleryImage.owner == owner).one_or_none()
-            if row is not None:
-                row.file_hash = hashlib.sha256(content).hexdigest()
-                row.file_size = len(content)
-
         try:
             outcome = repo().save_image_and_project(
                 owner=owner,
@@ -401,7 +425,7 @@ def setup_image_project_routes() -> APIRouter:
                 image_writer=image_writer,
                 image_reader=image_reader if content is not None else None,
                 image_rollback=image_rollback if content is not None else None,
-                metadata_updater=metadata_updater if content is not None else None,
+                metadata_updater=None,
                 state=body.state,
                 name=body.name,
                 width=body.width,
@@ -411,6 +435,18 @@ def setup_image_project_routes() -> APIRouter:
             )
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
+        from src.openclank.achievement_producers import record_activity
+        try:
+            saved_record = repo().get_project(project_id=project_id, owner=owner)
+            if saved_record.project_revision == outcome.project_revision:
+                layers = [layer for layer in (saved_record.state.get("layers") or []) if isinstance(layer, dict)]
+                record_activity(request, "imps.project.saved", str(outcome.action_id), {
+                    "projectId": project_id, "revisionId": str(outcome.project_revision),
+                    "layerIds": [str(layer["id"]) for layer in layers if layer.get("id") is not None],
+                    "editableLayerCount": sum(1 for layer in layers if not layer.get("locked", False) and layer.get("dataUrl")),
+                })
+        except Exception:
+            pass  # Committed Save must not become a retryable failure over award delivery.
         receipt = dict(outcome.refresh_receipt)
         if written["bytes_written"]:
             receipt["image_write"] = "written-by-imps"
@@ -425,9 +461,25 @@ def setup_image_project_routes() -> APIRouter:
             "refresh_receipt": receipt,
         }
 
+    @router.post("/api/imps/projects/save-copy")
     @router.post("/api/imps/projects/{project_id}/save-copy")
-    async def save_copy(request: Request, project_id: str, body: ProjectCopy) -> Dict[str, Any]:
+    async def save_copy(request: Request, body: ProjectCopy, project_id: Optional[str] = None) -> Dict[str, Any]:
         owner = _require_owner(request)
+        if project_id is None:
+            # A source-less copy only binds a real freshly imported Files image;
+            # it never makes an existing source editable or publishes its bytes.
+            if body.provider != "files" or not body.operation_key:
+                raise HTTPException(422, "unbound copy requires a Files resource and operation identity")
+            row = _files_image(body.resource_id, owner)
+            reader, _ = _files_image_io(body.provider, body.resource_id, owner)
+            if row is None or reader is None:
+                raise HTTPException(404, "allocated copy image is unavailable to this owner")
+            try:
+                digest = "sha256:" + hashlib.sha256(reader()).hexdigest()
+            except Exception as exc:
+                raise HTTPException(409, "allocated copy bytes are unavailable") from exc
+            if digest != body.expected_image_revision or digest != "sha256:" + str(row.digest or ""):
+                raise HTTPException(409, "allocated copy image revision changed")
 
         def image_writer():
             # The copy's byte write is caller-owned: this endpoint allocates
@@ -449,6 +501,18 @@ def setup_image_project_routes() -> APIRouter:
             )
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
+        from src.openclank.achievement_producers import record_activity
+        try:
+            saved_record = repo().get_project(project_id=outcome.project_id, owner=owner)
+            if saved_record.project_revision == outcome.project_revision:
+                layers = [layer for layer in (saved_record.state.get("layers") or []) if isinstance(layer, dict)]
+                record_activity(request, "imps.project.saved", f"copy:{outcome.project_id}:{outcome.project_revision}", {
+                    "projectId": outcome.project_id, "revisionId": str(outcome.project_revision),
+                    "layerIds": [str(layer["id"]) for layer in layers if layer.get("id") is not None],
+                    "editableLayerCount": sum(1 for layer in layers if not layer.get("locked", False) and layer.get("dataUrl")),
+                })
+        except Exception:
+            pass  # The committed copy remains successful if receipt delivery is unavailable.
         return {
             "project_id": outcome.project_id,
             "project_revision": outcome.project_revision,
@@ -466,7 +530,7 @@ def setup_image_project_routes() -> APIRouter:
         """Replay a captured Lore preimage to undo a Save.
 
         Restores the project state and, when the preimage captured image bytes
-        for a Gallery-managed resource, those bytes too. History-worker-side
+        for a Files-managed resource, those bytes too. History-worker-side
         discovery of preimages is not orchestrated (``L-S19-LORE-RESTORE``);
         replay reads the local managed preimage store.
         """
@@ -476,7 +540,7 @@ def setup_image_project_routes() -> APIRouter:
             record = repo().get_project(project_id=project_id, owner=owner)
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
-        _reader, writer = _gallery_image_io(record.image_provider, record.image_resource_id, owner)
+        _reader, writer = _files_image_io(record.image_provider, record.image_resource_id, owner)
         payload = read_captured_preimage(body.action_id)
         if payload:
             bound = payload.get("image_resource") or {}
@@ -487,7 +551,6 @@ def setup_image_project_routes() -> APIRouter:
                 raise HTTPException(409, "captured pixels cannot be restored for this provider")
         restore_writer = None
         restore_rollback = None
-        restore_metadata_updater = None
         current_bytes = None
         rollback_bytes = None
         if writer is not None and payload and payload.get("image_bytes_captured"):
@@ -521,12 +584,6 @@ def setup_image_project_routes() -> APIRouter:
                     raise RuntimeError("restored pixels changed after Restore; refusing compensation")
                 writer(rollback_bytes)
 
-            def restore_metadata_updater(db):
-                row = db.query(GalleryImage).filter(GalleryImage.id == str(record.image_resource_id).removeprefix("image:"), GalleryImage.owner == owner).one_or_none()
-                if row is not None:
-                    row.file_hash = hashlib.sha256(captured).hexdigest()
-                    row.file_size = len(captured)
-
         try:
             outcome = repo().replay_preimage(
                 owner=owner,
@@ -535,7 +592,7 @@ def setup_image_project_routes() -> APIRouter:
                 image_writer=restore_writer,
                 image_reader=restore_reader if writer is not None and payload and payload.get("image_bytes_captured") else None,
                 image_rollback=restore_rollback,
-                metadata_updater=restore_metadata_updater,
+                metadata_updater=None,
                 expected_project_revision=body.expected_project_revision,
                 current_image_bytes=current_bytes,
             )
@@ -551,11 +608,38 @@ def setup_image_project_routes() -> APIRouter:
             "refresh_receipt": outcome.refresh_receipt,
         }
 
+    def completed_export(request, bundle):
+        from src.openclank.achievement_producers import record_activity
+        artifact = complete_portable_export(bundle)
+        digest = hashlib.sha256(json.dumps(artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        record_activity(request, "imps.project.exported", digest, {
+            "editableExport": True, "manifestValid": True, "assetSetValid": True,
+            "exportArtifactId": digest,
+        })
+        return artifact
+
+    @router.post("/api/imps/projects/export-bundle")
+    async def export_unbound_project(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
+        _require_owner(request)
+        try:
+            return completed_export(request, body)
+        except ImageProjectError as exc:
+            raise _map_error(exc) from exc
+
+    @router.post("/api/imps/projects/validate-bundle")
+    async def validate_project_bundle(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
+        _require_owner(request)
+        try:
+            validate_portable_import(body)
+        except ImageProjectError as exc:
+            raise _map_error(exc) from exc
+        return body
+
     @router.get("/api/imps/projects/{project_id}/export")
     async def export_project(request: Request, project_id: str) -> Dict[str, Any]:
         owner = _require_owner(request)
         try:
-            bundle = repo().export_project(project_id=project_id, owner=owner)
+            bundle = completed_export(request, repo().export_project(project_id=project_id, owner=owner))
         except ImageProjectError as exc:
             raise _map_error(exc) from exc
         return bundle

@@ -20,7 +20,7 @@ import { Wildcard, ToolCompat } from "@/util"
 import { asSchema } from "@ai-sdk/provider-utils"
 import { SessionID } from "@/session/schema"
 import * as Session from "@/session/session"
-import { migrateProjectMemory } from "./checkpoint-paths"
+import { assertCurrentProjectMemory } from "./checkpoint-paths"
 import { ProjectID } from "@/project/schema"
 import { Auth } from "@/auth"
 import { Installation } from "@/installation"
@@ -34,6 +34,7 @@ import { Memory } from "@/memory"
 import { isRetryableTransientError } from "./retry"
 import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
 import { ManagedProvider } from "@/acp/managed-provider"
+import { withSdkDispatches } from "@/provider/logging-transport"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
@@ -45,6 +46,15 @@ type Result = Awaited<ReturnType<typeof streamText>>
  * serializes providerOptions. */
 export function stripManagedProjectionOptions(options: Record<string, any>): Record<string, any> {
   return Object.fromEntries(Object.entries(options).filter(([key]) => !key.startsWith("_openclank")))
+}
+
+/** Keep one-shot structured title generation compatible with DeepSeek's
+ * non-thinking forced-tool API; primary chat retains its reasoning settings. */
+export function applyEphemeralStructuredOptions(options: Record<string, any>, input: { ephemeral?: boolean; toolChoice?: string; model: Pick<Provider.Model, "providerID" | "api"> }, familyID?: string): void {
+  if (input.ephemeral && input.toolChoice === "required" && input.model.api.npm === "@ai-sdk/openai-compatible" && (familyID === "deepseek" || input.model.providerID === "deepseek")) {
+    options.thinking = { type: "disabled" }
+    delete options.reasoningEffort
+  }
 }
 
 /**
@@ -304,7 +314,7 @@ const live: Layer.Layer<
         // create an uppercase sibling and orphan the legacy content). The two
         // checkpoint-flow call sites cover the writer/rebuild paths; this covers
         // the "agent edits MEMORY.md before any checkpoint" path. Idempotent.
-        yield* Effect.promise(() => migrateProjectMemory(projectID)).pipe(Effect.ignore)
+        yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
         system.push(buildMemoryInstructions(SessionID.make(input.sessionID), projectID, yield* memory.root()))
       }
 
@@ -396,6 +406,7 @@ const live: Layer.Layer<
         mergeDeep(variant),
       )
       const options = managedMetadata ? stripManagedProjectionOptions(mergedOptions) : mergedOptions
+      applyEphemeralStructuredOptions(options, input, managedMetadata?.familyID)
       if (isOpenaiOauth) {
         options.instructions = system.join("\n")
       }
@@ -641,7 +652,12 @@ const live: Layer.Layer<
         )
         .pipe(Effect.ignore)
 
+      let sdkDispatchIDs: string[] = []
       return streamText({
+        onStepFinish(step) {
+          Session.getUsage({ model: input.model, usage: step.usage, metadata: step.providerMetadata,
+            captureScope: managedScope, captureDispatchIDs: sdkDispatchIDs, mainReply: !input.ephemeral })
+        },
         onError(error) {
           l.debug("streamText error", {
             messageID: input.user.id,
@@ -714,6 +730,10 @@ const live: Layer.Layer<
           middleware: [
             {
               specificationVersion: "v3" as const,
+              async wrapStream({ doStream }) {
+                sdkDispatchIDs = []
+                return withSdkDispatches(managedScope, sdkDispatchIDs, doStream)
+              },
               async transformParams(args) {
                 if (args.type === "stream") {
                   // @ts-expect-error

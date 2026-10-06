@@ -1,15 +1,14 @@
-"""Inspectable loose-file Copal repository.
+"""Inspectable Files-backed Copal repository.
 
-This is a storage-neutral compatibility seam for the existing ``CopalBridge``
-operation vocabulary. Ordinary document files are canonical; ``.copal`` only
-contains identity, revision, history, and trash metadata. Redb remains an
-explicit rollback backend while the loose-file bridge is exercised.
+Ordinary document files are canonical; ``.copal`` contains identity, revision,
+history, task projections and trash metadata.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import hashlib
 import json
 import os
@@ -21,7 +20,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from src.openclank.copal_bridge import CopalBridgeError
+from src.openclank.copal_errors import CopalBridgeError
 from src.openclank.copal_commit_lock import copal_commit_lock
 from src.openclank.copal_guarded import GuardedCommitCoordinator
 from src.openclank.media_ownership import (
@@ -72,14 +71,19 @@ class LooseCopalRepository:
         if kind in {"copal-event", "copal-operation"}:
             expected_parent = {
                 "copal-event": {"events"},
-                "copal-operation": {"operations", "task-index", "task-actions"},
+                "copal-operation": {"operations", "task-index", "task-actions", "document-actions"},
             }[kind]
-            return (
-                len(path.parts) == 3
-                and path.parts[0] == ".copal"
-                and path.parts[1] in expected_parent
-                and path.suffix == ".json"
-            )
+            if (
+                len(path.parts) != 3
+                or path.parts[0] != ".copal"
+                or path.parts[1] not in expected_parent
+                or path.suffix != ".json"
+            ):
+                return False
+            if kind == "copal-operation" and path.parts[1] == "document-actions":
+                digest = path.stem
+                return len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
+            return True
         return (
             kind == "calendar-projection"
             and len(path.parts) == 2
@@ -863,7 +867,9 @@ class LooseCopalRepository:
         rebuild: bool,
         source_reads: int = 0,
     ) -> dict[str, Any]:
-        self._recover_task_index(vault)
+        # Read recovery state before creating the new stage: index reads
+        # discard abandoned stages and must not erase this active update.
+        prior = self._task_index_get(vault)
         root = self._task_index_dir(vault)
         target_root = root.with_name(f"{root.name}.rebuild-{uuid.uuid4().hex}")
         target_root.mkdir(parents=True, exist_ok=True)
@@ -880,9 +886,9 @@ class LooseCopalRepository:
             resources_dir = target_root / "resources"
         rewritten_rows = 0
         rewritten_bytes = 0
-        prior_total = int(self._task_index_get(vault).get("total") or 0)
+        prior_total = int(prior.get("total") or 0)
         task_total = 0 if rebuild else prior_total
-        counts = {str(source): {str(checked): int(value) for checked, value in values.items()} for source, values in (self._task_index_get(vault).get("counts") or {}).items()} if not rebuild else {}
+        counts = {str(source): {str(checked): int(value) for checked, value in values.items()} for source, values in (prior.get("counts") or {}).items()} if not rebuild else {}
         changed = {str(document_id): record for document_id, record in records.items() if isinstance(record, dict)}
         for document_id, record in {**changed, **{value: None for value in removed}}.items():
             old_path = root / self._task_index_document_name(document_id)
@@ -1044,9 +1050,26 @@ class LooseCopalRepository:
         with path.open("r", encoding="utf-8", newline="") as handle:
             return handle.read()
 
+    @staticmethod
+    def _is_official_reference(record: dict[str, Any]) -> bool:
+        return bool(str(record.get("officialRef") or "").strip())
+
+    @staticmethod
+    def _official_reference(record: dict[str, Any]) -> dict[str, Any] | None:
+        reference_id = str(record.get("officialRef") or "").strip()
+        if not reference_id:
+            return None
+        from src.openclank.official_docs import official_reference
+        resolved = official_reference(reference_id)
+        if resolved is None:
+            raise CopalBridgeError("installed official reference is unavailable")
+        return resolved
+
+    def _assert_not_official_reference(self, record: dict[str, Any]) -> None:
+        if self._is_official_reference(record):
+            raise CopalBridgeError("official reference is read-only")
+
     def _record_doc(self, vault: Path, record: dict[str, Any], *, include_body: bool) -> dict[str, Any]:
-        storage_path = record.get("trashPath") if record.get("trashed") else record.get("path")
-        path = vault / str(storage_path or record["path"])
         result = dict(record)
         result.pop("path", None)
         result["name"] = record["name"]
@@ -1056,11 +1079,22 @@ class LooseCopalRepository:
         )
         result["storage"] = "files"
         result["format"] = "copal-loose-v1"
+        reference = self._official_reference(record) if not record.get("trashed") else None
+        if reference is not None:
+            result["head"] = reference["head"]
+            result["size"] = reference["size"]
+            result["officialVersion"] = reference["version"]
+            result["officialDigest"] = reference["digest"]
+            if include_body:
+                result["text"] = reference["content"]
+            return result
+        storage_path = record.get("trashPath") if record.get("trashed") else record.get("path")
+        path = vault / str(storage_path or record["path"])
         try:
             result["size"] = path.stat().st_size
         except FileNotFoundError as exc:
             raise CopalBridgeError("loose Copal document file is missing") from exc
-        if include_body:
+        if include_body and record.get("kind") not in {"asset", "compatibility"}:
             try:
                 result["text"] = self._read_content(path)
                 result["head"] = self._fingerprint(result["text"])
@@ -1091,8 +1125,6 @@ class LooseCopalRepository:
         }
         if action_id: entry["actionId"] = action_id
         operations.append(entry)
-        if len(operations) > 1000:
-            del operations[:-1000]
 
     def _doc(self, manifest: dict[str, Any], document_id: str) -> dict[str, Any]:
         record = manifest.get("documents", {}).get(document_id)
@@ -1120,19 +1152,38 @@ class LooseCopalRepository:
                     snapshot = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                     continue
-                if not isinstance(snapshot, dict) or not isinstance(snapshot.get("content"), str):
+                if not isinstance(snapshot, dict) or snapshot.get("historyVisible") is False:
+                    continue
+                if not isinstance(snapshot.get("content"), str) and snapshot.get("contentType") not in {"asset", "tombstone"}:
                     continue
                 snapshots.append({
                     "commit": str(snapshot.get("commit") or path.stem),
                     "ts": snapshot.get("ts") or path.stat().st_mtime,
                     "name": snapshot.get("name") or record.get("name"),
                     "message": snapshot.get("message"),
-                    "amends": [],
+                    "amends": snapshot.get("amends") if isinstance(snapshot.get("amends"), list) else [],
                 })
             changes.extend(sorted(snapshots, key=lambda item: float(item.get("ts") or 0), reverse=True))
         return changes
 
+    def _history_snapshot(self, vault: Path, record: dict[str, Any], commit: str) -> dict[str, Any]:
+        if record.get("kind") in {"asset", "compatibility"}:
+            raise CopalBridgeError("history commit has no text content")
+        if not commit or commit in {".", ".."} or "/" in commit or "\\" in commit:
+            raise CopalBridgeError("invalid history commit")
+        if commit == record.get("head"):
+            return {"commit": commit, "name": record.get("name"),
+                    "content": self._record_doc(vault, record, include_body=True).get("text", "")}
+        try:
+            snapshot = json.loads((self._history_dir(vault, record) / f"{commit}.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CopalBridgeError("history commit was not found") from exc
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("content"), str):
+            raise CopalBridgeError("history commit has no text content")
+        return snapshot
+
     def _write_record(self, vault: Path, manifest: dict[str, Any], record: dict[str, Any], content: str, *, operation: str, action_id: str | None = None) -> dict[str, Any]:
+        self._assert_not_official_reference(record)
         if record.get("readOnly"):
             raise CopalBridgeError("document is read-only")
         path = vault / str(record["path"])
@@ -1326,16 +1377,29 @@ class LooseCopalRepository:
         return receipt
 
     def _refresh_external_files(self, vault: Path, manifest: dict[str, Any]) -> None:
-        """Turn an out-of-band file edit into one durable source operation.
+        """Refresh mutable local files and canonical reference metadata.
 
-        Loose files can be edited by another process. The manifest stores the
-        last observed mtime, so normal task queries inspect metadata only and
-        read/hash just files whose mtime changed. The resulting operation feeds
-        the same incremental task projection path as native writes.
+        Shared official records never probe an owner vault path.  Their source
+        is the installed manifest, while digest/version transitions still emit
+        one operation so pagination and indexes receive an invalidation.
         """
         changed = False
         for record in manifest.get("documents", {}).values():
             if not isinstance(record, dict) or record.get("trashed"):
+                continue
+            reference = self._official_reference(record)
+            if reference is not None:
+                if (
+                    record.get("head") != reference["head"]
+                    or record.get("officialDigest") != reference["digest"]
+                    or record.get("officialVersion") != reference["version"]
+                ):
+                    record["head"] = reference["head"]
+                    record["officialDigest"] = reference["digest"]
+                    record["officialVersion"] = reference["version"]
+                    record["updatedAt"] = time.time()
+                    self._operation(manifest, "official_reference_refresh", f"refresh shared official {record.get('name')}", document_id=str(record.get("id") or ""))
+                    changed = True
                 continue
             path = vault / str(record.get("path") or "")
             try:
@@ -1360,106 +1424,106 @@ class LooseCopalRepository:
                 continue
             record["head"] = fingerprint
             record["updatedAt"] = time.time()
-            self._operation(
-                manifest,
-                "external_refresh",
-                f"external refresh {record.get('name')}",
-                document_id=str(record.get("id") or ""),
-            )
+            self._operation(manifest, "external_refresh", f"external refresh {record.get('name')}", document_id=str(record.get("id") or ""))
             changed = True
         if changed:
             self._save(vault, manifest)
 
-    def provision_official_docs(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Idempotently provision the maintained official docs folder.
+    def provision_official_docs(
+        self,
+        args: dict[str, Any],
+        *,
+        scoped: tuple[Path, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Install small owner-scoped records for the shared handbook.
 
-        Each article is a real read-only document under the official root, not
-        a link placeholder. Matching goes through ``plan_official_provision``:
-        stable ``docId`` identity first, then known historical aliases (which
-        are adopted and renamed to the canonical name in place), then the
-        canonical name. A same-named page that is not ours is personal data and
-        is left alone. An existing read-only record is replaced only when its
-        stored body is still an unmodified official revision, so a personal
-        edit is never clobbered.
-
-        Re-running creates nothing twice: an interrupted run resumes by
-        creating whatever is missing and refreshing whatever is present.
+        Canonical bodies remain in :mod:`official_docs`; current references
+        refresh normally. Historical physical copies require manual conversion.
         """
         from src.openclank.official_docs import (
             is_user_modified_content,
+            official_reference,
             plan_input_from_content,
             plan_official_provision,
         )
 
-        vault, manifest = self._scope(args)
+        vault, manifest = scoped if scoped is not None else self._scope(args)
         documents = manifest.setdefault("documents", {})
         articles = args.get("articles")
         if not isinstance(articles, list) or not articles:
             raise CopalBridgeError("official docs provisioning requires articles")
 
-        # Identity lives inside the encoded note, so decode it before planning.
         existing: list[dict[str, Any]] = []
         for record in documents.values():
             if not isinstance(record, dict) or record.get("trashed"):
                 continue
-            content = ""
-            try:
-                content = self._read_content(vault / str(record.get("path") or record.get("name") or ""))
-            except (OSError, UnicodeDecodeError):
-                content = ""
+            reference = self._official_reference(record)
+            if reference is not None:
+                content = reference["content"]
+            else:
+                try:
+                    content = self._read_content(vault / str(record.get("path") or record.get("name") or ""))
+                except (OSError, UnicodeDecodeError):
+                    content = ""
             existing.append(plan_input_from_content(
-                str(record.get("id") or ""),
-                str(record.get("name") or ""),
-                content,
+                str(record.get("id") or ""), str(record.get("name") or ""), content,
                 read_only=bool(record.get("readOnly")),
             ))
 
-        plan = plan_official_provision(existing, [a for a in articles if isinstance(a, dict)])
+        plan = plan_official_provision(existing, [article for article in articles if isinstance(article, dict)])
+        for item in plan.get("update") or []:
+            record = documents.get(str(item.get("existingId") or ""))
+            if isinstance(record, dict) and (not self._is_official_reference(record) or record.get("officialRetirement")):
+                raise CopalBridgeError("Stored handbook copies need offline conversion to installed references. Keep a backup and finish the reviewed conversion before refreshing these records.")
         created: list[str] = []
         updated: list[str] = []
         skipped: list[dict[str, Any]] = []
-
         for conflict in plan.get("conflicts") or []:
-            skipped.append({
-                "name": str(conflict.get("name") or ""),
-                "id": conflict.get("existingId"),
-                "reason": "personal-page-occupies-name",
-            })
+            skipped.append({"name": str(conflict.get("name") or ""), "id": conflict.get("existingId"), "reason": "personal-page-occupies-name"})
         for item in plan.get("skip") or []:
-            skipped.append({
-                "name": str(item.get("name") or ""),
-                "id": item.get("existingId"),
-                "reason": str(item.get("reason") or "user-modified"),
-            })
+            skipped.append({"name": str(item.get("name") or ""), "id": item.get("existingId"), "reason": str(item.get("reason") or "user-modified")})
+
+        def shared_reference(item: dict[str, Any]) -> dict[str, Any]:
+            reference = official_reference(str(item.get("docId") or ""))
+            if reference is None:
+                raise CopalBridgeError("official article is not installed in the canonical manifest")
+            return reference
+
+        def apply_reference(record: dict[str, Any], reference: dict[str, Any], name: str) -> bool:
+            changed = (
+                record.get("officialRef") != reference["docId"]
+                or record.get("head") != reference["head"]
+                or record.get("officialDigest") != reference["digest"]
+                or record.get("officialVersion") != reference["version"]
+                or record.get("name") != name
+                or not record.get("readOnly")
+                or "path" in record
+            )
+            record["name"] = name
+            record["officialRef"] = reference["docId"]
+            record["officialDigest"] = reference["digest"]
+            record["officialVersion"] = reference["version"]
+            record["head"] = reference["head"]
+            record["readOnly"] = True
+            record.pop("path", None)
+            record.pop("mtime_ns", None)
+            return changed
 
         for payload in plan.get("create") or []:
             if not isinstance(payload, dict):
                 raise CopalBridgeError("official article must be an object")
+            reference = shared_reference(payload)
             name = self._safe_name(str(payload.get("name") or ""), str(payload.get("kind") or "wiki"))
-            content = str(payload.get("content") or "")
-            read_only = bool(payload.get("read_only", True))
             document_id = f"doc_{uuid.uuid4().hex}"
             record = {
-                "id": document_id,
-                "owner": args.get("owner"),
-                "workspace_id": args.get("workspace_id"),
-                "kind": str(payload.get("kind") or "wiki"),
-                "corpus": str(payload.get("corpus") or "wiki"),
-                "name": name,
-                "path": name,
-                "head": self._fingerprint(content),
-                "createdAt": time.time(),
-                "updatedAt": time.time(),
-                "readOnly": read_only,
-                "trashed": False,
+                "id": document_id, "owner": args.get("owner"), "workspace_id": args.get("workspace_id"),
+                "kind": str(payload.get("kind") or "wiki"), "corpus": str(payload.get("corpus") or "wiki"),
+                "name": name, "head": reference["head"], "officialRef": reference["docId"],
+                "officialDigest": reference["digest"], "officialVersion": reference["version"],
+                "createdAt": time.time(), "updatedAt": time.time(), "readOnly": True, "trashed": False,
             }
             documents[document_id] = record
-            self._atomic_write(vault / name, content)
-            try:
-                record["mtime_ns"] = (vault / name).stat().st_mtime_ns
-            except OSError:
-                pass
-            self._operation(manifest, "create", f"create {name}", document_id=document_id)
+            self._operation(manifest, "official_reference_create", f"install shared official {name}", document_id=document_id)
             created.append(name)
 
         for item in plan.get("update") or []:
@@ -1469,75 +1533,82 @@ class LooseCopalRepository:
             if not isinstance(record, dict) or record.get("trashed"):
                 continue
             name = self._safe_name(str(item.get("name") or ""), str(item.get("kind") or "wiki"))
-            content = str(item.get("content") or "")
-            read_only = bool(item.get("read_only", True))
-            old_path = vault / str(record.get("path") or record.get("name") or "")
-            try:
-                current_content = self._read_content(old_path)
-            except FileNotFoundError as exc:
-                raise CopalBridgeError("loose Copal document file is missing") from exc
-            if is_user_modified_content(current_content):
-                skipped.append({
-                    "name": str(record.get("name") or name),
-                    "id": record.get("id"),
-                    "reason": "user-modified",
-                })
+            reference = shared_reference(item)
+            if self._is_official_reference(record):
+                if apply_reference(record, reference, name):
+                    record["updatedAt"] = time.time()
+                    self._operation(manifest, "official_reference_refresh", f"refresh shared official {name}", document_id=str(record.get("id") or ""))
+                    updated.append(name)
                 continue
-            new_path = vault / name
-            rename_from = item.get("renameFrom")
-            renamed = False
-            if rename_from or str(record.get("name") or "") != name:
-                if old_path != new_path:
-                    if new_path.exists() or any(
-                        other.get("path") == name and other.get("id") != record.get("id") and not other.get("trashed")
-                        for other in documents.values() if isinstance(other, dict)
-                    ):
-                        skipped.append({
-                            "name": name,
-                            "id": record.get("id"),
-                            "reason": "personal-page-occupies-name",
-                        })
-                        continue
-                    new_path.parent.mkdir(parents=True, exist_ok=True)
-                    if old_path.exists():
-                        os.replace(old_path, new_path)
-                    renamed = True
-                record["name"] = name
-                record["path"] = name
-                self._operation(manifest, "rename", f"rename {name}", document_id=str(record.get("id") or ""))
-            if current_content != content:
-                # Provisioning is the maintainer path: official records stay
-                # read-only to everyone else but must accept a newer seed body.
-                record["readOnly"] = False
-                try:
-                    result = self._write_record(vault, manifest, record, content, operation="write")
-                finally:
-                    record["readOnly"] = read_only
-                del result
-                updated.append(name)
-            elif renamed:
-                record["readOnly"] = read_only
-                try:
-                    record["mtime_ns"] = new_path.stat().st_mtime_ns
-                except OSError:
-                    pass
-                updated.append(name)
-            else:
-                # Already current: idempotent no-op, not an update.
-                record["readOnly"] = read_only
+
+            raise CopalBridgeError("Stored handbook copies need offline conversion to installed references. Keep a backup and finish the reviewed conversion before refreshing these records.")
 
         self._save(vault, manifest)
         return {"created": created, "updated": updated, "skipped": skipped}
+
+    def _ensure_official_references(
+        self,
+        vault: Path,
+        manifest: dict[str, Any],
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Lazily install the shared handbook for one mutable owner scope.
+
+        A current canonical receipt avoids re-planning every vault on ordinary
+        discovery reads. The surrounding ``_call_locked`` already holds the
+        cross-process commit lock, so this directly invokes provisioning rather
+        than recursing through the public bridge entry point.
+        """
+        owner = str(args.get("owner") or "")
+        if owner.casefold() == "shared":
+            return manifest
+        from src.openclank.official_docs import official_payloads, official_reference_manifest
+
+        canonical = official_reference_manifest()
+        marker = manifest.get("officialProvision")
+        if (
+            isinstance(marker, dict)
+            and marker.get("version") == canonical["version"]
+            and marker.get("fingerprint") == canonical["fingerprint"]
+        ):
+            return manifest
+        result = self.provision_official_docs(
+            {**args, "articles": official_payloads()},
+            scoped=(vault, manifest),
+        )
+        manifest["officialProvision"] = {
+            "version": canonical["version"],
+            "fingerprint": canonical["fingerprint"],
+            "count": canonical["count"],
+            "created": len(result["created"]),
+            "updated": len(result["updated"]),
+            "skipped": len(result["skipped"]),
+        }
+        self._save(vault, manifest)
+        # Provisioning is durable before the marker, and the same discovery
+        # request must observe the newly installed reference records.
+        return self._load(vault)
 
     async def call(self, operation: str, args: dict[str, Any] | None = None, *, timeout: float = 20) -> Any:
         del timeout
         return await asyncio.to_thread(self._call_sync, operation, args or {})
 
     def _call_sync(self, operation: str, args: dict[str, Any]) -> Any:
+        admitted = []
+        if operation in {"create", "write", "commit_guarded", "task_index_update"}:
+            from src.openclank.attachment_admission import admit_references
+            admitted = admit_references(args.get("owner"), "copal", args)
         # Separate repository instances and bridge processes must share the
         # same check/write boundary; an asyncio mutex cannot provide that.
         with copal_commit_lock(self.data_dir):
-            return self._call_locked(operation, args)
+            result = self._call_locked(operation, args)
+        from src.openclank.attachment_admission import settle_references
+        settle_references(admitted)
+        if operation == "purge_owner":
+            from src.openclank.attachment_admission import refresh_domain_references
+            from src.openclank.attachment_inventory import loose_copal_inventory
+            refresh_domain_references("copal", lambda: loose_copal_inventory(self))
+        return result
 
     def _call_locked(self, operation: str, args: dict[str, Any]) -> Any:
         self._guarded.reconcile(self)
@@ -1573,6 +1644,8 @@ class LooseCopalRepository:
                 expected=args.get("expected"),
             )
         vault, manifest = self._scope(args)
+        if operation in {"status", "scoped_status", "metadata_page", "list", "index", "search"}:
+            manifest = self._ensure_official_references(vault, manifest, args)
         action_id = str(args.get("action_id") or args.get("actionId") or args.get("commandId") or "").strip() or None
         documents = manifest["documents"]
         self._refresh_external_files(vault, manifest)
@@ -1709,13 +1782,13 @@ class LooseCopalRepository:
                 raise CopalBridgeError("asset exceeds the configured limit")
             raw_name = str(args.get("name") or "")
             name = self._safe_name(raw_name, "asset")
-            existing = next((row for row in documents.values() if isinstance(row, dict) and row.get("kind") == "asset" and row.get("name") == name and not row.get("trashed")), None)
+            existing = next((row for row in documents.values() if isinstance(row, dict) and (row.get("path") == name or row.get("name") == name) and not row.get("trashed")), None)
             # Asset heads must hash the original bytes.  The text fingerprint
             # re-encodes a Latin-1 decode as UTF-8, which disagrees with the
             # verification path for non-ASCII payloads.
             digest = binary_digest(data)
             if existing is not None:
-                if existing.get("head") == digest:
+                if existing.get("kind") == "asset" and existing.get("head") == digest:
                     return {"doc": self._record_doc(vault, existing, include_body=False)}
                 raise CopalBridgeError("asset already exists")
             document_id = f"asset_{uuid.uuid4().hex}"
@@ -1726,10 +1799,22 @@ class LooseCopalRepository:
             self._save(vault, manifest)
             return {"doc": self._record_doc(vault, record, include_body=False)}
         if operation == "history":
-            record = self._doc(manifest, str(args.get("id") or ""))
+            # Tombstones retain their scoped history for durable trash receipts.
+            record = documents.get(str(args.get("id") or ""))
+            if not isinstance(record, dict):
+                raise CopalBridgeError("document not found in this scope")
             return {"doc": record["id"], "changes": self._history_changes(vault, record)}
+        if operation == "diff":
+            record = self._doc(manifest, str(args.get("id") or ""))
+            previous = self._history_snapshot(vault, record, str(args.get("from") or ""))
+            current = self._history_snapshot(vault, record, str(args.get("to") or ""))
+            return {"diff": "".join(difflib.unified_diff(
+                previous["content"].splitlines(keepends=True), current["content"].splitlines(keepends=True),
+                fromfile=str(previous.get("name") or "before"), tofile=str(current.get("name") or "after"),
+            ))}
         if operation == "checkpoint":
             record = self._doc(manifest, str(args.get("id") or ""))
+            self._assert_not_official_reference(record)
             path = vault / str(record["path"])
             if not path.is_file():
                 raise CopalBridgeError("loose Copal document file is missing")
@@ -1748,7 +1833,7 @@ class LooseCopalRepository:
                     return {"outcome": "created", "doc": self._record_doc(vault, documents[str(replay["documentId"])], include_body=True), "replayed": True}
             kind = str(args.get("kind") or "markdown")
             name = self._safe_name(str(args.get("name") or ""), kind)
-            if any(record.get("path") == name and not record.get("trashed") for record in documents.values() if isinstance(record, dict)):
+            if any((record.get("path") == name or record.get("name") == name) and not record.get("trashed") for record in documents.values() if isinstance(record, dict)):
                 raise CopalBridgeError("document already exists")
             document_id = f"doc_{uuid.uuid4().hex}"
             content = str(args.get("content") or "")
@@ -1764,6 +1849,7 @@ class LooseCopalRepository:
             return {"outcome": "created", "doc": self._record_doc(vault, record, include_body=True)}
         if operation == "write":
             record = self._doc(manifest, str(args.get("id") or ""))
+            self._assert_not_official_reference(record)
             if record.get("readOnly"):
                 raise CopalBridgeError("document is read-only")
             base = args.get("base")
@@ -1776,22 +1862,21 @@ class LooseCopalRepository:
             return {"outcome": "committed", "doc": self._write_record(vault, manifest, record, str(args.get("content") or ""), operation="write", action_id=action_id)}
         if operation == "restore":
             record = self._doc(manifest, str(args.get("id") or ""))
+            self._assert_not_official_reference(record)
             commit = str(args.get("commit") or "")
             if commit == record.get("head"):
                 return {"outcome": "committed", "doc": self._record_doc(vault, record, include_body=True)}
-            snapshot_path = self._history_dir(vault, record) / f"{commit}.json"
-            try:
-                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise CopalBridgeError("history commit was not found") from exc
-            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("content"), str):
-                raise CopalBridgeError("history commit is invalid")
+            snapshot = self._history_snapshot(vault, record, commit)
             return {"outcome": "committed", "doc": self._write_record(vault, manifest, record, snapshot["content"], operation="restore", action_id=action_id)}
         if operation == "rename":
             record = self._doc(manifest, str(args.get("id") or ""))
+            if ((args.get("expected_head") is not None and args["expected_head"] != record.get("head"))
+                    or (args.get("expected_name") is not None and args["expected_name"] != record.get("name"))):
+                raise CopalBridgeError("stale_cursor: document changed after move preparation")
+            self._assert_not_official_reference(record)
             name = self._safe_name(str(args.get("name") or ""), str(record.get("kind") or ""))
             destination = vault / name
-            if destination.exists() or any(other.get("path") == name and other.get("id") != record["id"] and not other.get("trashed") for other in documents.values() if isinstance(other, dict)):
+            if destination.exists() or any((other.get("path") == name or other.get("name") == name) and other.get("id") != record["id"] and not other.get("trashed") for other in documents.values() if isinstance(other, dict)):
                 raise CopalBridgeError("document already exists")
             source = vault / str(record["path"])
             # Repair media links first so a protected reference refuses the
@@ -1813,6 +1898,7 @@ class LooseCopalRepository:
             return {"docs": [self._record_doc(vault, record, include_body=False) for record in documents.values() if isinstance(record, dict) and record.get("trashed") and (not args.get("corpus") or record.get("corpus") == args.get("corpus"))]}
         if operation in {"delete", "trash"}:
             record = self._doc(manifest, str(args.get("id") or ""))
+            self._assert_not_official_reference(record)
             source = vault / str(record["path"])
             trash = vault / ".copal" / "trash" / f"{record['id']}-{Path(record['path']).name}"
             trash.parent.mkdir(parents=True, exist_ok=True)
@@ -1826,6 +1912,8 @@ class LooseCopalRepository:
             return {"outcome": "deleted", "doc": self._record_doc(vault, record, include_body=False)}
         if operation == "restore_deleted":
             record = manifest.get("documents", {}).get(str(args.get("id") or ""))
+            if isinstance(record, dict):
+                self._assert_not_official_reference(record)
             if not isinstance(record, dict) or not record.get("trashed"):
                 raise CopalBridgeError("document not found in trash")
             source = vault / str(record.get("trashPath") or "")
@@ -1872,6 +1960,7 @@ class LooseCopalRepository:
             return {"docs": [self._record_doc(vault, record, include_body=True) for record in documents.values() if isinstance(record, dict) and not record.get("trashed")]}
         if operation == "asset_path":
             record = self._doc(manifest, str(args.get("id") or ""))
+            self._assert_not_official_reference(record)
             path = vault / str(record["path"])
             if not path.is_file():
                 raise CopalBridgeError("asset not found in this scope")
@@ -1880,7 +1969,7 @@ class LooseCopalRepository:
 
 
 class LooseCopalBridge(LooseCopalRepository):
-    """Lifecycle-compatible facade selected by ``COPAL_STORAGE=files``."""
+    """Current application facade over the Files repository."""
 
     def is_alive(self) -> bool:
         return True

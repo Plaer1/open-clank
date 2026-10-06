@@ -77,11 +77,13 @@ def test_exact_managed_capability_declaration_is_required():
 
 
 def test_generated_contract_preserves_all_methods_and_operations():
-    assert len(client_capability_offer()["methods"]) == 25
+    methods = client_capability_offer()["methods"]
+    assert len(methods) == 27
+    assert {"_openclank/history/v1/query", "_openclank/history/v1/mutate"} <= set(methods)
     assert len(MODEL_OPERATIONS) == 16
     assert "chat.stream" in MODEL_OPERATIONS
     assert sum(direction == "host_to_engine" for direction in METHOD_DIRECTIONS.values()) == 10
-    assert sum(direction == "engine_to_host" for direction in METHOD_DIRECTIONS.values()) == 15
+    assert sum(direction == "engine_to_host" for direction in METHOD_DIRECTIONS.values()) == 17
 
 
 def test_account_discovery_distinguishes_complete_from_unavailable():

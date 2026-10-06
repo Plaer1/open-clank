@@ -1,3 +1,4 @@
+import { uiIcon, setUiIconText, mountUiIcons } from './uiIcons.js';
 // static/js/ui.js
 
 /**
@@ -325,7 +326,7 @@ export function showToast(msg, durationOrOpts) {
   if (leadingIcon === 'check') {
     const icon = document.createElement('span');
     icon.className = 'toast-checkmark';
-    icon.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+    icon.innerHTML = uiIcon("check", 13, { role:"inherit" });
     toastEl.appendChild(icon);
   } else if (leadingIcon === 'spinner') {
     const wp = spinnerModule.createWhirlpool(14);
@@ -378,7 +379,7 @@ export function showToast(msg, durationOrOpts) {
   closeBtn.className = 'toast-close-btn';
   closeBtn.setAttribute('aria-label', 'Dismiss');
   closeBtn.title = 'Dismiss';
-  closeBtn.textContent = '×';
+  closeBtn.innerHTML = uiIcon('close', 14);
   closeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -458,7 +459,7 @@ export function showError(msg, options = {}) {
   closeBtn.className = 'toast-close-btn';
   closeBtn.setAttribute('aria-label', 'Dismiss');
   closeBtn.title = 'Dismiss';
-  closeBtn.textContent = '×';
+  closeBtn.innerHTML = uiIcon('close', 14);
   closeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -642,8 +643,8 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
 
     if (titleEl) titleEl.textContent = title || 'Confirm';
     msgEl.textContent = message;
-    okBtn.textContent = confirmText;
-    cancelBtn.textContent = cancelText;
+    setUiIconText(okBtn, 'check', confirmText);
+    setUiIconText(cancelBtn, 'close', cancelText);
     altBtn.textContent = alternateText || '';
     okBtn.className = danger ? 'confirm-btn confirm-btn-danger' : 'confirm-btn confirm-btn-primary';
     cancelBtn.className = 'confirm-btn confirm-btn-secondary';
@@ -746,8 +747,8 @@ export function styledPrompt(message, {
     input.value = defaultValue || '';
     input.placeholder = placeholder || '';
     input.maxLength = maxLength;
-    okBtn.textContent = confirmText;
-    cancelBtn.textContent = cancelText;
+    setUiIconText(okBtn, 'check', confirmText);
+    setUiIconText(cancelBtn, 'close', cancelText);
 
     // Remember what had focus so we can restore it when the dialog closes.
     const _prevFocus = document.activeElement;
@@ -840,6 +841,7 @@ export function isTouchInsideModal() {
 
 // Close floating dropdowns/popups on scroll to prevent them drifting
 function _initScrollDismiss() {
+  mountUiIcons(document);
   const chatHistory = document.getElementById('chat-history');
   if (chatHistory) {
     chatHistory.addEventListener('scroll', () => {
@@ -864,22 +866,7 @@ if (typeof document !== 'undefined' && document.readyState === 'loading') {
  * (or similar) to keep the per-site visual nudge they need.
  */
 export function emptyStateIcon(kind) {
-  const SVG_OPEN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">';
-  const SVG_CLOSE = '</svg>';
-  let inner;
-  switch (kind) {
-    case 'sad':
-      inner = '<circle cx="12" cy="12" r="10"/><path d="M16 16s-1.5-2-4-2-4 2-4 2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>';
-      break;
-    case 'neutral':
-      inner = '<circle cx="12" cy="12" r="10"/><line x1="8" y1="15" x2="16" y2="15"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>';
-      break;
-    case 'smiley':
-    default:
-      inner = '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>';
-      break;
-  }
-  return SVG_OPEN + inner + SVG_CLOSE;
+  return uiIcon(['sad', 'neutral'].includes(kind) ? kind : 'smiley', 14);
 }
 
 const uiModule = {
@@ -974,7 +961,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && 'ontouch
     // can paint / move layers / draw selections without the modal trying
     // to interpret it as a swipe-to-dismiss gesture. Skip the swipe init
     // entirely when the touch starts inside the editor area.
-    if (e.target.closest('.gallery-editor, .gallery-editor-container')) return;
+    if (e.target.closest('.imps-editor, .imps-editor-container')) return;
     // Internal vertical drag handles (e.g. the calendar's cal-splitter that
     // resizes the day-detail pane) consume vertical touches themselves. If
     // we don't bail here, the swipe-dismiss path also tracks the touch and
@@ -1101,6 +1088,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && 'ontouch
 
     if (shouldDismiss) {
       const managedModal = el.closest('.modal');
+      if (managedModal && Modals.minimizeOnSwipe(managedModal.id)) return;
       const managedWindow = managedModal?.__openClankWindow || managedModal?.__copalWindow;
       if (managedWindow?.requestCloseAsync) {
         // Open Clank windows may own an async dirty-state gate. Let that gate
@@ -1358,16 +1346,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && !window.
       }
       return;
     }
-    const galleryEditor = document.getElementById('gallery-editor-container');
-    const galleryModal = galleryEditor?.closest('.modal');
-    const galleryEditing = !!(
-      galleryEditor &&
-      galleryModal &&
-      !galleryModal.classList.contains('hidden') &&
-      getComputedStyle(galleryEditor).display !== 'none' &&
-      galleryEditor.querySelector('.gallery-editor')
+    const impsEditor = document.getElementById('imps-editor-container');
+    const impsEditing = !!(
+      impsEditor &&
+      getComputedStyle(impsEditor).display !== 'none' &&
+      impsEditor.querySelector('.imps-editor')
     );
-    if (galleryEditing) {
+    if (impsEditing) {
       e.preventDefault();
       e.stopImmediatePropagation();
       return;

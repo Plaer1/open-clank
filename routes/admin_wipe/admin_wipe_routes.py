@@ -6,7 +6,7 @@ nuking everything. The catch-all `chats` endpoint mirrors the
 existing /api/sessions/all so the Danger Zone speaks one URL pattern.
 
 URL shape: DELETE /api/admin/wipe/{kind}
-Kinds: chats, skills, notes, tasks, documents, gallery, calendar. The legacy
+Kinds: chats, skills, notes, tasks, documents, images, calendar. The legacy
 memory kind is retired; use the account-owned Brain reset flow.
 """
 
@@ -25,13 +25,12 @@ from core.database import (
     TaskRun,
     Document,
     DocumentVersion,
-    GalleryImage,
-    GalleryAlbum,
+    FilesImageResource,
     CalendarEvent,
     CalendarCal,
 )
-from src.constants import SKILLS_DIR, SKILLS_FILE, GALLERY_DIR, GALLERY_UPLOADS_DIR
-from src.generated_images import GENERATED_IMAGE_DIR, resolve_gallery_image_path
+from src.constants import SKILLS_DIR, SKILLS_FILE, GALLERY_UPLOADS_DIR
+from src.openclank.files_image_store import FilesImageStore
 
 logger = logging.getLogger(__name__)
 
@@ -155,35 +154,30 @@ def setup_admin_wipe_routes(session_manager, memory_provider=None):
                 db.commit()
                 return {"status": "deleted", "kind": kind, "count": count}
 
-            if kind == "gallery":
-                filenames = {
-                    str(row[0])
-                    for row in db.query(GalleryImage.filename).all()
-                    if row[0]
-                }
-                count = db.query(GalleryImage).count() + db.query(GalleryAlbum).count()
-                db.query(GalleryImage).delete()
-                db.query(GalleryAlbum).delete()
-                db.commit()
-                # Metadata proves the exact byte candidates.  Remove them only
-                # after the database wipe commits; unknown/legacy files with no
-                # row remain quarantined and inaccessible rather than becoming
-                # an unbounded recursive-delete target.
-                for filename in filenames:
+            if kind == "images":
+                rows = db.query(FilesImageResource.id, FilesImageResource.owner).filter(
+                    FilesImageResource.kind == "image",
+                    FilesImageResource.is_active.is_(True),
+                ).all()
+                count = len(rows)
+                # Materialize and release the read transaction before each
+                # Files store operation opens its own write transaction.
+                db.close()
+                for resource_id, resource_owner in rows:
+                    if not resource_owner:
+                        continue
                     try:
-                        resolve_gallery_image_path(
-                            filename,
-                            root=GENERATED_IMAGE_DIR,
-                            require_exists=True,
-                        ).unlink()
-                    except (HTTPException, OSError) as exc:
+                        FilesImageStore(session_factory=SessionLocal).retire(
+                            str(resource_owner), str(resource_id)
+                        )
+                    except Exception as exc:
                         logger.warning(
-                            "Could not remove wiped Gallery image %r: %s",
-                            filename,
+                            "Could not retire wiped Files image %r: %s",
+                            resource_id,
                             exc,
                         )
-                # Also drop the upload dir so disk doesn't keep orphans.
-                _rmtree_quiet(GALLERY_DIR)
+                # Legacy Gallery upload staging is separate from the Files
+                # image root and can be discarded after Files rows retire.
                 _rmtree_quiet(GALLERY_UPLOADS_DIR)
                 return {"status": "deleted", "kind": kind, "count": count}
 

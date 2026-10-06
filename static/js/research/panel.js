@@ -1,8 +1,10 @@
+import { uiIcon } from '../uiIcons.js';
 /**
  * Deep Research side panel — open/close, form, job rendering, library.
  */
 import * as jobs from './jobs.js?v=20260630researchthumb';
 import themeModule from '../theme.js';
+import modalManager from '../modalManager.js';
 import createResearchSynapse from '../researchSynapse.js';
 import spinnerModule from '../spinner.js';
 import { sortModelIds } from '../modelSort.js';
@@ -39,8 +41,8 @@ const _collapsedSections = new Set();
 // applies to every running job.
 const _SYNAPSE_MIN_KEY = 'research.synapseMinimized';
 let _synapseMinimized = (() => { try { return localStorage.getItem(_SYNAPSE_MIN_KEY) === '1'; } catch { return false; } })();
-const _vizCollapseIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>';
-const _vizExpandIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+const _vizCollapseIcon = uiIcon("chevron-up", 12);
+const _vizExpandIcon = uiIcon("chevron-down", 12);
 function _toggleSynapseMinimized() {
   _synapseMinimized = !_synapseMinimized;
   try { localStorage.setItem(_SYNAPSE_MIN_KEY, _synapseMinimized ? '1' : '0'); } catch {}
@@ -56,6 +58,7 @@ function _toggleSynapseMinimized() {
 
 let _open = false;
 let _onDocKeydown = null;
+let _minimizeReturnFocus = null;
 let _apiBase = '';
 let _endpoints = [];
 let _expandedJobId = null;
@@ -195,17 +198,17 @@ async function _updateResearchCount() {
   } catch {}
 }
 
-const _searchIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
-const _closeIcon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
-const _playIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>';
-const _cancelIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-const _trashIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>';
-const _externalIcon = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
-const _copyIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
-const _retryIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>';
-const _chevronIcon = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
-const _editIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
-const _chatIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+const _searchIcon = uiIcon("research", 14);
+const _closeIcon = uiIcon("chevron-down", 18);
+const _playIcon = uiIcon("play", 14);
+const _cancelIcon = uiIcon("close", 12);
+const _trashIcon = uiIcon("trash", 12);
+const _externalIcon = uiIcon("external", 11);
+const _copyIcon = uiIcon("copy", 12);
+const _retryIcon = uiIcon("refresh", 12);
+const _chevronIcon = uiIcon("chevron-down", 10);
+const _editIcon = uiIcon("edit", 12);
+const _chatIcon = uiIcon("chat", 12);
 
 export function init(apiBase, markdownMod, sessionMod) {
   _apiBase = apiBase;
@@ -219,12 +222,8 @@ export function init(apiBase, markdownMod, sessionMod) {
 export function isOpen() { return _open; }
 export function toggle() {
   if (_open) {
-    // If minimized, restore instead of closing
-    const overlay = document.getElementById('research-overlay');
-    if (overlay && overlay.style.display === 'none') {
-      overlay.style.display = '';
-      const btn = document.getElementById('tool-research-btn');
-      if (btn) btn.classList.remove('minimized');
+    if (modalManager.isMinimized('research-overlay')) {
+      modalManager.restore('research-overlay');
       return;
     }
     closePanel();
@@ -235,12 +234,7 @@ export function toggle() {
 
 export function openPanel(focusJobId) {
   if (_open) {
-    const overlay = document.getElementById('research-overlay');
-    if (overlay && overlay.style.display === 'none') {
-      overlay.style.display = '';
-      const btn = document.getElementById('tool-research-btn');
-      if (btn) btn.classList.remove('minimized');
-    }
+    if (modalManager.isMinimized('research-overlay')) modalManager.restore('research-overlay');
     document.body.classList.add('research-panel-view');
     if (focusJobId) _focusJob(focusJobId);
     return;
@@ -272,6 +266,13 @@ export function openPanel(focusJobId) {
 
   overlay.appendChild(pane);
   document.body.appendChild(overlay);
+
+  modalManager.register('research-overlay', {
+    railBtnId: 'rail-research',
+    sidebarBtnId: 'tool-research-btn',
+    restoreFn: _restorePanelFromDock,
+    closeFn: closePanel,
+  });
 
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) closePanel();
@@ -339,7 +340,23 @@ export function closePanel() {
   if (btn) btn.classList.remove('active');
 
   const overlay = document.getElementById('research-overlay');
+  if (modalManager.isRegistered('research-overlay')) modalManager.unregister('research-overlay');
   if (overlay) overlay.remove();
+}
+
+function _restorePanelFromDock() {
+  const overlay = document.getElementById('research-overlay');
+  if (!overlay) return;
+  overlay.style.display = '';
+  overlay.classList.remove('hidden', 'modal-minimized');
+  document.body.classList.add('research-panel-view');
+  const btn = document.getElementById('tool-research-btn');
+  if (btn) btn.classList.remove('minimized');
+  const focusTarget = _minimizeReturnFocus;
+  _minimizeReturnFocus = null;
+  const visibleTarget = focusTarget?.isConnected && !focusTarget.closest('[hidden], .hidden')
+    ? focusTarget : document.getElementById('research-query');
+  visibleTarget?.focus?.({ preventScroll: true });
 }
 
 function _buildPanelHTML() {
@@ -360,14 +377,14 @@ function _buildPanelHTML() {
     <div class="modal-header research-pane-header">
       <h4><span style="position:relative;top:-1px;left:6px;display:inline-flex;vertical-align:middle;">${_searchIcon}</span><span style="margin-left:6px;">Deep Research</span></h4>
       <div class="research-pane-header-actions">
-        <button id="research-panel-minimize" class="modal-minimize-btn" type="button" title="Minimize"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="18" x2="19" y2="18"/></svg></button>
+        <button id="research-panel-minimize" class="modal-minimize-btn" type="button" title="Minimize">${uiIcon("remove", 14)}</button>
         <button id="research-panel-close" class="close-btn" title="Close">&#x2716;</button>
       </div>
     </div>
     <div class="modal-body research-pane-body" data-no-swipe-dismiss>
       <div class="research-new-job">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
-          <h2 style="margin:0;padding:0;line-height:1;display:inline-flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M6 18h8"/><path d="M3 22h18"/><path d="M14 22a7 7 0 1 0 0-14h-1"/><path d="M9 14h2"/><path d="M9 12a2 2 0 0 1-2-2V6h4v4a2 2 0 0 1-2 2Z"/><path d="M12 6V3a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3"/></svg>Research <span id="research-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
+          <h2 style="margin:0;padding:0;line-height:1;display:inline-flex;align-items:center;gap:6px;">${uiIcon("research", 14, {"style":"flex-shrink:0;color:var(--accent, var(--red));"})}Research <span id="research-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
         </div>
         <p class="memory-desc doclib-desc" style="margin-top:2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <span>Multi-step web research with an LLM-in-the-loop agent</span>
@@ -375,7 +392,7 @@ function _buildPanelHTML() {
         </p>
         <textarea id="research-query" class="research-query" placeholder="${_pickResearchHint()}" rows="4"></textarea>
         <button id="research-settings-toggle" class="research-settings-toggle${chevronCls}">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;opacity:0.85;flex-shrink:0;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings<span class="research-settings-chevron">${_chevronIcon}</span>
+          ${uiIcon("settings", 12, {"style":"vertical-align:-2px;margin-right:4px;opacity:0.85;flex-shrink:0;"})}Settings<span class="research-settings-chevron">${_chevronIcon}</span>
         </button>
         <div id="research-settings-body" class="research-settings-row"${settingsHidden}>
           <label class="research-setting">
@@ -447,10 +464,9 @@ function _resetCategoryToAuto() {
 function _wireEvents(pane) {
   pane.querySelector('#research-panel-close').addEventListener('click', closePanel);
   pane.querySelector('#research-panel-minimize')?.addEventListener('click', () => {
-    const overlay = document.getElementById('research-overlay');
-    if (overlay) overlay.style.display = 'none';
-    const btn = document.getElementById('tool-research-btn');
-    if (btn) btn.classList.add('minimized');
+    _minimizeReturnFocus = document.activeElement;
+    modalManager.minimize('research-overlay');
+    document.querySelector('.minimized-dock-chip[data-modal-id="research-overlay"]')?.focus({ preventScroll: true });
   });
   pane.querySelector('#research-start-btn').addEventListener('click', _handleStart);
   pane.querySelector('#research-add-btn').addEventListener('click', _handleAdd);
@@ -790,7 +806,7 @@ function _renderJobs() {
       + '<span class="research-section-right">'
       +   clearAllHtml
       +   '<span class="research-section-dot' + (dotPulse ? ' pulsing' : '') + '" style="background:' + dotColor + ';"></span>'
-      +   '<svg class="research-section-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>'
+      +   uiIcon("chevron-down", 12, {"className":"research-section-chevron"})
       + '</span>';
     if (key === 'past') {
       const hint = document.createElement('span');
@@ -849,8 +865,8 @@ function _promptParallelOrSequential(count, anchorBtn) {
   pop.id = 'research-run-mode-popover';
   pop.className = 'research-run-mode-popover';
   // Same parallel / sequential glyphs the model-comparison picker uses.
-  const ICON_PARALLEL = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>';
-  const ICON_SEQUENTIAL = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="8" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor"/><circle cx="4" cy="12" r="1.5" fill="currentColor"/><circle cx="4" cy="18" r="1.5" fill="currentColor"/></svg>';
+  const ICON_PARALLEL = uiIcon("menu", 16);
+  const ICON_SEQUENTIAL = uiIcon("list", 16);
   pop.innerHTML =
     '<button class="research-run-mode-row" data-mode="parallel">' + ICON_PARALLEL + '<span class="rrm-title">Parallel</span></button>'
     + '<button class="research-run-mode-row" data-mode="sequential">' + ICON_SEQUENTIAL + '<span class="rrm-title">Sequential</span></button>';
@@ -1090,11 +1106,11 @@ function _buildJobCard(job) {
 }
 
 const _CAT_ICONS = {
-  product:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="13" rx="2"/><path d="M7 8V5a5 5 0 0 1 10 0v3"/></svg>',
-  comparison: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v18"/><path d="M16 3v18"/><path d="M3 8h5"/><path d="M16 16h5"/></svg>',
-  howto:      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
-  landscape:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>',
-  factcheck:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>',
+  product:    uiIcon("workspace", 32),
+  comparison: uiIcon("compare", 32),
+  howto:      uiIcon("check", 32, {"role":"inherit"}),
+  landscape:  uiIcon("grid", 32),
+  factcheck:  uiIcon("shield", 32),
 };
 
 const _CAT_LABELS = {
@@ -1211,7 +1227,7 @@ async function _copyResult(job, btn) {
   if (btn) {
     const orig = btn.innerHTML;
     if (ok) {
-      btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+      btn.innerHTML = `${uiIcon("check", 12, {"role":"success"})}`;
       btn.classList.add('research-job-action-copied');
       setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('research-job-action-copied'); }, 2000);
     } else {

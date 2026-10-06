@@ -16,6 +16,7 @@ import re
 import sqlite3
 import stat
 import struct
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,10 @@ VECTOR_LOGICAL_SPACE = "documents_vector"
 RRF_K = 60
 RRF_WEIGHTS = {"exact": 2.0, "fts": 1.0, "vector": 1.0}
 RANKER_VERSION = "scope-first-rrf-v1"
+
+# Serialize only external source snapshots/metadata writes and erasure, never
+# provider calls. SQLite write transactions also serialize distinct processes.
+_EXTERNAL_REFERENCE_LOCK = threading.RLock()
 
 
 def _hash(value: str) -> str:
@@ -226,6 +231,7 @@ class FrankenmemoryRAG:
         self._embedding_provider_ref = str(embedding_provider_ref or "").strip()
         self._healthy = False
         self._fts_available = False
+        self._external_sources = {}
         self._ensure_tables()
 
     def _connect(self) -> sqlite3.Connection:
@@ -238,144 +244,159 @@ class FrankenmemoryRAG:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         try:
             with self._connect() as conn:
+                existing = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fm_v2_documents'").fetchone()
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fm_v2_sources'").fetchone():
+                    source_columns = {row[1] for row in conn.execute("PRAGMA table_info(fm_v2_sources)")}
+                    if not {"workspace_key", "project_key"}.issubset(source_columns):
+                        raise RuntimeError("Legacy RAG schema requires .clanker/tools/migrations/python/secondary.py rag-schema")
+                if existing:
+                    required = {'fm_v2_sources': ['owner_id', 'source_id', 'workspace_key', 'project_key', 'source_uri', 'source_revision', 'content_hash', 'source_type', 'forget_state', 'created_at'], 'fm_v2_documents': ['owner_id', 'document_id', 'source_id', 'source_revision', 'title', 'parser_version', 'content_hash', 'created_at'], 'fm_v2_chunks': ['owner_id', 'chunk_id', 'document_id', 'ordinal', 'text', 'content_hash', 'locator_json', 'created_at'], 'fm_v2_derived_generations': ['owner_id', 'generation_id', 'logical_space', 'workspace_key', 'project_key', 'provider_ref', 'model', 'endpoint_class', 'dimension', 'normalization', 'metric', 'chunker_version', 'config_fingerprint', 'source_watermark', 'row_count', 'state', 'retention_state', 'failure_json', 'created_at', 'updated_at', 'validated_at'], 'fm_v2_index_pointers': ['owner_id', 'logical_space', 'workspace_key', 'project_key', 'generation_id', 'publication_tx', 'publication_watermark', 'published_at'], 'fm_v2_chunk_embeddings': ['owner_id', 'generation_id', 'chunk_id', 'dimension', 'embedding', 'content_hash', 'created_at'], 'fm_v2_index_publications': ['owner_id', 'publication_id', 'logical_space', 'workspace_key', 'project_key', 'previous_generation_id', 'generation_id', 'action', 'publication_watermark', 'created_at']}
+                    for table, names in required.items():
+                        present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                        if not set(names).issubset(present):
+                            raise RuntimeError("Legacy RAG schema requires .clanker/tools/migrations/python/secondary.py rag-schema")
+                    if conn.execute("SELECT 1 FROM fm_v2_index_pointers WHERE publication_tx='' LIMIT 1").fetchone():
+                        raise RuntimeError("Legacy RAG pointers require .clanker/tools/migrations/python/secondary.py rag-schema")
+                # Current schema may initialize a fresh document projection.
                 # These definitions match fm-core's migration 11. The Rust
                 # migration remains the authority; this additive bootstrap is
                 # only for the app's early RAG singleton startup race.
-                conn.executescript(
-                    """
-                    CREATE TABLE IF NOT EXISTS fm_v2_sources (
-                        owner_id TEXT NOT NULL, source_id TEXT NOT NULL,
-                        workspace_key TEXT NOT NULL DEFAULT '', project_key TEXT NOT NULL DEFAULT '',
-                        source_uri TEXT NOT NULL, source_revision INTEGER NOT NULL,
-                        content_hash TEXT NOT NULL, source_type TEXT NOT NULL,
-                        forget_state TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL,
-                        PRIMARY KEY(owner_id, source_id, source_revision)
-                        ,CHECK (source_revision > 0)
-                        ,CHECK (project_key = '' OR workspace_key <> '')
-                        ,CHECK (forget_state IN ('active','forget_requested','forgotten'))
-                    );
-                    CREATE TABLE IF NOT EXISTS fm_v2_documents (
-                        owner_id TEXT NOT NULL, document_id TEXT NOT NULL,
-                        source_id TEXT NOT NULL, source_revision INTEGER NOT NULL,
-                        title TEXT NOT NULL DEFAULT '', parser_version TEXT NOT NULL,
-                        content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
-                        PRIMARY KEY(owner_id, document_id),
-                        FOREIGN KEY(owner_id, source_id, source_revision)
-                          REFERENCES fm_v2_sources(owner_id, source_id, source_revision)
-                    );
-                    CREATE TABLE IF NOT EXISTS fm_v2_chunks (
-                        owner_id TEXT NOT NULL, chunk_id TEXT NOT NULL,
-                        document_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
-                        text TEXT NOT NULL, content_hash TEXT NOT NULL,
-                        locator_json TEXT NOT NULL, created_at TEXT NOT NULL,
-                        PRIMARY KEY(owner_id, chunk_id),
-                        UNIQUE(owner_id, document_id, ordinal),
-                        FOREIGN KEY(owner_id, document_id)
-                          REFERENCES fm_v2_documents(owner_id, document_id)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_fm_v2_rag_chunks_owner
-                      ON fm_v2_chunks(owner_id, document_id, ordinal);
-                    CREATE TABLE IF NOT EXISTS fm_v2_derived_generations (
-                        owner_id TEXT NOT NULL,
-                        generation_id TEXT NOT NULL,
-                        logical_space TEXT NOT NULL,
-                        workspace_key TEXT NOT NULL DEFAULT '',
-                        project_key TEXT NOT NULL DEFAULT '',
-                        provider_ref TEXT NOT NULL,
-                        model TEXT NOT NULL,
-                        endpoint_class TEXT NOT NULL,
-                        dimension INTEGER NOT NULL,
-                        normalization TEXT NOT NULL,
-                        metric TEXT NOT NULL,
-                        chunker_version TEXT NOT NULL,
-                        config_fingerprint TEXT NOT NULL,
-                        source_watermark TEXT NOT NULL,
-                        row_count INTEGER NOT NULL DEFAULT 0,
-                        state TEXT NOT NULL,
-                        retention_state TEXT NOT NULL DEFAULT 'retained',
-                        failure_json TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        validated_at TEXT,
-                        PRIMARY KEY(owner_id, generation_id),
-                        CHECK (project_key = '' OR workspace_key <> ''),
-                        CHECK (dimension >= 0),
-                        CHECK (state IN ('planned','building','validating','ready','failed')),
-                        CHECK (retention_state IN ('retained','gc_eligible','deleted'))
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_fm_v2_derived_generations_space
-                      ON fm_v2_derived_generations(
-                        owner_id, logical_space, workspace_key, project_key,
-                        created_at
-                      );
-                    CREATE TABLE IF NOT EXISTS fm_v2_index_pointers (
-                        owner_id TEXT NOT NULL,
-                        logical_space TEXT NOT NULL,
-                        workspace_key TEXT NOT NULL DEFAULT '',
-                        project_key TEXT NOT NULL DEFAULT '',
-                        generation_id TEXT NOT NULL,
-                        publication_tx TEXT NOT NULL DEFAULT '',
-                        publication_watermark TEXT NOT NULL,
-                        published_at TEXT NOT NULL,
-                        PRIMARY KEY(owner_id, logical_space, workspace_key, project_key),
-                        FOREIGN KEY(owner_id, generation_id)
-                          REFERENCES fm_v2_derived_generations(owner_id, generation_id),
-                        CHECK (project_key = '' OR workspace_key <> '')
-                    );
-                    CREATE TABLE IF NOT EXISTS fm_v2_chunk_embeddings (
-                        owner_id TEXT NOT NULL,
-                        generation_id TEXT NOT NULL,
-                        chunk_id TEXT NOT NULL,
-                        dimension INTEGER NOT NULL,
-                        embedding BLOB NOT NULL,
-                        content_hash TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        PRIMARY KEY(owner_id, generation_id, chunk_id),
-                        FOREIGN KEY(owner_id, generation_id)
-                          REFERENCES fm_v2_derived_generations(owner_id, generation_id),
-                        FOREIGN KEY(owner_id, chunk_id)
-                          REFERENCES fm_v2_chunks(owner_id, chunk_id)
-                          ON DELETE CASCADE,
-                        CHECK (dimension > 0)
-                    );
-                    CREATE TABLE IF NOT EXISTS fm_v2_index_publications (
-                        owner_id TEXT NOT NULL,
-                        publication_id TEXT NOT NULL,
-                        logical_space TEXT NOT NULL,
-                        workspace_key TEXT NOT NULL DEFAULT '',
-                        project_key TEXT NOT NULL DEFAULT '',
-                        previous_generation_id TEXT,
-                        generation_id TEXT NOT NULL,
-                        action TEXT NOT NULL,
-                        publication_watermark TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        PRIMARY KEY(owner_id, publication_id),
-                        CHECK (project_key = '' OR workspace_key <> ''),
-                        CHECK (action IN ('publish','rollback'))
-                    );
-                    CREATE TRIGGER IF NOT EXISTS fm_v2_generation_state_immutable
-                    BEFORE UPDATE OF state ON fm_v2_derived_generations
-                    WHEN NOT (
-                        old.state = new.state OR
-                        (old.state = 'planned' AND new.state = 'building') OR
-                        (old.state = 'building' AND new.state IN ('validating','failed')) OR
-                        (old.state = 'validating' AND new.state IN ('ready','failed'))
+                if not existing:
+                    conn.executescript(
+                        """
+                        CREATE TABLE IF NOT EXISTS fm_v2_sources (
+                            owner_id TEXT NOT NULL, source_id TEXT NOT NULL,
+                            workspace_key TEXT NOT NULL DEFAULT '', project_key TEXT NOT NULL DEFAULT '',
+                            source_uri TEXT NOT NULL, source_revision INTEGER NOT NULL,
+                            content_hash TEXT NOT NULL, source_type TEXT NOT NULL,
+                            forget_state TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL,
+                            PRIMARY KEY(owner_id, source_id, source_revision)
+                            ,CHECK (source_revision > 0)
+                            ,CHECK (project_key = '' OR workspace_key <> '')
+                            ,CHECK (forget_state IN ('active','forget_requested','forgotten'))
+                        );
+                        CREATE TABLE IF NOT EXISTS fm_v2_documents (
+                            owner_id TEXT NOT NULL, document_id TEXT NOT NULL,
+                            source_id TEXT NOT NULL, source_revision INTEGER NOT NULL,
+                            title TEXT NOT NULL DEFAULT '', parser_version TEXT NOT NULL,
+                            content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+                            PRIMARY KEY(owner_id, document_id),
+                            FOREIGN KEY(owner_id, source_id, source_revision)
+                              REFERENCES fm_v2_sources(owner_id, source_id, source_revision)
+                        );
+                        CREATE TABLE IF NOT EXISTS fm_v2_chunks (
+                            owner_id TEXT NOT NULL, chunk_id TEXT NOT NULL,
+                            document_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+                            text TEXT NOT NULL, content_hash TEXT NOT NULL,
+                            locator_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                            PRIMARY KEY(owner_id, chunk_id),
+                            UNIQUE(owner_id, document_id, ordinal),
+                            FOREIGN KEY(owner_id, document_id)
+                              REFERENCES fm_v2_documents(owner_id, document_id)
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_fm_v2_rag_chunks_owner
+                          ON fm_v2_chunks(owner_id, document_id, ordinal);
+                        CREATE TABLE IF NOT EXISTS fm_v2_derived_generations (
+                            owner_id TEXT NOT NULL,
+                            generation_id TEXT NOT NULL,
+                            logical_space TEXT NOT NULL,
+                            workspace_key TEXT NOT NULL DEFAULT '',
+                            project_key TEXT NOT NULL DEFAULT '',
+                            provider_ref TEXT NOT NULL,
+                            model TEXT NOT NULL,
+                            endpoint_class TEXT NOT NULL,
+                            dimension INTEGER NOT NULL,
+                            normalization TEXT NOT NULL,
+                            metric TEXT NOT NULL,
+                            chunker_version TEXT NOT NULL,
+                            config_fingerprint TEXT NOT NULL,
+                            source_watermark TEXT NOT NULL,
+                            row_count INTEGER NOT NULL DEFAULT 0,
+                            state TEXT NOT NULL,
+                            retention_state TEXT NOT NULL DEFAULT 'retained',
+                            failure_json TEXT,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            validated_at TEXT,
+                            PRIMARY KEY(owner_id, generation_id),
+                            CHECK (project_key = '' OR workspace_key <> ''),
+                            CHECK (dimension >= 0),
+                            CHECK (state IN ('planned','building','validating','ready','failed')),
+                            CHECK (retention_state IN ('retained','gc_eligible','deleted'))
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_fm_v2_derived_generations_space
+                          ON fm_v2_derived_generations(
+                            owner_id, logical_space, workspace_key, project_key,
+                            created_at
+                          );
+                        CREATE TABLE IF NOT EXISTS fm_v2_index_pointers (
+                            owner_id TEXT NOT NULL,
+                            logical_space TEXT NOT NULL,
+                            workspace_key TEXT NOT NULL DEFAULT '',
+                            project_key TEXT NOT NULL DEFAULT '',
+                            generation_id TEXT NOT NULL,
+                            publication_tx TEXT NOT NULL DEFAULT '',
+                            publication_watermark TEXT NOT NULL,
+                            published_at TEXT NOT NULL,
+                            PRIMARY KEY(owner_id, logical_space, workspace_key, project_key),
+                            FOREIGN KEY(owner_id, generation_id)
+                              REFERENCES fm_v2_derived_generations(owner_id, generation_id),
+                            CHECK (project_key = '' OR workspace_key <> '')
+                        );
+                        CREATE TABLE IF NOT EXISTS fm_v2_chunk_embeddings (
+                            owner_id TEXT NOT NULL,
+                            generation_id TEXT NOT NULL,
+                            chunk_id TEXT NOT NULL,
+                            dimension INTEGER NOT NULL,
+                            embedding BLOB NOT NULL,
+                            content_hash TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            PRIMARY KEY(owner_id, generation_id, chunk_id),
+                            FOREIGN KEY(owner_id, generation_id)
+                              REFERENCES fm_v2_derived_generations(owner_id, generation_id),
+                            FOREIGN KEY(owner_id, chunk_id)
+                              REFERENCES fm_v2_chunks(owner_id, chunk_id)
+                              ON DELETE CASCADE,
+                            CHECK (dimension > 0)
+                        );
+                        CREATE TABLE IF NOT EXISTS fm_v2_index_publications (
+                            owner_id TEXT NOT NULL,
+                            publication_id TEXT NOT NULL,
+                            logical_space TEXT NOT NULL,
+                            workspace_key TEXT NOT NULL DEFAULT '',
+                            project_key TEXT NOT NULL DEFAULT '',
+                            previous_generation_id TEXT,
+                            generation_id TEXT NOT NULL,
+                            action TEXT NOT NULL,
+                            publication_watermark TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            PRIMARY KEY(owner_id, publication_id),
+                            CHECK (project_key = '' OR workspace_key <> ''),
+                            CHECK (action IN ('publish','rollback'))
+                        );
+                        CREATE TRIGGER IF NOT EXISTS fm_v2_generation_state_immutable
+                        BEFORE UPDATE OF state ON fm_v2_derived_generations
+                        WHEN NOT (
+                            old.state = new.state OR
+                            (old.state = 'planned' AND new.state = 'building') OR
+                            (old.state = 'building' AND new.state IN ('validating','failed')) OR
+                            (old.state = 'validating' AND new.state IN ('ready','failed'))
+                        )
+                        BEGIN
+                            SELECT RAISE(ABORT, 'invalid derived generation state transition');
+                        END;
+                        CREATE TRIGGER IF NOT EXISTS fm_v2_active_generation_retained
+                        BEFORE UPDATE OF retention_state ON fm_v2_derived_generations
+                        WHEN new.retention_state <> 'retained' AND EXISTS (
+                            SELECT 1 FROM fm_v2_index_pointers p
+                            WHERE p.owner_id = old.owner_id
+                              AND p.generation_id = old.generation_id
+                        )
+                        BEGIN
+                            SELECT RAISE(ABORT, 'active generation must remain retained');
+                        END;
+                        """
                     )
-                    BEGIN
-                        SELECT RAISE(ABORT, 'invalid derived generation state transition');
-                    END;
-                    CREATE TRIGGER IF NOT EXISTS fm_v2_active_generation_retained
-                    BEFORE UPDATE OF retention_state ON fm_v2_derived_generations
-                    WHEN new.retention_state <> 'retained' AND EXISTS (
-                        SELECT 1 FROM fm_v2_index_pointers p
-                        WHERE p.owner_id = old.owner_id
-                          AND p.generation_id = old.generation_id
-                    )
-                    BEGIN
-                        SELECT RAISE(ABORT, 'active generation must remain retained');
-                    END;
-                    """
-                )
                 try:
                     conn.execute(
                         "CREATE VIRTUAL TABLE IF NOT EXISTS fm_v2_chunks_fts USING fts5(owner_id UNINDEXED, chunk_id UNINDEXED, text)"
@@ -386,67 +407,6 @@ class FrankenmemoryRAG:
                     self._fts_available = True
                 except sqlite3.Error:
                     self._fts_available = False
-                columns = {row[1] for row in conn.execute("PRAGMA table_info(fm_v2_sources)")}
-                for column in ("workspace_key", "project_key"):
-                    if column not in columns:
-                        conn.execute(f"ALTER TABLE fm_v2_sources ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
-                pointer_columns = {
-                    row[1] for row in conn.execute("PRAGMA table_info(fm_v2_index_pointers)")
-                }
-                if "publication_tx" not in pointer_columns:
-                    conn.execute(
-                        "ALTER TABLE fm_v2_index_pointers "
-                        "ADD COLUMN publication_tx TEXT NOT NULL DEFAULT ''"
-                    )
-                generation_columns = {
-                    row[1]
-                    for row in conn.execute(
-                        "PRAGMA table_info(fm_v2_derived_generations)"
-                    )
-                }
-                if "row_count" not in generation_columns:
-                    conn.execute(
-                        "ALTER TABLE fm_v2_derived_generations "
-                        "ADD COLUMN row_count INTEGER NOT NULL DEFAULT 0"
-                    )
-                # Older pointers predate publication transaction IDs. Backfill
-                # an auditable publication record without changing the target.
-                for pointer in conn.execute(
-                    "SELECT owner_id,logical_space,workspace_key,project_key,"
-                    "generation_id,publication_watermark,published_at "
-                    "FROM fm_v2_index_pointers WHERE publication_tx=''"
-                ).fetchall():
-                    publication_id = "pub_" + uuid.uuid4().hex
-                    conn.execute(
-                        "UPDATE fm_v2_index_pointers SET publication_tx=? "
-                        "WHERE owner_id=? AND logical_space=? AND workspace_key=? "
-                        "AND project_key=? AND publication_tx=''",
-                        (
-                            publication_id,
-                            pointer["owner_id"],
-                            pointer["logical_space"],
-                            pointer["workspace_key"],
-                            pointer["project_key"],
-                        ),
-                    )
-                    conn.execute(
-                        "INSERT OR IGNORE INTO fm_v2_index_publications("
-                        "owner_id,publication_id,logical_space,workspace_key,"
-                        "project_key,previous_generation_id,generation_id,action,"
-                        "publication_watermark,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (
-                            pointer["owner_id"],
-                            publication_id,
-                            pointer["logical_space"],
-                            pointer["workspace_key"],
-                            pointer["project_key"],
-                            None,
-                            pointer["generation_id"],
-                            "publish",
-                            pointer["publication_watermark"],
-                            pointer["published_at"],
-                        ),
-                    )
                 if self._fts_available:
                     scopes = conn.execute(
                         "SELECT DISTINCT owner_id,workspace_key,project_key "
@@ -490,6 +450,119 @@ class FrankenmemoryRAG:
             return f"workspace:{workspace}"
         return "owner"
 
+    def register_external_source(self, workspace_id: str, adapter: Any) -> None:
+        """Bind an exact derived-index scope to a separately owned source.
+
+        The adapter supplies current text transiently. Persisted chunks in this
+        scope contain only hashes and locators; they never become source text.
+        """
+        workspace = str(workspace_id or "").strip()
+        if not workspace or workspace in self._external_sources:
+            raise ValueError("external source scope must be unique and explicit")
+        self._external_sources[workspace] = adapter
+
+    def index_external_references(self, *, owner: str, workspace_id: str) -> Dict[str, Any]:
+        owner = _owner(owner)
+        adapter = self._external_sources.get(workspace_id)
+        if adapter is None:
+            raise ValueError("external source binding is unavailable")
+        with _EXTERNAL_REFERENCE_LOCK:
+            now = datetime.now(timezone.utc).isoformat()
+            count = 0
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                references = adapter.references(owner)
+                for reference in references:
+                    uri, revision = reference["source_uri"], int(reference["revision"])
+                    source_id = _source_id(owner, workspace_id, "", uri)
+                    digest = reference["content_hash"]
+                    document_id = "doc_" + _hash(f"{owner}\0{source_id}\0{revision}\0{digest}\0{CHUNKER_VERSION}")[:32]
+                    conn.execute(
+                        "INSERT OR IGNORE INTO fm_v2_sources(owner_id,source_id,workspace_key,project_key,source_uri,source_revision,content_hash,source_type,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (owner, source_id, workspace_id, "", uri, revision, digest, "external_reference", now),
+                    )
+                    conn.execute(
+                        "INSERT OR IGNORE INTO fm_v2_documents(owner_id,document_id,source_id,source_revision,title,parser_version,content_hash,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                        (owner, document_id, source_id, revision, "", CHUNKER_VERSION, digest, now),
+                    )
+                    for span in _document_chunk_spans(reference["text"]):
+                        locator = {**reference["locator"], "start": span.start, "end": span.end}
+                        encoded = json.dumps(locator, sort_keys=True, separators=(",", ":"))
+                        chunk_hash = _hash(span.text)
+                        chunk_id = "chunk_" + _hash(f"{owner}\0{document_id}\0{CHUNKER_VERSION}\0{span.ordinal}\0{encoded}\0{chunk_hash}")[:32]
+                        conn.execute(
+                            "INSERT OR IGNORE INTO fm_v2_chunks(owner_id,chunk_id,document_id,ordinal,text,content_hash,locator_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (owner, chunk_id, document_id, span.ordinal, "", chunk_hash, encoded, now),
+                        )
+                        count += 1
+        return {"references": len(references), "chunks": count}
+
+    def erase_external_chat_references(self, *, owner: str, workspace_id: str, chat_id: str) -> Dict[str, Any]:
+        """Erase one canonical conversation's locators/vectors, all revisions.
+
+        The canonical erasure fence must be committed before this call. The
+        shared source-sync lock makes an earlier snapshot finish before purge;
+        later snapshots see the fence and cannot recreate the selected source.
+        No provider call or independent knowledge deletion occurs here.
+        """
+        owner = _owner(owner)
+        if not self.healthy or not workspace_id or not chat_id:
+            raise RuntimeError("canonical conversation index erase is unavailable")
+        with _EXTERNAL_REFERENCE_LOCK, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT DISTINCT d.document_id,d.source_id,d.source_revision "
+                "FROM fm_v2_documents d JOIN fm_v2_sources s ON "
+                "s.owner_id=d.owner_id AND s.source_id=d.source_id AND s.source_revision=d.source_revision "
+                "JOIN fm_v2_chunks c ON c.owner_id=d.owner_id AND c.document_id=d.document_id "
+                "WHERE d.owner_id=? AND s.workspace_key=? AND s.project_key='' "
+                "AND s.source_type='external_reference' AND json_valid(c.locator_json) "
+                "AND json_extract(c.locator_json,'$.type')='conversation_archive_part' "
+                "AND json_extract(c.locator_json,'$.chat_id')=?",
+                (owner, workspace_id, chat_id),
+            ).fetchall()
+            documents = [row["document_id"] for row in rows]
+            keys = {(row["source_id"], int(row["source_revision"])) for row in rows}
+            self._delete_documents(conn, owner, documents)
+            self._delete_unreferenced_sources(conn, owner, keys)
+            # Existing chunk FK cascades remove embeddings in every retained
+            # generation. Generation manifests/publications contain no text or
+            # part locator and may remain as explicitly lagging audit state.
+            residual = sum(conn.execute(
+                "SELECT count(*) FROM fm_v2_chunks WHERE owner_id=? AND document_id=?",
+                (owner, document_id),
+            ).fetchone()[0] for document_id in documents)
+            if residual:
+                raise RuntimeError("canonical conversation index erase has residual locators")
+        return {"success": True, "removed_documents": len(documents), "residual": residual}
+
+    def external_vector_status(self, *, owner: str, workspace_id: str) -> Dict[str, Any]:
+        owner = _owner(owner)
+        if workspace_id not in self._external_sources or not self.healthy:
+            return {"health": "unavailable", "reason": "external_source_unavailable"}
+        with self._connect() as conn:
+            return self._pointer_health(conn, owner, VECTOR_LOGICAL_SPACE, workspace_id, "")
+
+    def search_external_vectors(self, query: str, *, owner: str, workspace_id: str) -> Dict[str, Any]:
+        """Pure cosine retrieval in one explicit source scope, without FTS fallback."""
+        owner = _owner(owner)
+        if workspace_id not in self._external_sources or not self.healthy:
+            return {"items": [], "health": "unavailable", "reason": "external_source_unavailable"}
+        with self._connect() as conn:
+            pointer = self._pointer_health(conn, owner, VECTOR_LOGICAL_SPACE, workspace_id, "")
+            if pointer["health"] not in {"current", "lagging"}:
+                return {**pointer, "items": [], "query_execution": "not_dispatched"}
+            vector = self._query_vector(owner, pointer, query, {})
+            if vector is None:
+                return {**pointer, "items": [], "reason": "embedding_binding_unavailable_or_changed", "query_execution": "not_dispatched"}
+            rows = self._canonical_rows(conn, owner, workspace_id, "")
+            canonical = {row["chunk_id"]: row for row in rows}
+            ranked = self._vector_ranked_ids(conn, owner, pointer["generation_id"], canonical, vector, int(pointer["dimension"]))
+            return {**pointer, "query_execution": "vector_cosine", "items": [
+                {"locator": json.loads(canonical[chunk_id]["locator_json"]), "score": score}
+                for chunk_id, score in ranked
+            ]}
+
     def _canonical_rows(
         self,
         conn: sqlite3.Connection,
@@ -497,7 +570,7 @@ class FrankenmemoryRAG:
         workspace: str,
         project: str,
     ) -> List[sqlite3.Row]:
-        return conn.execute(
+        rows = conn.execute(
             "SELECT c.chunk_id,c.text,c.content_hash AS chunk_hash,c.ordinal,"
             "c.locator_json,"
             "d.document_id,d.title,s.source_id,s.source_revision,s.source_uri,"
@@ -516,6 +589,10 @@ class FrankenmemoryRAG:
             "ORDER BY s.source_uri,c.ordinal,c.chunk_id",
             (owner, workspace, project, CHUNKER_VERSION),
         ).fetchall()
+        adapter = self._external_sources.get(workspace)
+        if adapter is not None:
+            return adapter.hydrate(owner, rows)
+        return rows
 
     def _source_watermark(
         self,
@@ -541,7 +618,11 @@ class FrankenmemoryRAG:
             "ORDER BY s.source_id,s.source_revision,d.document_id,c.ordinal,c.chunk_id",
             (CHUNKER_VERSION, owner, workspace, project),
         ).fetchall()
-        return _hash(json.dumps([tuple(row) for row in rows], separators=(",", ":")))
+        manifest = [tuple(row) for row in rows]
+        adapter = self._external_sources.get(workspace)
+        if adapter is not None:
+            manifest.append(("external_source", adapter.watermark(owner)))
+        return _hash(json.dumps(manifest, separators=(",", ":")))
 
     def _publish_inline_fts(
         self,
@@ -860,6 +941,8 @@ class FrankenmemoryRAG:
             return False
         workspace = str(metadata.get("workspace_id") or "").strip()
         project = str(metadata.get("project_id") or "").strip()
+        if workspace in self._external_sources:
+            raise ValueError("external source scopes accept reference indexing only")
         if project and not workspace:
             return False
         uri = str(metadata.get("source") or metadata.get("source_uri") or "memory://document")

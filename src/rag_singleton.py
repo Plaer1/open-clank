@@ -30,6 +30,10 @@ def get_rag_manager():
     _last_attempt = now
 
     try:
+        from src.frankenmemory_database import prepare_frankenmemory_database
+
+        # Admit the native current store before a projection can write any tables.
+        prepare_frankenmemory_database()
         from src.frankenmemory_rag import FrankenmemoryRAG
         from src.embeddings import get_embedding_client
 

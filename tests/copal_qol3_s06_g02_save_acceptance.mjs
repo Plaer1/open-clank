@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// G02 uses the real FastAPI app, Redb bridge, authenticated session, and a
+// G02 uses the real FastAPI app, Files-backed Copal vault, authenticated session, and a
 // request boundary interception that delays one actual document PUT. The
 // interception is disposable and never touches the live service.
 import assert from 'node:assert/strict';
@@ -73,8 +73,8 @@ const environment = {
   ...process.env, APP_BIND:'127.0.0.1', APP_PORT:String(appPort), AUTH_ENABLED:'true',
   DEBUG:'false', OPENCLANK_DEBUG:'false', OPENCLANK_RECOVERY_MODE:'true',
   OPEN_CLANK_DATA_DIR:dataDir, ODYSSEUS_DATA_DIR:dataDir,
-  DATABASE_URL:`sqlite:///${path.join(dataDir, 'app.db')}`, COPAL_DATA_DIR:copalDir,
-  COPAL_STORAGE:'redb', PYTHONUNBUFFERED:'1',
+  DATABASE_URL:`sqlite:///${path.join(dataDir, 'app.db')}`, COPAL_LOOSE_ROOT:copalDir,
+  PYTHONUNBUFFERED:'1',
 };
 
 try {

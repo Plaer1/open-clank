@@ -27,7 +27,7 @@ const hostFile = path.join(hostRoot, 'fixture.bin'); const hostIdentity = fs.sta
 
 async function waitHealth(base, child, logs) { for (let i=0; i<1200; i += 1) { if (child.exitCode != null) throw new Error(`FastAPI exited: ${logs().slice(-3000)}`); try { if ((await fetch(`${base}/api/health`)).ok) return; } catch (_) {} await delay(100); } throw new Error(`health timeout: ${logs().slice(-3000)}`); }
 function startApp(port) {
-  const env = { ...process.env, DEBUG:'false', OPENCLANK_DEBUG:'false', AUTH_ENABLED:'true', OPENCLANK_RECOVERY_MODE:'true', OPEN_CLANK_AGENT_DRIVE:'disabled', COPAL_STORAGE:'redb', COPAL_DATA_DIR:path.join(data, 'copal-db'), COPAL_BRIDGE_COMMAND:path.join(repo, 'packages', 'Copal', 'rust', 'copal-db', 'target', 'release', 'copal-bridge'), OPEN_CLANK_DATA_DIR:data, ODYSSEUS_FILES_REGISTRY:registryPath, DATABASE_URL:`sqlite:///${path.join(data, 'app.db')}`, PYTHONUNBUFFERED:'1' };
+  const env = { ...process.env, DEBUG:'false', OPENCLANK_DEBUG:'false', AUTH_ENABLED:'true', OPENCLANK_RECOVERY_MODE:'true', OPEN_CLANK_AGENT_DRIVE:'disabled', COPAL_LOOSE_ROOT:path.join(data, 'copal-vaults'), OPEN_CLANK_DATA_DIR:data, ODYSSEUS_FILES_REGISTRY:registryPath, DATABASE_URL:`sqlite:///${path.join(data, 'app.db')}`, PYTHONUNBUFFERED:'1' };
   let output = ''; const child = spawn(python, ['-m','uvicorn','app:app','--host','127.0.0.1','--port',String(port)], { cwd:repo, env, stdio:['ignore','pipe','pipe'] });
   const collect = chunk => { output += String(chunk); if (output.length > 50000) output = output.slice(-50000); }; child.stdout.on('data', collect); child.stderr.on('data', collect); return { child, logs:() => output };
 }

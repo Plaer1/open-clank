@@ -58,6 +58,18 @@ pub struct RestoreReceipt {
     /// have to infer whether a partial mutation occurred.
     #[serde(default)]
     pub resources: Vec<RestoreResourceOutcome>,
+    #[serde(default)]
+    pub verification: Option<RestoreVerification>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreVerification {
+    pub restore_id: String,
+    pub resource_id: String,
+    pub version_id: String,
+    pub content_hash: String,
+    pub restored_content_hash: Option<String>,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -132,6 +144,8 @@ pub struct RestoreJournal {
     pub staged_digest: Option<String>,
     pub outcome: Option<RestoreOutcome>,
     pub lease_ids: Vec<String>,
+    #[serde(default)]
+    pub verification: Option<RestoreVerification>,
 }
 
 /// Provider boundary for restore. Implementations perform their own atomic
@@ -259,8 +273,8 @@ impl FilesystemRestoreProvider {
             file.write_all(format!("v1\n{destination_key}\n{restore_id}\n{digest}").as_bytes())?;
             file.sync_all()?;
         }
-        std::fs::rename(&receipt_temp, &self.receipt_path)?;
-        std::fs::File::open(receipt_parent)?.sync_all()?;
+        crate::platform::publish(&receipt_temp, &self.receipt_path)?;
+        crate::platform::finish_publication(&self.receipt_path)?;
         Ok(())
     }
 }
@@ -363,19 +377,14 @@ impl RestoreProvider for FilesystemRestoreProvider {
         std::fs::create_dir_all(parent)?;
         let mode = host_metadata.and_then(|metadata| metadata.mode).or(self.mode()?);
         if let Some(target) = host_metadata.and_then(|metadata| metadata.symlink_target.as_deref()) {
-            #[cfg(unix)]
             {
                 if std::fs::symlink_metadata(&self.path).is_ok() {
                     std::fs::remove_file(&self.path)?;
                 }
-                std::os::unix::fs::symlink(target, &self.path)?;
-                std::fs::File::open(parent)?.sync_all()?;
+                crate::platform::symlink(target, &self.path)?;
+                crate::platform::finish_publication(&self.path)?;
                 self.persist_receipt(restore_id, &digest)?;
                 return Ok(());
-            }
-            #[cfg(not(unix))]
-            {
-                return Err("symlink restore is unsupported on this host".into());
             }
         }
     if host_metadata.and_then(|metadata| metadata.resource_type.as_deref()) == Some("Directory")
@@ -393,7 +402,7 @@ impl RestoreProvider for FilesystemRestoreProvider {
             if let Some(millis) = host_metadata.and_then(|metadata| metadata.modified_unix_millis) {
                 set_modified_millis(&self.path, millis)?;
             }
-            std::fs::File::open(parent)?.sync_all()?;
+            crate::platform::finish_publication(&self.path)?;
             self.persist_receipt(restore_id, &digest)?;
             return Ok(());
         }
@@ -429,8 +438,11 @@ impl RestoreProvider for FilesystemRestoreProvider {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(mode))?;
         }
-        std::fs::rename(&temporary, &self.path)?;
-        std::fs::File::open(parent)?.sync_all()?;
+        if let Some(millis) = host_metadata.and_then(|metadata| metadata.modified_unix_millis) {
+            set_modified_millis(&temporary, millis)?;
+        }
+        crate::platform::publish(&temporary, &self.path)?;
+        crate::platform::finish_publication(&self.path)?;
         self.persist_receipt(restore_id, &digest)?;
         Ok(())
     }
@@ -637,10 +649,7 @@ fn apply_directory_manifest(path: &Path, content: &[u8]) -> CatalogResult<()> {
             }
             "symlink" => {
                 let link_target = value.get("target").and_then(Value::as_str).ok_or("symlink entry has no target")?;
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(link_target, &target)?;
-                #[cfg(not(unix))]
-                return Err("symlink restore is unsupported on this host".into());
+                crate::platform::symlink(link_target, &target)?;
             }
             "file" => {
                 let encoded = value.get("content").and_then(Value::as_str).ok_or("file entry has no retrievable content")?;
@@ -687,8 +696,14 @@ fn set_modified_millis(path: &Path, millis: u64) -> CatalogResult<()> {
             return Err(std::io::Error::last_os_error().into());
         }
     }
-    #[cfg(not(unix))]
-    let _ = (path, millis);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // OPEN_REPARSE_POINT changes the link itself rather than its target.
+        let file = std::fs::OpenOptions::new().write(true).custom_flags(0x02200000).open(path)?;
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis);
+        file.set_times(std::fs::FileTimes::new().set_modified(modified))?;
+    }
     Ok(())
 }
 
@@ -834,6 +849,21 @@ pub async fn prepare_restore_authorized(
     {
         return Err(RestoreOutcome::Unauthorized);
     }
+    if let Some(journal) = coordinator.catalog().get_restore::<RestoreJournal>(&request.restore_id).map_err(|_| RestoreOutcome::Corrupt)? {
+        if journal.source_action_id != request.source_action_id || journal.source_version_id != request.source_version_id
+            || journal.destination != request.destination || journal.expected_destination_fingerprint != request.expected_destination_fingerprint {
+            return Err(RestoreOutcome::Conflict);
+        }
+        let content = if journal.state == RestoreState::Complete { None } else {
+            coordinator.read_version(&request.source_action_id, source).await.map_err(|_| RestoreOutcome::Corrupt)?.map(|bytes| bytes.to_vec())
+        };
+        return Ok(RestorePlan {
+            source_action_id: request.source_action_id.clone(), source_version_id: request.source_version_id.clone(),
+            destination: request.destination.clone(), expected_destination_fingerprint: request.expected_destination_fingerprint.clone(),
+            observed_destination_fingerprint: observed_destination_fingerprint.map(str::to_owned),
+            content, source_host_metadata: None, requires_current_capture: request.require_current_capture,
+        });
+    }
     if let Some(expiry) = coordinator
         .catalog()
         .expiry(&request.source_action_id)
@@ -846,6 +876,17 @@ pub async fn prepare_restore_authorized(
             RestoreOutcome::Expired
         });
     }
+    // Keep the CAS precondition typed at the authorization boundary.  The
+    // lower planning helper still validates it defensively, but this path must
+    // never classify a normal revision conflict by parsing an error string.
+    if let (Some(expected), Some(observed)) = (
+        request.expected_destination_fingerprint.as_deref(),
+        observed_destination_fingerprint,
+    ) {
+        if expected != observed {
+            return Err(RestoreOutcome::Conflict);
+        }
+    }
     let plan = prepare_restore(
         coordinator,
         &request.source_action_id,
@@ -856,13 +897,10 @@ pub async fn prepare_restore_authorized(
         request.require_current_capture,
     )
     .await
-    .map_err(|error| {
-        if error.to_string().contains("expired") {
-            RestoreOutcome::Expired
-        } else {
-            RestoreOutcome::Corrupt
-        }
-    })?;
+    // Expiry was checked through the typed catalog state above. Any later
+    // source-read failure is corrupt/unavailable data; do not classify a
+    // restore outcome by parsing an implementation error string.
+    .map_err(|_| RestoreOutcome::Corrupt)?;
     let leases = restore_lease_ids(request);
     coordinator
         .catalog()
@@ -879,6 +917,7 @@ pub async fn prepare_restore_authorized(
         staged_digest: plan.content.as_deref().map(digest_content),
         outcome: None,
         lease_ids: leases,
+        verification: None,
     };
     coordinator
         .catalog()
@@ -907,6 +946,7 @@ fn apply_restore_authorized<P: RestoreProvider>(
     if journal.state == RestoreState::Complete {
         let outcome = journal.outcome.clone().unwrap_or(RestoreOutcome::Complete);
         return Ok(RestoreReceipt {
+            verification: None,
             source_action_id: journal.source_action_id,
             source_version_id: journal.source_version_id,
             outcome: outcome.clone(),
@@ -971,6 +1011,7 @@ fn apply_restore_authorized<P: RestoreProvider>(
             .put_restore(&request.restore_id, &journal)
             .map_err(|_| RestoreOutcome::Corrupt)?;
         Ok(RestoreReceipt {
+            verification: None,
             source_action_id: request.source_action_id.clone(),
             source_version_id: request.source_version_id.clone(),
             outcome: RestoreOutcome::Complete,
@@ -984,6 +1025,20 @@ fn apply_restore_authorized<P: RestoreProvider>(
         .catalog()
         .release_leases(&request.restore_id, &leases);
     result
+}
+
+fn verify_restore<P: RestoreProvider + ?Sized>(journal: &mut RestoreJournal, content: &[u8], provider: &mut P) {
+    let content_hash = format!("sha256:{:x}", sha2::Sha256::digest(content));
+    let restored_content_hash = provider.capture_current().ok()
+        .filter(|current| current.host_metadata.resource_type.as_deref() != Some("Missing"))
+        .map(|current| format!("sha256:{:x}", sha2::Sha256::digest(&current.content)));
+    let status = if restored_content_hash.as_deref() == Some(content_hash.as_str()) { "Verified" }
+        else if restored_content_hash.is_some() { "Mismatch" } else { "Pending" };
+    journal.verification = Some(RestoreVerification {
+        restore_id: journal.restore_id.clone(), resource_id: journal.destination.resource_id.clone(),
+        version_id: journal.source_version_id.clone(), content_hash, restored_content_hash,
+        status: status.into(),
+    });
 }
 
 /// Canonical restore entry point for providers that can await the checked
@@ -1002,8 +1057,27 @@ pub async fn apply_restore_authorized_durable<P: RestoreProvider + ?Sized>(
         .map_err(|_| RestoreOutcome::Corrupt)?
         .ok_or(RestoreOutcome::UnknownVersion)?;
     if journal.state == RestoreState::Complete {
+        // A retry may verify a committed write, but must never invoke apply again.
+        if journal.verification.as_ref().is_some_and(|proof| proof.status == "Pending") {
+            let leases = journal.lease_ids.clone();
+            coordinator.catalog().acquire_leases(&request.restore_id, &leases).map_err(|_| RestoreOutcome::Conflict)?;
+            if let Ok(current) = provider.capture_current()
+                && current.host_metadata.resource_type.as_deref() != Some("Missing") {
+                let actual = format!("sha256:{:x}", sha2::Sha256::digest(&current.content));
+                if let Some(proof) = journal.verification.as_mut() {
+                    proof.status = if actual == proof.content_hash { "Verified".into() } else { "Mismatch".into() };
+                    proof.restored_content_hash = Some(actual);
+                }
+                let stored = coordinator.catalog().put_restore(&request.restore_id, &journal);
+                let _ = coordinator.catalog().release_leases(&request.restore_id, &leases);
+                stored.map_err(|_| RestoreOutcome::Corrupt)?;
+            } else {
+                let _ = coordinator.catalog().release_leases(&request.restore_id, &leases);
+            }
+        }
         let outcome = journal.outcome.clone().unwrap_or(RestoreOutcome::Complete);
         return Ok(RestoreReceipt {
+            verification: journal.verification.clone(),
             source_action_id: journal.source_action_id,
             source_version_id: journal.source_version_id,
             outcome: outcome.clone(),
@@ -1036,6 +1110,7 @@ pub async fn apply_restore_authorized_durable<P: RestoreProvider + ?Sized>(
                 .reconcile_apply(&request.restore_id, &digest)
                 .map_err(|_| RestoreOutcome::Corrupt)?
         {
+            verify_restore(&mut journal, content, provider);
             journal.state = RestoreState::Complete;
             journal.outcome = Some(RestoreOutcome::Complete);
             coordinator
@@ -1043,6 +1118,7 @@ pub async fn apply_restore_authorized_durable<P: RestoreProvider + ?Sized>(
                 .put_restore(&request.restore_id, &journal)
                 .map_err(|_| RestoreOutcome::Corrupt)?;
             return Ok(RestoreReceipt {
+                verification: journal.verification.clone(),
                 source_action_id: request.source_action_id.clone(),
                 source_version_id: request.source_version_id.clone(),
                 outcome: RestoreOutcome::Complete,
@@ -1158,6 +1234,7 @@ pub async fn apply_restore_authorized_durable<P: RestoreProvider + ?Sized>(
             .map_err(|_| RestoreOutcome::Conflict)?;
         #[cfg(feature = "test_faults")]
         qualification_restore_abort("after_provider_commit");
+        verify_restore(&mut journal, content, provider);
         journal.state = RestoreState::Complete;
         journal.outcome = Some(RestoreOutcome::Complete);
         coordinator
@@ -1165,6 +1242,7 @@ pub async fn apply_restore_authorized_durable<P: RestoreProvider + ?Sized>(
             .put_restore(&request.restore_id, &journal)
             .map_err(|_| RestoreOutcome::Corrupt)?;
         Ok(RestoreReceipt {
+            verification: journal.verification.clone(),
             source_action_id: request.source_action_id.clone(),
             source_version_id: request.source_version_id.clone(),
             outcome: RestoreOutcome::Complete,
@@ -1234,6 +1312,7 @@ where
     };
     write(content)?;
     Ok(RestoreReceipt {
+        verification: None,
         source_action_id: plan.source_action_id.clone(),
         source_version_id: plan.source_version_id.clone(),
         outcome: RestoreOutcome::Complete,

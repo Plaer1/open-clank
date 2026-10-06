@@ -4,8 +4,9 @@ Focused regression coverage for `SecurityHeadersMiddleware`
 (core/middleware.py), added alongside the HSTS + Permissions-Policy
 hardening:
 
-  1. HSTS is emitted only for HTTPS requests, including those reaching
-     the app over a reverse proxy (`X-Forwarded-Proto: https`).
+  1. HSTS is emitted only for an HTTPS ASGI request scheme. A reverse proxy
+     must establish that scheme through its configured trust boundary; a
+     caller-supplied `X-Forwarded-Proto` header is not authority.
   2. HSTS is absent on plain HTTP so local/dev deployments are unaffected.
   3. `Permissions-Policy` locks down camera/geolocation but preserves
      same-origin microphone access (`microphone=(self)`), so the app's
@@ -47,12 +48,10 @@ def test_hsts_present_for_direct_https_requests():
     )
 
 
-def test_hsts_present_via_x_forwarded_proto_https():
+def test_hsts_ignores_untrusted_x_forwarded_proto_https():
     response = _client().get("/", headers={"X-Forwarded-Proto": "https"})
 
-    assert response.headers["strict-transport-security"] == (
-        "max-age=31536000; includeSubDomains"
-    )
+    assert "strict-transport-security" not in response.headers
 
 
 def test_permissions_policy_locks_camera_and_geolocation_but_allows_self_microphone():

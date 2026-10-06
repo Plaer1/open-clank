@@ -112,8 +112,8 @@ try {
     window.__filesOpenedTarget = '';
     window.__filesOpenedResource = '';
     window.__filesOpenedPayload = null;
-    window.__galleryOpenedResource = '';
-    window.__galleryOpenedPayload = null;
+    window.__impsOpenedResource = '';
+    window.__impsOpenedPayload = null;
     window.__fileArchived = false;
     window.__chatArchived = false;
     window.__filesPlaces = [];
@@ -172,21 +172,18 @@ try {
         window.__filesOpenedPayload = data.payload;
       },
     };
-    window.galleryModule = {
+    window.impsModule = {
       async openResource(resourceRef) {
         const response = await fetch('/api/files-v1/open-resource', {
           method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ resource_ref: resourceRef }),
         });
-        if (!response.ok) throw new Error('Gallery exact open failed');
+        if (!response.ok) throw new Error('Imps exact open failed');
         const data = await response.json();
-        window.__galleryOpenedResource = data.resource.ref;
-        window.__galleryOpenedPayload = data.payload;
+        window.__impsOpenedResource = data.resource.ref;
+        window.__impsOpenedPayload = data.payload;
       },
     };
-    // Gallery's retired launch target resolves through the Imps-owned editor
-    // seam; expose the same exact-open fixture under that production name.
-    window.galleryEditorModule = window.galleryModule;
     const copalLauncher = document.createElement('button');
     copalLauncher.dataset.copalView = 'notes';
     copalLauncher.hidden = true;
@@ -230,13 +227,13 @@ try {
           id: 'resource-copal', ref: 'rr1.copal-root', provider: 'copal', kind: 'provider_root',
           capabilities: ['children', 'stat', 'search'], name: 'Copal', preview_kind: null, sort_keys: ['name'],
         }, {
-          id: 'resource-gallery', ref: 'rr1.gallery-root', provider: 'gallery', kind: 'provider_root',
+          id: 'resource-gallery', ref: 'rr1.gallery-root', provider: 'files', kind: 'provider_root',
           capabilities: ['children', 'stat', 'search'], name: 'Gallery', preview_kind: null, sort_keys: ['name'],
         }, {
           id: 'resource-library', ref: 'rr1.library-root', provider: 'library', kind: 'provider_root',
           capabilities: ['children', 'stat', 'search'], name: 'Library', preview_kind: null, sort_keys: ['name'],
         }],
-        providers: { host: { available: true }, copal: { available: true }, gallery: { available: true }, library: { available: true } },
+        providers: { host: { available: true }, copal: { available: true }, files: { available: true }, library: { available: true } },
         });
       }
       if (url.pathname === '/api/files-v1/workspace') {
@@ -317,21 +314,12 @@ try {
           { id: 'resource-host-zeta', ref: 'rr1.host-zeta', provider: 'host', kind: 'file', capabilities: ['stat', 'preview', 'download'], name: 'zeta.txt', size: 8, mime_type: 'text/plain', preview_kind: 'text', modified_unix_ms: 10 },
         ], next_cursor: null, total: 3 });
         if (body.parent_ref === 'rr1.gallery-root') return json({ entries: [{
-          id: 'resource-gallery-albums', ref: 'rr1.gallery-albums', provider: 'gallery', kind: 'virtual_folder',
-          capabilities: ['children', 'stat', 'search'], name: 'Albums', preview_kind: null,
-          sort_keys: ['name', 'modified'],
-        }, {
-          id: 'resource-gallery-photos', ref: 'rr1.gallery-photos', provider: 'gallery', kind: 'virtual_folder',
+          id: 'resource-gallery-photos', ref: 'rr1.gallery-photos', provider: 'files', kind: 'virtual_folder',
           capabilities: ['children', 'stat', 'search'], name: 'Photos', preview_kind: null,
           sort_keys: ['name', 'kind', 'modified', 'size'],
-        }], next_cursor: null, total: 2, sort: body.sort, sort_keys: ['name'] });
-        if (body.parent_ref === 'rr1.gallery-albums') return json({ entries: [{
-          id: 'resource-gallery-album-a', ref: 'rr1.gallery-album-a', provider: 'gallery', kind: 'album',
-          capabilities: ['children', 'stat', 'open'], name: 'Summer', modified_unix_ms: 1700000002000,
-          sort_keys: ['name', 'kind', 'modified', 'size'],
-        }], next_cursor: null, total: 1, sort: body.sort, sort_keys: ['name', 'modified'] });
+        }], next_cursor: null, total: 1, sort: body.sort, sort_keys: ['name'] });
         if (body.parent_ref === 'rr1.gallery-photos') return json({ entries: [{
-          id: 'resource-gallery-image', ref: 'rr1.gallery-image', provider: 'gallery', kind: 'image',
+          id: 'resource-gallery-image', ref: 'rr1.gallery-image', provider: 'files', kind: 'image',
           capabilities: ['stat', 'open', 'preview', 'download', 'favorite'], name: 'Opaque lake.png', size: 68,
           mime_type: 'image/png', preview_kind: 'image', modified_unix_ms: 1700000004000,
         }], next_cursor: null, total: 1, sort: body.sort, sort_keys: ['name', 'kind', 'modified', 'size'] });
@@ -420,7 +408,7 @@ try {
             mime_type: 'text/markdown', preview_kind: 'text', modified_unix_ms: 1700000001000,
           }],
           truncated: false,
-          providers: { host: { available: true }, copal: { available: true }, gallery: { available: false }, library: { available: true } },
+          providers: { host: { available: true }, copal: { available: true }, files: { available: false }, library: { available: true } },
         });
       }
       if (url.pathname === '/api/files-v1/action') {
@@ -464,9 +452,9 @@ try {
           },
         });
         if (body.action === 'open' && body.resource_ref === 'rr1.gallery-image') return json({
-          version: 1, action: 'open', target: { app: 'gallery' }, exact: true,
+          version: 1, action: 'open', target: { app: 'imps' }, exact: true,
           resource: {
-            id: 'resource-gallery-image', ref: 'rr1.gallery-image-refreshed', provider: 'gallery', kind: 'image',
+            id: 'resource-gallery-image', ref: 'rr1.gallery-image-refreshed', provider: 'files', kind: 'image',
             capabilities: ['stat', 'open', 'preview', 'download', 'favorite'], name: 'Opaque lake.png',
             mime_type: 'image/png', preview_kind: 'image',
           },
@@ -541,9 +529,9 @@ try {
           },
         });
         if (body.resource_ref === 'rr1.gallery-image-refreshed') return json({
-          version: 1, target: { app: 'gallery' },
+          version: 1, target: { app: 'imps' },
           resource: {
-            id: 'resource-gallery-image', ref: 'rr1.gallery-image-exact', provider: 'gallery', kind: 'image',
+            id: 'resource-gallery-image', ref: 'rr1.gallery-image-exact', provider: 'files', kind: 'image',
             capabilities: ['stat', 'open', 'preview', 'download', 'favorite'], name: 'Opaque lake.png',
           },
           payload: {
@@ -1151,24 +1139,16 @@ try {
 
   await evaluate(`(() => {
     const provider = document.querySelector('.files-provider-select');
-    provider.value = 'gallery';
+    provider.value = 'files';
     provider.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
   await waitFor("[...document.querySelectorAll('.files-entry')].some(node => node.textContent.includes('Photos'))", 'Gallery opaque folder');
-  assert.deepEqual(await evaluate("[...document.querySelector('.files-sort-select').options].filter(option => !option.disabled).map(option => option.value)"), ['name:asc', 'name:desc']);
-  await evaluate("[...document.querySelectorAll('.files-entry')].find(node => node.textContent.includes('Albums')).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
-  await waitFor("document.querySelector('.files-entry')?.textContent.includes('Summer')", 'Gallery album folder');
-  assert.deepEqual(await evaluate("[...document.querySelector('.files-sort-select').options].filter(option => !option.disabled).map(option => option.value)"), ['name:asc', 'name:desc', 'modified:asc', 'modified:desc']);
-  assert.deepEqual(await evaluate("[...document.querySelector('.files-sort-select').options].filter(option => option.disabled).map(option => option.value)"), ['kind:asc', 'kind:desc', 'size:asc', 'size:desc']);
-  assert.equal(await evaluate("window.__filesChildrenBodies.some(body => body.parent_ref === 'rr1.gallery-albums' && ['name', 'modified'].includes(body.sort?.key))"), true);
-  await evaluate("document.querySelector('.files-toolbar-button[title=\"Parent folder\"]').click()");
-  await waitFor("[...document.querySelectorAll('.files-entry')].some(node => node.textContent.includes('Photos'))", 'Gallery root after sort negotiation');
   await evaluate("[...document.querySelectorAll('.files-entry')].find(node => node.textContent.includes('Photos')).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
   await waitFor("document.querySelector('.files-entry')?.textContent.includes('Opaque lake.png')", 'Gallery opaque image');
   await evaluate("document.querySelector('.files-entry').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
-  await waitFor("window.__galleryOpenedResource === 'rr1.gallery-image-exact'", 'Gallery opaque exact-open');
-  assert.equal(await evaluate("window.__galleryOpenedPayload.read_only"), true);
-  assert.equal(await evaluate("window.__galleryOpenedPayload.prompt"), 'A quiet lake');
+  await waitFor("window.__impsOpenedResource === 'rr1.gallery-image-exact'", 'Imps opaque exact-open');
+  assert.equal(await evaluate("window.__impsOpenedPayload.read_only"), true);
+  assert.equal(await evaluate("window.__impsOpenedPayload.prompt"), 'A quiet lake');
   assert.equal(await evaluate("window.__filesRequests.some(request => request.includes('resource-gallery-image'))"), false);
 
   await evaluate(`(() => {
@@ -1427,7 +1407,7 @@ try {
   assert.equal(accountSwitch.visibleText.includes('/work'), false);
   assert.equal(accountSwitch.visibleText.includes('README.md'), false);
 
-  process.stdout.write(JSON.stringify({ tree: 'persistent', favorites: 'pass', workspaces: 'opaque-lifecycle', glyphs: 'pass', textPreview: 'bounded', managedPreview: 'stream-capped', managedOpen: 'opaque', galleryOpen: 'opaque', managedActions: 'opaque', managedShowInFiles: 'expired-ref-reissue+ancestor-up', hostInterop: 'opaque-workspace', locationWizard: 'shared-whole-disk', liveWatch: 'path-free', policyRevalidation: 'retain-5xx-purge-revoked', detailsSort: 'pass', columnSort: 'pass', columnKeyboard: 'pass', accountSwitch: 'pass' }) + '\n');
+  process.stdout.write(JSON.stringify({ tree: 'persistent', favorites: 'pass', workspaces: 'opaque-lifecycle', glyphs: 'pass', textPreview: 'bounded', managedPreview: 'stream-capped', managedOpen: 'opaque', impsOpen: 'opaque', managedActions: 'opaque', managedShowInFiles: 'expired-ref-reissue+ancestor-up', hostInterop: 'opaque-workspace', locationWizard: 'shared-whole-disk', liveWatch: 'path-free', policyRevalidation: 'retain-5xx-purge-revoked', detailsSort: 'pass', columnSort: 'pass', columnKeyboard: 'pass', accountSwitch: 'pass' }) + '\n');
 } finally {
   if (socket) socket.close();
   chromium.kill('SIGTERM');

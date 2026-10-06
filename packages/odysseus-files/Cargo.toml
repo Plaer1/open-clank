@@ -35,6 +35,7 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSDate", "NSError", "NSObject", "NSObjCRuntime", "NSRunLoop", "NSString", "NSURL", "NSValue", "block2", "objc2-core-foundation"] }
 objc2-image-io = { version = "=0.3.2", default-features = false, features = ["std", "CGImageDestination", "ImageIOBase", "objc2", "objc2-core-graphics"] }
 objc2-quick-look-thumbnailing = { version = "=0.3.2", default-features = false, features = ["std", "QLThumbnailGenerationRequest", "QLThumbnailGenerator", "QLThumbnailRepresentation", "bitflags", "block2", "objc2-core-foundation", "objc2-core-graphics"] }
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
 notify = { version = "=8.2.0", optional = true }
 prost = { version = "=0.14.4", optional = true }
 tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"], optional = true }
@@ -42,6 +43,9 @@ tokio-stream = { version = "=0.1.18", features = ["net"], optional = true }
 tonic = { version = "=0.14.6", optional = true }
 tonic-prost = { version = "=0.14.6", optional = true }
 tower = { version = "=0.5.3", features = ["limit"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+png = "=0.17.16"
 
 [build-dependencies]
 protoc-bin-vendored = "=3.2.0"

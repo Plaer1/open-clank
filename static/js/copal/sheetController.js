@@ -202,7 +202,7 @@ export function createSheetController({
     if (isReadOnlyColumn(column, schema)) return { outcome:'readonly' };
     if (typeof onCellEdit !== 'function') return { outcome:'unavailable' };
     const result = await onCellEdit({ row, column, value, ...context() });
-    if (result?.outcome === 'applied' || result === true) await refresh('cell-edit');
+    if (['applied', 'queued'].includes(result?.outcome) || result === true) await refresh('cell-edit');
     return result;
   }
 
@@ -235,7 +235,7 @@ export function createSheetController({
         && resultRevision >= currentRevision;
       if (!localProvenance) return { outcome:'ignored', reason:'definition-authority-advanced' };
     }
-    if (result?.outcome === 'applied' || result === true) {
+    if (['applied', 'queued'].includes(result?.outcome) || result === true) {
       if (result.definition) {
         const resultRevision = result.definitionRevision ?? result.revision;
         const published = publishDefinition(result.definition, resultRevision);

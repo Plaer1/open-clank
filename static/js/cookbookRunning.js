@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK RUNNING SUB-MODULE
 // Running tasks tab: task cards, status monitoring,
@@ -2241,7 +2242,7 @@ export function _renderRunningTab() {
       const _secDot = (key && allTasks.some(_serveTaskFailed)) ? 'fail' : 'ok';
       const _dotTitle = key ? (_secDot === 'fail' ? 'Server not responding' : 'Reachable') : 'Local (this machine)';
       const _srvColor = _serverColorForTaskGroup(key || 'local', allTasks);
-      sec.insertAdjacentHTML('afterbegin', `<div class="cookbook-section-header${_srvColor ? ' has-server-color' : ''}" data-collapse="${bodyId}"${_serverHeaderStyle(_srvColor)}><svg class="cookbook-section-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg><span class="cookbook-srv-status ${_secDot}" title="${_dotTitle}" style="flex-shrink:0;position:relative;top:0px;"></span><span class="cookbook-section-title" style="margin:0;">${esc(sg.name)}</span><button class="cookbook-btn cookbook-stop-all-btn" data-stop-server="${esc(key)}" title="Stop all running servers"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" style="vertical-align:-1px;margin-right:4px;"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>Stop all</button><button class="cookbook-btn cookbook-clear-btn" data-clear-server="${esc(key)}" title="Clear finished tasks"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-1px;margin-right:4px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>Clear finished</button></div><div id="${bodyId}" class="cookbook-section-body"></div>`);
+      sec.insertAdjacentHTML('afterbegin', `<div class="cookbook-section-header${_srvColor ? ' has-server-color' : ''}" data-collapse="${bodyId}"${_serverHeaderStyle(_srvColor)}>${uiIcon("chevron-down", 12, {"className":"cookbook-section-chevron"})}<span class="cookbook-srv-status ${_secDot}" title="${_dotTitle}" style="flex-shrink:0;position:relative;top:0px;"></span><span class="cookbook-section-title" style="margin:0;">${esc(sg.name)}</span><button class="cookbook-btn cookbook-stop-all-btn" data-stop-server="${esc(key)}" title="Stop all running servers">${uiIcon("stop", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Stop all</button><button class="cookbook-btn cookbook-clear-btn" data-clear-server="${esc(key)}" title="Clear finished tasks">${uiIcon("trash", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Clear finished</button></div><div id="${bodyId}" class="cookbook-section-body"></div>`);
     }
   }
 
@@ -2417,13 +2418,13 @@ export function _renderRunningTab() {
       <div class="cookbook-task-header">
         <span class="cookbook-task-type${(task.status === 'done' && task.type === 'download') ? ' cookbook-task-type-done' : ''}" data-type="${esc(task.type)}">${esc((task.status === 'done' && task.type === 'download') ? 'finished' : task.type)}</span>
         <span class="cookbook-task-name">${modelLogo(logoName)}${esc(displayName)}</span>
-        <span class="cookbook-task-indicator"><span class="cookbook-task-wave" style="display:${task.status === 'running' ? '' : 'none'}"></span>${_canLaunchDownloadedTask(task) ? '<button type="button" class="cookbook-task-serve-btn" title="Open in Launch"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>Launch</span></button>' : ''}<span class="cookbook-task-check" title="Clear" style="display:${_canClearTask(task) ? '' : 'none'}"><svg class="cookbook-task-check-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#50fa7b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><svg class="cookbook-task-clear-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span class="cookbook-task-done-label">${esc(_clearPillLabel(task))}</span><span class="cookbook-task-clear-label">clear</span></span></span>
-        <button type="button" class="cookbook-task-start-now" title="Start this queued download now" style="display:${(task.type === 'download' && task.status === 'queued') ? '' : 'none'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="8 5 19 12 8 19 8 5"/></svg><span>start now</span></button>
+        <span class="cookbook-task-indicator"><span class="cookbook-task-wave" style="display:${task.status === 'running' ? '' : 'none'}"></span>${_canLaunchDownloadedTask(task) ? "<button type=\"button\" class=\"cookbook-task-serve-btn\" title=\"Open in Launch\">" + uiIcon("play", 12) + "<span>Launch</span></button>" : ''}<span class="cookbook-task-check" title="Clear" style="display:${_canClearTask(task) ? '' : 'none'}">${uiIcon("check", 12, {"className":"cookbook-task-check-ico","role":"success"})}${uiIcon("close", 12, {"className":"cookbook-task-clear-ico"})}<span class="cookbook-task-done-label">${esc(_clearPillLabel(task))}</span><span class="cookbook-task-clear-label">clear</span></span></span>
+        <button type="button" class="cookbook-task-start-now" title="Start this queued download now" style="display:${(task.type === 'download' && task.status === 'queued') ? '' : 'none'}">${uiIcon("play", 11)}<span>start now</span></button>
         <span class="cookbook-task-status ${_bdg.cls}"${_bdgTitle}>${esc(_bdg.text)}</span>
         <button type="button" class="cookbook-task-menu-btn" title="Actions">&#8942;</button>
       </div>
       <div class="cookbook-task-sub"><span class="cookbook-task-session">${esc(task.sessionId)}</span><span class="cookbook-task-uptime" style="display:${((task.type === 'serve' || task.type === 'download') && task.status === 'running') ? '' : 'none'}"></span>${(task.type === 'download') ? `<span class="cookbook-task-dldir" title="Download destination" style="font-size:9px;color:var(--fg-muted);font-family:'Fira Code',monospace;opacity:0.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:40ch;">Dir: ${esc(task.payload?.local_dir || '~/.cache/huggingface/hub')}</span>` : ''}</div>
-      <div class="cookbook-output-wrap cookbook-task-collapsible${(_mobileCollapseDefault && !_shouldAutoExpandTaskOutput(task)) ? ' cookbook-task-collapsed' : ''}"><pre class="cookbook-output-pre">${esc(task.output || '')}</pre><button type="button" class="copy-code cookbook-output-copy"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>
+      <div class="cookbook-output-wrap cookbook-task-collapsible${(_mobileCollapseDefault && !_shouldAutoExpandTaskOutput(task)) ? ' cookbook-task-collapsed' : ''}"><pre class="cookbook-output-pre">${esc(task.output || '')}</pre><button type="button" class="copy-code cookbook-output-copy">${uiIcon("copy", 14)}</button></div>
     `;
 
     const _waveEl = el.querySelector('.cookbook-task-wave');
@@ -2732,20 +2733,20 @@ export function _renderRunningTab() {
         items.push({ group: 'danger', label: 'Cancel', action: 'cancel', mobileOnly: true, custom: () => {} });
 
         const _MENU_ICONS = {
-          'start-now': '<polygon points="6 4 20 12 6 20 6 4"/>',
-          reconnect: '<path d="M1 4v6h6"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/>',
-          retry: '<path d="M1 4v6h6"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/>',
-          stop: '<rect x="6" y="6" width="12" height="12" rx="1"/>',
-          edit: '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/>',
-          'edit-panel': '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/>',
-          'register-provider': '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
-          save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/>',
-          'copy-tmux': '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-          'copy-crash-report': '<path d="M10.3 2.3 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.3a2 2 0 0 0-3.4 0z"/><path d="M12 8v5M12 17h.01"/>',
-          'copy-log': '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-          kill: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
-          cancel: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
-        };
+  "start-now": "play",
+  "reconnect": "refresh",
+  "retry": "refresh",
+  "stop": "stop",
+  "edit": "edit",
+  "edit-panel": "edit",
+  "register-provider": "add",
+  "save": "save",
+  "copy-tmux": "copy",
+  "copy-crash-report": "warning",
+  "copy-log": "copy",
+  "kill": "trash",
+  "cancel": "close"
+};
         let _lastGroup = null;
         for (const item of items) {
           // Insert a thin divider whenever the group changes, so the
@@ -2765,7 +2766,7 @@ export function _renderRunningTab() {
           div.style.cssText = 'display:flex;align-items:center;gap:8px;';
           if (item.tooltip) div.title = item.tooltip;
           const ic = _MENU_ICONS[item.action] || '';
-          div.innerHTML = `<span style="display:inline-flex;flex-shrink:0;opacity:0.7;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ic}</svg></span><span>${item.label}</span>`;
+          div.innerHTML = `<span style="display:inline-flex;flex-shrink:0;opacity:0.7;">${ic ? uiIcon(ic, 14) : ""}</span><span>${item.label}</span>`;
           div.addEventListener('click', () => {
             _cleanup();
             if (item.custom) { item.custom(); return; }
@@ -2963,7 +2964,7 @@ export function _renderRunningTab() {
       _copyText(text).then(() => {
         const btn = el.querySelector('.cookbook-output-copy');
         const origHTML = btn.innerHTML;
-        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        btn.innerHTML = uiIcon("check", 14, {"role":"success"});
         btn.classList.add('copied');
         setTimeout(() => { btn.innerHTML = origHTML; btn.classList.remove('copied'); }, 1500);
       });

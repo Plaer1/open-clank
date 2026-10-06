@@ -717,6 +717,7 @@ def setup_tui_routes(
             "session_id": session_id,
             "status": agent_runs.get_status(session_id),
             "active": agent_runs.is_active(session_id),
+            "run_id": agent_runs.get_run_id(session_id),
         }
 
     @router.post("/api/tui/v1/sessions/{session_id}/turns")
@@ -754,10 +755,12 @@ def setup_tui_routes(
                 db.add(row)
 
         if replay:
-            if agent_runs.get_status(session_id) is not None:
+            run = agent_runs.get_run(session_id)
+            if run is not None:
                 return StreamingResponse(
-                    agent_runs.subscribe(session_id),
+                    agent_runs.subscribe(session_id, expected_run=run),
                     media_type="text/event-stream",
+                    headers={"X-Agent-Run-ID": run.run_id},
                 )
 
             async def completed_replay():
@@ -804,11 +807,13 @@ def setup_tui_routes(
             _owned_session(db, owner, session_id)
         from src import agent_runs
 
-        if agent_runs.get_status(session_id) is None:
+        run = agent_runs.get_run(session_id)
+        if run is None:
             raise HTTPException(404, "No retained turn for this session")
         return StreamingResponse(
-            agent_runs.subscribe(session_id, after_seq=max(0, after)),
+            agent_runs.subscribe(session_id, expected_run=run, after_seq=max(0, after)),
             media_type="text/event-stream",
+            headers={"X-Agent-Run-ID": run.run_id},
         )
 
     @router.post("/api/tui/v1/sessions/{session_id}/turns/active/stop")
@@ -818,7 +823,12 @@ def setup_tui_routes(
             _owned_session(db, owner, session_id)
         from src import agent_runs
 
-        return {"session_id": session_id, "stopped": agent_runs.stop(session_id)}
+        expected_run_id = request.headers.get("X-Agent-Run-ID") or None
+        return {
+            "session_id": session_id,
+            "stopped": agent_runs.stop(session_id, expected_run_id=expected_run_id),
+            "run_id": agent_runs.get_run_id(session_id),
+        }
 
     @router.get("/api/tui/v1/sessions/{session_id}/actors")
     def session_actors(request: Request, session_id: str):

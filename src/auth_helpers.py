@@ -5,7 +5,6 @@ from typing import Optional
 from fastapi import Request, HTTPException
 from core.middleware import INTERNAL_TOOL_OWNER_HEADER
 from src.owner_identity import (
-    auth_disabled as _owner_identity_auth_disabled,
     copal_owner_for as _owner_identity_copal_owner,
     is_internal_tool_identity,
 )
@@ -25,9 +24,9 @@ _COPAL_RESERVED_OWNER_PREFIXES = ("user:", "deleted:")
 def copal_owner_for_user(username: Optional[str]) -> str:
     """Resolve a human username without colliding with Copal sentinels.
 
-    Unnamed auth-disabled scope maps to the existing Copal ``local`` adapter
-    (see src.owner_identity). Reserved names are namespaced so a real human
-    account can never impersonate a Copal sentinel.
+    Historical unnamed scope retains its recovery adapter. Protected routes
+    require a verified account before using it. Reserved names are namespaced
+    so a real human account can never impersonate a Copal sentinel.
     """
     owner = str(username or "").strip().lower()
     if not owner:
@@ -72,8 +71,12 @@ def effective_user(request: Request) -> Optional[str]:
     if is_internal_tool_identity(user):
         headers = getattr(request, "headers", None)
         owner = (headers.get(INTERNAL_TOOL_OWNER_HEADER) if headers is not None else None)
-        if owner:
-            return str(owner).strip().lower()
+        manager = getattr(request.app.state, "auth_manager", None)
+        owner = str(owner or "").strip().lower()
+        from core.auth import normalize_known_username
+        if manager is not None and normalize_known_username(manager.users, owner):
+            return owner
+        return None
     return user
 
 
@@ -91,105 +94,56 @@ def require_authenticated_request(request: Request) -> str:
     sessions or their own API-token scope/owner gate.
     """
     if _is_api_token_request(request):
-        return effective_user(request) or ""
+        owner = str(getattr(request.state, "api_token_owner", "") or "").strip().lower()
+        manager = getattr(request.app.state, "auth_manager", None)
+        from core.auth import normalize_known_username
+        if not getattr(request.state, "authenticated", False) or manager is None or normalize_known_username(manager.users, owner) is None:
+            raise HTTPException(401, "Not authenticated")
+        return owner
     return require_user(request)
 
 
-def _auth_disabled() -> bool:
-    """True when the operator has explicitly turned off auth via .env.
-    Shared with src.owner_identity so the auth-disabled mapping and route
-    gates agree on what "off" means."""
-    return _owner_identity_auth_disabled()
-
-
 def require_user(request: Request) -> str:
-    """FastAPI dependency: reject unauthenticated callers when the upstream
-    auth middleware was bypassed unexpectedly (e.g. SSRF from a sibling
-    service). Returns the resolved username, or "" in single-user / anonymous
-    modes where no username is available.
-
-    The three "" cases are:
-      1. AUTH_ENABLED=false — the operator explicitly turned auth off.
-         The full /login flow is skipped (issue #622), so route-level
-         require_user must let the request through too instead of 401-ing
-         and forcing the browser to /login.
-      2. Unconfigured first-run + loopback caller — pre-setup access from
-         localhost so the operator can hit the SPA before creating the
-         first admin.
-      3. LOCALHOST_BYPASS=true + loopback caller — documented dev bypass.
-
-    Use this on routes that touch user data so middleware misconfig can't
-    open them up.
-    """
+    """Require a middleware-verified browser or internal capability identity."""
     if _is_api_token_request(request):
         raise HTTPException(403, "API tokens must use a scope-aware API route")
-
-    u = get_current_user(request)
-    if u:
-        return u
-    # Operator-disabled auth: honor it at the route layer too. Without this,
-    # routes that depend on require_user 401, the front-end fetch wrapper
-    # redirects to /login, and the user sees a login page despite
-    # AUTH_ENABLED=false (issue #622). Docker / reverse-proxy deployments
-    # hit this because requests arrive from a non-loopback client.host, so
-    # the loopback fall-through below never fires.
-    if _auth_disabled():
-        return ""
-    auth_mgr = getattr(request.app.state, "auth_manager", None)
-    client = getattr(request, "client", None)
-    host = (client.host if client else "") or ""
-    is_loopback = host in ("127.0.0.1", "::1", "localhost")
-    # LOCALHOST_BYPASS=true is the dev-only "I'm on loopback, skip auth"
-    # switch. Mirror the middleware so routes don't 401 the same caller
-    # the middleware just let through.
-    if is_loopback and os.getenv("LOCALHOST_BYPASS", "false").lower() == "true":
-        return ""
-    if auth_mgr is not None and getattr(auth_mgr, "is_configured", False):
+    state = getattr(request, "state", None)
+    if not getattr(state, "authenticated", False):
         raise HTTPException(401, "Not authenticated")
-    # Unconfigured / first-run mode: only allow loopback callers.
-    if is_loopback:
-        return ""
-    raise HTTPException(401, "Not authenticated")
+    user = get_current_user(request)
+    if is_internal_tool_identity(user) and getattr(state, "internal_tool_authenticated", False):
+        return user
+    manager = getattr(request.app.state, "auth_manager", None)
+    if manager is None:
+        raise HTTPException(503, "Authentication unavailable")
+    from core.auth import normalize_known_username
+    if normalize_known_username(manager.users, user) is None:
+        raise HTTPException(401, "Not authenticated")
+    return user
 
 
 def require_privilege(request: Request, key: str) -> str:
-    """Reject callers whose `auth.json` privilege flag for `key` is False.
-    Returns the username so the route handler can keep using it.
-
-    Admins always have every privilege via `auth_manager.get_privileges`
-    (which returns ADMIN_PRIVILEGES wholesale), so this is a no-op for
-    them. In unauthenticated single-user mode (`require_user` returns ""),
-    privileges aren't enforced.
-    """
+    """Require an explicit true privilege from the verified identity authority."""
     user = require_user(request)
-    if not user:
+    if is_internal_tool_identity(user):
+        # This lane is admitted only by loopback plus the internal capability.
         return user
     auth_mgr = getattr(request.app.state, "auth_manager", None)
     if auth_mgr is None:
-        return user
+        raise HTTPException(503, "Privilege authority unavailable")
     try:
-        privs = auth_mgr.get_privileges(user) or {}
-    except Exception:
-        return user
-    if not isinstance(privs, dict):
-        privs = {}
-    # True = permitted; missing key defaults to permitted (unknown privileges
-    # fail open — the UI gates display-side).
-    if not privs.get(key, True):
+        privs = auth_mgr.get_privileges(user)
+    except Exception as exc:
+        raise HTTPException(503, "Privilege authority unavailable") from exc
+    if not isinstance(privs, dict) or privs.get(key) is not True:
         raise HTTPException(403, f"Your account is not allowed to {key.replace('_', ' ')}.")
     return user
 
 
 def owner_filter(query, model_cls, user: str, *, include_shared: bool = True):
-    """Filter `query` so only rows owned by `user` (and optionally null-owner
-    legacy rows) come through. In single-user mode the historical shared
-    behaviour remains the default; callers asking for an exact catalogue
-    (``include_shared=False``) get only legacy null-owner rows instead of an
-    accidental all-users query. Returns the modified query."""
+    """Filter to a named owner, with explicit optional shared catalog rows."""
     if not user:
-        if include_shared:
-            return query
-        return query.filter(model_cls.owner == None)  # noqa: E711
+        raise HTTPException(401, "Owner identity required")
     if include_shared:
         return query.filter((model_cls.owner == user) | (model_cls.owner == None))  # noqa: E711
     return query.filter(model_cls.owner == user)

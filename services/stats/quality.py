@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable, Mapping
 
-FORMULA_VERSION = "s09-quality-v2"
+FORMULA_VERSION = "l02-quality-v3"
 MIN_COVERAGE = 0.5
 MAX_QUALITY_EVENTS = 100_000
 FAMILIES = ("prompt_maturity", "context_health", "workflow_hygiene", "tool_reliability")
@@ -46,15 +46,33 @@ def _status(rate: float | None) -> str:
     return "clear"
 
 
-def _evidence(value: object, ordinal: int) -> dict:
+def _evidence(value: object, ordinal: int, event: Mapping[str, object]) -> dict:
     identifier = str(value or f"ordinal-{ordinal}")
     if len(identifier) > 128 or any(ord(char) < 32 for char in identifier):
         raise QualityError("invalid evidence id")
-    return {"id": identifier, "ordinal": ordinal}
+    source = event.get("source_ref")
+    safe_source = {}
+    if isinstance(source, Mapping) and source.get("authority") in {
+            "conversation_archive", "conversation_compaction_projection", "stats_event"}:
+        for key in ("authority", "session_handle", "actor_id", "message_id", "part_id",
+                    "revision", "content_hash", "event_handle", "summary_id"):
+            item = source.get(key)
+            if key == "revision" and isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+                safe_source[key] = item
+            elif isinstance(item, str) and item and len(item) <= 128 and not any(ord(char) < 32 for char in item):
+                safe_source[key] = item
+    session = event.get("session_handle") or safe_source.get("session_handle")
+    if not isinstance(session, str) or not session.startswith("session_") or len(session) > 128 or any(ord(char) < 32 for char in session):
+        session = None
+    available = bool(session and safe_source)
+    body = event.get("body_state")
+    return {"id": identifier, "ordinal": ordinal, "session_handle": session,
+            "source_ref": safe_source or None, "source_state": "available" if available else "unavailable",
+            "body_state": body if available and body in {"published", "unpublished", "unavailable"} else "unavailable"}
 
 
 def project_quality(events: Iterable[Mapping[str, object]], *, owner: str,
-                    coverage: Mapping[str, int] | None = None,
+                    coverage: Mapping[str, object] | None = None,
                     cancel_event=None, deadline: float | None = None) -> dict:
     if not str(owner or "").strip():
         raise QualityError("owner is required")
@@ -83,7 +101,7 @@ def project_quality(events: Iterable[Mapping[str, object]], *, owner: str,
     outcome = {"success": 0, "failure": 0, "unknown": 0}
     for ordinal, event in enumerate(rows, 1):
         _check(cancel_event, deadline)
-        evidence_id = _evidence(event.get("evidence_id"), ordinal)
+        evidence_id = _evidence(event.get("evidence_id"), ordinal, event)
         status = event.get("outcome")
         outcome[status if status in outcome else "unknown"] += 1
         checks = {
@@ -111,7 +129,7 @@ def project_quality(events: Iterable[Mapping[str, object]], *, owner: str,
             step = max(1, (len(rows) + 15) // 16)
             for index in range(0, len(rows), step):
                 window = rows[index:index + step]
-                sparkline.append(round(sum(bool(window_event.get("outcome") == "failure") for window_event in window) / len(window), 4))
+                sparkline.append(round(sum(any(window_event.get(signal) is True for signal in SIGNALS[family]) for window_event in window) / len(window), 4))
             sparkline = sparkline[:16]
         families[family] = {"state": state, "affected": drivers[family], "share": rate,
                             "weight": POLICY[family], "evidence": evidence[family],
@@ -126,4 +144,5 @@ def project_quality(events: Iterable[Mapping[str, object]], *, owner: str,
     grade = ("A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F") if score is not None else None
     return {"formula_version": FORMULA_VERSION, "weights": POLICY, "state": "scored" if sufficient else "unscored",
             "score": score, "grade": grade, "coverage": {"covered": covered, "total": total},
-            "outcomes": outcome, "families": families}
+            "outcomes": outcome, "families": families,
+            "source_coverage": dict((coverage or {}).get("ordinary_evidence") or {})}

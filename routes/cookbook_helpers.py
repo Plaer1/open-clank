@@ -1151,7 +1151,7 @@ def _ssh(host, cmd, port=None):
     return f"ssh {pf}{host} '{cmd}'"
 
 
-def _safe_env_prefix(ep: str | None) -> str | None:
+def _safe_env_prefix(ep: str | None, *, bash_windows: bool = False) -> str | None:
     """Rewrite a `source <path>` env_prefix so it no-ops if the path is missing.
     Prevents `line N: <path>: No such file or directory` errors when a serve
     task is launched against a host that doesn't have the expected venv.
@@ -1160,7 +1160,31 @@ def _safe_env_prefix(ep: str | None) -> str | None:
     quotes (bash only tilde-expands unquoted tokens at word start)."""
     if not ep:
         return ep
-    import shlex
+    # PowerShell escapes an apostrophe by doubling it inside single quotes.
+    # POSIX shlex silently concatenates those quotes and changes the path.
+    ps_venv = re.fullmatch(r"&\s+'((?:[^']|'')*)'", ep)
+    if ps_venv:
+        path = ps_venv.group(1).replace("''", "'")
+        if any(c in path for c in "\r\n;&|`$<>"):
+            raise HTTPException(400, "Invalid env_prefix")
+        if bash_windows:
+            activation = path.replace("\\", "/")
+            if not activation.lower().endswith("/scripts/activate.ps1"):
+                raise HTTPException(400, "Windows Bash requires a venv Scripts/Activate.ps1 prefix")
+            activation = _git_bash_path(activation[:-len("Activate.ps1")] + "activate")
+            literal = shlex.quote(activation)
+            return f"[ -f {literal} ] && source {literal} || true"
+        return "& '" + path.replace("'", "''") + "'"
+    ps_conda = re.fullmatch(r"conda activate '((?:[^']|'')*)'", ep)
+    if ps_conda:
+        path = ps_conda.group(1).replace("''", "'")
+        if any(c in path for c in "\r\n;&|`$<>"):
+            raise HTTPException(400, "Invalid env_prefix")
+        if bash_windows:
+            return 'eval "$(conda shell.bash hook)" && conda activate ' + shlex.quote(_git_bash_path(path))
+        # Ordinary POSIX quoted prefixes also reach here. Preserve the literal
+        # verbatim; each producing caller already escaped its own shell syntax.
+        return ep
     try:
         parts = shlex.split(ep, posix=True)
     except ValueError:

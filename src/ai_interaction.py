@@ -257,7 +257,7 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
     except Exception:
         prefs = {}
 
-    handler_label = _resolve_handler_label(owner)
+    handler_label = await _resolve_handler_label(owner)
 
     def _render(text) -> str:
         return _render_memory_text(text, handler_label)
@@ -295,11 +295,15 @@ async def do_recall_memory(content: str, session_id: Optional[str] = None, owner
     return {"results": "\n\n".join(sections)}
 
 
-def _resolve_handler_label(owner) -> str:
+async def _resolve_handler_label(owner) -> str:
     """Owner-scoped Handler label for read-time %USER% rendering (fail-safe)."""
     try:
+        label = getattr(_memory_provider, "handler_display_label", None)
+        if callable(label):
+            return await label(owner=owner)
+        if getattr(_memory_provider, "_broker_url", ""):
+            return "Handler"
         from services.memory.principal_context import resolve_handler_display_label
-
         return resolve_handler_display_label(owner)
     except Exception:
         return "Handler"
@@ -379,7 +383,7 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 for r in records:
                     cat = r.category
                     mid = r.id[:8]
-                    text = _render_memory_text(r.text, _resolve_handler_label(owner))
+                    text = _render_memory_text(r.text, await _resolve_handler_label(owner))
                     if len(text) > 150:
                         text = text[:150] + "..."
                     result_lines.append(f"- [{cat}] `{mid}` — {text}")
@@ -474,7 +478,7 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 for h in hits:
                     cat = h.memory.category
                     mid = h.memory.id[:8]
-                    text = _render_memory_text(h.memory.text, _resolve_handler_label(owner))
+                    text = _render_memory_text(h.memory.text, await _resolve_handler_label(owner))
                     result_lines.append(f"- [{cat}] `{mid}` — {text}")
                 return {"results": "\n".join(result_lines)}
             except Exception as e:
@@ -948,7 +952,7 @@ def _managed_image_suffix(media_type: str) -> str:
     }.get(str(media_type or "").split(";", 1)[0].lower(), ".png")
 
 
-def _save_managed_gallery_image(
+def _save_managed_files_image(
     *,
     image_bytes: bytes,
     media_type: str,
@@ -965,11 +969,10 @@ def _save_managed_gallery_image(
 
     owner_key = gallery_owner_key(owner)
     if owner_key is None:
-        raise RuntimeError("Gallery image owner provenance is unavailable")
+        raise RuntimeError("Files image owner provenance is unavailable")
     from src.openclank.files_image_store import FilesImageStore
-    image_id = None
     try:
-        from src.database import GalleryImage, Session as DbSession, SessionLocal
+        from src.database import Session as DbSession, SessionLocal
 
         width = None
         height = None
@@ -982,6 +985,17 @@ def _save_managed_gallery_image(
         except Exception:
             pass
 
+        scoped_session_id = None
+        if session_id:
+            with SessionLocal() as db:
+                scoped_session = db.query(DbSession.id).filter(
+                    DbSession.id == session_id,
+                    DbSession.owner == owner_key,
+                ).first()
+            if scoped_session is None:
+                raise RuntimeError("Files image session provenance is unavailable")
+            scoped_session_id = session_id
+
         store = FilesImageStore(session_factory=SessionLocal)
         gallery = store.ensure_photos(owner_key)
         managed = store.import_image(
@@ -991,45 +1005,21 @@ def _save_managed_gallery_image(
             data=image_bytes,
             mime_type=media_type,
             operation_key=f"generated:{owner_key}:{session_id or 'none'}:{model_route_id}:{hashlib.sha256(image_bytes).hexdigest()}",
-            provenance={"prompt": prompt, "model": model_route_id, "size": size, "quality": quality},
-            source_provider="gallery",
+            provenance={
+                "prompt": prompt, "model": model_route_id, "size": size,
+                "quality": quality, "session_ids": [scoped_session_id] if scoped_session_id else [],
+                "width": width, "height": height,
+            },
+            source_provider="imps",
         )
-        image_id = managed.id
         filename = managed.locator or f"{uuid.uuid4().hex[:12]}{_managed_image_suffix(media_type)}"
-        with SessionLocal() as db:
-            scoped_session_id = None
-            if session_id:
-                scoped_session = db.query(DbSession.id).filter(
-                    DbSession.id == session_id,
-                    DbSession.owner == owner_key,
-                ).first()
-                if scoped_session is not None:
-                    scoped_session_id = session_id
-            image = GalleryImage(
-                id=image_id,
-                filename=filename,
-                prompt=prompt,
-                model=model_route_id,
-                size=size,
-                quality=quality,
-                session_id=scoped_session_id,
-                owner=owner_key,
-                file_hash=hashlib.sha256(image_bytes).hexdigest(),
-                file_size=len(image_bytes),
-                width=width,
-                height=height,
-            )
-            db.add(image)
-            db.commit()
-            # FilesImageStore has already published the immutable bytes.  The
-            # GalleryImage row is retained only as a compatibility projection.
     except Exception:
         logger.warning(
-            "Failed to publish managed image with Gallery provenance",
+            "Failed to publish managed Files image",
             exc_info=True,
         )
         raise
-    return f"/api/generated-image/{filename}", image_id
+    return f"/api/generated-image/{filename}", managed.id
 
 
 def _managed_image_error(action: str, exc: Exception) -> Dict[str, str]:
@@ -1098,7 +1088,7 @@ async def do_generate_image(
             root_operation_id=root_operation_id,
             idempotency_key=idempotency_key,
         )
-        image_url, image_id = _save_managed_gallery_image(
+        image_url, image_id = _save_managed_files_image(
             image_bytes=image_bytes,
             media_type=media_type,
             prompt=prompt,
@@ -1179,7 +1169,7 @@ async def do_edit_image(
             root_operation_id=root_operation_id,
             idempotency_key=idempotency_key,
         )
-        image_url, image_id = _save_managed_gallery_image(
+        image_url, image_id = _save_managed_files_image(
             image_bytes=image_bytes,
             media_type=output_media_type,
             prompt=prompt,

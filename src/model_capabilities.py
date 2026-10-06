@@ -1074,26 +1074,3 @@ def declare_current_models(
 ) -> None:
     for model_id in _endpoint_enabled_models(endpoint):
         set_declared(db, endpoint, model_id, value)
-
-
-def migrate_legacy_model_capabilities() -> None:
-    """Retire legacy declarations while preserving probe evidence and toggles."""
-    db = SessionLocal()
-    try:
-        legacy_rows = db.query(DBModelCapability).filter(
-            DBModelCapability.declaration_fingerprint.is_not(None)
-        ).all()
-        for row in legacy_rows:
-            row.tools_declared = None
-            row.declaration_fingerprint = None
-        endpoints = db.query(ModelEndpoint).filter(
-            ModelEndpoint.supports_tools.is_not(None)
-        ).all()
-        for endpoint in endpoints:
-            endpoint.supports_tools = None
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()

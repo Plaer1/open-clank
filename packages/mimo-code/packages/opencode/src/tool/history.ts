@@ -30,8 +30,8 @@ const parameters = z.object({
   ),
   // search params
   query: z.string().optional().describe("FTS query (BM25 over text/tool bodies). Required for operation=search."),
-  scope: z.enum(["project", "global"]).optional().describe("Default project."),
-  session_id: z.string().optional(),
+  scope: z.enum(["project", "global"]).optional().describe("Standalone: project (default) or global. Managed: omit for the bound chat, or use global; project is unavailable."),
+  session_id: z.string().optional().describe("Target chat id from a history search result. In managed mode, callback admission still uses the current engine session."),
   kind: z.array(KIND).optional(),
   tool_name: z.string().optional().describe("Filter to a specific tool (e.g. Bash, Read)"),
   time_after: z.number().optional().describe("Unix ms"),
@@ -69,7 +69,9 @@ export const HistoryTool = Tool.define(
             const hits = yield* history.search({
               query: args.query,
               scope: args.scope,
-              session_id: args.session_id,
+              // In managed mode this is the admitted engine session; callers
+              // cannot select a different chat or owner through tool args.
+              session_id: ManagedProvider.enabled() ? ctx.sessionID : args.session_id,
               kind: args.kind,
               tool_name: args.tool_name,
               time_after: args.time_after,
@@ -108,6 +110,7 @@ export const HistoryTool = Tool.define(
             }
             const part = yield* history.get({
               session_id: ctx.sessionID,
+              chat_id: ManagedProvider.enabled() ? args.session_id : undefined,
               message_id: args.message_id,
               part_id: args.part_id,
               length: args.length,
@@ -139,6 +142,7 @@ export const HistoryTool = Tool.define(
             }
             const attachments = yield* history.media({
               session_id: ctx.sessionID,
+              chat_id: ManagedProvider.enabled() ? args.session_id : undefined,
               message_id: args.message_id,
               part_id: args.part_id,
             })
@@ -171,6 +175,7 @@ export const HistoryTool = Tool.define(
           }
           const around = yield* history.around({
             session_id: ctx.sessionID,
+            chat_id: ManagedProvider.enabled() ? args.session_id : undefined,
             message_id: args.message_id,
             before: args.before,
             after: args.after,

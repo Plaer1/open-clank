@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-out="${1:-.clankers/robonotes/source-coverage-union-2026-07-10.md}"
+out="${1:-.clanker/robonotes/scripts/source-coverage-union-2026-07-10.md}"
 relative_out="${out#./}"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
@@ -15,6 +15,8 @@ trap 'rm -f "$tmp"' EXIT
     -g '!.venv/**'
     -g '!.archive/**'
     -g '!.references/**'
+    -g '!**/.clanker/references/**'
+    -g '!**/.references/**'
     -g '!data/**'
     -g '!packages/**'
     -g '!**/__pycache__/**'
@@ -36,6 +38,8 @@ trap 'rm -f "$tmp"' EXIT
   child_rg_args=(
     --files --hidden
     -g '!**/.git/**'
+    -g '!**/.clanker/references/**'
+    -g '!**/.references/**'
     -g '!**/node_modules/**'
     -g '!**/target/**'
     -g '!**/.next/**'
@@ -51,7 +55,6 @@ trap 'rm -f "$tmp"' EXIT
   [[ -f packages/Copal/db/copal.redb ]] && printf '%s\n' packages/Copal/db/copal.redb
 
   reference_roots=(
-    packages/Copal/.references/obsidian-local
     packages/Copal/treehouse/packages/learnhouse
     packages/Copal/treehouse/packages/skills-service
   )
@@ -83,7 +86,7 @@ mkdir -p "$(dirname "$out")"
     case "$path" in
       .clanker/futures/*)
         disposition='plan-control'; phase='00/05' ;;
-      .clankers/robonotes/*)
+      .clanker/robonotes/*|.clankers/robonotes/*)
         disposition='audit-or-run-evidence'; phase='00/05' ;;
       data/backups/*)
         disposition='runtime-backup-binary-metadata'; phase='00/05' ;;
@@ -128,7 +131,8 @@ mkdir -p "$(dirname "$out")"
     '.git|VCS object store; represented by branch/status/revision'
     '.venv|installed Python dependency environment'
     '.archive|historical archive outside active product scope'
-    '.references|unrelated root reference collection; Copal references enumerated separately'
+    '.clanker/references|canonical study payloads; excluded from first-party source enumeration'
+    'packages/Copal/.references|separately owned legacy Copal study payloads; not relocated by root R01'
     'packages/mimo-code|protected unrelated dirty MiMo source tree'
     'packages/mimo-code/node_modules|installed dependency tree'
     'mcp_servers/frankenmemory/target|generated Rust build output'

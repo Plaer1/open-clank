@@ -16,7 +16,6 @@ from src.embedding_lanes import (
     collection_name,
     dedupe_results,
     lane_count,
-    migrate_legacy_collection,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,7 +45,7 @@ class MemoryVectorStore:
                 (lane.collection for lane in self._lanes if lane.name == LANE_FASTEMBED),
                 self._lanes[0].collection,
             )
-            migrate_legacy_collection(self.COLLECTION_NAME, self._lanes)
+
             logger.info(
                 "MemoryVectorStore ready (lanes=%s entries=%s)",
                 [lane.name for lane in self._lanes],

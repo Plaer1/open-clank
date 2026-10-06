@@ -1,3 +1,4 @@
+import { uiIcon } from '../uiIcons.js';
 // static/js/emailLibrary/signatureFold.js
 //
 // Heuristics that turn raw HTML email bodies into folded structures —
@@ -18,7 +19,7 @@ import {
 // No leading icon on the signature fold — the user explicitly does not
 // want a star/emoji-style glyph in this header.
 export const _SIG_ICON = '';
-export const _QUOTE_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
+export const _QUOTE_ICON = uiIcon("reply", 11);
 
 // HTML-escape used by `_extractQuoteMeta`. Inlined here (rather than
 // imported from utils) so this module remains free of cross-file links.
@@ -123,7 +124,7 @@ export function _foldSummary(label, iconSvg, meta) {
     + iconSvg
     + `<span class="email-fold-summary-name">${_esc(primary)}</span>`
     + metaSpan
-    + '<svg class="email-summary-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:auto;transition:transform .15s ease;"><polyline points="6 9 12 15 18 9"/></svg>'
+    + uiIcon("chevron-down", 10, {"className":"email-summary-chevron","style":"margin-left:auto;transition:transform .15s ease;"})
     + '</summary>'
   );
 }

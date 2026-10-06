@@ -1,17 +1,7 @@
-"""Canonical OperationApproval write/read for interactive approval lanes.
+"""Canonical operation consent for ACP, native file and shell approvals.
 
-Slice S09 cutover: ACP, native file, and shell approvals historically persisted
-only in the compatibility ``permission_grants`` store.  When the canonical
-context (immutable owner subject plus a containing enabled Location) is
-resolvable, these lanes now write typed ``operation`` PolicyBindings and
-consult them first.  The compatibility store remains the measured fallback for
-pre-cutover rows and for targets that have no canonical Location yet; reset
-already spans both ledgers, so an approval recorded here is revoked by the same
-chat/workspace/location/all-agent reset scopes.
-
-Resource identity uses the exact deterministic digest the legacy migration
-planner (``file_policy_migration``) assigns to imported grants, so a runtime
-approval and a migrated approval share one namespace and one matching rule.
+Only FilePolicyRepository is consulted. Consent never grants path authority;
+process confinement remains the OS boundary.
 """
 
 from __future__ import annotations
@@ -123,14 +113,34 @@ def _authority_context(
             return None
         repository = FilePolicyRepository(db_path)
     if auth is None:
-        if not os.path.isabs(auth_path) or not os.path.isfile(auth_path):
-            return None
-        auth = ReadOnlyAuthSnapshot(auth_path)
+        if os.path.isabs(auth_path) and os.path.isfile(auth_path):
+            auth = ReadOnlyAuthSnapshot(auth_path)
+    users = getattr(auth, "users", getattr(auth, "_users", None))
+    if isinstance(users, dict):
+        repository.sync_subjects(users)
     account_id = getattr(auth, "account_id", None)
     subject_id = account_id(owner_key) if callable(account_id) else None
     if not subject_id:
         return None
     return repository, str(subject_id)
+
+
+def canonical_workspace_id(owner: str, identifier: str) -> str:
+    """Normalize a pending approval's owner-qualified Workspace alias.
+
+    This supplies no consent or path authority. Unknown context retains the
+    request identifier; persistence and execution still resolve it separately.
+    """
+    if not identifier:
+        return ""
+    try:
+        context = _authority_context(owner)
+        if context:
+            repository, subject = context
+            return repository.legacy_target("workspace", subject + ":" + identifier, fallback=identifier)
+    except (FilePolicyError, OSError, ValueError, OverflowError):
+        pass
+    return identifier
 
 
 def _path_within(root: str, target: str) -> bool:
@@ -180,6 +190,7 @@ def _location_for_scope(
     """Location for one approval, preferring the stable Workspace identity."""
     identifier = str(workspace_id or "").strip()
     if identifier:
+        identifier = repository.legacy_target("workspace", subject_id + ":" + identifier, fallback=identifier)
         try:
             workspace = repository.get_workspace(identifier)
         except FilePolicyError:
@@ -208,8 +219,8 @@ def _expiry_unix_ms(value: Any) -> int | None:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return int(parsed.timestamp() * 1000)
-    except (TypeError, ValueError):
-        return None
+    except (TypeError, ValueError) as error:
+        raise ValueError("Approval expiry is invalid") from error
 
 
 def record_operation_approval(
@@ -228,10 +239,8 @@ def record_operation_approval(
 ) -> bool:
     """Persist one typed canonical OperationApproval.
 
-    Returns False when the canonical context cannot be resolved without
-    broadening or guessing; callers keep their compatibility-store fallback for
-    that case.  Never raises on policy/store refusal — a failed canonical write
-    must degrade to the measured legacy lane, not drop the user's approval.
+    Returns False when the context cannot be persisted safely. Callers retain
+    only the current Once approval; no legacy writer is permitted.
     """
     lifetime = str(lifetime or "").strip().lower()
     if lifetime not in {"chat", "workspace", "always"}:
@@ -261,14 +270,16 @@ def record_operation_approval(
             workspace_id=stable_workspace,
             target_path=target_path,
         )
-        if location is None:
+        if location is None and capability != "execute":
             return False
-        repo.create_binding(
+        if stable_workspace:
+            stable_workspace = repo.legacy_target("workspace", subject_id + ":" + stable_workspace, fallback=stable_workspace)
+        binding = repo.create_binding(
             actor_subject_id=subject_id,
             binding_class="operation",
             subject_kind="user",
             subject_id=subject_id,
-            location_id=location.id,
+            location_id=location.id if location else None,
             workspace_id=stable_workspace or None,
             chat_id=chat_id or None,
             resource_ref=approval_resource_ref(permission_type, pattern, resource),
@@ -277,8 +288,9 @@ def record_operation_approval(
             lifetime=lifetime,
             expires_unix_ms=_expiry_unix_ms(expires_at),
         )
+        repo.store_approval_details(binding.id, str(permission_type), str(pattern), str(resource or ""))
         return True
-    except (FilePolicyError, OSError, ValueError):
+    except (FilePolicyError, OSError, ValueError, OverflowError):
         return False
 
 
@@ -325,9 +337,7 @@ def match_operation_approval(
 ) -> bool:
     """True when a canonical OperationApproval covers this exact request.
 
-    Returns False on any resolution failure so callers fall back to the
-    compatibility store; a broken canonical lane must never become an implicit
-    approval.
+    Resolution failure means no durable approval. No fallback authority exists.
     """
     capability = capability_for_permission(permission_type)
     if not capability:
@@ -338,6 +348,11 @@ def match_operation_approval(
             return False
         repo, subject_id = context
         stable_workspace = str(workspace_id or "").strip()
+        if stable_workspace:
+            stable_workspace = repo.legacy_target("workspace", subject_id + ":" + stable_workspace, fallback=stable_workspace)
+        if repo.approval_match(subject_id=subject_id, permission_type=str(permission_type), filepath=filepath,
+            resource=resource, session_id=str(session_id or ""), workspace_id=stable_workspace):
+            return True
         location = _location_for_scope(
             repo,
             subject_id=subject_id,
@@ -362,5 +377,5 @@ def match_operation_approval(
             workspace_id=stable_workspace or None,
             chat_id=str(session_id or "").strip() or None,
         )
-    except (FilePolicyError, OSError, ValueError):
+    except (FilePolicyError, OSError, ValueError, OverflowError):
         return False

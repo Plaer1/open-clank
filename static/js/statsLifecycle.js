@@ -23,6 +23,7 @@ export function createStatsRefreshLifecycle({
   visibility = globalThis.document,
   timers = globalThis,
   cadenceSeconds = 300,
+  isVisible = () => true,
 } = {}) {
   if (typeof refresh !== 'function') throw new TypeError('Stats refresh callback is required');
   let started = false;
@@ -35,7 +36,7 @@ export function createStatsRefreshLifecycle({
   let generation = 0;
   let refreshCount = 0;
 
-  const visible = () => !visibility || visibility.visibilityState !== 'hidden';
+  const visible = () => (!visibility || visibility.visibilityState !== 'hidden') && isVisible();
 
   const request = reason => {
     if (!started || stopped) return Promise.resolve(false);

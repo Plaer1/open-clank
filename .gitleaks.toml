@@ -3,15 +3,345 @@ title = "Open Clank secret-scanning exceptions"
 [extend]
 useDefault = true
 
-# Translation catalog records use words such as "api" and "key" as schema
-# labels.  Admit only the exact label shapes and dotted translation identifiers;
-# arbitrary values and every other path remain under the default rules.
+# Frozen translation catalogs contain UI message identifiers, never key values.
+# Match only their exact field and namespace shape; translated API labels in
+# historical commits are classified by immutable fingerprints instead.
 [[allowlists]]
-description = "Structured translation catalogue labels"
+targetRules = ["generic-api-key"]
+description = "Frozen translation UI identifiers"
 condition = "AND"
 regexTarget = "line"
-paths = ['''(^|/)static/i18n/[^/]+\.json$''']
-regexes = [
-  '''^\s*"ui\.api(\.key)?":\s*"[^"\r\n]*",?\s*$''',
-  '''^\s*"key":\s*"[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)+",?\s*$''',
-]
+paths = ['(^|/)static/i18n/(freeze/(context|strings|batches/batch-[0-9]{3})|ledger|provenance)\.json$']
+regexes = ['^\s*"key":\s*"ui(\.[A-Za-z0-9_-]+)+",?\s*$']
+
+# Exact synthetic idempotency values in the affected operation tests. The
+# secret-value constraint does not exempt a new key on the same source line.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Synthetic operation identifiers"
+condition = "AND"
+regexTarget = "secret"
+paths = ['(^|/)tests/test_(managed_protocol|managed_operation_router|stats_quota_adapters|search_contract_s01|stats_s01_foundation|operation_artifacts|tui_turn_routes)\.py$']
+regexes = ['^(operation-id-123456|cancel-operation-0001|operation-key-0001|bob-operation-key-1|idempotency-key-1|turn-idempotency-000[12])$']
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Keyboard shortcut strings in command declarations"
+condition = "AND"
+regexTarget = "line"
+paths = ['(^|/)packages/mimo-code/packages/app/src/pages/layout\.tsx$']
+regexes = ['^\s*keybind: "shift\+alt\+arrow(up|down)",\s*$']
+
+[[allowlists]]
+targetRules = ["private-key"]
+description = "Deliberately incomplete PEM header used by the no-store test"
+condition = "AND"
+regexTarget = "line"
+paths = ['(^|/)mcp_servers/frankenmemory/crates/fm-core/src/privacy\.rs$']
+regexes = ['(?m)^\s*"-----BEGIN PRIVATE KEY-----\\nabc",\s*$']
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact fake credentials in redaction behavior tests"
+condition = "AND"
+regexTarget = "secret"
+paths = ['(^|/)packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline\.test\.ts$']
+regexes = ['^(eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjMifQ\.dBjftJeZ4CVPmB92Sg|0123456789abcdef)$']
+
+# Exact upstream test publishable client identifier; public by design.
+# Different values and private sk_ keys still trigger scanning.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Upstream Stripe test publishable client identifier"
+condition = "AND"
+regexTarget = "secret"
+paths = ['(^|/)packages/mimo-code/packages/console/app/package\.json$']
+regexes = ['^pk_test_51RtuLNE7fOCwHSD4mewwzFejyytjdGoSDK7CAvhbffwaZnPbNb2rwJICw6LTOXCmWO320fSNXvb5NzI08RZVkAxd00syfqrW7t$']
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/ar\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\\.key\":\\ \"\u0645\u0641\u062a\u0627\u062d\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/bg\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\\.key\":\\ \"\u041a\u043b\u044e\u0447\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/bs\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"API\\ key\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/cs\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Kl\u00ed\u010d\\ API\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/da\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/de\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.move\\.to\\.trash\":\\ \"In\\ den\\ Papierkorb\\ verschieben\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/el\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"\u039a\u03bb\u03b5\u03b9\u03b4\u03af\\ API\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/en\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"API\\ key\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/es\\-419\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"API\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Clave\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/es\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"API\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Tecla\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/fa\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"\u06a9\u0644\u06cc\u062f\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/fi\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"API\\ avain\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/fr\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Cl\u00e9\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/hr\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"API\\ key\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/hu\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"API\\ kulcs\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/id\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Kunci\\ API\",\\s*$","(?m)^\\s*\"ui\\.show\\.hide\\.the\\.api\\.key\\.field\":\\ \"Tampilkan/sembunyikan\\ bidang\\ kunci\\ API\",\\s*$","(?m)^\\s*\"ui\\.tidying\\.memories\":\\ \"Merapikan\\ kenangan\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/it\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Tasto\\ API\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/ja\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/ko\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/ms\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Kunci\\ API\",\\s*$","(?m)^\\s*\"ui\\.lower\\.quant\\.tiers\\.q2\\.q3\\.q4\\.awq\\.4bit\\.are\\.smaller\":\\ \"Peringkat\\ kuantiti\\ yang\\ lebih\\ rendah\\ \\(Q2/Q3/Q4\\ /\\ AWQ\\-4bit\\)\\ adalah\\ lebih\\ kecil,\\ lebih\\ pantas\\ dan\\ lebih\\ murah\\ untuk\\ dijalankan,\\ pada\\ beberapa\\ kehilangan\\ kualiti\\.\\ Peringkat\\ yang\\ lebih\\ tinggi\\ \\(Q8\\ /\\ FP8\\ /\\ FP16\\ /\\ BF16\\)\\ mengekalkan\\ lebih\\ banyak\\ kualiti\\ tetapi\\ memerlukan\\ lebih\\ banyak\\ VRAM\\.\\ \u201cSemua\u201d\\ menunjukkan\\ kuantiti\\ pemarkahan\\ terbaik\\ bagi\\ setiap\\ model\\ \u2014\\ pilih\\ yang\\ khusus\\ untuk\\ ditapis\\.\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/nl\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/no\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.move\\.to\\.trash\":\\ \"Flytt\\ til\\ papirkurv\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/pa\\-Guru\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/pl\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Klucz\\ API\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$","(?m)^\\s*\"ui\\.saved\":\\ \"Zapisane\",\\s*$","(?m)^\\s*\"ui\\.saved\\.499dc627\":\\ \"\u2713\\ Zapisano\",\\s*$","(?m)^\\s*\"ui\\.unsaved\":\\ \"Niezapisane\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/pt\\-BR\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"API\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Chave\\ de\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/pt\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"API\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Chave\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/ro\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Tasta\\ API\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/ru\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"API\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"\u041a\u043b\u044e\u0447\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/sv\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/sw\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Kitufe\\ cha\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/th\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\\.key\":\\ \"\u0e1b\u0e38\u0e48\u0e21\\ API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/tr\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/uk\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/ur\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"API\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/vi\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.api\":\\ \"api\",\\s*$","(?m)^\\s*\"ui\\.api\\.key\":\\ \"Kh\u00f3a\\ API\",\\s*$","(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact existing translated UI labels"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/i18n/zh\\-Hans\\.json$"]
+regexes = ["(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]

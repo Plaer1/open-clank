@@ -37,7 +37,11 @@ def test_quality_is_versioned_coverage_aware_and_evidence_bounded():
     assert result["formula_version"] == FORMULA_VERSION
     assert result["state"] == "scored"
     assert result["families"]["prompt_maturity"]["state"] == "critical"
-    assert result["families"]["prompt_maturity"]["evidence"] == [{"id": "ordinal-1", "ordinal": 1}]
+    evidence = result["families"]["prompt_maturity"]["evidence"][0]
+    assert evidence["id"] == "ordinal-1" and evidence["ordinal"] == 1
+    assert evidence["source_state"] == "unavailable"
+    assert evidence["session_handle"] is None and evidence["source_ref"] is None
+    assert "secret" not in evidence and "owner" not in evidence
     assert "secret" not in str(result)
 
 

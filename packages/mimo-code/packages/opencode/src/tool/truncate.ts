@@ -12,7 +12,11 @@ import { TRUNCATION_DIR } from "./truncation-dir"
 const log = Log.create({ service: "truncation" })
 const RETENTION = Duration.days(7)
 const META_SUFFIX = ".meta.json"
-const OUTPUT_NAME = /^tool_[0-9a-f]{12}[A-Za-z0-9]{14}$/
+// v1 identifiers were 12 hex timestamp characters followed by 14 base62
+// characters. Current v2 identifiers add a g/- marker, 16 hex timestamp
+// characters, and 9 base62 characters. Cleanup and ownership operations must
+// recognize both while refusing arbitrary paths.
+const OUTPUT_NAME = /^tool_(?:[0-9a-f]{12}[A-Za-z0-9]{14}|[g-][0-9a-f]{16}[A-Za-z0-9]{9})$/
 
 export const MAX_LINES = 2000
 export const MAX_BYTES = 50 * 1024

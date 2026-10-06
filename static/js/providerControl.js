@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // Unified Open Clank provider control plane.
 //
 // This browser module is deliberately a projection of /api/v1/providers/**.
@@ -21,6 +22,10 @@ const FAMILY_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const VIEW_FRESH_MAX_AGE_MS = 30 * 1000;
 const REQUEST_TIMEOUT_MS = 8 * 1000;
 const FAMILY_ENRICH_TIMEOUT_MS = 45 * 1000;
+const OAUTH_STATUS_RETRY_BASE_MS = 1200;
+const OAUTH_STATUS_RETRY_MAX_MS = 10 * 1000;
+const OAUTH_STATUS_RETENTION_MS = 10 * 60 * 1000;
+const OAUTH_FLOW_STORAGE_KEY = 'open-clank:provider-oauth-flow:v1';
 const FAMILY_PICKER_SEARCH_THRESHOLD = 12;
 const PURPOSES = Object.freeze([
   ['chat', 'Chat', ['chat.stream', 'chat.complete']],
@@ -63,12 +68,12 @@ let state = emptyState();
 let activePicker = null;
 let pickerSerial = 0;
 
-const CARET_ICON = '<svg class="provider-control-picker-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
-const ADD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>';
-const API_ADD_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="12" r="8"/><path d="M19 5v6M16 8h6M7 12h8"/></svg>';
-const LOCAL_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>';
-const API_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>';
-const KEY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/><path d="M15.5 7.5l3 3"/></svg>';
+const CARET_ICON = uiIcon("chevron-down", 10, {"className":"provider-control-picker-caret"});
+const ADD_ICON = uiIcon("add", 15);
+const API_ADD_ICON = uiIcon("add", 15);
+const LOCAL_ICON = uiIcon("computer", 11);
+const API_ICON = uiIcon("network", 11);
+const KEY_ICON = uiIcon("key", 13);
 
 function familyLogo(family) {
   if (!family) return '';
@@ -1126,6 +1131,7 @@ function renderCreateConnection() {
   const remoteFamilies = addableFamilies.filter(item => (
     (item.kinds || []).some(kind => ['official', 'subscription', 'custom_gateway'].includes(kind))
   ));
+  const subscriptionFamilies = remoteFamilies.filter(item => (item.kinds || []).includes('subscription'));
   const localFamilies = addableFamilies.filter(item => (item.kinds || []).includes('local'));
 
   function providerOptions(families) {
@@ -1144,6 +1150,7 @@ function renderCreateConnection() {
   function addCard(mode, families) {
     if (!families.length) return null;
     const isLocal = mode === 'local';
+    const isSubscription = mode === 'subscription';
     const preferredFamily = families.find(item => item.id === (isLocal ? 'ollama' : 'openai')) || families[0];
     const form = element('form', {
       class: 'admin-card provider-control-quick-form provider-control-add-card',
@@ -1151,20 +1158,23 @@ function renderCreateConnection() {
     });
     const heading = element('div', { class: 'provider-control-add-heading' });
     const headingCopy = element('div', { class: 'provider-control-add-title' });
+    const title = isLocal ? 'Add Local Models' : isSubscription ? 'Add Subscription Models' : 'Add API Models';
     headingCopy.append(
       iconNode(isLocal ? ADD_ICON : API_ADD_ICON, 'provider-control-add-title-icon'),
-      element('h2', {}, isLocal ? 'Add Local Models' : 'Add API Models'),
-      element('span', { class: 'provider-control-add-kind' }, '(Endpoint)'),
+      element('h2', {}, title),
+      element('span', { class: 'provider-control-add-kind' }, isSubscription ? '(Account)' : '(Endpoint)'),
     );
     heading.append(headingCopy);
     const description = element('p', { class: 'admin-toggle-sub provider-control-add-description' },
       isLocal
         ? 'Connect Ollama or another model server running on your network.'
-        : 'Connect OpenAI, Anthropic, DeepSeek, OpenRouter, or another provider.',
+        : isSubscription
+          ? 'Sign in with a supported provider account to add its subscription models.'
+          : 'Connect an API key endpoint such as OpenAI, Anthropic, DeepSeek, or OpenRouter.',
     );
     let pickerMenuAnchor = null;
     const family = createThemedPicker({
-      label: isLocal ? 'Local model provider' : 'API model provider',
+      label: isLocal ? 'Local model provider' : isSubscription ? 'Subscription provider' : 'API model provider',
       options: providerOptions(families),
       value: preferredFamily.id,
       searchable: families.length > FAMILY_PICKER_SEARCH_THRESHOLD,
@@ -1223,7 +1233,11 @@ function renderCreateConnection() {
 
     function availableMethods() {
       const methods = authMethodsFor(contract());
-      return isLocal ? methods.filter(method => ['none', 'api_key'].includes(method.type)) : methods;
+      if (isLocal) return methods.filter(method => ['none', 'api_key'].includes(method.type));
+      if (isSubscription) return methods.filter(method => method.type === 'oauth');
+      return methods.filter(method => !(
+        method.type === 'oauth' && (contract().kinds || []).includes('subscription')
+      ));
     }
 
     function authMethodsIncomplete() {
@@ -1232,6 +1246,13 @@ function renderCreateConnection() {
 
     function selectedMethod() {
       const methods = availableMethods();
+      const unavailable = {
+        id: 'unavailable',
+        type: 'unavailable',
+        label: isSubscription ? 'Subscription login unavailable' : 'Sign-in methods unavailable',
+      };
+      if (isSubscription && !methods.some(method => method.type === 'oauth')) return unavailable;
+      if (!isLocal && !methods.length) return unavailable;
       return methods.find(method => method.id === methodId)
         || (isLocal ? methods.find(method => method.type === 'none') : null)
         || methods.find(method => method.type === 'api_key')
@@ -1245,6 +1266,7 @@ function renderCreateConnection() {
     function selectedKind(method = selectedMethod()) {
       const kinds = contract().kinds || [];
       if (isLocal && kinds.includes('local')) return 'local';
+      if (isSubscription && kinds.includes('subscription')) return 'subscription';
       if (method.type === 'oauth' && kinds.includes('subscription')) return 'subscription';
       if (kinds.includes('official')) return 'official';
       if (kinds.includes('custom_gateway')) return 'custom_gateway';
@@ -1256,7 +1278,13 @@ function renderCreateConnection() {
       const chosen = selectedMethod();
       methodId = chosen.id;
       authChoices.replaceChildren();
-      const alternatives = methods.filter(item => item.id !== methodId);
+      const seenAlternatives = new Set();
+      const alternatives = methods.filter(item => item.id !== methodId).filter(item => {
+        const key = item.type === 'api_key' ? 'api_key' : item.id;
+        if (seenAlternatives.has(key)) return false;
+        seenAlternatives.add(key);
+        return true;
+      });
       if (!alternatives.length && !authMethodsIncomplete()) {
         authChoices.classList?.add?.('hidden');
         return;
@@ -1317,7 +1345,11 @@ function renderCreateConnection() {
       url.classList?.toggle?.('hidden', !needsUrl);
       routeHint.classList?.toggle?.('hidden', needsUrl && !unavailable);
       routeHint.textContent = unavailable
-        ? 'Load this provider’s sign-in methods before adding it.'
+        ? authMethodsIncomplete()
+          ? 'Load this provider’s sign-in methods before adding it.'
+          : isSubscription
+            ? 'This provider does not offer subscription login.'
+            : 'This provider has no compatible sign-in method.'
         : method.type === 'oauth' ? 'Browser account' : 'Official provider API';
       url.required = needsUrl && !unavailable;
       const usesSecret = method.type === 'api_key';
@@ -1329,7 +1361,7 @@ function renderCreateConnection() {
       if (method.type !== 'oauth') promptHost.replaceChildren();
       save.disabled = unavailable;
       save.textContent = unavailable
-        ? 'Sign-in required'
+        ? isSubscription && !authMethodsIncomplete() ? 'Unavailable' : 'Sign-in required'
         : method.type === 'oauth' ? (method.label || 'Sign in') : 'Add';
       if (method.type === 'none') {
         primaryRow.append(save);
@@ -1348,8 +1380,10 @@ function renderCreateConnection() {
       const methods = availableMethods();
       const preferred = isLocal
         ? methods.find(method => method.type === 'none') || methods.find(method => method.type === 'api_key')
-        : methods.find(method => method.type === 'api_key') || methods.find(method => method.type === 'oauth') || methods[0];
-      methodId = preferred?.id || 'none';
+        : isSubscription
+          ? methods.find(method => method.type === 'oauth')
+          : methods.find(method => method.type === 'api_key') || methods.find(method => method.type === 'oauth') || methods[0];
+      methodId = preferred?.id || (isLocal ? 'none' : 'unavailable');
       if (resetUrl) {
         url.value = selected.id === 'ollama' ? 'http://localhost:11434' : '';
         secret.value = '';
@@ -1448,8 +1482,10 @@ function renderCreateConnection() {
   const cards = element('div', { class: 'provider-control-add-cards' });
   const localCard = addCard('local', localFamilies);
   const remoteCard = addCard('remote', remoteFamilies);
+  const subscriptionCard = addCard('subscription', subscriptionFamilies);
   if (localCard) cards.append(localCard);
   if (remoteCard) cards.append(remoteCard);
+  if (subscriptionCard) cards.append(subscriptionCard);
   host.append(cards);
   renderedFamilySignature = signature;
 }
@@ -1652,9 +1688,182 @@ function oauthPanel() {
   return byId('provider-control-oauth');
 }
 
+function oauthExpiryMs(value) {
+  const parsed = typeof value === 'number' ? value : Date.parse(String(value || ''));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : Date.now() + OAUTH_STATUS_RETENTION_MS;
+}
+
+function readOAuthFlowSession() {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(OAUTH_FLOW_STORAGE_KEY);
+    if (!raw) return null;
+    const value = JSON.parse(raw);
+    const flowId = typeof value?.flow_id === 'string' ? value.flow_id : '';
+    const expiresAtMs = Number(value?.expires_at_ms);
+    if (!/^[A-Za-z0-9_-]{16,128}$/.test(flowId) || !Number.isFinite(expiresAtMs) || expiresAtMs <= 0) {
+      globalThis.sessionStorage?.removeItem(OAUTH_FLOW_STORAGE_KEY);
+      return null;
+    }
+    return { flowId, expiresAtMs };
+  } catch (_) {
+    return null;
+  }
+}
+
+function rememberOAuthFlow(flowId, expiresAtMs) {
+  try {
+    globalThis.sessionStorage?.setItem(OAUTH_FLOW_STORAGE_KEY, JSON.stringify({
+      flow_id: flowId,
+      expires_at_ms: expiresAtMs,
+    }));
+  } catch (_) {}
+}
+
+function forgetOAuthFlow(flowId) {
+  try {
+    const saved = readOAuthFlowSession();
+    if (!flowId || saved?.flowId === flowId) {
+      globalThis.sessionStorage?.removeItem(OAUTH_FLOW_STORAGE_KEY);
+    }
+  } catch (_) {}
+}
+
 function stopOAuthPolling() {
   if (activeOAuth?.timer) clearTimeout(activeOAuth.timer);
+  forgetOAuthFlow(activeOAuth?.flowId);
   activeOAuth = null;
+}
+
+function addOAuthPublicDetails(result) {
+  const flow = activeOAuth;
+  if (!flow || flow.flowId !== result.flow_id || flow.detailsLoaded) return;
+  if (typeof result.instructions === 'string' && result.instructions) {
+    flow.instructions.textContent = result.instructions;
+    flow.instructions.classList?.remove?.('hidden');
+  }
+  if (typeof result.url === 'string' && result.url && !flow.loginLink) {
+    flow.loginLink = element(
+      'a',
+      { class: 'admin-btn-add', href: result.url, target: '_blank', rel: 'noopener noreferrer' },
+      'Open provider login',
+    );
+    flow.loginLinkHost.append(flow.loginLink);
+    flow.loginLinkHost.classList?.remove?.('hidden');
+    if (flow.openLoginOnStart) {
+      try { window.open?.(result.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
+      flow.openLoginOnStart = false;
+    }
+  }
+  const userCode = typeof result.user_code === 'string' && /^[A-Za-z0-9-]{4,64}$/.test(result.user_code)
+    ? result.user_code
+    : '';
+  if (userCode && !flow.copyButton) {
+    const codeRow = element('div', {
+      class: 'provider-control-oauth-code-row',
+      role: 'group',
+      'aria-label': 'Provider sign-in code',
+    });
+    const code = element('code', { class: 'provider-control-oauth-user-code' }, userCode);
+    const copyButton = button('Copy code', 'admin-btn-sm provider-control-oauth-copy-button');
+    const copyFeedback = element('p', {
+      class: 'admin-toggle-sub provider-control-oauth-copy-feedback',
+      role: 'status',
+      'aria-live': 'polite',
+    });
+    copyButton.addEventListener('click', async () => {
+      copyButton.disabled = true;
+      try {
+        const writeText = globalThis.navigator?.clipboard?.writeText;
+        if (typeof writeText !== 'function') throw new Error('Clipboard unavailable');
+        await writeText.call(globalThis.navigator.clipboard, userCode);
+        copyFeedback.textContent = 'Code copied.';
+      } catch (_) {
+        copyFeedback.textContent = 'Copy failed. Select the code to copy it.';
+      } finally {
+        copyButton.disabled = Boolean(flow.codeExpired);
+      }
+    });
+    codeRow.append(code, copyButton);
+    flow.codeHost.replaceChildren(
+      element('span', { class: 'provider-control-oauth-code-label' }, 'Sign-in code'),
+      codeRow,
+      copyFeedback,
+    );
+    flow.codeHost.classList?.remove?.('hidden');
+    flow.copyButton = copyButton;
+    flow.copyFeedback = copyFeedback;
+  }
+  flow.detailsLoaded = Boolean(flow.instructions.textContent || flow.loginLink || flow.copyButton);
+}
+
+function mountOAuthFlow(result, options = {}) {
+  const panel = oauthPanel();
+  if (!panel) return null;
+  const flowId = String(result.flow_id || '');
+  const card = element('div', { class: 'admin-card provider-control-oauth-card' });
+  const title = options.title
+    || (result.mode === 'reauth' ? 'Reconnect provider account' : 'Provider login');
+  card.append(element('h2', {}, title));
+  const instructions = element('p', {
+    class: 'admin-toggle-sub provider-control-oauth-instructions hidden',
+  });
+  const loginLinkHost = element('div', { class: 'provider-control-oauth-login hidden' });
+  const codeHost = element('div', { class: 'provider-control-oauth-code hidden' });
+  const status = element('p', {
+    class: 'admin-toggle-sub',
+    role: 'status',
+    'aria-live': 'polite',
+  }, options.statusText || `Status: ${result.status || 'pending'}`);
+  const cancel = button('Cancel login');
+  card.append(instructions, loginLinkHost, codeHost, status, cancel);
+  panel.replaceChildren(card);
+  const expiresAtMs = oauthExpiryMs(result.expires_at);
+  activeOAuth = {
+    flowId,
+    status,
+    timer: null,
+    expiresAtMs,
+    retryCount: 0,
+    instructions,
+    loginLinkHost,
+    codeHost,
+    loginLink: null,
+    copyButton: null,
+    copyFeedback: null,
+    codeExpired: false,
+    detailsLoaded: false,
+    openLoginOnStart: Boolean(options.openLoginOnStart),
+  };
+  rememberOAuthFlow(flowId, expiresAtMs);
+  addOAuthPublicDetails({ ...result, flow_id: flowId });
+  cancel.addEventListener('click', async () => {
+    const current = activeOAuth;
+    if (!current || current.flowId !== flowId) return;
+    cancel.disabled = true;
+    try {
+      const done = await request(`/oauth/flows/${encodeURIComponent(flowId)}`, { method: 'DELETE' });
+      if (done.status === 'complete') {
+        status.textContent = 'Provider login saved to the account pool.';
+        stopOAuthPolling();
+        panel.replaceChildren();
+        await changed('Provider login saved to the account pool.');
+        return;
+      }
+      if (done.status === 'cancelled') {
+        stopOAuthPolling();
+        panel.replaceChildren();
+        return;
+      }
+      status.textContent = `Login ${done.status || 'status unknown'}`;
+      cancel.disabled = false;
+    } catch (_) {
+      if (activeOAuth?.flowId === flowId) {
+        status.textContent = 'Cancellation could not be confirmed. Login status checks will continue.';
+        cancel.disabled = false;
+      }
+    }
+  });
+  return activeOAuth;
 }
 
 async function pollOAuth(flowId) {
@@ -1662,6 +1871,12 @@ async function pollOAuth(flowId) {
   try {
     const result = await request(`/oauth/flows/${encodeURIComponent(flowId)}`);
     if (!activeOAuth || activeOAuth.flowId !== flowId) return;
+    addOAuthPublicDetails({ ...result, flow_id: flowId });
+    if (Number.isFinite(Date.parse(String(result.expires_at || '')))) {
+      activeOAuth.expiresAtMs = oauthExpiryMs(result.expires_at);
+      rememberOAuthFlow(flowId, activeOAuth.expiresAtMs);
+    }
+    activeOAuth.retryCount = 0;
     activeOAuth.status.textContent = `Status: ${result.status}`;
     if (result.status === 'complete') {
       stopOAuthPolling();
@@ -1671,16 +1886,47 @@ async function pollOAuth(flowId) {
     }
     if (['failed', 'cancelled', 'expired'].includes(result.status)) {
       activeOAuth.status.textContent = `Login ${result.status}${result.error_code ? ` · ${result.error_code}` : ''}`;
+      if (activeOAuth.copyButton) {
+        activeOAuth.codeExpired = true;
+        activeOAuth.copyButton.disabled = true;
+        activeOAuth.copyFeedback.textContent = result.status === 'expired'
+          ? 'This sign-in code has expired.'
+          : 'This sign-in code is no longer available.';
+      }
       stopOAuthPolling();
       return;
     }
     activeOAuth.timer = setTimeout(() => pollOAuth(flowId), 1200);
-  } catch (error) {
-    if (activeOAuth?.flowId === flowId) {
-      activeOAuth.status.textContent = error.message;
+  } catch (_) {
+    const flow = activeOAuth;
+    if (!flow || flow.flowId !== flowId) return;
+    if (Date.now() >= flow.expiresAtMs + OAUTH_STATUS_RETENTION_MS) {
+      flow.status.textContent = 'Login status could not be confirmed. Check Added Models before starting another login.';
       stopOAuthPolling();
+      return;
     }
+    flow.retryCount += 1;
+    const delay = Math.min(
+      OAUTH_STATUS_RETRY_BASE_MS * (2 ** Math.min(flow.retryCount - 1, 4)),
+      OAUTH_STATUS_RETRY_MAX_MS,
+    );
+    flow.status.textContent = `Could not check login status. Retrying in ${Math.ceil(delay / 1000)} seconds…`;
+    flow.timer = setTimeout(() => pollOAuth(flowId), delay);
   }
+}
+
+function restoreOAuthFlow() {
+  const saved = readOAuthFlowSession();
+  if (!saved || !oauthPanel()) return;
+  mountOAuthFlow({
+    flow_id: saved.flowId,
+    status: 'pending',
+    expires_at: new Date(saved.expiresAtMs).toISOString(),
+  }, {
+    title: 'Restoring provider login',
+    statusText: 'Restoring login status…',
+  });
+  pollOAuth(saved.flowId);
 }
 
 async function startOAuth(connection, account = null, method = null, inputs = {}) {
@@ -1707,16 +1953,11 @@ async function startOAuth(connection, account = null, method = null, inputs = {}
         inputs,
       },
     });
-    const card = element('div', { class: 'admin-card provider-control-oauth-card' });
-    card.append(element('h2', {}, account ? `Reconnect ${account.label}` : `Add ${connection.label} login`));
-    if (result.instructions) card.append(element('p', { class: 'admin-toggle-sub' }, result.instructions));
-    if (result.url) {
-      const link = element('a', { class: 'admin-btn-add', href: result.url, target: '_blank', rel: 'noopener noreferrer' }, 'Open provider login');
-      card.append(link);
-      try { window.open?.(result.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
-    }
-    const status = element('p', { class: 'admin-toggle-sub', role: 'status', 'aria-live': 'polite' }, 'Status: pending');
-    card.append(status);
+    const status = mountOAuthFlow(result, {
+      title: account ? `Reconnect ${account.label}` : `Add ${connection.label} login`,
+      openLoginOnStart: true,
+    })?.status;
+    if (!status) return false;
     if (result.method === 'code') {
       const stateInput = element('input', { class: 'settings-input', type: 'text', autocomplete: 'off', placeholder: 'State from the callback URL', value: result.state || '' });
       const codeInput = element('input', { class: 'settings-input', type: 'text', autocomplete: 'off', placeholder: 'Authorization code (if provided)' });
@@ -1742,19 +1983,10 @@ async function startOAuth(connection, account = null, method = null, inputs = {}
           finish.disabled = false;
         }
       });
-      card.append(field('OAuth state', stateInput), field('Authorization code', codeInput), finish);
+      status.parentElement?.insertBefore(field('OAuth state', stateInput), status);
+      status.parentElement?.insertBefore(field('Authorization code', codeInput), status);
+      status.parentElement?.insertBefore(finish, status);
     }
-    const cancel = button('Cancel login');
-    cancel.addEventListener('click', async () => {
-      try {
-        await request(`/oauth/flows/${encodeURIComponent(result.flow_id)}`, { method: 'DELETE' });
-      } catch (_) {}
-      stopOAuthPolling();
-      panel.replaceChildren();
-    });
-    card.append(cancel);
-    panel.replaceChildren(card);
-    activeOAuth = { flowId: result.flow_id, status, timer: null };
     pollOAuth(result.flow_id);
     return true;
   } catch (error) {
@@ -2605,6 +2837,7 @@ export function init(options = {}) {
     invalidateLoadedViews();
     load({ force: true, view: activeManagementView() });
   });
+  restoreOAuthFlow();
 }
 
 export function selectConnection(connectionId) {

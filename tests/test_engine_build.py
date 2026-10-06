@@ -33,7 +33,7 @@ def _fixture_install(tmp_path: Path) -> tuple[Path, Path]:
         "engine_version": "1.0.2",
         "target": target,
         "support_tier": "tier-1",
-        "bun_version": "1.3.14",
+        "bun_version": "1.4.0",
         "binary": {
             "name": binary.name,
             "sha256": _sha256(binary),
@@ -74,7 +74,7 @@ def test_vendor_manifest_pins_toolchain_lock_catalog_and_license():
     manifest = engine_build.load_vendor_manifest(ROOT)
     vendor = ROOT / "packages" / "mimo-code"
 
-    assert manifest["toolchain"]["bun"]["version"] == "1.3.14"
+    assert manifest["toolchain"]["bun"]["version"] == "1.4.0"
     assert set(manifest["build"]["tier_1_targets"]) == {
         "linux-x64",
         "linux-arm64",
@@ -219,6 +219,7 @@ def test_source_fingerprint_ignores_local_and_generated_state(tmp_path):
         "openclank-vendor.json": "manifest hashes separately",
         "packages/opencode/script/build-darwin.ts": "generated build entrypoint",
         "packages/opencode/src/provider/models-snapshot.js": "generated model catalogue",
+        "packages/sdk/js/openapi.json": "generated OpenAPI document",
         "packages/sdk/tsconfig.tsbuildinfo": "compiler state",
         "scratch.bun-build": "package output",
         "scratch~": "editor backup",

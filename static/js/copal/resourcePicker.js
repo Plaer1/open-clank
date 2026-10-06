@@ -1,3 +1,4 @@
+import { isChatResource, editorDestinationReason } from './resourceDestinations.js';
 /* Files-v1 resource picker shared by Editor and Notes.
  *
  * The picker is deliberately a display/selection adapter.  It only sends
@@ -6,9 +7,11 @@
  * can safely retain it across an async open handoff.
  */
 
+import { wireDialog } from './overlays.js';
+import { filesBrowserResource, installEditorFilesStyles, mountEditorFilesBrowser } from './editorFilesBrowser.js';
+
 export const RESOURCE_PICKER_PURPOSES = Object.freeze(new Set(['file', 'folder', 'template-folder']));
 const MAX_PAGE = 200;
-const MAX_RENDER_ROWS = 240;
 const EVENT_NAMES = [
   'openclank-account-changed', 'openclank-files-policy-changed', 'openclank-policy-changed',
   'openclank-window-closed', 'openclank:auth-context-changed', 'openclank:file-policy-changed',
@@ -50,7 +53,7 @@ function rowKind(row) {
 // component when adapting it for DOM identity; String(object) would collapse
 // unrelated owner/workspace/provider resources to "[object Object]".
 function canonicalResourceKey(row, accountScope = '', workspaceScope = '') {
-  const value = row?.resource_key ?? row?.resourceKey ?? row?.resource?.key ?? row?.id;
+  const value = row?.resource_key ?? row?.resource?.key ?? row?.resourceId ?? row?.resourceKey ?? row?.id;
   const source = value && typeof value === 'object' ? value : null;
   const account = text(source?.accountId ?? source?.account_id ?? source?.owner ?? source?.account, accountScope);
   const workspace = text(source?.workspaceId ?? source?.workspace_id ?? source?.workspace, workspaceScope);
@@ -91,7 +94,10 @@ export function normalizeAuthorizedResource(row, {
     ref,
     resourceRef: ref,
     resourceKey,
+    resourceId:text(row?.resource_id ?? row?.resourceId ?? (typeof row?.id === 'string' ? row.id : null) ?? resourceKeyValue?.resource_id ?? resourceKeyValue?.resourceId),
     provider,
+    open_target:row.open_target || row.openTarget || null,
+    provenance:row.provenance || null,
     kind,
     name: text(row?.name ?? row?.display_name ?? row?.resource?.name, ref),
     logicalPath: text(row?.logical_path ?? row?.logicalPath ?? row?.path ?? row?.resource?.logical_path),
@@ -141,303 +147,253 @@ function defaultElement(tag, attrs = {}, ...children) {
   return element;
 }
 
-/**
- * Create a bounded, keyboard accessible Files-v1 picker.
- *
- * `picker.loadChildren(ref)` and `picker.search(query)` are also useful to a
- * non-DOM Editor explorer.  They return authorized immutable rows and never
- * mutate provider state.
- */
+/** Selection/lifetime adapter for the actual shared Files browser. */
 export function createResourcePicker({
-  client,
-  purpose = 'file',
-  h = defaultElement,
-  accountScope = '',
-  workspaceScope = '',
-  generation = 0,
-  signal = null,
-  getGeneration = null,
-  getAccountScope = null,
-  onSelect = null,
-  onCancel = null,
-  rootLabel = 'Files',
-  mount = null,
+  client, purpose = 'file', h = defaultElement, accountScope = '', workspaceScope = '', generation = 0,
+  signal = null, getGeneration = null, getAccountScope = null, getWorkspaceScope = null,
+  isOriginCurrent = null, originWindow = null, initialDirectory = null, isCompatible = null,
+  onSelect = null, onCancel = null, onClose = null, rootLabel = 'Files', mount = null,
 } = {}) {
   if (!client || typeof client.roots !== 'function' || typeof client.children !== 'function') throw new TypeError('Files facade client is required');
   if (!RESOURCE_PICKER_PURPOSES.has(purpose)) throw new TypeError(`Unsupported picker purpose: ${purpose}`);
   const state = {
     closed:false, destroyed:false, controller:new AbortController(), generation:Number(generation) || 0,
-    accountScope:text(accountScope), workspaceScope:text(workspaceScope), roots:[], rows:[], selected:null,
-    parentRef:null, cursor:null, query:'', loading:false, error:null, dom:null, focusIndex:0,
-    requestEpoch:0, requestController:null, navigation:[], currentFolder:null, searchTimer:null, externalGeneration:getGeneration ? Number(getGeneration()) : null,
+    accountScope:text(accountScope || getAccountScope?.()), workspaceScope:text(workspaceScope || getWorkspaceScope?.()),
+    roots:[], rows:[], selected:null, currentFolder:null, parentRef:null, cursor:null, query:'',
+    loading:false, confirming:false, error:null, dom:null, browser:null, requestEpoch:0,
+    requestController:null, navigation:[], externalGeneration:getGeneration ? Number(getGeneration()) : null,
   };
-  const externalAbort = () => state.controller.abort();
-  if (signal) {
-    if (signal.aborted) state.controller.abort();
-    else signal.addEventListener('abort', externalAbort, { once:true });
-  }
-  const isCurrent = () => !state.closed && !state.destroyed && !state.controller.signal.aborted;
+  const isCurrent = () => !state.closed && !state.destroyed && !state.controller.signal.aborted
+    && (!state.dom || state.dom.open && state.dom.isConnected);
   const scopeStillCurrent = () => isCurrent()
     && (!getGeneration || Number(getGeneration()) === state.externalGeneration)
-    && (!getAccountScope || text(getAccountScope()) === state.accountScope);
+    && (!getAccountScope || text(getAccountScope()) === state.accountScope)
+    && (!getWorkspaceScope || text(getWorkspaceScope()) === state.workspaceScope)
+    && (!isOriginCurrent || isOriginCurrent());
+  const normalize = (row, parentRef = null) => normalizeAuthorizedResource(filesBrowserResource(row), {
+    purpose, generation:state.generation, accountScope:state.accountScope, workspaceScope:state.workspaceScope, parentRef,
+  });
+  const reason = (row) => {
+    if (row && isChatResource(row)) return 'Chats belong in Chats or Library, outside Editor.';
+    if (purpose === 'file' && row && editorDestinationReason(row)) return editorDestinationReason(row);
+    if (!row) return purpose === 'file' ? 'Select a file to open.' : 'Select or browse to a folder.';
+    if (purpose === 'file') {
+      if (row.kind === 'folder') return 'Open a folder to browse its files.';
+      if (row.capabilities.open !== true) return 'This resource cannot be opened in Editor.';
+    } else {
+      if (row.kind !== 'folder') return 'Choose a folder.';
+      if (row.capabilities.children !== true) return 'This folder cannot be browsed.';
+      if (purpose === 'template-folder' && !(row.capabilities.write || row.capabilities.create || row.capabilities.edit)) return 'Template folders require permission to create or edit files.';
+    }
+    const compatible = isCompatible?.(row);
+    return compatible === false ? 'This resource is not supported by this Editor.' : typeof compatible === 'string' ? compatible : '';
+  };
+  const candidate = () => state.selected || (purpose !== 'file' ? state.currentFolder : null);
+  const render = () => {
+    if (!state.dom) return;
+    const confirm = state.dom.querySelector('[data-resource-picker-confirm]');
+    const status = state.dom.querySelector('[data-resource-picker-status]');
+    const row = candidate();
+    if (confirm) {
+      confirm.disabled = !scopeStillCurrent() || state.loading || state.confirming || !!reason(row);
+      confirm.textContent = state.confirming ? 'Opening…' : purpose === 'template-folder' ? 'Choose Folder' : 'Open';
+      confirm.title = reason(row) || row?.name || '';
+    }
+    if (status) {
+      status.textContent = state.error?.message || (state.confirming ? 'Opening in the original Editor…' : reason(row) || row?.name || '');
+      status.classList.toggle('error', !!state.error);
+    }
+    state.dom.setAttribute('aria-busy', String(state.loading || state.confirming));
+  };
   const beginRequest = () => {
     state.requestController?.abort();
     const controller = new AbortController();
-    state.requestController = controller; state.requestEpoch += 1;
-    return { controller, epoch:state.requestEpoch };
+    state.requestController = controller;
+    return { controller, epoch:++state.requestEpoch };
   };
-  const requestStillCurrent = (request) => scopeStillCurrent()
-    && state.requestEpoch === request.epoch && state.requestController === request.controller;
-  const setRows = (rows, parentRef = null) => {
-    state.rows = rows.map(row => normalizeAuthorizedResource(row, {
-      purpose, generation:state.generation, accountScope:state.accountScope, workspaceScope:state.workspaceScope, parentRef,
-    }));
-    state.parentRef = parentRef; state.cursor = null; state.focusIndex = 0;
-    return Object.freeze([...state.rows]);
-  };
-  const loadRoots = async () => {
-    if (!isCurrent()) return Object.freeze([]);
+  const requestStillCurrent = request => scopeStillCurrent()
+    && state.requestEpoch === request.epoch && state.requestController === request.controller && !request.controller.signal.aborted;
+  // Retain the existing non-DOM authorized-page API. DOM navigation/search
+  // belong exclusively to the shared browser below.
+  const loadPage = async (kind, ref = null, options = {}) => {
+    if (!scopeStillCurrent()) return Object.freeze([]);
     const request = beginRequest();
-    state.loading = true; state.error = null;
+    state.loading = true; state.error = null; render();
     try {
-      const response = await client.roots({ copalWorkspace:state.workspaceScope || 'default', signal:request.controller.signal });
+      const response = kind === 'roots'
+        ? await client.roots({ copalWorkspace:state.workspaceScope || 'default', signal:request.controller.signal })
+        : kind === 'search'
+          ? await client.search(state.query, { limit:MAX_PAGE, signal:request.controller.signal })
+          : await client.children(ref, { ...options, limit:MAX_PAGE, signal:request.controller.signal });
       if (!requestStillCurrent(request)) return Object.freeze([]);
       state.generation = generationFrom(response, state.generation);
-      state.externalGeneration = getGeneration ? Number(getGeneration()) : state.externalGeneration;
-      state.roots = rowsFrom(response).map(row => normalizeAuthorizedResource(row, {
-        purpose:'folder', generation:state.generation, accountScope:state.accountScope, workspaceScope:state.workspaceScope,
-      }));
-      state.rows = [...state.roots]; state.parentRef = null; state.cursor = null; state.focusIndex = 0;
-      return Object.freeze([...state.roots]);
+      const rows = rowsFrom(response).filter(row => !isChatResource(row)).map(row => normalize(row, ref));
+      const previous = options.append ? state.rows : [];
+      const seen = new Set(previous.map(row => row.resourceKey));
+      state.rows = [...previous, ...rows.filter(row => !seen.has(row.resourceKey) && !!seen.add(row.resourceKey))].slice(0, 5001);
+      state.parentRef = ref; state.cursor = cursorFrom(response);
+      if (kind === 'roots') state.roots = [...state.rows];
+      return Object.freeze([...rows]);
     } catch (error) {
       if (error?.name === 'AbortError' || !requestStillCurrent(request)) return Object.freeze([]);
       state.error = error; throw error;
     } finally { if (state.requestController === request.controller) state.loading = false; render(); }
   };
-  const loadChildren = async (parent, { cursor = null, query = state.query, append = false, sort = { key:'name', direction:'asc', directories_first:true } } = {}) => {
-    const parentIdentity = typeof parent === 'string' ? { ref:parent } : parent;
-    const ref = text(parentIdentity?.ref ?? parentIdentity?.resourceRef);
+  const loadRoots = () => loadPage('roots');
+  const loadChildren = (parent, options = {}) => {
+    const ref = text(typeof parent === 'string' ? parent : parent?.ref || parent?.resourceRef || parent?.resource_ref);
     if (!ref) throw new TypeError('Folder resource reference is required');
-    if (!isCurrent() || (append && state.loading)) return Object.freeze([]);
-    const request = beginRequest();
-    state.loading = true; state.error = null;
-    try {
-      const response = await client.children(ref, { cursor, limit:MAX_PAGE, query:String(query || ''), sort, signal:request.controller.signal });
-      if (!requestStillCurrent(request)) return Object.freeze([]);
-      state.generation = generationFrom(response, state.generation);
-      state.externalGeneration = getGeneration ? Number(getGeneration()) : state.externalGeneration;
-      const next = rowsFrom(response).map(row => normalizeAuthorizedResource(row, {
-        purpose:purpose === 'file' ? 'file' : 'folder', generation:state.generation, accountScope:state.accountScope, workspaceScope:state.workspaceScope, parentRef:ref,
-      }));
-      if (append) {
-        const seen = new Set(state.rows.map(row => `${row.provider}:${row.resourceKey || row.ref}`));
-        state.rows = [...state.rows, ...next.filter(row => {
-          const key = `${row.provider}:${row.resourceKey || row.ref}`;
-          if (seen.has(key)) return false;
-          seen.add(key); return true;
-        })];
-      } else state.rows = next;
-      state.rows = state.rows.slice(0, 5001);
-      state.parentRef = ref; state.cursor = cursorFrom(response); state.focusIndex = 0;
-      render();
-      return Object.freeze([...next]);
-    } catch (error) {
-      if (error?.name === 'AbortError' || !requestStillCurrent(request)) return Object.freeze([]);
-      state.error = error; render(); throw error;
-    } finally { if (state.requestController === request.controller) state.loading = false; }
+    return loadPage('children', ref, { query:state.query, sort:{ key:'name', direction:'asc', directories_first:true }, ...options });
   };
-  const search = async (query) => {
-    const value = text(query);
-    state.query = value;
-    if (!isCurrent()) return Object.freeze([]);
-    // Clearing a query is a new request as well.  This supersedes a slow
-    // search before asking the facade for the unfiltered view.
-    if (!value) return state.parentRef ? loadChildren(state.parentRef, { query:value }) : loadRoots();
-    const request = beginRequest();
-    state.loading = true; state.error = null;
-    try {
-      if (typeof client.search !== 'function') throw new Error('Files search is unavailable');
-      const response = await client.search(value, { limit:MAX_PAGE, signal:request.controller.signal });
-      if (!requestStillCurrent(request)) return Object.freeze([]);
-      state.generation = generationFrom(response, state.generation);
-      state.externalGeneration = getGeneration ? Number(getGeneration()) : state.externalGeneration;
-      state.rows = rowsFrom(response).slice(0, 5001).map(row => normalizeAuthorizedResource(row, {
-        purpose, generation:state.generation, accountScope:state.accountScope, workspaceScope:state.workspaceScope, parentRef:null,
-      }));
-      state.parentRef = null; state.cursor = null; state.focusIndex = 0; render();
-      return Object.freeze([...state.rows]);
-    } catch (error) {
-      if (error?.name === 'AbortError' || !requestStillCurrent(request)) return Object.freeze([]);
-      state.error = error; render(); throw error;
-    } finally { if (state.requestController === request.controller) state.loading = false; }
+  const search = query => {
+    state.query = text(query);
+    return state.query ? loadPage('search') : state.parentRef ? loadChildren(state.parentRef) : loadRoots();
   };
-  const select = (value) => {
-    if (!value || !isCurrent()) return false;
-    const selected = state.rows.find(row => row.ref === (value.ref || value.resourceRef)) || value;
-    const caps = selected.capabilities || {};
-    if (purpose === 'file' && (selected.kind === 'folder' || caps.open !== true || caps.read !== true)) return false;
-    if ((purpose === 'folder' || purpose === 'template-folder') && (selected.kind !== 'folder' || caps.children !== true)) return false;
-    if (purpose === 'template-folder' && !(caps.write === true || caps.create === true || caps.edit === true)) return false;
-    state.selected = selected;
-    try { onSelect?.(selected); } catch (_) { /* terminal selection still tears down the picker */ }
-    return true;
+  const select = value => {
+    if (!scopeStillCurrent() || state.confirming) return false;
+    try {
+      state.selected = value ? normalize(value, state.parentRef) : null;
+      state.error = null; render();
+      return !reason(candidate());
+    } catch (error) { state.selected = null; state.error = error; render(); return false; }
   };
   const close = (cancelled = true) => {
     if (state.closed) return;
-    state.closed = true; state.loading = false; state.controller.abort(); state.requestController?.abort();
-    if (state.searchTimer) { clearTimeout(state.searchTimer); state.searchTimer = null; }
-    state.dom?.remove(); state.dom = null;
+    state.closed = true; state.loading = false;
+    state.controller.abort(); state.requestController?.abort();
+    state.browser?.dispose(); state.browser = null;
     detachLifecycle();
+    const dialog = state.dom; state.dom = null;
+    if (dialog?.open) dialog.close();
+    else dialog?.remove();
     if (cancelled) onCancel?.();
+    onClose?.(cancelled);
   };
-  const enter = async (value) => {
-    const selected = state.rows.find(row => row.ref === (value?.ref || value?.resourceRef || value));
-    if (!selected || selected.kind !== 'folder' || selected.capabilities?.children !== true) return false;
-    const previous = { ref:state.parentRef, rows:[...state.rows], cursor:state.cursor, query:state.query, folder:state.currentFolder };
-    const request = beginRequest();
-    state.loading = true; state.error = null; render();
+  const confirm = async value => {
+    if (state.confirming || state.loading) return false;
+    if (value && !select(value)) { render(); return false; }
+    const selected = candidate();
+    if (!scopeStillCurrent()) { close(); return false; }
+    if (reason(selected)) { render(); return false; }
+    state.confirming = true; state.error = null; render();
     try {
-      const response = await client.children(selected.ref, { cursor:null, limit:MAX_PAGE, query:String(state.query || ''), sort:{ key:'name', direction:'asc', directories_first:true }, signal:request.controller.signal });
-      if (!requestStillCurrent(request)) return false;
-      state.generation = generationFrom(response, state.generation);
-      state.externalGeneration = getGeneration ? Number(getGeneration()) : state.externalGeneration;
-      const rows = rowsFrom(response).map(row => normalizeAuthorizedResource(row, {
-        purpose:purpose === 'file' ? 'file' : 'folder', generation:state.generation,
-        accountScope:state.accountScope, workspaceScope:state.workspaceScope, parentRef:selected.ref,
-      })).slice(0, 5001);
-      // Navigation is a successful-load transaction. Failed, aborted, or
-      // stale requests leave the prior folder and its history untouched.
-      state.navigation.push(previous);
-      state.currentFolder = selected; state.parentRef = selected.ref;
-      state.rows = rows; state.cursor = cursorFrom(response); state.focusIndex = 0;
-      render(); return true;
+      // A displayed row is never authority for a later open. Revalidate its
+      // exact opaque reference before handing the immutable identity back.
+      let authorized = selected;
+      if (typeof client.stat === 'function') {
+        const result = await client.stat(selected.ref, { signal:state.controller.signal });
+        if (!scopeStillCurrent()) { close(); return false; }
+        state.generation = generationFrom(result, state.generation);
+        authorized = normalize(result?.resource || result, selected.parentRef || state.parentRef);
+        if (authorized.resourceKey !== selected.resourceKey || authorized.provider !== selected.provider || authorized.kind !== selected.kind) throw new Error('The selected resource changed. Select it again.');
+      }
+      const unavailable = reason(authorized);
+      if (unavailable) throw new Error(unavailable);
+      const result = await onSelect?.(authorized, { signal:state.controller.signal, isCurrent:scopeStillCurrent });
+      if (result === false) throw new Error('The Editor could not open this resource. Try again.');
+      if (!isCurrent()) return false;
+      close(false); return true;
     } catch (error) {
-      if (error?.name !== 'AbortError' && requestStillCurrent(request)) { state.error = error; render(); }
-      return false;
-    } finally { if (state.requestController === request.controller) state.loading = false; }
+      if (!isCurrent() || error?.name === 'AbortError') return false;
+      if (!scopeStillCurrent()) { close(); return false; }
+      state.error = error; return false;
+    } finally { state.confirming = false; render(); }
+  };
+  const directoryChanged = row => {
+    if (!scopeStillCurrent()) return;
+    try {
+      state.currentFolder = row ? normalize(row) : null;
+      state.parentRef = state.currentFolder?.ref || null;
+      state.selected = null; state.error = null; render();
+    } catch (error) { state.error = error; render(); }
+  };
+  const enter = async value => {
+    const folder = normalize(value);
+    if (folder.kind !== 'folder' || folder.capabilities.children !== true || !scopeStillCurrent()) return false;
+    if (state.browser) return state.browser.openDirectory(filesBrowserResource(value));
+    const previous = { folder:state.currentFolder, ref:state.parentRef, rows:state.rows, cursor:state.cursor };
+    try { await loadChildren(folder); } catch (_) { return false; }
+    if (!scopeStillCurrent()) return false;
+    state.navigation.push(previous); state.currentFolder = folder; state.selected = null; render(); return true;
   };
   const back = () => {
+    if (state.browser) return state.browser.window?.navigation?.back?.();
     const previous = state.navigation.pop();
     if (!previous) return false;
-    state.parentRef = previous.ref; state.rows = previous.rows; state.cursor = previous.cursor; state.query = previous.query; state.focusIndex = 0;
-    state.currentFolder = previous.folder || null; render();
-    return true;
-  };
-  const render = () => {
-    const dialog = state.dom;
-    if (!dialog) return;
-    const list = dialog.querySelector('[data-resource-picker-list]');
-    if (!list) return;
-    list.replaceChildren();
-    const backButton = dialog.querySelector('[data-resource-picker-back]');
-    if (backButton) { backButton.disabled = state.navigation.length === 0; backButton.onclick = () => back(); }
-    const breadcrumb = dialog.querySelector('[data-resource-picker-breadcrumb]');
-    if (breadcrumb) breadcrumb.textContent = state.currentFolder ? state.currentFolder.name : rootLabel;
-    const total = state.rows.length;
-    const start = Math.max(0, Math.min(Math.max(0, total - MAX_RENDER_ROWS), state.focusIndex - Math.floor(MAX_RENDER_ROWS / 2)));
-    const visible = state.rows.slice(start, start + MAX_RENDER_ROWS);
-    if (start) list.append(h('div', { class:'copal-resource-picker-spacer', style:`height:${start * 32}px`, 'aria-hidden':'true' }));
-    visible.forEach((row, visibleIndex) => {
-      const index = start + visibleIndex;
-      const canEnter = row.kind === 'folder' && row.capabilities?.children === true;
-      const selectable = (purpose === 'file' && row.kind !== 'folder' && row.capabilities?.open === true && row.capabilities?.read === true)
-        || ((purpose === 'folder' || purpose === 'template-folder') && row.kind === 'folder' && row.capabilities?.children === true && (purpose !== 'template-folder' || row.capabilities?.write === true || row.capabilities?.create === true || row.capabilities?.edit === true));
-      const status = canEnter || selectable ? '' : purpose === 'template-folder' ? 'read-only' : row.capabilities?.read === true ? 'unavailable' : 'read-only';
-      const details = `${row.provider} · ${row.kind}${row.logicalPath ? ` · ${row.logicalPath}` : ''}${status ? ` · ${status}` : ''}`;
-      const button = h('button', { type:'button', class:`copal-doc-row${state.selected?.ref === row.ref ? ' active' : ''}`, role:'option', 'aria-selected':String(state.selected?.ref === row.ref), 'aria-posinset':index + 1, 'aria-setsize':total, 'data-row-index':index, 'data-resource-ref':row.ref, disabled:!canEnter && !selectable },
-        h('strong', { text:row.name }), h('small', { text:details }));
-      button.tabIndex = index === state.focusIndex ? 0 : -1;
-      button.addEventListener('click', () => {
-        // File selection uses folder rows as navigation affordances.  A
-        // folder purpose selects the folder itself; this keeps the three
-        // purposes explicit while sharing one paged list.
-        if (row.kind === 'folder' && canEnter) { void enter(row); return; }
-        if (select(row)) close(false);
-      });
-      button.addEventListener('keydown', event => {
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'PageDown' || event.key === 'PageUp' || event.key === 'Home' || event.key === 'End') {
-          event.preventDefault();
-          const next = event.key === 'Home' ? 0 : event.key === 'End' ? total - 1 : Math.max(0, Math.min(total - 1, state.focusIndex + (event.key === 'PageDown' || event.key === 'PageUp' ? (event.key === 'PageDown' ? 20 : -20) : event.key === 'ArrowDown' ? 1 : -1)));
-          if (!moveFocus(next)) { state.focusIndex = next; render(); const target = list.querySelector(`[data-row-index="${next}"]`); target?.focus(); target?.scrollIntoView?.({ block:'nearest' }); }
-        } else if (event.key === 'Enter') {
-          event.preventDefault();
-          if (row.kind === 'folder' && canEnter) void enter(row);
-          else if (select(row)) close(false);
-        }
-      });
-      list.append(button);
-    });
-    if (start + visible.length < total) list.append(h('div', { class:'copal-resource-picker-spacer', style:`height:${(total - start - visible.length) * 32}px`, 'aria-hidden':'true' }));
-    if (!visible.length) list.append(h('p', { class:'copal-empty-inline', text:state.loading ? 'Loading…' : state.error?.message || 'No authorized resources.' }));
-    if (state.currentFolder && (purpose === 'folder' || purpose === 'template-folder')) {
-      const required = purpose === 'template-folder' ? 'writable' : 'authorized';
-      list.append(h('button', { type:'button', class:'copal-btn primary', text:`Choose this ${required} folder`, onclick:() => { if (select(state.currentFolder)) close(false); } }));
-    }
-    if (state.cursor) list.append(h('button', { type:'button', class:'copal-btn', text:'Load more', onclick:() => loadChildren(state.parentRef, { cursor:state.cursor, append:true }) }));
-  };
-  const moveFocus = index => {
-    const list = state.dom?.querySelector?.('[data-resource-picker-list]');
-    const target = list?.querySelector?.(`[data-row-index="${index}"]`);
-    if (!target) return false;
-    list.querySelector?.('[data-row-index][tabindex="0"]')?.setAttribute('tabindex', '-1');
-    target.tabIndex = 0;
-    state.focusIndex = index;
-    target.focus();
-    target.scrollIntoView?.({ block:'nearest' });
-    return true;
+    state.currentFolder = previous.folder; state.parentRef = previous.ref; state.rows = previous.rows; state.cursor = previous.cursor; state.selected = null; render(); return true;
   };
   const open = async () => {
-    if (state.closed && !state.destroyed && !signal?.aborted) {
-      state.closed = false;
-      state.controller = new AbortController();
-      state.requestController = null;
-      attachLifecycle();
-    }
-    if (!isCurrent()) return false;
-    if (state.dom) return true;
-    if (typeof document !== 'undefined') {
-      const dialog = h('dialog', { class:'copal-dialog copal-resource-picker', 'aria-label':`${rootLabel}: ${purpose}` },
-        h('h2', { text:purpose === 'folder' ? 'Open Folder' : purpose === 'template-folder' ? 'Choose template folder' : 'Open File' }),
-        h('nav', { class:'copal-resource-picker-breadcrumbs', 'aria-label':'Folder navigation' },
-          h('button', { type:'button', class:'copal-btn', 'data-resource-picker-back':true, text:'Back' }),
-          h('span', { 'data-resource-picker-breadcrumb':true, text:rootLabel })),
-        h('input', { type:'search', placeholder:'Search authorized resources…', 'aria-label':'Search authorized resources', autocomplete:'off' }),
-        h('div', { 'data-resource-picker-list':true, role:'listbox', tabindex:'0', 'aria-label':'Authorized resources' }),
-        h('footer', { class:'copal-dialog-actions' }, h('button', { type:'button', class:'copal-btn', text:'Cancel', onclick:() => close() })),
-      );
-      state.dom = dialog; (mount || document.body).append(dialog); dialog.addEventListener('cancel', () => close());
-      const input = dialog.querySelector('input');
-      const list = dialog.querySelector('[data-resource-picker-list]');
-      list.addEventListener('scroll', () => {
-        const total = state.rows.length;
-        const index = Math.max(0, Math.min(Math.max(0, total - 1), Math.floor(list.scrollTop / 32)));
-        if (index !== state.focusIndex) { state.focusIndex = index; render(); }
-      }, { passive:true });
-      input.addEventListener('input', () => {
-        if (state.searchTimer) clearTimeout(state.searchTimer);
-        const query = input.value;
-        state.searchTimer = setTimeout(() => { state.searchTimer = null; void search(query); }, 120);
-      });
-      dialog.showModal?.(); input.focus();
-    }
-    try { await loadRoots(); } catch (_) { /* rendered error state remains truthful */ }
-    render(); return true;
+    if (!scopeStillCurrent() || state.dom) return false;
+    if (typeof document === 'undefined') { await loadRoots(); return true; }
+    installEditorFilesStyles();
+    const browserHost = h('div', { class:'copal-resource-picker-browser' });
+    const dialog = h('dialog', { class:'copal-dialog copal-resource-picker copal-files-selection-dialog', 'aria-label':`${rootLabel}: ${purpose}` },
+      h('h2', { text:purpose === 'folder' ? 'Open Folder' : purpose === 'template-folder' ? 'Choose template folder' : 'Open File' }),
+      browserHost,
+      h('p', { class:'copal-resource-picker-status', 'data-resource-picker-status':true, role:'status', 'aria-live':'polite' }),
+      h('footer', { class:'copal-dialog-actions' },
+        h('button', { type:'button', class:'copal-btn', text:'Cancel', onclick:() => close() }),
+        h('button', { type:'button', class:'copal-btn primary', 'data-resource-picker-confirm':true, disabled:true, text:'Open', onclick:() => { void confirm(); } })),
+    );
+    state.dom = dialog;
+    (mount || document.body).append(dialog);
+    // Native close notifications are queued. Invalidate the callback scope in
+    // the dismissal event itself, before an awaited open can resume.
+    dialog.addEventListener('cancel', event => { event.preventDefault(); close(); }, { capture:true });
+    dialog.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || event.isComposing || !dialog.open) return;
+      event.preventDefault(); event.stopPropagation(); close();
+    }, { capture:true });
+    dialog.addEventListener('pointerdown', event => {
+      if (event.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      if (event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom) return;
+      event.preventDefault(); event.stopPropagation(); close();
+    }, { capture:true });
+    wireDialog(dialog, { restoreFocus:!onClose });
+    dialog.addEventListener('close', () => close(), { once:true });
+    dialog.showModal(); render();
+    state.loading = true; render();
+    try {
+      const browser = await mountEditorFilesBrowser({
+        container:browserHost,
+        onDirectory:directoryChanged,
+        onSelection:select,
+        onConfirm:row => confirm(row),
+      }, scopeStillCurrent);
+      if (!browser || !scopeStillCurrent()) { browser?.dispose(); close(); return false; }
+      state.browser = browser;
+      await browser.open();
+      if (!scopeStillCurrent()) { close(); return false; }
+      if (initialDirectory) await browser.openDirectory(filesBrowserResource(initialDirectory));
+      if (!scopeStillCurrent()) { close(); return false; }
+      return true;
+    } catch (error) {
+      if (isCurrent()) state.error = error;
+      return false;
+    } finally { state.loading = false; render(); }
   };
-  const onLifecycle = () => close();
+  const onLifecycle = event => {
+    if (['openclank-window-closed', 'modal-dismissed'].includes(event?.type)) {
+      const id = event.detail?.id || event.detail?.windowId;
+      if (!originWindow || id !== originWindow.id) return;
+    }
+    close();
+  };
+  const eventNames = [...EVENT_NAMES, 'openclank:auth-user-ready', 'workspace-change', 'modal-dismissed'];
   const lifecycleTargets = [globalThis, globalThis.document].filter(Boolean);
   let listenersAttached = false;
   const attachLifecycle = () => {
     if (listenersAttached) return;
     listenersAttached = true;
-    lifecycleTargets.forEach(target => EVENT_NAMES.forEach(name => target.addEventListener?.(name, onLifecycle)));
+    lifecycleTargets.forEach(target => eventNames.forEach(name => target.addEventListener?.(name, onLifecycle)));
     signal?.addEventListener?.('abort', onLifecycle, { once:true });
   };
   const detachLifecycle = () => {
     if (!listenersAttached) return;
     listenersAttached = false;
-    lifecycleTargets.forEach(target => EVENT_NAMES.forEach(name => target.removeEventListener?.(name, onLifecycle)));
+    lifecycleTargets.forEach(target => eventNames.forEach(name => target.removeEventListener?.(name, onLifecycle)));
     signal?.removeEventListener?.('abort', onLifecycle);
-    signal?.removeEventListener?.('abort', externalAbort);
   };
   attachLifecycle();
   const destroy = () => { state.destroyed = true; close(false); detachLifecycle(); };
@@ -446,10 +402,10 @@ export function createResourcePicker({
     closed:state.closed, destroyed:state.destroyed, generation:state.generation, accountScope:state.accountScope,
     workspaceScope:state.workspaceScope, parentRef:state.parentRef, cursor:state.cursor,
     navigationDepth:state.navigation.length, currentFolder:state.currentFolder,
-    query:state.query, loading:state.loading, error:state.error, selected:state.selected,
+    query:state.query, loading:state.loading, confirming:state.confirming, error:state.error, selected:state.selected,
     rows:[...state.rows], roots:[...state.roots],
   });
-  return Object.freeze({ open, close, destroy, loadRoots, loadChildren, search, select, enter, back, render, state:snapshot });
+  return Object.freeze({ open, close, destroy, loadRoots, loadChildren, search, select, confirm, enter, back, render, state:snapshot });
 }
 
 export default { createResourcePicker, normalizeAuthorizedResource, RESOURCE_PICKER_PURPOSES };

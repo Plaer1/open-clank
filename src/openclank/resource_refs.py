@@ -24,7 +24,7 @@ RESOURCE_REF_VERSION = 1
 DEFAULT_RESOURCE_REF_TTL_SECONDS = 15 * 60
 MAX_RESOURCE_REF_TTL_SECONDS = 24 * 60 * 60
 
-PROVIDERS = frozenset({"host", "copal", "gallery", "library", "published", "chat", "research"})
+PROVIDERS = frozenset({"host", "copal", "files", "library", "published", "chat", "research"})
 RESOURCE_KINDS = frozenset(
     {
         "provider_root",

@@ -61,26 +61,19 @@ def require_admin(request: Request):
     Allows access when auth is explicitly disabled, or when the request carries
     the in-process internal-tool token used by loopback agent tools.
     """
-    # In-process bypass for tool-layer loopback calls. Two paths:
-    # (a) header-direct (caller set X-Odysseus-Internal-Token), or
-    # (b) the auth middleware already validated the token and stamped
-    #     request.state.current_user = "internal-tool".
-    try:
-        hdr = request.headers.get(INTERNAL_TOOL_HEADER)
-        if hdr and secrets.compare_digest(hdr, INTERNAL_TOOL_TOKEN):
-            return
-        if getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:
-            return
-    except Exception:
-        pass
-
-    auth_mgr = getattr(request.app.state, "auth_manager", None)
-    if os.getenv("AUTH_ENABLED", "true").lower() == "false":
+    if getattr(request.state, "internal_tool_authenticated", False) and getattr(request.state, "authenticated", False):
         return
-    if not auth_mgr or not auth_mgr.is_configured:
-        raise HTTPException(403, "Admin only")
+    auth_mgr = getattr(request.app.state, "auth_manager", None)
+    if auth_mgr is None:
+        raise HTTPException(503, "Authentication unavailable")
     user = getattr(request.state, "current_user", None)
-    if not user or not auth_mgr.is_admin(user):
+    if not getattr(request.state, "authenticated", False) or not user or user not in auth_mgr.users:
+        raise HTTPException(403, "Admin only")
+    try:
+        permitted = auth_mgr.is_admin(user)
+    except Exception as exc:
+        raise HTTPException(503, "Privilege authority unavailable") from exc
+    if permitted is not True:
         raise HTTPException(403, "Admin only")
 
 
@@ -94,6 +87,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
         path = request.url.path
+        # Files content declares a stricter media policy. Multiple CSP headers
+        # are enforced by intersection, retaining both the app default and the
+        # resource sandbox without broadening any allowed source.
+        resource_csp = (
+            response.headers.get("Content-Security-Policy")
+            if path.startswith("/api/files-v1/content/") else None
+        )
 
         # Tool render endpoints
         is_tool_render = path.startswith("/api/tools/") and path.endswith("/render")
@@ -106,11 +106,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(self), geolocation=()"
 
-        is_https = (
-            request.url.scheme == "https"
-            or request.headers.get("X-Forwarded-Proto") == "https"
-        )
-        if is_https:
+        # Proxy middleware may establish ``request.url.scheme`` after applying
+        # its configured trust boundary. A directly supplied forwarded header
+        # has no such authority, so it cannot change transport policy here.
+        if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
         if is_report:
@@ -151,4 +150,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "frame-src 'self'; "
                 "frame-ancestors 'none'"
             )
+        if resource_csp and resource_csp != response.headers.get("Content-Security-Policy"):
+            response.headers.append("Content-Security-Policy", resource_csp)
         return response

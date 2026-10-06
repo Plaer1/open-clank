@@ -4,8 +4,38 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7777').replace(/\/$/, '');
-const debuggerBase = (process.argv[3] || 'http://127.0.0.1:9222').replace(/\/$/, '');
+// This script creates and mutates acceptance fixtures. Refuse before any
+// filesystem, network, or browser access unless the invocation names a local,
+// disposable target and a disposable account explicitly.
+assert.equal(
+  process.env.OPEN_CLANK_DISPOSABLE_ACCEPTANCE,
+  '1',
+  'set OPEN_CLANK_DISPOSABLE_ACCEPTANCE=1 for a disposable acceptance target',
+);
+const baseArgument = String(process.argv[2] || '').trim();
+const debuggerArgument = String(process.argv[3] || '').trim();
+const expectedAuthUsername = String(process.env.OPEN_CLANK_AUTH_USERNAME || '').trim().toLowerCase();
+assert(baseArgument, 'pass an explicit disposable base URL as argv[2]');
+assert(debuggerArgument, 'pass an explicit local debugger URL as argv[3]');
+assert(/^(fixture|acceptance|test)-/.test(expectedAuthUsername), 'OPEN_CLANK_AUTH_USERNAME must begin fixture-, acceptance-, or test-');
+
+function disposableLoopbackUrl(value, label) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    assert.fail(`${label} must be an absolute loopback URL`);
+  }
+  assert(['http:', 'https:'].includes(parsed.protocol), `${label} must use HTTP(S)`);
+  assert(['127.0.0.1', '[::1]', '::1'].includes(parsed.hostname), `${label} must target literal local loopback`);
+  return parsed;
+}
+
+const baseUrl = disposableLoopbackUrl(baseArgument, 'base URL');
+assert.notEqual(baseUrl.port, '7777', 'base URL port 7777 is reserved for the live app');
+const debuggerUrl = disposableLoopbackUrl(debuggerArgument, 'debugger URL');
+const base = baseUrl.href.replace(/\/$/, '');
+const debuggerBase = debuggerUrl.href.replace(/\/$/, '');
 const outputDir = process.argv[4] || '/tmp/openclank-copal-browser';
 fs.mkdirSync(outputDir, { recursive:true });
 
@@ -17,7 +47,6 @@ if (authCookieFdRaw) {
   authSessionToken = fs.readFileSync(authCookieFd, 'utf8').trim();
   assert(/^[0-9a-f]{64}$/i.test(authSessionToken), 'OPEN_CLANK_AUTH_COOKIE_FD did not contain an Open Clank session token');
 }
-const expectedAuthUsername = String(process.env.OPEN_CLANK_AUTH_USERNAME || 'e').trim().toLowerCase();
 
 async function authenticatedFetch(url, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -490,7 +519,7 @@ assert.deepEqual(inspectorTabs, ['Properties','Links','Outline']);
 assert(await evaluate("document.querySelectorAll('#copal-notes-modal .copal-property-editor').length >= 4"));
 await screenshot('notes-properties');
 await evaluate(`(() => { const input=document.querySelector('#copal-notes-modal input[aria-label="Value for score"]'); input.value='8'; input.dispatchEvent(new Event('change',{bubbles:true})); })()`);
-await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(acceptance.id)}?workspace=default').then((response)=>response.json()).then((doc)=>/^score: 8$/m.test(doc.text))`, 'typed property Redb round-trip');
+await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(acceptance.id)}?workspace=default').then((response)=>response.json()).then((doc)=>/^score: 8$/m.test(doc.text))`, 'typed property Files round-trip');
 results.notes.typedPropertyRoundTrip = true;
 assert.deepEqual(await evaluate(`(() => ({
   done:document.querySelector('#copal-notes-modal input[aria-label="Value for done"]')?.type,
@@ -504,7 +533,7 @@ await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(acceptance.id)}?
 await evaluate("document.querySelector('#copal-notes-modal .cm-content').focus()");
 await command('Input.dispatchKeyEvent', { type:'keyDown', key:'z', code:'KeyZ', windowsVirtualKeyCode:90, modifiers:primaryModifier });
 await command('Input.dispatchKeyEvent', { type:'keyUp', key:'z', code:'KeyZ', windowsVirtualKeyCode:90, modifiers:primaryModifier });
-await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(acceptance.id)}?workspace=default').then((response)=>response.json()).then((doc)=>/^done: false$/m.test(doc.text))`, 'property undo Redb save');
+await waitFor(`fetch('/api/copal/documents/${encodeURIComponent(acceptance.id)}?workspace=default').then((response)=>response.json()).then((doc)=>/^done: false$/m.test(doc.text))`, 'property undo Files save');
 await evaluate("[...document.querySelectorAll('#copal-notes-modal .copal-inspector-tabs button')].find((node)=>node.textContent.trim()==='Links').click(); [...document.querySelectorAll('#copal-notes-modal .copal-inspector-tabs button')].find((node)=>node.textContent.trim()==='Properties').click()");
 await waitFor("[...document.querySelectorAll('#copal-notes-modal .copal-property-key')].some((node)=>node.value==='done')", 'property undo inspector refresh');
 results.notes.propertyUndo = true;
@@ -690,7 +719,7 @@ results.notes.conflictRecovery = true;
 await evaluate("document.querySelector('#copal-notes-modal button[aria-label=\"Editor commands\"]').click()");
 await waitFor("document.querySelector('dialog.copal-command-palette[open]')", 'history command palette');
 await evaluate("[...document.querySelectorAll('dialog.copal-command-palette[open] .copal-command-row')].find((node)=>node.textContent.trim().startsWith('History')).click()");
-await waitFor("[...document.querySelectorAll('dialog[open] button')].some((node)=>node.textContent.trim()==='Restore')", 'Redb history revisions');
+await waitFor("[...document.querySelectorAll('dialog[open] button')].some((node)=>node.textContent.trim()==='Restore')", 'Files history revisions');
 results.notes.history = await evaluate("[...document.querySelectorAll('dialog[open] button')].filter((node)=>node.textContent.trim()==='Restore').length");
 await evaluate("[...document.querySelectorAll('dialog[open] button')].find((node)=>node.textContent.trim()==='Close').click()");
 

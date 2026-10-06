@@ -1,3 +1,4 @@
+import { recordPresentation, achievementOwner, activityDigest } from './achievementProducer.js';
 // Theme system — preset themes + custom color editing, stored in localStorage
 // ES6 module
 
@@ -8,12 +9,11 @@ import { hexToRgb } from './color/hex.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 import { createGraphicsConsumer } from './graphics/consumer.js';
-import { createObstacleField, PAINTED_ALPHA_THRESHOLD } from './graphics/obstacle-field.js';
-import {
-  composeRainDirection,
-  resolveCollision,
-  spawnPosition,
-} from './graphics/rain-physics.js';
+import { getThemeEmojiAsset, getThemeEmojiCatalog, preloadThemeEmojiAssets } from './themeEmojiAssets.js';
+import { createObstacleField, obstacleCollision, PAINTED_ALPHA_THRESHOLD } from './graphics/obstacle-field.js';
+import { createKenePaintTrail } from './graphics/kene-paint.js';
+import { LCARS_SCANNER_CONTROLS, createLcarsScanner } from './graphics/lcars-scanner.js';
+import { createJunctionRainScene, stepJunctionRain } from './graphics/junction-rain.js';
 
 export const THEMES = {
   'clanker-dark': {
@@ -64,10 +64,8 @@ const THEME_LABELS = {
 const DEFAULT_THEME = 'clanker-dark';
 const LS_KEY = 'odysseus-theme';
 const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
-const THEME_SNAPSHOT_VERSION = 2;
-const AUTH_USER_KEY = 'odysseus-auth-user';
+const THEME_SNAPSHOT_VERSION = 3;
 const THEME_OWNER_PREFIX = `${LS_KEY}:scope:`;
-const LEGACY_CLANKER_ACCENTS = new Set(['#5A9EF5', '#2469D8', '#B83B78']);
 const THEME_ACCENT_DEFAULT = '#F6BE48';
 const THEME_ACCENT_HOVER = '#C4922A';
 const THEME_ACCENT_FOCUS = '#FFD97A';
@@ -87,14 +85,21 @@ const FONT_MAP = {
   serif: "Georgia, 'Times New Roman', serif",
   opendyslexic: "'OpenDyslexic', sans-serif",
 };
-const DEFAULT_FONT = 'mono';
+const DEFAULT_FONT = 'liga-comic-mono';
 const DEFAULT_DENSITY = 'comfortable';
+const DEFAULT_EDGE_HARDNESS = 50;
+
+function _normalizeEdgeHardness(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_EDGE_HARDNESS;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, Math.min(100, Math.round(numeric))) : DEFAULT_EDGE_HARDNESS;
+}
 const MAX_CUSTOM_THEMES = 8;
 
 // Default background patterns for built-in themes
 const THEME_DEFAULT_PATTERN = {
-  'clanker-dark':  'clanker-routefield',
-  'clanker-light': 'clanker-blueprint',
+  'clanker-dark':  'clanker-emoji-drift',
+  'clanker-light': 'clanker-lcars',
   dark:       'none',
   light:      'dots',
   midnight:   'rain',
@@ -121,7 +126,7 @@ const THEME_DEFAULT_EFFECT_COLOR = {
 
 // Default effect intensity (0..1) per theme. Any theme not listed defaults to 1.
 const THEME_DEFAULT_INTENSITY = {
-  'clanker-dark':  0.64,
+  'clanker-dark':  0.65,
   'clanker-light': 0.55,
   midnight:   0.5,
   terminal:   0.8,
@@ -129,13 +134,26 @@ const THEME_DEFAULT_INTENSITY = {
 };
 
 const THEME_DEFAULT_SIZE = {
-  'clanker-dark': 1,
+  'clanker-dark': 1.8,
   'clanker-light': 1,
 };
 
 const THEME_DEFAULT_FONT = {
   'clanker-dark': 'liga-comic-mono',
   'clanker-light': 'liga-comic-mono',
+};
+
+// Theme-scoped defaults captured from the current Open Clank Dark settings.
+// Explicit saved control values override these; other themes keep their defaults.
+const THEME_DEFAULT_EFFECT_CONTROLS = {
+  'clanker-dark': {
+    'clanker-emoji-drift': {
+      advancedSettings: true, driftSpeed: 5, driftSpeedVariation: 12,
+      gemSizeVariation: 100, intensityVariation: 0, middleIntensity: 200,
+      totalQuantity: 115, glowLikelihood: 6, rotationLikelihood: 71,
+      rotationSpeed: 5, rotationSpeedVariation: 18, useOneEmojiPool: true,
+    },
+  },
 };
 
 // Default frosted-glass state per theme. Themes not listed default to false.
@@ -183,18 +201,6 @@ function _themeSourcePalette(input) {
   return { ...flat, ...nested, ...overrides };
 }
 
-function _isLegacyClankerDefault(name, source, base, context = {}) {
-  // A caller saving a freshly edited palette has provenance that a legacy
-  // localStorage record lacks. Preserve an intentional blue value in that
-  // case; only unversioned reads should apply the conservative migration.
-  if (context.preserveExplicit) return false;
-  if (context.version >= THEME_SNAPSHOT_VERSION && context.overridePresent) return false;
-  if (!['clanker-dark', 'clanker-light'].includes(name)) return false;
-  const oldAccent = LEGACY_CLANKER_ACCENTS.has(String(source.red || '').toUpperCase());
-  return oldAccent
-    && ['bg', 'fg', 'panel', 'border'].every(key => !source[key] || String(source[key]).toUpperCase() === String(base[key]).toUpperCase());
-}
-
 /**
  * Return the complete versioned theme state used by boot, preview, hydration,
  * save and reset. Flat aliases are retained for older callers while the
@@ -203,24 +209,17 @@ function _isLegacyClankerDefault(name, source, base, context = {}) {
 export function normalizeThemeSnapshot(input = null, context = {}) {
   const source = _isPlainObject(input) ? input : {};
   let name = source.identity?.name || source.name || context.name || DEFAULT_THEME;
-  if (name === 'chatgpt') name = 'gpt';
-  if (name === 'sakura') name = 'ume';
   const builtIn = Object.prototype.hasOwnProperty.call(THEMES, name);
   if (!builtIn && !_isPlainObject(source.colors) && !_isPlainObject(source.palette)
       && !_isPlainObject(source.overrides?.colors)) return null;
 
   const base = builtIn ? THEMES[name] : (THEMES[DEFAULT_THEME] || {});
   const rawPalette = _themeSourcePalette(source);
-  const legacyDefault = _isLegacyClankerDefault(name, rawPalette, base, {
-    ...context,
-    version: source.version,
-    overridePresent: source.identity?.overridePresent,
-  });
   const palette = {};
   for (const key of ['bg', 'fg', 'panel', 'border', 'red']) {
     const candidate = _themeColor(rawPalette[key]);
     const fallback = _themeColor(base[key]) || (key === 'red' ? THEME_ACCENT_DEFAULT : '#000000');
-    palette[key] = (legacyDefault && key === 'red') ? (_themeColor(base.red) || THEME_ACCENT_DEFAULT) : (candidate || fallback);
+    palette[key] = candidate || fallback;
   }
 
   const rawAdvanced = {
@@ -229,10 +228,6 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
     ...(_isPlainObject(source.advanced) ? _copyThemeValue(source.advanced) : {}),
     ...(_isPlainObject(source.overrides?.advanced) ? _copyThemeValue(source.overrides.advanced) : {}),
   };
-  if (legacyDefault) {
-    const defaults = base.advanced || {};
-    for (const key of Object.keys(defaults)) rawAdvanced[key] = defaults[key];
-  }
   const explicitAdvanced = {};
   for (const [key, value] of Object.entries(rawAdvanced)) {
     const color = _themeColor(value);
@@ -263,28 +258,32 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
     ...source,
     ...(_isPlainObject(source.typography) ? source.typography : {}),
   };
-  // Normalize legacy pattern aliases at every load/import/save path (T19).
-  // `clanker-radar` (Radar Ripples) migrates to the S25 LCARS redesign while
-  // keeping saved intensity/size/color preferences on the same theme record.
-  const PATTERN_ALIASES = { 'clanker-sweep': null, 'clanker-radar': 'clanker-lcars' };
-  let rawPattern = options.pattern || options.bgPattern || THEME_DEFAULT_PATTERN[name] || 'none';
-  if (Object.prototype.hasOwnProperty.call(PATTERN_ALIASES, rawPattern)) {
-    rawPattern = PATTERN_ALIASES[rawPattern] || THEME_DEFAULT_PATTERN[name] || 'none';
+  const suppliedPattern = options.pattern || options.bgPattern || '';
+  const rawPattern = suppliedPattern || THEME_DEFAULT_PATTERN[name] || 'none';
+  const rawControlValues = options.controls || options.bgEffectControls || {};
+  const controls = _isPlainObject(rawControlValues) ? _copyThemeValue(rawControlValues) : {};
+  const defaultControls = THEME_DEFAULT_EFFECT_CONTROLS[name]?.[rawPattern];
+  if (defaultControls) {
+    controls[rawPattern] = { ...defaultControls, ...(controls[rawPattern] || {}) };
+  }
+  if (!suppliedPattern && name === 'clanker-light' && rawPattern === 'clanker-lcars'
+      && controls['clanker-lcars']?.visualMode === undefined) {
+    controls['clanker-lcars'] = { ...(controls['clanker-lcars'] || {}), visualMode: 'status-sweep' };
   }
   const pattern = rawPattern;
   const effectColor = options.effectColor || options.bgEffectColor || THEME_DEFAULT_EFFECT_COLOR[name] || '';
   const effectIntensity = options.effectIntensity ?? options.bgEffectIntensity
     ?? THEME_DEFAULT_INTENSITY[name] ?? 1;
   const effectSize = options.effectSize ?? options.bgEffectSize ?? THEME_DEFAULT_SIZE[name] ?? 1;
-  const controls = options.controls || options.bgEffectControls || {};
-  const font = THEME_DEFAULT_FONT[name] || typography.font || DEFAULT_FONT;
+  const font = typography.font || source.font || THEME_DEFAULT_FONT[name] || DEFAULT_FONT;
   const density = typography.density || DEFAULT_DENSITY;
+  const edgeHardness = _normalizeEdgeHardness(source.layout?.edgeHardness);
   const frosted = options.frosted !== undefined ? !!options.frosted : THEME_DEFAULT_FROSTED[name] === true;
   const reduced = source.motion?.reduced !== undefined
     ? !!source.motion.reduced : !!source.reducedMotion;
   const paletteOverrides = builtIn
     ? Object.fromEntries(Object.keys(rawPalette).filter(key => ['bg', 'fg', 'panel', 'border', 'red'].includes(key)
-      && !legacyDefault && _themeColor(rawPalette[key]) && String(rawPalette[key]).toUpperCase() !== String(base[key]).toUpperCase())
+      && _themeColor(rawPalette[key]) && String(rawPalette[key]).toUpperCase() !== String(base[key]).toUpperCase())
       .map(key => [key, palette[key]]))
     : { ...palette };
   const snapshot = {
@@ -294,6 +293,7 @@ export function normalizeThemeSnapshot(input = null, context = {}) {
     palette,
     overrides: { colors: paletteOverrides, advanced: normalizedAdvanced },
     typography: { font, density },
+    layout: { edgeHardness },
     background: {
       pattern, effectColor, effectIntensity: Number(effectIntensity), effectSize: Number(effectSize),
       controls: _copyThemeValue(controls), frosted,
@@ -335,6 +335,7 @@ function _writeCustomThemeEntry(name, colors, opts) {
   if (opts) {
     if (opts.font) entry.font = opts.font;
     if (opts.density) entry.density = opts.density;
+    entry.layout = { ...snapshot.layout };
     if (opts.bgPattern) entry.bgPattern = opts.bgPattern;
     if (opts.bgEffectColor) entry.bgEffectColor = opts.bgEffectColor;
     if (opts.bgEffectIntensity !== undefined) entry.bgEffectIntensity = opts.bgEffectIntensity;
@@ -676,6 +677,24 @@ export function applyFontDensity(font, density) {
   if (d !== 'comfortable') document.documentElement.classList.add('density-' + d);
 }
 
+export function applyEdgeHardness(value) {
+  const hardness = _normalizeEdgeHardness(value);
+  // 50 keeps each surface's existing radius; endpoints soften or square it.
+  document.documentElement.style.setProperty('--theme-radius-scale', String((100 - hardness) / 50));
+  return hardness;
+}
+
+function _syncEdgeHardnessValue() {
+  const slider = document.getElementById('theme-edge-hardness');
+  const output = document.getElementById('theme-edge-hardness-value');
+  if (!slider) return;
+  const hardness = _normalizeEdgeHardness(slider.value);
+  const label = hardness === DEFAULT_EDGE_HARDNESS ? `${hardness}% · Current`
+    : hardness === 0 ? '0% · Softest' : hardness === 100 ? '100% · Square' : `${hardness}%`;
+  if (output) output.textContent = label;
+  slider.setAttribute('aria-valuetext', label);
+}
+
 // UI text-size scale (accessibility). Global and independent of the active
 // theme, so the chosen size persists across theme switches. Stored as a plain
 // percentage string ('100' | '110' | '125' | '150').
@@ -736,6 +755,12 @@ function _normalizeBackgroundEffectControlValue(control, value) {
     if (value === undefined || value === null) return !!control.default;
     return value === true || value === 'true' || value === 1;
   }
+  if (control?.type === 'select') {
+    const choices = Array.isArray(control.options) ? control.options.map(option => String(option.value)) : [];
+    const fallback = String(control.default ?? choices[0] ?? '');
+    const candidate = String(value ?? fallback);
+    return choices.includes(candidate) ? candidate : fallback;
+  }
   const min = Number.isFinite(control?.min) ? control.min : 0;
   const max = Number.isFinite(control?.max) ? control.max : 100;
   const fallback = Number.isFinite(control?.default) ? control.default : min;
@@ -788,6 +813,8 @@ function _backgroundEffectControlHost() {
 }
 
 function _formatBackgroundEffectControlValue(control, value) {
+  const label = control.labels && (control.labels[value] ?? control.labels[Number(value)]);
+  if (label !== undefined) return `${label}${control.unit || ''}`;
   return `${value}${control.unit || ''}`;
 }
 
@@ -806,7 +833,35 @@ function _renderBackgroundEffectControls(pattern = _activeBgPattern()) {
     const value = getBackgroundEffectControlValue(pattern, control.key, control.default);
     const group = document.createElement('div');
     group.className = 'theme-effect-control';
-    if (control.type === 'toggle') {
+    if (control.type === 'select') {
+      const label = document.createElement('label');
+      label.className = 'theme-fd-label';
+      label.htmlFor = id;
+      label.textContent = control.label;
+      const select = document.createElement('select');
+      select.id = id;
+      select.className = 'theme-fd-select';
+      select.setAttribute('aria-label', control.label);
+      for (const option of control.options || []) {
+        const item = document.createElement('option');
+        item.value = String(option.value);
+        item.textContent = option.label;
+        select.append(item);
+      }
+      select.value = value;
+      select.addEventListener('change', () => {
+        _setBackgroundEffectControlValue(pattern, control.key, select.value);
+        _persistBackgroundEffectControls();
+        _renderBackgroundEffectControls(pattern);
+        if (control.key === 'useOneEmojiPool' || control.key === 'splashEmojiMix') _reselectThemeEmojiAssets(pattern);
+        if (pattern === 'clanker-lcars') {
+          if (control.key === 'visualMode') applyBgPattern(pattern, { force: true });
+          else _syncLcarsBackgroundMode(pattern);
+        }
+        _invalidateBackgroundPaint();
+      });
+      group.append(label, select);
+    } else if (control.type === 'toggle') {
       group.classList.add('theme-effect-toggle');
       const label = document.createElement('label');
       label.className = 'theme-fd-label';
@@ -826,6 +881,7 @@ function _renderBackgroundEffectControls(pattern = _activeBgPattern()) {
         _setBackgroundEffectControlValue(pattern, control.key, input.checked);
         _persistBackgroundEffectControls();
         _renderBackgroundEffectControls(pattern);
+        if (control.key === 'useOneEmojiPool' || control.key === 'splashEmojiMix') _reselectThemeEmojiAssets(pattern);
         _invalidateBackgroundPaint();
       });
       group.append(label, toggle);
@@ -847,12 +903,18 @@ function _renderBackgroundEffectControls(pattern = _activeBgPattern()) {
       input.step = String(control.step);
       input.value = String(value);
       input.setAttribute('aria-label', control.label);
+      input.setAttribute('aria-valuetext', _formatBackgroundEffectControlValue(control, value));
       input.addEventListener('input', () => {
         _setBackgroundEffectControlValue(pattern, control.key, input.value);
         output.textContent = _formatBackgroundEffectControlValue(control, input.value);
+        input.setAttribute('aria-valuetext', output.textContent);
+        if (pattern === 'clanker-lcars') _syncLcarsBackgroundMode(pattern);
         _invalidateBackgroundPaint();
       });
-      input.addEventListener('change', _persistBackgroundEffectControls);
+      input.addEventListener('change', () => {
+        _persistBackgroundEffectControls();
+        if (control.key === 'emojiKitchenLikelihood') _reselectThemeEmojiAssets(pattern);
+      });
       group.append(label, input);
     }
     host.append(group);
@@ -872,11 +934,12 @@ export function registerBackgroundEffectControls(pattern, controls) {
       const max = Math.max(min, Number.isFinite(Number(control.max)) ? Number(control.max) : 100);
       return {
         ...control,
-        type: control.type === 'toggle' ? 'toggle' : 'range',
+        type: control.type === 'toggle' ? 'toggle' : control.type === 'select' ? 'select' : 'range',
         min,
         max,
         step: Number.isFinite(Number(control.step)) ? Number(control.step) : 1,
-        default: control.type === 'toggle' ? !!control.default : Math.min(max, Math.max(min,
+        default: control.type === 'toggle' ? !!control.default : control.type === 'select'
+          ? String(control.default ?? control.options?.[0]?.value ?? '') : Math.min(max, Math.max(min,
           Number.isFinite(Number(control.default)) ? Number(control.default) : min)),
       };
     });
@@ -912,6 +975,41 @@ if (typeof document !== 'undefined') registerBackgroundEffectControls('clanker-k
   { key: 'longerLifetimeScale', label: 'Long snake lifetime scale', min: 0, max: 200, step: 5, default: 100, unit: '%', advanced: true, showWhen: { key: 'longerDisappearSooner', value: true } },
 ]);
 
+const _LCARS_VISUAL_MODE_CONTROL = {
+  key: 'visualMode', label: 'Mode', type: 'select', default: 'classic',
+  options: [
+    { value: 'classic', label: 'Classic' },
+    { value: 'status-sweep', label: 'Status Sweep' },
+  ],
+};
+const _LCARS_STATUS_SWEEP_CONTROLS = [
+  {
+    key: 'statusSweepSpeed', label: 'Sweep speed', min: 25, max: 400, step: 5,
+    default: 100, unit: '%', advanced: true,
+    showWhen: { key: 'visualMode', value: 'status-sweep' },
+  },
+  {
+    key: 'statusSweepDirection', label: 'Sweep direction', type: 'select', default: 'ltr',
+    options: [
+      { value: 'ltr', label: 'Left to right' },
+      { value: 'rtl', label: 'Right to left' },
+    ],
+    advanced: true,
+    showWhen: { key: 'visualMode', value: 'status-sweep' },
+  },
+];
+const _LCARS_IMMEDIATE_CONTROL_KEYS = new Set(['mode', 'sweepStyle', 'scanSpeed']);
+registerBackgroundEffectControls('clanker-lcars', [
+  _LCARS_VISUAL_MODE_CONTROL,
+  _CLANKER_ADVANCED_SETTINGS,
+  ...LCARS_SCANNER_CONTROLS.map(control => ({
+    ...control,
+    advanced: !_LCARS_IMMEDIATE_CONTROL_KEYS.has(control.key),
+    showWhen: { key: 'visualMode', value: 'classic' },
+  })),
+  ..._LCARS_STATUS_SWEEP_CONTROLS,
+]);
+
 const _CLANKER_DRIFT_CONTROLS = [
   { key: 'driftSpeed', label: 'Drift speed', min: 25, max: 500, step: 5, default: 100, unit: '%' },
   { key: 'driftSpeedVariation', label: 'Drift speed variation', min: 0, max: 100, step: 1, default: 20, unit: '%' },
@@ -925,17 +1023,31 @@ const _CLANKER_DRIFT_CONTROLS = [
   { key: 'rotationSpeedVariation', label: 'Rotation speed variation', min: 0, max: 100, step: 1, default: 30, unit: '%' },
 ];
 
+const _CLANKER_EMOJI_POOL_CONTROLS = [
+  { key: 'useOneEmojiPool', label: 'Use one emoji pool', type: 'toggle', default: true, advanced: true },
+  {
+    key: 'emojiKitchenLikelihood', label: 'Emoji Kitchen likelihood',
+    min: 0, max: 100, step: 1, default: 50, unit: '%', advanced: true,
+    showWhen: { key: 'useOneEmojiPool', value: false },
+  },
+];
+
 registerBackgroundEffectControls('clanker-gem-drift', _withClankerAdvancedSettings(_CLANKER_DRIFT_CONTROLS));
-registerBackgroundEffectControls('clanker-emoji-drift', _withClankerAdvancedSettings(_CLANKER_DRIFT_CONTROLS));
+registerBackgroundEffectControls('clanker-emoji-drift', _withClankerAdvancedSettings([
+  ..._CLANKER_DRIFT_CONTROLS.map(control => control.key === 'driftSpeed'
+    ? { ...control, min: 0, max: 200 } : control),
+  ..._CLANKER_EMOJI_POOL_CONTROLS,
+]));
 
 const _CLANKER_CODE_RAIN_CONTROLS = [
-  { key: 'splashQuantity', label: 'Quantity', min: .4, max: 8, step: .1, default: 1.4, unit: 'x' },
-  { key: 'splashRainSpeed', label: 'Rain speed', min: .1, max: 4, step: .1, default: 1, unit: 'x' },
-  { key: 'splashRainFlicker', label: 'Flicker', min: 0, max: 1, step: .01, default: .16 },
+  { key: 'splashQuantity', label: 'Quantity', min: .3, max: 4, step: .1, default: 4, unit: 'x' },
+  { key: 'splashRainSpeed', label: 'Rain speed', min: .1, max: 4, step: .1, default: 1.6, unit: 'x' },
+  { key: 'splashRainFlicker', label: 'Flicker', min: 0, max: 1, step: .01, default: .27 },
   { key: 'splashRainSpread', label: 'Spread', min: 0, max: 4, step: .05, default: 1, unit: 'x' },
   { key: 'splashRainDown', label: 'Rain downward', type: 'toggle', default: true },
   { key: 'splashRainReverseChance', label: 'Reverse chance', min: 0, max: 100, step: .1, default: 0, unit: '%' },
   { key: 'splashRainWaves', label: 'Spawn in waves', type: 'toggle', default: false },
+  { key: 'splashRainBounceSides', label: 'Bounce off sides', type: 'toggle', default: true },
   { key: 'splashCharVariety', label: 'Character variety', min: .05, max: 1, step: .05, default: 1 },
   { key: 'splashMinOpacity', label: 'Minimum opacity', min: .02, max: 1, step: .02, default: .2 },
   { key: 'splashMaxOpacity', label: 'Maximum opacity', min: .02, max: 1, step: .02, default: 1 },
@@ -959,9 +1071,422 @@ registerBackgroundEffectControls('clanker-matrix-rain', [
     ..._CLANKER_CODE_RAIN_CONTROLS,
     { key: 'splashEmojiMix', label: 'Rare emoji mix', type: 'toggle', default: false },
     { key: 'splashEmojiRarity', label: 'Emoji rarity (1 in)', min: 1, max: 10000000, step: 1, default: 10000000, showWhen: { key: 'splashEmojiMix', value: true } },
+    ..._CLANKER_EMOJI_POOL_CONTROLS,
   ].map(control => ({ ...control, advanced: true })),
 ]);
-registerBackgroundEffectControls('clanker-emoji-rain', _withClankerAdvancedSettings(_CLANKER_CODE_RAIN_CONTROLS));
+registerBackgroundEffectControls('clanker-emoji-rain', _withClankerAdvancedSettings([
+  ..._CLANKER_CODE_RAIN_CONTROLS,
+  ..._CLANKER_EMOJI_POOL_CONTROLS,
+]));
+
+const _THEME_EMOJI_SCENE_POOL_SIZE = 64;
+const _THEME_EMOJI_GLOW_CACHE_MAX_ENTRIES = _THEME_EMOJI_SCENE_POOL_SIZE * 6;
+const _THEME_EMOJI_GLOW_CACHE_PIXEL_BUDGET = 4_194_304;
+const _THEME_EMOJI_GLOW_SOURCE_MAX_DIMENSION = 64;
+const _THEME_EMOJI_GLOW_BLUR = 4;
+const _THEME_EMOJI_GLOW_PADDING = 12;
+let _themeEmojiCatalogPromise = null;
+const _THEME_EMOJI_CANVAS_IDS = Object.freeze({
+  'clanker-emoji-drift': 'clanker-emoji-drift-canvas',
+  'clanker-emoji-rain': 'clanker-emoji-rain-canvas',
+  'clanker-matrix-rain': 'clanker-matrix-rain-canvas',
+});
+
+function _prepareThemeEmojiCatalog() {
+  if (!_themeEmojiCatalogPromise) {
+    _themeEmojiCatalogPromise = getThemeEmojiCatalog()
+      .catch(error => {
+        _themeEmojiCatalogPromise = null;
+        console.error('Packaged emoji catalogue integrity failure', error);
+        uiModule.showToast?.('The installed emoji artwork is unavailable. Check the application package.');
+        return [];
+      });
+  }
+  return _themeEmojiCatalogPromise;
+}
+
+function _sampleThemeEmojiCatalogueIds(catalogue, kind, requested) {
+  const count = Math.max(0, Math.floor(requested));
+  const selected = [];
+  let seen = 0;
+  for (const entry of catalogue) {
+    if ((kind && entry?.kind !== kind) || typeof entry?.id !== 'string' || !entry.id) continue;
+    seen += 1;
+    if (selected.length < count) {
+      selected.push(entry.id);
+      continue;
+    }
+    const index = Math.floor(Math.random() * seen);
+    if (index < count) selected[index] = entry.id;
+  }
+  return selected;
+}
+
+function _themeEmojiPoolSignature(pattern) {
+  if (getBackgroundEffectControlValue(pattern, 'useOneEmojiPool', true)) return 'unified';
+  return `split:${getBackgroundEffectControlValue(pattern, 'emojiKitchenLikelihood', 50)}`;
+}
+
+function _createThemeEmojiAssetPool(pattern, capacity = _THEME_EMOJI_SCENE_POOL_SIZE) {
+  const signature = _themeEmojiPoolSignature(pattern);
+  const cataloguePromise = _themeEmojiCatalogPromise || Promise.resolve([]);
+  return cataloguePromise.then(catalogue => {
+    const drift = pattern === 'clanker-emoji-drift';
+    const unified = getBackgroundEffectControlValue(pattern, 'useOneEmojiPool', true);
+    const likelihood = getBackgroundEffectControlValue(pattern, 'emojiKitchenLikelihood', 50) / 100;
+    const pool = unified ? {
+      type: 'unified', signature,
+      entries: _sampleThemeEmojiCatalogueIds(catalogue, null, capacity),
+    } : {
+      type: 'split', signature, likelihood,
+      google: _sampleThemeEmojiCatalogueIds(catalogue, 'google', likelihood >= 1 && (!drift || catalogue.some(entry => entry.kind === 'kitchen')) ? 0 : drift || likelihood <= 0 ? capacity : capacity / 2),
+      kitchen: _sampleThemeEmojiCatalogueIds(catalogue, 'kitchen', likelihood <= 0 ? 0 : drift || likelihood >= 1 ? capacity : capacity / 2),
+    };
+    if (!drift) return pool;
+    // Metadata decks are bounded by particle capacity. Draw without replacement
+    // while preserving the split pool's probability until a kind is exhausted.
+    const shuffle = ids => {
+      const deck = [...new Set(ids)];
+      for (let i = deck.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [deck[i], deck[j]] = [deck[j], deck[i]];
+      }
+      return deck;
+    };
+    const google = shuffle(unified ? pool.entries : pool.google);
+    const kitchen = shuffle(unified ? [] : pool.kitchen);
+    const entries = [];
+    while (entries.length < capacity && (google.length || kitchen.length)) {
+      const deck = kitchen.length && (!google.length || Math.random() < likelihood) ? kitchen : google;
+      entries.push(deck.pop());
+    }
+    const refreshPool = unified ? {
+      type: 'unified', entries: catalogue.map(entry => entry.id),
+    } : {
+      type: 'split', likelihood,
+      google: catalogue.filter(entry => entry.kind === 'google').map(entry => entry.id),
+      kitchen: catalogue.filter(entry => entry.kind === 'kitchen').map(entry => entry.id),
+    };
+    return { type: 'unified', signature, entries, refreshPool };
+  });
+}
+
+function _themeEmojiPoolIds(pool) {
+  if (!pool) return [];
+  return pool.type === 'unified' ? pool.entries : [...pool.google, ...pool.kitchen];
+}
+
+function _pickThemeEmojiAssetId(pool) {
+  if (!pool) return null;
+  const choose = ids => ids.length ? ids[Math.floor(Math.random() * ids.length)] : null;
+  if (pool.type === 'unified') return choose(pool.entries);
+  if (pool.kitchen.length && Math.random() < pool.likelihood) return choose(pool.kitchen);
+  if (pool.google.length) return choose(pool.google);
+  return choose(pool.kitchen);
+}
+
+function _queueThemeEmojiAssetPreload(scene, pattern, ids) {
+  if (!scene || !Array.isArray(ids)) return;
+  const canvasId = _THEME_EMOJI_CANVAS_IDS[pattern];
+  if (!canvasId) return;
+  const selectedIds = new Set(ids.filter(id => typeof id === 'string' && id));
+  const retained = new Map();
+  const previous = scene.themeEmojiAssets instanceof Map ? scene.themeEmojiAssets : new Map();
+  const toLoad = [];
+  for (const id of selectedIds) {
+    const dimension = scene.themeEmojiRasterDimension || 0;
+    const existing = previous.get(id);
+    const asset = existing && (existing.rasterMaxDimension || 0) === dimension
+      ? existing : getThemeEmojiAsset(id, { maxDimension: dimension });
+    if (asset) retained.set(id, asset);
+    else {
+      // Keep the existing sprite visible while a new quality tier loads.
+      if (existing) retained.set(id, existing);
+      toLoad.push(id);
+    }
+  }
+  scene.themeEmojiAssets = retained;
+  scene.themeEmojiLoadController?.abort();
+  const loadController = new AbortController();
+  scene.themeEmojiLoadController = loadController;
+  if (!(scene.themeEmojiArrivals instanceof Map)) scene.themeEmojiArrivals = new Map();
+  for (const id of scene.themeEmojiArrivals.keys()) if (!selectedIds.has(id)) scene.themeEmojiArrivals.delete(id);
+  const sceneIsActive = () => {
+    const canvas = document.getElementById(canvasId);
+    return document.body.classList.contains(`bg-pattern-${pattern}`)
+      && canvas?.isConnected && canvas.__backgroundScene === scene;
+  };
+  // Defer requests until after the current paint callback. Only selected
+  // per-scene ids are fetched; the full catalogue is never preloaded.
+  if (!toLoad.length) {
+    if (sceneIsActive()) _invalidateBackgroundPaint();
+    return;
+  }
+  Promise.resolve().then(() => sceneIsActive()
+    ? preloadThemeEmojiAssets(toLoad, { concurrency: 6, maxDimension: scene.themeEmojiRasterDimension || 0,
+      signal: loadController.signal,
+      onAsset: (asset, id) => {
+        if (!asset || !sceneIsActive() || scene.themeEmojiLoadController !== loadController || !selectedIds.has(id)) return;
+        retained.set(id, asset);
+        if (!scene.themeEmojiArrivals.has(id)) scene.themeEmojiArrivals.set(id, performance.now());
+        _invalidateBackgroundPaint();
+      },
+    }) : null)
+    .then(assets => {
+      if (!Array.isArray(assets) || !sceneIsActive()) return;
+      const activeIds = new Set(_themeEmojiPoolIds(scene.themeEmojiAssetPool));
+      for (let index = 0; index < toLoad.length; index += 1) {
+        const asset = assets[index];
+        const id = toLoad[index];
+        if (asset && activeIds.has(id) && asset.id === id) retained.set(id, asset);
+      }
+    }).catch(() => {}).finally(() => {
+    if (sceneIsActive()) _invalidateBackgroundPaint();
+  });
+}
+
+function _getThemeEmojiAssetForScene(scene, id) {
+  if (!id) return null;
+  if (scene.themeEmojiAssets instanceof Map && scene.themeEmojiAssets.has(id)) {
+    return scene.themeEmojiAssets.get(id);
+  }
+  const asset = getThemeEmojiAsset(id, { maxDimension: scene.themeEmojiRasterDimension || 0 });
+  if (!asset) return null;
+  if (!(scene.themeEmojiAssets instanceof Map)) scene.themeEmojiAssets = new Map();
+  if (scene.themeEmojiAssets.size >= (scene.shards?.length || _THEME_EMOJI_SCENE_POOL_SIZE)) {
+    scene.themeEmojiAssets.delete(scene.themeEmojiAssets.keys().next().value);
+  }
+  scene.themeEmojiAssets.set(id, asset);
+  return asset;
+}
+
+function _disposeThemeEmojiGlowEntry(entry) {
+  if (!entry?.canvas) return;
+  try { entry.canvas.width = 0; entry.canvas.height = 0; } catch (_) { /* detached */ }
+}
+
+function _clearThemeEmojiGlowCache(scene) {
+  const cache = scene.themeEmojiGlowCache;
+  if (cache instanceof Map) {
+    for (const entry of cache.values()) _disposeThemeEmojiGlowEntry(entry);
+    cache.clear();
+  }
+  const handle = scene.themeEmojiGlowIdleHandle;
+  if (handle != null) {
+    if (scene.themeEmojiGlowIdleType === 'idle' && typeof window.cancelIdleCallback === 'function') {
+      window.cancelIdleCallback(handle);
+    } else {
+      window.clearTimeout(handle);
+    }
+  }
+  scene.themeEmojiGlowCache = new Map();
+  scene.themeEmojiGlowPixels = 0;
+  scene.themeEmojiGlowPending = new Set();
+  scene.themeEmojiGlowQueue = [];
+  scene.themeEmojiGlowIdleHandle = null;
+  scene.themeEmojiGlowIdleType = null;
+}
+
+function _rememberThemeEmojiGlow(scene, key, entry) {
+  const cache = scene.themeEmojiGlowCache instanceof Map
+    ? scene.themeEmojiGlowCache : (scene.themeEmojiGlowCache = new Map());
+  if (cache.has(key)) {
+    const previous = cache.get(key);
+    cache.delete(key);
+    scene.themeEmojiGlowPixels = Math.max(0, (scene.themeEmojiGlowPixels || 0) - (previous?.pixels || 0));
+    if (previous !== entry) _disposeThemeEmojiGlowEntry(previous);
+  }
+  cache.set(key, entry);
+  scene.themeEmojiGlowPixels = (scene.themeEmojiGlowPixels || 0) + (entry?.pixels || 0);
+  while (cache.size > _THEME_EMOJI_GLOW_CACHE_MAX_ENTRIES
+      || scene.themeEmojiGlowPixels > _THEME_EMOJI_GLOW_CACHE_PIXEL_BUDGET) {
+    const oldest = cache.entries().next().value;
+    if (!oldest) break;
+    cache.delete(oldest[0]);
+    scene.themeEmojiGlowPixels = Math.max(0, scene.themeEmojiGlowPixels - (oldest[1]?.pixels || 0));
+    _disposeThemeEmojiGlowEntry(oldest[1]);
+  }
+}
+
+function _buildThemeEmojiAlphaGlow(asset, color) {
+  if (!asset?.image || !(asset.width > 0) || !(asset.height > 0)) return null;
+  const scale = Math.min(
+    1,
+    _THEME_EMOJI_GLOW_SOURCE_MAX_DIMENSION / Math.max(asset.width, asset.height),
+  );
+  const sourceWidth = Math.max(1, Math.round(asset.width * scale));
+  const sourceHeight = Math.max(1, Math.round(asset.height * scale));
+  const width = sourceWidth + _THEME_EMOJI_GLOW_PADDING * 2;
+  const height = sourceHeight + _THEME_EMOJI_GLOW_PADDING * 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+  try {
+    if ('filter' in context) {
+      context.filter = `blur(${_THEME_EMOJI_GLOW_BLUR}px)`;
+      context.drawImage(asset.image, _THEME_EMOJI_GLOW_PADDING, _THEME_EMOJI_GLOW_PADDING, sourceWidth, sourceHeight);
+      context.filter = 'none';
+    } else {
+      context.shadowColor = '#fff';
+      context.shadowBlur = _THEME_EMOJI_GLOW_BLUR * 2;
+      context.drawImage(asset.image, _THEME_EMOJI_GLOW_PADDING, _THEME_EMOJI_GLOW_PADDING, sourceWidth, sourceHeight);
+      context.shadowBlur = 0;
+      context.shadowColor = 'transparent';
+    }
+    context.globalCompositeOperation = 'source-in';
+    context.fillStyle = color || '#62c7e8';
+    context.fillRect(0, 0, width, height);
+    context.globalCompositeOperation = 'source-over';
+    return { canvas, sourceWidth, sourceHeight, pixels: width * height };
+  } catch (_) {
+    _disposeThemeEmojiGlowEntry({ canvas });
+    return null;
+  }
+}
+
+function _scheduleThemeEmojiGlow(scene, asset, color, key) {
+  const pending = scene.themeEmojiGlowPending instanceof Set
+    ? scene.themeEmojiGlowPending : (scene.themeEmojiGlowPending = new Set());
+  if (pending.has(key) || pending.size >= _THEME_EMOJI_GLOW_CACHE_MAX_ENTRIES) return;
+  pending.add(key);
+  const queue = Array.isArray(scene.themeEmojiGlowQueue)
+    ? scene.themeEmojiGlowQueue : (scene.themeEmojiGlowQueue = []);
+  queue.push({ asset, color, key });
+
+  const scheduleNext = () => {
+    if (scene.themeEmojiGlowIdleHandle != null || !queue.length) return;
+    const buildOne = () => {
+      scene.themeEmojiGlowIdleHandle = null;
+      scene.themeEmojiGlowIdleType = null;
+      const task = queue.shift();
+      if (task) {
+        pending.delete(task.key);
+        const activeIds = _themeEmojiPoolIds(scene.themeEmojiAssetPool);
+        if (_themeEmojiPoolSceneIsActive(scene, 'clanker-emoji-drift') && activeIds.includes(task.asset.id)) {
+          const entry = _buildThemeEmojiAlphaGlow(task.asset, task.color);
+          _rememberThemeEmojiGlow(scene, task.key, entry);
+          if (entry) _invalidateBackgroundPaint();
+        }
+      }
+      scheduleNext();
+    };
+    if (typeof window.requestIdleCallback === 'function') {
+      scene.themeEmojiGlowIdleType = 'idle';
+      scene.themeEmojiGlowIdleHandle = window.requestIdleCallback(buildOne, { timeout: 250 });
+    } else {
+      scene.themeEmojiGlowIdleType = 'timeout';
+      scene.themeEmojiGlowIdleHandle = window.setTimeout(buildOne, 0);
+    }
+  };
+  scheduleNext();
+}
+
+function _getThemeEmojiAlphaGlow(scene, asset, color) {
+  if (!asset?.id) return null;
+  const tint = String(color || '#62c7e8').trim().toLowerCase();
+  const key = `${asset.id}\u0000${tint}`;
+  const cache = scene.themeEmojiGlowCache instanceof Map
+    ? scene.themeEmojiGlowCache : (scene.themeEmojiGlowCache = new Map());
+  if (cache.has(key)) {
+    const entry = cache.get(key);
+    cache.delete(key);
+    cache.set(key, entry);
+    return entry;
+  }
+  _scheduleThemeEmojiGlow(scene, asset, tint, key);
+  return null;
+}
+
+function _themeEmojiPoolSceneIsActive(scene, pattern) {
+  const canvasId = _THEME_EMOJI_CANVAS_IDS[pattern];
+  const canvas = canvasId && document.getElementById(canvasId);
+  return document.body.classList.contains(`bg-pattern-${pattern}`)
+    && canvas?.isConnected && canvas.__backgroundScene === scene;
+}
+
+function _clearThemeEmojiAssetAssignments(scene) {
+  for (const shard of scene.shards || []) shard.emojiAssetId = null;
+  for (const drop of scene.drops || []) {
+    drop.emojiAssetId = null;
+    drop.themeEmojiAssetAssigned = false;
+  }
+}
+
+function _assignThemeEmojiAssetIds(scene, pattern) {
+  const pool = scene.themeEmojiAssetPool;
+  if (pattern === 'clanker-emoji-drift') {
+    const ids = pool?.entries || [];
+    for (let i = 0; i < (scene.shards?.length || 0); i += 1) {
+      scene.shards[i].emojiAssetId = ids.length ? ids[i % ids.length] : null;
+    }
+    return;
+  }
+  for (const drop of scene.drops || []) {
+    if (!drop.emoji) {
+      drop.emojiAssetId = null;
+      drop.themeEmojiAssetAssigned = false;
+    } else {
+      drop.emojiAssetId = _pickThemeEmojiAssetId(pool);
+      drop.themeEmojiAssetAssigned = true;
+    }
+  }
+}
+
+function _requestThemeEmojiAssetPool(scene, pattern) {
+  if (!scene) return;
+  const signature = _themeEmojiPoolSignature(pattern);
+  if (scene.themeEmojiAssetPool?.signature === signature) return;
+  if (scene.themeEmojiPoolRequestSignature === signature && scene.themeEmojiPoolLoading) return;
+  const requestId = (scene.themeEmojiPoolRequestId || 0) + 1;
+  scene.themeEmojiLoadController?.abort();
+  scene.themeEmojiPoolRequestId = requestId;
+  scene.themeEmojiPoolRequestSignature = signature;
+  scene.themeEmojiAssetPool = null;
+  scene.themeEmojiPoolLoading = true;
+  _clearThemeEmojiAssetAssignments(scene);
+  if (pattern === 'clanker-emoji-drift') _clearThemeEmojiGlowCache(scene);
+  _createThemeEmojiAssetPool(pattern, pattern === 'clanker-emoji-drift' ? scene.shards.length : _THEME_EMOJI_SCENE_POOL_SIZE).then(pool => {
+    if (scene.themeEmojiPoolRequestId !== requestId) return;
+    scene.themeEmojiPoolLoading = false;
+    if (scene.themeEmojiPoolRequestSignature !== _themeEmojiPoolSignature(pattern)
+        || !_themeEmojiPoolSceneIsActive(scene, pattern)) {
+      scene.themeEmojiPoolRequestSignature = null;
+      return;
+    }
+    scene.themeEmojiAssetPool = pool;
+    _assignThemeEmojiAssetIds(scene, pattern);
+    if (pattern === 'clanker-emoji-drift') scene.themeEmojiActiveLoadKey = null;
+    else _queueThemeEmojiAssetPreload(scene, pattern, _themeEmojiPoolIds(pool));
+    _invalidateBackgroundPaint();
+  }).catch(() => {
+    if (scene.themeEmojiPoolRequestId === requestId) {
+      scene.themeEmojiPoolRequestSignature = null;
+      scene.themeEmojiPoolLoading = false;
+    }
+  });
+}
+
+function _reselectThemeEmojiAssets(pattern) {
+  const canvasId = _THEME_EMOJI_CANVAS_IDS[pattern];
+  const canvas = canvasId && document.getElementById(canvasId);
+  const scene = canvas?.__backgroundScene;
+  if (!scene) return;
+  if (pattern !== 'clanker-emoji-drift' && pattern === 'clanker-matrix-rain'
+      && !getBackgroundEffectControlValue(pattern, 'splashEmojiMix', false)) {
+    scene.themeEmojiPoolRequestId = (scene.themeEmojiPoolRequestId || 0) + 1;
+    scene.themeEmojiPoolRequestSignature = null;
+    scene.themeEmojiPoolLoading = false;
+    scene.themeEmojiAssetPool = null;
+    scene.themeEmojiAssets = new Map();
+    _clearThemeEmojiAssetAssignments(scene);
+    _invalidateBackgroundPaint();
+    return;
+  }
+  _prepareThemeEmojiCatalog();
+  _requestThemeEmojiAssetPool(scene, pattern);
+}
 
 function _disposeBackgroundEffect() {
   const dispose = window[_BACKGROUND_OWNER_KEY] || _activeBackgroundEffectDispose;
@@ -1030,6 +1555,26 @@ function _activeBgPattern() {
   return activeClass ? activeClass.slice('bg-pattern-'.length) : 'none';
 }
 
+const _LCARS_STATUS_SWEEP_CLASS = 'bg-mode-lcars-status-sweep';
+
+function _syncLcarsBackgroundMode(pattern) {
+  if (typeof document === 'undefined') return false;
+  const statusSweep = pattern === 'clanker-lcars'
+    && getBackgroundEffectControlValue('clanker-lcars', 'visualMode', 'classic') === 'status-sweep';
+  document.body.classList.toggle(_LCARS_STATUS_SWEEP_CLASS, statusSweep);
+  if (!statusSweep) {
+    document.body.style.removeProperty('--clanker-lcars-sweep-duration');
+    document.body.style.removeProperty('--clanker-lcars-sweep-direction');
+    return false;
+  }
+  const speed = getBackgroundEffectControlValue('clanker-lcars', 'statusSweepSpeed', 100);
+  const duration = Math.max(5.5, Math.min(88, 2200 / Math.max(25, speed)));
+  const direction = getBackgroundEffectControlValue('clanker-lcars', 'statusSweepDirection', 'ltr');
+  document.body.style.setProperty('--clanker-lcars-sweep-duration', `${duration}s`);
+  document.body.style.setProperty('--clanker-lcars-sweep-direction', direction === 'rtl' ? 'reverse' : 'normal');
+  return true;
+}
+
 function _syncBgPatternControlVisibility(pattern) {
   const ig = document.getElementById('theme-bg-intensity-group');
   const sg = document.getElementById('theme-bg-size-group');
@@ -1037,11 +1582,16 @@ function _syncBgPatternControlVisibility(pattern) {
   if (sg) sg.style.display = _NO_SIZE_PATTERNS.has(pattern) ? 'none' : '';
 }
 
-export function applyBgPattern(pattern) {
-  const p = pattern || 'none';
+export function applyBgPattern(pattern, config = {}) {
+  const requestedPattern = pattern || 'none';
+  const p = requestedPattern;
+  if (_THEME_EMOJI_CANVAS_IDS[p]) _prepareThemeEmojiCatalog();
+  const force = config.force === true;
   const samePattern = _activeBgPattern() === p;
   const hasActiveOwner = window[_BACKGROUND_OWNER_KEY] || _activeBackgroundEffectDispose;
-  if (samePattern && (!_CANVAS_PATTERNS[p] || hasActiveOwner)) {
+  const statusSweep = _syncLcarsBackgroundMode(p);
+  const currentModeIsOwned = statusSweep ? !hasActiveOwner : (!_CANVAS_PATTERNS[p] || hasActiveOwner);
+  if (!force && samePattern && currentModeIsOwned) {
     _syncBgPatternControlVisibility(p);
     _renderBackgroundEffectControls(p);
     return;
@@ -1049,7 +1599,7 @@ export function applyBgPattern(pattern) {
   document.body.classList.remove(..._BG_CLASSES);
   _disposeBackgroundEffect();
   if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
-  if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
+  if (_CANVAS_PATTERNS[p] && !(p === 'clanker-lcars' && statusSweep)) _CANVAS_PATTERNS[p]();
   _syncBgPatternControlVisibility(p);
   _renderBackgroundEffectControls(p);
 }
@@ -1058,12 +1608,9 @@ export function getSaved() {
   const raw = Storage.getJSON(_themeOwnerKey(), null);
   const snapshot = normalizeThemeSnapshot(raw, { accountId: _themeOwner });
   if (!snapshot) return null;
-  // Idempotent migration: once an old record is read, persist the canonical
-  // shape under its current owner. The legacy key is only used before auth.
-  try {
-    const serialized = JSON.stringify(snapshot);
-    if (JSON.stringify(raw) !== serialized) Storage.setJSON(_themeOwnerKey(), snapshot);
-  } catch (_) { /* storage quota/private mode is non-fatal */ }
+  if (raw && raw.version !== THEME_SNAPSHOT_VERSION) {
+    console.info('Saved theme is preserved. Explicit browser preference conversion: .clanker/tools/browser-storage.mjs (see browser-storage.md).');
+  }
   return snapshot;
 }
 
@@ -1080,12 +1627,17 @@ export function save(name, colors, opts) {
 }
 
 function _syncToServer(obj) {
+  const accountId = achievementOwner();
   try {
     fetch('/api/prefs/theme', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify({ value: obj }),
+    }).then(async response => {
+      if (!response.ok || !accountId || accountId !== achievementOwner()) return;
+      const themeDigest = await activityDigest(normalizeThemeSnapshot(obj, { accountId }));
+      await recordPresentation('theme.preference.saved', { confirmed:true, themeDigest }, { accountId, kind:'R' });
     }).catch(e => console.warn('Theme sync failed:', e));
   } catch (e) { console.warn('Theme sync error:', e); }
 }
@@ -1104,13 +1656,14 @@ export function applyThemeIdentity(name) {
 function _getThemeOptions(name, source = {}) {
   const snapshot = normalizeThemeSnapshot({ name, colors: source.colors || THEMES[name], ...source }, { name });
   if (!snapshot) return {
-    font: DEFAULT_FONT, density: DEFAULT_DENSITY, bgPattern: 'none',
+    font: DEFAULT_FONT, density: DEFAULT_DENSITY, layout: { edgeHardness: DEFAULT_EDGE_HARDNESS }, bgPattern: 'none',
     bgEffectColor: '', bgEffectIntensity: 1, bgEffectSize: 1,
     bgEffectControls: {}, frosted: false,
   };
   return {
     font: snapshot.typography.font,
     density: snapshot.typography.density,
+    layout: { ...snapshot.layout },
     bgPattern: snapshot.background.pattern,
     bgEffectColor: snapshot.background.effectColor,
     bgEffectIntensity: snapshot.background.effectIntensity,
@@ -1120,10 +1673,45 @@ function _getThemeOptions(name, source = {}) {
   };
 }
 
+function _syncBackgroundEffectPercentValues() {
+  const sliders = [
+    ['theme-bg-intensity', 'Intensity'],
+    ['theme-bg-size', 'Size'],
+  ];
+  for (const [id, fallbackLabel] of sliders) {
+    const slider = document.getElementById(id);
+    const label = slider?.closest('.theme-fd-group')?.querySelector('label.theme-fd-label');
+    if (!slider || !label) continue;
+
+    let name = label.querySelector('[data-theme-value-name]');
+    let output = label.querySelector('output');
+    if (!name) {
+      name = document.createElement('span');
+      name.dataset.themeValueName = '';
+      name.textContent = label.textContent.trim() || fallbackLabel;
+      if (!output) output = document.createElement('output');
+      label.replaceChildren(name, output);
+    } else if (!output) {
+      output = document.createElement('output');
+      label.append(output);
+    }
+
+    label.classList.add('theme-effect-control-label');
+    label.htmlFor = slider.id;
+    output.setAttribute('for', slider.id);
+    output.setAttribute('aria-hidden', 'true');
+    const numericValue = Number(slider.value);
+    const percent = `${Number.isFinite(numericValue) ? numericValue : 0}%`;
+    output.textContent = percent;
+    slider.setAttribute('aria-valuetext', percent);
+  }
+}
+
 function _syncThemeControls(name, colors, opts) {
   const values = {
     'theme-font-select': opts.font,
     'theme-density-select': opts.density,
+    'theme-edge-hardness': String(opts.layout.edgeHardness),
     'theme-bg-pattern-select': opts.bgPattern,
     'theme-bg-effect-color': opts.bgEffectColor || colors.fg || '#9cdef2',
     'theme-bg-intensity': String(Math.round(opts.bgEffectIntensity * 100)),
@@ -1133,11 +1721,12 @@ function _syncThemeControls(name, colors, opts) {
     const el = document.getElementById(id);
     if (el) el.value = value;
   }
+  _syncBackgroundEffectPercentValues();
+  _syncEdgeHardnessValue();
   const font = document.getElementById('theme-font-select');
   if (font) {
-    const locked = !!THEME_DEFAULT_FONT[name];
-    font.disabled = locked;
-    font.title = locked ? 'Clanker themes bundle and lock Liga Comic Mono' : '';
+    font.disabled = false;
+    font.title = '';
   }
   const frosted = document.getElementById('theme-frosted-toggle');
   if (frosted) frosted.checked = opts.frosted;
@@ -1165,16 +1754,19 @@ export function applyTheme(name, providedColors = null, config = {}) {
     bgEffectControls: snapshot.background.controls,
     font: snapshot.typography.font,
     density: snapshot.typography.density,
+    layout: { ...snapshot.layout },
   };
   applyColors(normalizedColors);
   applyThemeIdentity(name);
   applyFontDensity(opts.font, opts.density);
+  applyEdgeHardness(opts.layout.edgeHardness);
   applyBgEffectColor(opts.bgEffectColor);
   applyBgEffectIntensity(opts.bgEffectIntensity);
   applyBgEffectSize(opts.bgEffectSize);
   applyBackgroundEffectControls(opts.bgEffectControls);
   applyFrostedGlass(opts.frosted);
   applyBgPattern(opts.bgPattern);
+  if (_THEME_EMOJI_CANVAS_IDS[opts.bgPattern]) _reselectThemeEmojiAssets(opts.bgPattern);
   _syncThemeControls(name, normalizedColors, opts);
   if (config.persist !== false) save(name, normalizedColors, opts);
   return { colors: normalizedColors, opts, snapshot };
@@ -1197,28 +1789,12 @@ function _applySnapshot(snapshot, persist = false) {
   });
 }
 
-function _migrateLegacyOwnerState(username, owner) {
-  if (!owner || !username || String(Storage.get(AUTH_USER_KEY, '')).trim() !== String(username).trim()) return;
-  const ownerKey = _themeOwnerKey(owner);
-  if (!Storage.getJSON(ownerKey, null)) {
-    const legacy = Storage.getJSON(LS_KEY, null);
-    const migrated = normalizeThemeSnapshot(legacy, { accountId: owner });
-    if (migrated) Storage.setJSON(ownerKey, migrated);
-  }
-  const customKey = _customThemeStorageKey(owner);
-  if (!Storage.getJSON(customKey, null)) {
-    const legacyCustom = Storage.getJSON(CUSTOM_THEMES_KEY, null);
-    if (_isPlainObject(legacyCustom)) Storage.setJSON(customKey, legacyCustom);
-  }
-}
-
 async function _hydrateForAccount(detail = {}) {
   const username = String(detail.username || '').trim();
   const accountId = String(detail.accountId || detail.account_id || '').trim();
   const owner = accountId || username;
   const generation = ++_themeHydrationGeneration;
   _themeOwner = owner || null;
-  _migrateLegacyOwnerState(username, owner);
 
   // Clear the previous account's visual state before waiting on the network.
   const local = getSaved();
@@ -1233,11 +1809,15 @@ async function _hydrateForAccount(detail = {}) {
     ]);
     if (generation !== _themeHydrationGeneration || _themeOwner !== owner) return;
     const serverTheme = themeResult.status === 'fulfilled' ? themeResult.value : null;
-    if (serverTheme) {
+    if (serverTheme?.version === THEME_SNAPSHOT_VERSION) {
       const normalized = normalizeThemeSnapshot(serverTheme, { accountId: owner });
       if (normalized) {
         Storage.setJSON(_themeOwnerKey(owner), normalized);
         _applySnapshot(normalized, false);
+        const themeDigest = await activityDigest(normalized);
+        if (generation === _themeHydrationGeneration && _themeOwner === owner) {
+          await recordPresentation('theme.settings.loaded', { rehydrated:true, themeDigest }, { accountId });
+        }
       }
     }
     if (customResult.status === 'fulfilled' && _isPlainObject(customResult.value?.value)) {
@@ -1477,12 +2057,14 @@ export function initThemeUI() {
     const opts = {};
     const fs = document.getElementById('theme-font-select');
     const ds = document.getElementById('theme-density-select');
+    const eh = document.getElementById('theme-edge-hardness');
     const ps = document.getElementById('theme-bg-pattern-select');
     const ec = document.getElementById('theme-bg-effect-color');
     const es = document.getElementById('theme-bg-intensity');
     const sz = document.getElementById('theme-bg-size');
     if (fs) opts.font = fs.value;
     if (ds) opts.density = ds.value;
+    if (eh) opts.layout = { edgeHardness: _normalizeEdgeHardness(eh.value) };
     if (ps) opts.bgPattern = ps.value;
     if (ec) opts.bgEffectColor = ec.value;
     if (es) opts.bgEffectIntensity = parseFloat(es.value) / 100;
@@ -1850,6 +2432,7 @@ export function initThemeUI() {
   const _initEffectControls = _initialOptions.bgEffectControls;
   const _initFrosted = _initialOptions.frosted;
   applyFontDensity(_initFont, _initDensity);
+  applyEdgeHardness(_initialOptions.layout.edgeHardness);
   applyBgEffectColor(_initEffectColor);
   applyBgEffectIntensity(_initEffectIntensity);
   applyBgEffectSize(_initEffectSize);
@@ -1865,12 +2448,16 @@ export function initThemeUI() {
     nf.value = _initFont;
     nf.addEventListener('change', () => {
       applyFontDensity(nf.value, document.getElementById('theme-density-select').value);
-      const s = getSaved(); if (s) _saveFull(s.name, s.colors);
+      const s = getSaved();
+      _saveFull(s?.name || DEFAULT_THEME, s?.colors || THEMES[DEFAULT_THEME]);
     });
     // Fetch custom fonts from local folder and populate dropdown
+    const fontOwner = _themeOwner;
     fetch('/api/fonts/custom', { credentials: 'same-origin' })
       .then(r => r.json())
       .then(data => {
+        if (document.getElementById('theme-font-select') !== nf || _themeOwner !== fontOwner) return;
+        const selectedFont = getSaved()?.typography.font || nf.value || _initFont;
         _customFonts = data.fonts || {};
         const families = Object.keys(_customFonts);
         nf.querySelectorAll('option[data-custom-font]').forEach(o => o.remove());
@@ -1881,13 +2468,13 @@ export function initThemeUI() {
           opt.dataset.customFont = '1';
           nf.appendChild(opt);
         }
-        // Restore saved value after options are populated, then reapply
-        // the font so a late-loaded custom font is not left on fallback.
+        // Restore the current choice after options are populated, then reapply
+        // it so a late-loaded custom font is not left on fallback.
         // Density and backgrounds are untouched (T07).
-        nf.value = _initFont;
-        if (_customFonts[_initFont] && !FONT_MAP[_initFont]) {
+        nf.value = selectedFont;
+        if (_customFonts[selectedFont] && !FONT_MAP[selectedFont]) {
           const densityEl = document.getElementById('theme-density-select');
-          applyFontDensity(_initFont, densityEl ? densityEl.value : _initDensity);
+          applyFontDensity(selectedFont, densityEl ? densityEl.value : _initDensity);
         }
       })
       .catch(e => console.warn('Custom fonts fetch failed:', e));
@@ -1897,6 +2484,21 @@ export function initThemeUI() {
     nd.value = _initDensity;
     nd.addEventListener('change', () => {
       applyFontDensity(document.getElementById('theme-font-select').value, nd.value);
+      const s = getSaved(); if (s) _saveFull(s.name, s.colors);
+    });
+  }
+  const edgeHardnessSlider = document.getElementById('theme-edge-hardness');
+  if (edgeHardnessSlider) {
+    const nh = edgeHardnessSlider.cloneNode(true); edgeHardnessSlider.parentNode.replaceChild(nh, edgeHardnessSlider);
+    nh.value = String(_initialOptions.layout.edgeHardness);
+    _syncEdgeHardnessValue();
+    nh.addEventListener('input', () => {
+      applyEdgeHardness(nh.value);
+      _syncEdgeHardnessValue();
+    });
+    nh.addEventListener('change', () => {
+      applyEdgeHardness(nh.value);
+      _syncEdgeHardnessValue();
       const s = getSaved(); if (s) _saveFull(s.name, s.colors);
     });
   }
@@ -1936,6 +2538,7 @@ export function initThemeUI() {
     intensitySlider.dataset.themeBound = '1';
     intensitySlider.value = String(Math.round(_initEffectIntensity * 100));
     intensitySlider.addEventListener('input', () => {
+      _syncBackgroundEffectPercentValues();
       applyBgEffectIntensity(parseFloat(intensitySlider.value) / 100);
       const s = getSaved(); if (s) _saveFull(s.name, s.colors);
     });
@@ -1946,10 +2549,12 @@ export function initThemeUI() {
     sizeSlider.dataset.themeBound = '1';
     sizeSlider.value = String(Math.round(_initEffectSize * 100));
     sizeSlider.addEventListener('input', () => {
+      _syncBackgroundEffectPercentValues();
       applyBgEffectSize(parseFloat(sizeSlider.value) / 100);
       const s = getSaved(); if (s) _saveFull(s.name, s.colors);
     });
   }
+  _syncBackgroundEffectPercentValues();
 
   const frostedToggle = document.getElementById('theme-frosted-toggle');
   if (frostedToggle && frostedToggle.dataset.themeBound !== '1') {
@@ -2039,6 +2644,7 @@ export function initThemeUI() {
       const obj = { name: cur ? cur.name : 'custom', colors };
       if (cur && cur.font) obj.font = cur.font;
       if (cur && cur.density) obj.density = cur.density;
+      if (cur && cur.layout) obj.layout = { ...cur.layout };
       if (cur && cur.bgPattern) obj.bgPattern = cur.bgPattern;
       if (cur && cur.bgEffectColor) obj.bgEffectColor = cur.bgEffectColor;
       if (cur && cur.bgEffectControls) obj.bgEffectControls = cur.bgEffectControls;
@@ -2092,6 +2698,9 @@ export function initThemeUI() {
       const opts = {};
       if (parsed.font) opts.font = parsed.font;
       if (parsed.density) opts.density = parsed.density;
+      if (parsed.layout?.edgeHardness !== undefined) {
+        opts.layout = { edgeHardness: _normalizeEdgeHardness(parsed.layout.edgeHardness) };
+      }
       if (parsed.bgPattern) opts.bgPattern = parsed.bgPattern;
       if (parsed.bgEffectColor) opts.bgEffectColor = parsed.bgEffectColor;
       if (parsed.bgEffectControls && typeof parsed.bgEffectControls === 'object') opts.bgEffectControls = parsed.bgEffectControls;
@@ -2318,7 +2927,7 @@ function _readClankerEffectConfig(fullPalette = false) {
   };
 }
 
-function _runBackgroundCanvas({ canvas, bodyClass, resize, paint, resizeTarget = null, onLayoutChange = null, onDispose = null }) {
+function _runBackgroundCanvas({ canvas, bodyClass, resize, paint, resizeTarget = null, onLayoutChange = null, onDispose = null, onResizeStart = null, onResizeSettled = null }) {
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
   let animationFrame = 0;
   let resizeFrame = 0;
@@ -2328,6 +2937,7 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint, resizeTarget =
   let viewportKey = '';
   let resizeObserver = null;
   let disposed = false;
+  let painting = false;
 
   function cancelFrame() {
     if (!animationFrame) return;
@@ -2366,10 +2976,14 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint, resizeTarget =
     if (_activeBackgroundEffectDispose === dispose) _activeBackgroundEffectDispose = null;
     if (window[_BACKGROUND_OWNER_KEY] === dispose) window[_BACKGROUND_OWNER_KEY] = null;
     // Release scene-owned raster caches and paint on unmount (T11 / C8).
-    const activeScene = canvas.__backgroundScene;
-    if (activeScene) {
+  const activeScene = canvas.__backgroundScene;
+  if (activeScene) {
+      activeScene.themeEmojiLoadController?.abort();
       if (activeScene.emojiSprites && typeof activeScene.emojiSprites.clear === 'function') activeScene.emojiSprites.clear();
       if (activeScene.paintField && typeof activeScene.paintField.clear === 'function') activeScene.paintField.clear();
+      if (activeScene.themeEmojiGlowCache instanceof Map || activeScene.themeEmojiGlowIdleHandle != null) {
+        _clearThemeEmojiGlowCache(activeScene);
+      }
     }
     canvas.__backgroundScene = null;
     if (onDispose) onDispose();
@@ -2389,18 +3003,23 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint, resizeTarget =
     }
     if (!motion.matches && previousFrame) animationTime += Math.min(Math.max(time - previousFrame, 0), 34);
     previousFrame = time;
-    paint(motion.matches ? 0 : animationTime, motion.matches);
+    painting = true;
+    try { paint(motion.matches ? 0 : animationTime, motion.matches); }
+    finally { painting = false; }
     scheduleFrame();
   }
 
   function handleResize() {
+    if (onResizeStart) onResizeStart();
     window.clearTimeout(resizeTimer);
     resizeTimer = window.setTimeout(() => {
       resizeTimer = 0;
       if (disposed || resizeFrame) return;
       resizeFrame = window.requestAnimationFrame(() => {
         resizeFrame = 0;
-        if (!resizeIfNeeded() || disposed) return;
+        const resized = resizeIfNeeded();
+        if (onResizeSettled) onResizeSettled();
+        if (!resized || disposed) return;
         // A canvas resize clears its bitmap. Repaint in this callback so the
         // compositor never receives a cleared canvas while its RAF is pending.
         paint(motion.matches ? 0 : animationTime, motion.matches);
@@ -2447,7 +3066,11 @@ function _runBackgroundCanvas({ canvas, bodyClass, resize, paint, resizeTarget =
 
   // T10: one-shot paint for reduced-motion (and any dirty-style) invalidation.
   canvas.__requestBackgroundRepaint = () => {
-    if (!disposed) frame(performance.now());
+    if (disposed || document.hidden) return;
+    // Animated invalidations join the existing RAF instead of entering frame
+    // recursively from a paint/load callback. Reduced motion paints once.
+    if (!motion.matches) scheduleFrame();
+    else if (!painting) frame(performance.now());
   };
 }
 
@@ -2476,17 +3099,18 @@ function _clankerEdgeAlpha(x, y, extent, bounds) {
   return Math.max(0, Math.min(1, (distance - extent) / fadeBand));
 }
 
-function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null }) {
+function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null, resizeScene = null }) {
   if (document.getElementById(id)) return;
-  const host = document.getElementById('chat-container') || document.body;
-  const chatPane = host.id === 'chat-container';
+  // Keep the selected scene on the persistent shell, outside the chat pane so
+  // minimize, pop-out and chat layout changes cannot hide or clip the owner.
+  const host = document.body;
   const canvas = document.createElement('canvas');
   canvas.id = id;
-  canvas.style.cssText = chatPane
-    ? 'position:absolute;left:0;top:0;pointer-events:none;z-index:-1;'
-    : 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:-1;';
   canvas.setAttribute('aria-hidden', 'true');
-  if (chatPane) host.classList.add('background-effect-host');
+  // A negative canvas in the isolated body host stays over the page
+  // background and behind shell and applet surfaces.
+  host.classList.add('background-effect-host');
   host.prepend(canvas);
 
   // Match the working built-in effects: one synchronized visible Canvas2D,
@@ -2501,48 +3125,39 @@ function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null })
   let scene = null;
   let sceneKey = '';
 
-  function updateCanvasLayout() {
-    if (!chatPane) return;
-    const rect = host.getBoundingClientRect();
-    canvas.style.left = `${-Math.round(rect.left)}px`;
-    canvas.style.top = `${-Math.round(rect.top)}px`;
-    canvas.style.width = `${window.innerWidth}px`;
-    canvas.style.height = `${window.innerHeight}px`;
-  }
-
   function resize() {
-    const rect = host.getBoundingClientRect();
-    const nextWidth = chatPane ? Math.max(1, window.innerWidth) : Math.max(1, Math.round(rect.width));
-    const nextHeight = chatPane ? Math.max(1, window.innerHeight) : Math.max(1, Math.round(rect.height));
+    const nextWidth = Math.max(1, window.innerWidth);
+    const nextHeight = Math.max(1, window.innerHeight);
     const nextDpr = Math.min(window.devicePixelRatio || 1, 2);
     const geometryChanged = width !== nextWidth || height !== nextHeight || dpr !== nextDpr;
     width = canvasWidth = nextWidth;
     height = canvasHeight = nextHeight;
     dpr = nextDpr;
-    updateCanvasLayout();
     if (geometryChanged) {
       canvas.width = Math.max(1, Math.floor(canvasWidth * dpr));
       canvas.height = Math.max(1, Math.floor(canvasHeight * dpr));
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      sceneKey = '';
+      if (!resizeScene) sceneKey = '';
     }
+    if (scene && resizeScene) resizeScene(scene, width, height);
   }
 
   function paint(time, reduced) {
     // Clanker-native canvases own their full palette. Tying it to a body class
     // on every frame created a second, monochrome render state.
     const config = _readClankerEffectConfig(true);
-    // Scene geometry follows the vanilla lifecycle: rebuild only when geometry
-    // or effect-control topology changes. Palette/intensity reads stay live in
-    // draw() so style-only updates preserve scene identity and trajectories
-    // (T08). The chat pane is already the clipping boundary. Keep its artwork
-    // full bleed so a viewport-scale crop cannot leave a gutter on one edge.
-    const safeBounds = chatPane
-      ? { inset: 0, left: 0, top: 0, right: width, bottom: height, width, height }
-      : _clankerSafeBounds(width, height, config.size);
+    // Scene geometry follows the existing lifecycle: rebuild only when the
+    // viewport or topology changes. Palette/intensity updates retain the
+    // same scene and trajectories.
+    const safeBounds = { inset: 0, left: 0, top: 0, right: width, bottom: height, width, height };
     const controlSceneKey = typeof getSceneKey === 'function' ? getSceneKey() : '';
-    const nextSceneKey = `${width}:${height}:${config.size}:${safeBounds.inset}:${controlSceneKey}`;
+    // Particle lifecycles can retain their population while canvas geometry
+    // settles; other effects keep the existing topology rebuild behavior.
+    const nextSceneKey = resizeScene ? `retained:${controlSceneKey}`
+      : `${width}:${height}:${config.size}:${safeBounds.inset}:${controlSceneKey}`;
     if (sceneKey !== nextSceneKey) {
+      scene?.themeEmojiLoadController?.abort();
+      if (scene) _clearThemeEmojiGlowCache(scene);
       scene = build({ width, height, safeBounds, dpr, ...config });
       canvas.__backgroundStaticCanvas = scene?.staticCanvas || null;
       sceneKey = nextSceneKey;
@@ -2577,9 +3192,8 @@ function _mountClankerEffect({ id, bodyClass, build, draw, getSceneKey = null })
     bodyClass,
     resize,
     paint,
-    resizeTarget: chatPane ? host : null,
-    onLayoutChange: chatPane ? updateCanvasLayout : null,
-    onDispose: chatPane ? () => host.classList.remove('background-effect-host') : null,
+    onResizeStart: resizeScene ? () => { if (scene) scene.driftResizePending = true; } : null,
+    onResizeSettled: resizeScene ? () => { if (scene) scene.driftResizePending = false; } : null,
   });
 }
 
@@ -2657,7 +3271,7 @@ function _initClankerRoutefield() {
   // not chance, so the scale at the use site is not a surprise.
   const DIRECTION_CHANGE_WEIGHT = .16;
   const COLOR_CHANGE_CHANCE = .12;
-  const SPLIT_CHANCE = .10;
+  const SPLIT_CHANCE = .08;
   // Sampled polyline segments per quadratic edge — enough for smooth travel
   // without paying a bezier evaluation per bead per frame.
   const SAMPLES_PER_ROUTE = 18;
@@ -2800,7 +3414,7 @@ function _initClankerRoutefield() {
         ctx.save();
         ctx.translate(node.x, node.y);
         ctx.rotate(-.28);
-        ctx.fillStyle = outline;
+        ctx.strokeStyle = outline;
         ctx.globalAlpha = intensity * .72;
         ctx.fillRect(-18 * size, -6 * size, 36 * size, 12 * size);
         for (let segment = 0; segment < 3; segment += 1) {
@@ -2816,18 +3430,18 @@ function _initClankerRoutefield() {
         ctx.quadraticCurveTo(route.cx, route.cy, route.b.x, route.b.y);
         ctx.setLineDash([]);
         ctx.strokeStyle = outline;
-        ctx.lineWidth = 4 * size;
-        ctx.globalAlpha = intensity * .62;
+        ctx.lineWidth = 3 * size;
+        ctx.globalAlpha = intensity * .34;
         ctx.stroke();
         ctx.strokeStyle = colors[route.color];
-        ctx.lineWidth = 1.1 * size;
-        ctx.globalAlpha = intensity * .22;
+        ctx.lineWidth = 1 * size;
+        ctx.globalAlpha = intensity * .12;
         ctx.stroke();
-        ctx.setLineDash([3 * size, 12 * size]);
+        ctx.setLineDash([2 * size, 16 * size]);
         ctx.lineDashOffset = 0;
         ctx.strokeStyle = colors[route.color];
-        ctx.lineWidth = 1.55 * size;
-        ctx.globalAlpha = intensity * .64;
+        ctx.lineWidth = 1.2 * size;
+        ctx.globalAlpha = intensity * .30;
         ctx.stroke();
       }
       ctx.setLineDash([]);
@@ -2866,7 +3480,9 @@ function _initClankerRoutefield() {
           scene.stats.retirements += 1;
           return;
         }
-        bead.distance += bead.speed * (size || 1) * .06 * elapsed * bead.direction;
+        // `speed` is pixels per second; integrating elapsed milliseconds at
+        // 0.001 keeps motion continuous and slow enough to follow on each edge.
+        bead.distance += bead.speed * (size || 1) * .001 * elapsed * bead.direction;
 
         // Occasional direction / color changes — seeded, not per-frame random.
         const roll = _clankerNoise(now * .0007 + bead.routeIndex * 13 + bead.distance * .001);
@@ -2909,7 +3525,7 @@ function _initClankerRoutefield() {
           // Splits: at a cooled-down junction, with pool headroom, a second
           // bead peels onto a different incident edge.
           const cooled = now - arrivingAt.lastBranchAt >= policy.BRANCH_COOLDOWN_MS;
-          const wantsSplit = _clankerNoise(now * .0021 + next.index * 3) < policy.SPLIT_CHANCE * .08;
+          const wantsSplit = _clankerNoise(now * .0021 + next.index * 3) < policy.SPLIT_CHANCE;
           if (cooled && wantsSplit && scene.beads.length < policy.MAX_ROUTE_BEADS) {
             const alternate = candidates.filter(candidate => candidate !== next);
             if (alternate.length) {
@@ -2947,22 +3563,24 @@ function _initClankerRoutefield() {
         const route = scene.routes[bead.routeIndex];
         if (!route) continue;
         const point = beadPosition(route, bead.distance);
-        const radius = (2.6 + bead.glow * 1.2) * size;
-        // Short local glow only — a soft halo, never a snake body or trail.
+        const radius = (4 + bead.glow * 1.25) * size;
+        // A compact bright marker and local halo keep motion legible while
+        // the tracks remain scaffolding rather than the dominant signal.
         ctx.beginPath();
-        ctx.arc(point.x, point.y, radius + 2.4 * size, 0, Math.PI * 2);
+        ctx.arc(point.x, point.y, radius + 4.2 * size, 0, Math.PI * 2);
         ctx.fillStyle = colors[bead.color];
-        ctx.globalAlpha = intensity * .16 * bead.glow;
+        ctx.globalAlpha = intensity * .22 * bead.glow;
         ctx.fill();
         ctx.beginPath();
         ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
         ctx.fillStyle = outline;
-        ctx.globalAlpha = intensity * .85;
-        ctx.fill();
+        ctx.lineWidth = 1.35 * size;
+        ctx.globalAlpha = intensity * .92;
+        ctx.stroke();
         ctx.beginPath();
-        ctx.arc(point.x, point.y, radius * .68, 0, Math.PI * 2);
+        ctx.arc(point.x, point.y, radius * .76, 0, Math.PI * 2);
         ctx.fillStyle = colors[bead.color];
-        ctx.globalAlpha = intensity;
+        ctx.globalAlpha = intensity * .98;
         ctx.fill();
       }
     },
@@ -3219,42 +3837,9 @@ function _initClankerKeneWeave() {
       };
       rasterizeStatic(colors, outline, intensity, size);
       phase('static-done');
-      // Bounded grid paint field — separate from snake bodies. Cells deposit
-      // color where snakes visit and decay over time; the field is recreated
-      // (cleared) only on a topology reset (scene rebuild). Off means no new
-      // paint while existing paint keeps fading.
-      const paintCell = Math.max(18, Math.min(tileWidth, tileHeight) / 3.2);
-      const paintCols = Math.max(4, Math.min(96, Math.ceil(width / paintCell)));
-      const paintRows = Math.max(4, Math.min(96, Math.ceil(height / paintCell)));
-      const paintField = {
-        cols: paintCols,
-        rows: paintRows,
-        cellW: width / paintCols,
-        cellH: height / paintRows,
-        colors: new Uint8Array(paintCols * paintRows),
-        alphas: new Float32Array(paintCols * paintRows),
-        deposit(x, y, colorIndex, amount) {
-          const column = Math.floor(x / this.cellW);
-          const row = Math.floor(y / this.cellH);
-          if (column < 0 || row < 0 || column >= this.cols || row >= this.rows) return;
-          const index = row * this.cols + column;
-          this.colors[index] = ((colorIndex % 6) + 6) % 6;
-          this.alphas[index] = Math.min(1, this.alphas[index] + amount);
-        },
-        decay(elapsedMs) {
-          if (!elapsedMs) return;
-          // Half-life ≈ 2.6s: paint fades out steadily whether or not new
-          // deposits are arriving.
-          const factor = Math.exp(-elapsedMs / 2600);
-          const alphas = this.alphas;
-          for (let index = 0; index < alphas.length; index += 1) {
-            if (alphas[index] > 0) alphas[index] *= factor;
-          }
-        },
-        clear() {
-          this.alphas.fill(0);
-        },
-      };
+      // Exact traveled-route paint. The helper retains only clipped route
+      // intervals, so residue can never light adjacent lattice geometry.
+      const paintField = createKenePaintTrail();
       return { paths, junctions, snakePoints, maxSnakeStep: maxSnakeStep, snakeSeed,
         snakeRoutes, snakes, staticCanvas, rasterizeStatic, paintField,
         styleKey: `${intensity}:${outline}:${colors.join(',')}`,
@@ -3277,31 +3862,12 @@ function _initClankerKeneWeave() {
       if (scene.staticCanvas) ctx.drawImage(scene.staticCanvas, 0, 0, scene.staticCanvas.width, scene.staticCanvas.height, 0, 0, width, height);
       const renderTime = reduced ? 0 : time;
 
-      // ── Grid paint trail (S25) ──
-      // Separate from snake bodies: a bounded cell field that receives color
-      // where snakes visit and decays on its own clock. `snakePaintTrail` off
-      // stops deposits; existing paint keeps fading to zero.
+      // Exact route residue is drawn before heads/tails. The helper owns both
+      // its fade clock and its bounded segment collection.
       const paintTrailOn = getBackgroundEffectControlValue('clanker-kene-weave', 'snakePaintTrail', false);
       const paintField = scene.paintField;
-      const paintElapsed = (!reduced && scene.paintLastTime && renderTime > scene.paintLastTime)
-        ? Math.min(80, renderTime - scene.paintLastTime) : 0;
-      if (!reduced) scene.paintLastTime = renderTime;
       if (paintField) {
-        if (paintElapsed) paintField.decay(paintElapsed);
-        // Paint is drawn under the snakes as the residue they leave behind.
-        // Deposits from this frame land here next frame (one-frame lag is
-        // imperceptible and keeps paint out of the snake stroke path).
-        const { cols, rows, cellW, cellH, colors: paintColors, alphas: paintAlphas } = paintField;
-        for (let row = 0; row < rows; row += 1) {
-          for (let column = 0; column < cols; column += 1) {
-            const index = row * cols + column;
-            const alpha = paintAlphas[index];
-            if (alpha <= 0.012) continue;
-            ctx.fillStyle = colors[paintColors[index] % colors.length];
-            ctx.globalAlpha = intensity * alpha * .26;
-            ctx.fillRect(column * cellW, row * cellH, cellW + .5, cellH + .5);
-          }
-        }
+        paintField.draw(ctx, { time: renderTime, colors, intensity, size });
       }
 
       const snakeCount = getBackgroundEffectControlValue('clanker-kene-weave', 'snakeCount', 7);
@@ -3322,7 +3888,17 @@ function _initClankerKeneWeave() {
         const elapsed = previousTime && renderTime > previousTime
           ? Math.min(80, renderTime - previousTime) : 0;
         snake.lastTime = renderTime;
-        const random = scene.snakeSeed + signalIndex * 131 + snake.cycle * 47;
+        // Capture the actual outgoing head before any rollover can change its
+        // route or direction. Paint intervals use this state, never a chord
+        // from the previous route to the next route.
+        const oldRouteIndex = snake.routeIndex;
+        const oldReverse = snake.reverse;
+        const oldProgress = Math.max(0, Math.min(1, snake.progress));
+        const oldCycle = snake.cycle;
+        const oldRoute = scene.snakeRoutes[oldRouteIndex];
+        const oldHeadProgress = oldReverse ? 1 - oldProgress : oldProgress;
+        const random = scene.snakeSeed + signalIndex * 131 + oldCycle * 47;
+        const oldColorIndex = Math.floor(_clankerNoise(random + 31) * colors.length);
         const tailSteps = Math.max(8, Math.round(64 * (1 + (snake.lengthNoise * 2 - 1) * lengthVariation * .6)));
         const lengthRatio = tailSteps / 64;
         let traverseTime = baseTraverse;
@@ -3336,9 +3912,9 @@ function _initClankerKeneWeave() {
         // therefore changes only the next increment; the current head remains
         // where it was instead of being recomputed from a new global phase.
         snake.progress += elapsed / Math.max(1, duration);
-        if (snake.progress >= 1) {
+        const rolledOver = snake.progress >= 1;
+        if (rolledOver) {
           snake.progress %= 1;
-          const oldRoute = scene.snakeRoutes[snake.routeIndex];
           const anchor = snake.reverse ? oldRoute.points[0] : oldRoute.points[oldRoute.points.length - 1];
           const nextReverse = _clankerNoise(random + 17) > .5;
           let bestIndex = snake.routeIndex;
@@ -3363,6 +3939,26 @@ function _initClankerKeneWeave() {
         const route = scene.snakeRoutes[snake.routeIndex];
         const reverse = snake.reverse;
         const headProgress = reverse ? 1 - progress : progress;
+        const headColorIndex = Math.floor(_clankerNoise(random + 31) * colors.length);
+        if (paintTrailOn && paintField && !reduced && elapsed > 0) {
+          if (rolledOver) {
+            // Do not join routes: close the outgoing path and begin the new
+            // path independently, with lifecycle-qualified merge keys.
+            paintField.depositRange(
+              oldRoute, oldHeadProgress, oldReverse ? 0 : 1, oldColorIndex, renderTime,
+              `${signalIndex}:${oldCycle}:${oldRouteIndex}`,
+            );
+            paintField.depositRange(
+              route, reverse ? 1 : 0, headProgress, headColorIndex, renderTime,
+              `${signalIndex}:${snake.cycle}:${snake.routeIndex}`,
+            );
+          } else {
+            paintField.depositRange(
+              route, oldHeadProgress, headProgress, headColorIndex, renderTime,
+              `${signalIndex}:${oldCycle}:${oldRouteIndex}`,
+            );
+          }
+        }
         const fade = Math.max(snakeFadeAlpha(progress, duration), snake.transitionAlpha);
         snake.transitionAlpha = Math.max(0, snake.transitionAlpha - elapsed / SNAKE_FADE_IN_MS);
         const headPoint = _pointOnCachedPolyline(route, headProgress);
@@ -3370,39 +3966,21 @@ function _initClankerKeneWeave() {
           x: headPoint.x, y: headPoint.y, routeIndex: snake.routeIndex,
           reverse: snake.reverse, progress: snake.progress, cycle: snake.cycle,
         };
-        // Deposit paint at the head (and a short trail of tail samples) so the
-        // grid field reads as continuous coverage rather than dotted points.
-        if (paintTrailOn && paintField) {
-          const depositColor = Math.floor(_clankerNoise(random + 31) * colors.length);
-          paintField.deposit(headPoint.x, headPoint.y, depositColor, .34);
-          for (let paintStep = 1; paintStep <= 3; paintStep += 1) {
-            const paintProgress = headProgress + (reverse ? paintStep : -paintStep) * .0024;
-            if (paintProgress < 0 || paintProgress > 1) continue;
-            const paintPoint = _pointOnCachedPolyline(route, paintProgress);
-            paintField.deposit(paintPoint.x, paintPoint.y, depositColor, .18);
-          }
-        }
         const tail = [];
         for (let step = tailSteps; step >= 0; step -= 1) {
           const pointProgress = headProgress + (reverse ? step : -step) * .0024;
           if (pointProgress >= 0 && pointProgress <= 1) tail.push(_pointOnCachedPolyline(route, pointProgress));
         }
         if (tail.length < 2) continue;
-        const signalColor = colors[Math.floor(_clankerNoise(random + 31) * colors.length)];
-        // A separate path/stroke for every tail segment makes the first paint
-        // monopolize Canvas2D (especially with the signal shadow enabled).
-        // Tail opacity is monotonic, so a small number of buckets preserves
-        // the taper while keeping path setup and software shadow work bounded.
+        const signalColor = colors[headColorIndex];
+        // Tail opacity is monotonic, so bounded buckets preserve the taper.
+        // Canvas shadows were the expensive part: use a small transparent
+        // stroke stack instead of a blurred stroke for every bucket.
         const tailSegments = tail.length - 1;
         const fadeBuckets = 8;
-        for (const [strokeStyle, lineWidth, alpha] of [
-          [outline, 7.5 * size, .72],
-          [signalColor, 3 * size, 1],
-        ]) {
+        const strokeTailBuckets = (strokeStyle, lineWidth, alpha, taper = 2.25) => {
           ctx.strokeStyle = strokeStyle;
           ctx.lineWidth = lineWidth;
-          ctx.shadowColor = signalColor;
-          ctx.shadowBlur = strokeStyle === outline ? 0 : 18 * size;
           for (let bucket = 0; bucket < fadeBuckets; bucket += 1) {
             const first = Math.max(1, Math.floor(bucket * tailSegments / fadeBuckets) + 1);
             const last = Math.min(tailSegments, Math.floor((bucket + 1) * tailSegments / fadeBuckets));
@@ -3413,29 +3991,58 @@ function _initClankerKeneWeave() {
               ctx.lineTo(tail[index].x, tail[index].y);
             }
             const midpoint = ((first + last) / 2) / tailSegments;
-            ctx.globalAlpha = intensity * alpha * fade * Math.pow(midpoint, 2.25);
+            ctx.globalAlpha = intensity * alpha * fade * Math.pow(midpoint, taper);
             ctx.stroke();
           }
+        };
+        // Draw the halo as two continuous, low-alpha paths. Reusing this one
+        // path avoids multiplying halo work by fade buckets and keeps either
+        // tail endpoint quiet; the outline/core below retain the real taper.
+        ctx.beginPath();
+        ctx.moveTo(tail[0].x, tail[0].y);
+        for (let index = 1; index < tail.length; index += 1) {
+          ctx.lineTo(tail[index].x, tail[index].y);
         }
-        ctx.shadowBlur = 0;
+        ctx.strokeStyle = signalColor;
+        ctx.lineWidth = 11 * size;
+        ctx.globalAlpha = intensity * fade * .025;
+        ctx.stroke();
+        ctx.lineWidth = 6.5 * size;
+        ctx.globalAlpha = intensity * fade * .055;
+        ctx.stroke();
+        strokeTailBuckets(outline, 7.5 * size, .72);
+        strokeTailBuckets(signalColor, 3 * size, 1);
         const head = tail[tail.length - 1];
         scene.heads[signalIndex].x = head.x;
         scene.heads[signalIndex].y = head.y;
+        // Soft circles are smooth on the existing Canvas2D surface and avoid a
+        // per-snake/per-frame shadow kernel or a second canvas cache.
+        ctx.fillStyle = signalColor;
+        ctx.beginPath();
+        ctx.arc(head.x, head.y, 10 * size, 0, Math.PI * 2);
+        ctx.globalAlpha = intensity * fade * .045;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(head.x, head.y, 6.2 * size, 0, Math.PI * 2);
+        ctx.globalAlpha = intensity * fade * .12;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(head.x, head.y, 5.1 * size, 0, Math.PI * 2);
+        ctx.fillStyle = outline;
+        ctx.globalAlpha = intensity * fade * .8;
+        ctx.fill();
         ctx.beginPath();
         ctx.arc(head.x, head.y, 3.8 * size, 0, Math.PI * 2);
         ctx.fillStyle = signalColor;
         ctx.globalAlpha = intensity * fade;
-        ctx.shadowColor = signalColor;
-        ctx.shadowBlur = 18 * size;
         ctx.fill();
-        ctx.shadowBlur = 0;
       }
     },
   });
 }
 
-// S25 LCARS redesign — replaces Radar Ripples (`clanker-radar` migrates to
-// `clanker-lcars` via PATTERN_ALIASES). Composition: asymmetric rounded elbow
+// S25 LCARS renderer — historical Radar Ripples conversions live in workspace tools;
+// Composition: asymmetric rounded elbow
 // rails near the margins, segmented bars, small status tiles and coordinated
 // pulses/stepped scans. Center stays open for readable applets. No concentric
 // rings. Palette is theme-relative (gold/blue in Clanker) with low-alpha
@@ -3446,6 +4053,7 @@ function _initClankerLcars() {
     bodyClass: 'bg-pattern-clanker-lcars',
     build: ({ size, safeBounds }) => {
       const { left, top, right, bottom, width, height } = safeBounds;
+      const scanner = createLcarsScanner();
       // Rail thickness tracks the margin inset so laptop/large/mobile all keep
       // a readable open center. Elbow radius is generous — the rounded outer
       // corner is the LCARS signature.
@@ -3535,12 +4143,34 @@ function _initClankerLcars() {
         barH,
         tile,
         safeBounds: { left, top, right, bottom, width, height },
+        scanner,
+        scannerState: scanner.state,
+        scannerControls: {},
+        motionTime: 0,
+        motionLastTime: null,
       };
     },
     draw: (ctx, { time, reduced, scene, intensity, size, colors, outline }) => {
-      // Reduced motion is a composed static art piece: geometry and resting
-      // highlights only, pinned so a delayed repaint cannot move the scene.
-      const renderTime = reduced ? 0 : time;
+      const scannerControls = scene.scannerControls || (scene.scannerControls = {});
+      for (const control of LCARS_SCANNER_CONTROLS) {
+        scannerControls[control.key] = getBackgroundEffectControlValue(
+          'clanker-lcars', control.key, control.default,
+        );
+      }
+      // Existing rail pulses, tile breathing and stepped highlights share an
+      // integrated clock with the scanner speed. Zero holds their exact phase;
+      // changing speed therefore cannot recompute or jump the composition.
+      const clockTime = Number.isFinite(Number(time)) ? Number(time) : 0;
+      if (reduced) {
+        scene.motionLastTime = null;
+      } else {
+        const elapsed = scene.motionLastTime == null ? 0 : Math.min(120, Math.max(0, clockTime - scene.motionLastTime));
+        scene.motionLastTime = clockTime;
+        scene.motionTime = (scene.motionTime || 0) + elapsed * (scannerControls.scanSpeed / 100);
+      }
+      // Reduced motion is a composed static art piece, pinned independently
+      // from the paused interactive phase retained for a later resume.
+      const renderTime = reduced ? 0 : (scene.motionTime || 0);
       const primary = colors[0];
       const accent = colors[1];
       const lilac = colors[5] || colors[1];
@@ -3675,6 +4305,20 @@ function _initClankerLcars() {
           scan.thickness / 2, cyanDetail, intensity * .20);
       }
 
+      // Scanner state is bounded and lives inside this scene; theme.js keeps
+      // the existing canvas/RAF owner while the helper draws the quiet band.
+      if (scene.scanner?.draw) {
+        scene.scanner.draw(ctx, {
+          time: clockTime,
+          reduced,
+          bounds: scene.safeBounds,
+          size,
+          intensity,
+          colors,
+          controls: scannerControls,
+        });
+      }
+
       // Resting outline ticks at the elbow corners — quiet secondary structure.
       ctx.globalAlpha = intensity * .12;
       ctx.strokeStyle = outline;
@@ -3698,41 +4342,21 @@ function _clankerNoise(seed) {
   return value - Math.floor(value);
 }
 
-// T13: curated supported graphemes — not broad code-point ranges. The rain
-// string below is already a curated emoji inventory (including multi-code-point
-// sequences such as ZWJ families and flag-like forms). Drift samples it through
-// the grapheme segmenter so multi-code-point emoji stay intact, and falls back
-// to a single usable glyph if the pool is ever empty.
-const _CLANKER_DRIFT_FALLBACK_GLYPH = '◆';
+// The curated rain inventory contains complete emoji sequences. It feeds the
+// effect's stable asset IDs; background emoji artwork itself is always loaded
+// from the Google/Kitchen catalogue, never drawn from platform fonts.
 const _CLANKER_MATRIX_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$%^&*()_+-=[]{}|;:,.<>?/~`';
 const _CLANKER_RAIN_EMOJI_CHARS = [
   '😀😃😄😁😆😅😂🤣🥲😊😇🙂🙃😉😌😍🥰😘😗😙😚😋😛😝😜🤪🤨🧐🤓😎🥸🤩🥳😏😒😞😔😟😕🙁😣😖😫😩🥺😢😭😤😠😡🤬🤯😳🥵🥶😱😨😰😥😓🤗🤔🫣🤭🫢🫡🤫🫠🤥😶🫥😐🫤😑🙄😯😦😧😮😲🥱😴🤤😪😮‍💨😵😵‍💫🤐🥴🤢🤮🤧😷🤒🤕🤑🤠😈👿👹👺🤡💩👻💀☠👽👾🤖🎃🙈🙉🙊😺😸😹😻😼😽🙀😿😾💋💌💘💝💖💗💓💞💕💟❣💔❤️‍🔥❤️‍🩹❤🩷🧡💛💚💙🩵💜🤎🖤🩶🤍💯💢💥💫💦💨🕳💬👁‍🗨🗨🗯💭💤',
   '🐵🐒🦍🦧🐶🐕🦮🐕‍🦺🐩🐺🦊🦝🐱🐈🐈‍⬛🦁🐯🐅🐆🐴🫎🫏🐎🦄🦓🦌🦬🐮🐂🐃🐄🐷🐖🐗🐽🐏🐑🐐🐪🐫🦙🦒🐘🦣🦏🦛🐭🐁🐀🐹🐰🐇🐿🦫🦔🦇🐻🐻‍❄🐨🐼🦥🦦🦨🦘🦡🐾🦃🐔🐓🐣🐤🐥🐦🐧🕊🦅🦆🦢🦉🦤🪶🦩🦚🦜🪽🐦‍⬛🪿🐸🐊🐢🦎🐍🐲🐉🦕🦖🐳🐋🐬🦭🐟🐠🐡🦈🐙🐚🪸🪼🐌🦋🐛🐜🐝🪲🐞🦗🪳🕷🕸🦂🦟🪰🪱🦠💐🌸💮🪷🏵🌹🥀🌺🌻🌼🌷🪻🌱🪴🌲🌳🌴🌵🌾🌿☘🍀🍁🍂🍃🪹🪺🍄🌰🦀🦞🦐🦑',
   '🍇🍈🍉🍊🍋🍌🍍🥭🍎🍏🍐🍑🍒🍓🫐🥝🍅🫒🥥🥑🍆🥔🥕🌽🌶🫑🥒🥬🥦🧄🧅🥜🫘🌰🫚🫛🍞🥐🥖🫓🥨🥯🥞🧇🧀🍖🍗🥩🥓🍔🍟🍕🌭🥪🌮🌯🫔🥙🧆🥚🍳🥘🍲🫕🥣🥗🍿🧈🧂🥫🍱🍘🍙🍚🍛🍜🍝🍠🍢🍣🍤🍥🥮🍡🥟🥠🥡🦪🍦🍧🍨🍩🍪🎂🍰🧁🥧🍫🍬🍭🍮🍯🍼🥛☕🫖🍵🍶🍾🍷🍸🍹🍺🍻🥂🥃🫗🥤🧋🧃🧉🧊🥢🍽🍴🥄🔪🫙🏺',
 ].join('');
-const _CLANKER_EMOJI_FONT = '"Noto Color Emoji", "Noto Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif';
-
-let _clankerDriftGlyphPoolCache = null;
-function _clankerDriftGlyphPool() {
-  if (_clankerDriftGlyphPoolCache) return _clankerDriftGlyphPoolCache;
-  const pool = _clankerGraphemes(_CLANKER_RAIN_EMOJI_CHARS).filter(glyph => glyph && glyph.trim());
-  _clankerDriftGlyphPoolCache = pool.length ? pool : [_CLANKER_DRIFT_FALLBACK_GLYPH];
-  return _clankerDriftGlyphPoolCache;
-}
-
-function _clankerEmoji(seed) {
-  const pool = _clankerDriftGlyphPool();
-  const index = Math.floor(_clankerNoise(seed) * pool.length) % pool.length;
-  return pool[index] || _CLANKER_DRIFT_FALLBACK_GLYPH;
-}
-
-function _buildClankerDriftScene({ width, height, size, safeBounds, dpr }) {
+function _buildClankerDriftScene({ width, height, size, safeBounds }) {
   const baseCount = Math.max(140, Math.ceil(width * height / 5600));
   const count = Math.min(720, Math.ceil(baseCount * 2.5));
-  return {
+  const scene = {
     baseCount,
-    spriteDpr: dpr || 1,
-    emojiSprites: new Map(),
+    themeEmojiAssetPool: null,
     shards: Array.from({ length: count }, (_, index) => {
       const seed = index * 47 + 11;
       return {
@@ -3753,58 +4377,12 @@ function _buildClankerDriftScene({ width, height, size, safeBounds, dpr }) {
         rotationDirection: _clankerNoise(seed + 59) < .5 ? -1 : 1,
         glowNoise: _clankerNoise(seed + 31),
         intensityNoise: _clankerNoise(seed + 37) * 2 - 1,
-        emoji: _clankerEmoji(seed + 41),
+        emojiAssetId: null,
       };
     }),
   };
-}
-
-// T11: raster cache is quantized (so live size tweaks cannot mint one entry
-// per continuous font size), bounded by an LRU cap, and released on unmount.
-const _EMOJI_SPRITE_MAX_ENTRIES = 48;
-const _EMOJI_SPRITE_SIZE_STEP = 4;
-
-function _quantizeEmojiSpriteSize(pixelFontSize) {
-  return Math.max(12, Math.round(pixelFontSize / _EMOJI_SPRITE_SIZE_STEP) * _EMOJI_SPRITE_SIZE_STEP);
-}
-
-function _clankerEmojiSprite(scene, emoji, fontSize, color) {
-  const dpr = scene.spriteDpr || 1;
-  const pixelFontSize = _quantizeEmojiSpriteSize(Math.max(12, Math.round(fontSize * dpr)));
-  const key = `${emoji}\u0000${pixelFontSize}\u0000${color}`;
-  const cached = scene.emojiSprites.get(key);
-  if (cached) {
-    // LRU touch: re-insert so Map iteration order tracks recency.
-    scene.emojiSprites.delete(key);
-    scene.emojiSprites.set(key, cached);
-    return cached;
-  }
-
-  const padding = Math.ceil(pixelFontSize * .28);
-  const sprite = document.createElement('canvas');
-  const spriteCtx = sprite.getContext('2d');
-  if (!spriteCtx) return null;
-  spriteCtx.font = `${pixelFontSize}px ${_CLANKER_EMOJI_FONT}`;
-  const metrics = spriteCtx.measureText(emoji);
-  sprite.width = Math.max(pixelFontSize + padding * 2, Math.ceil(metrics.width + padding * 2));
-  sprite.height = Math.ceil(pixelFontSize * 1.45 + padding * 2);
-  spriteCtx.font = `${pixelFontSize}px ${_CLANKER_EMOJI_FONT}`;
-  spriteCtx.textAlign = 'center';
-  spriteCtx.textBaseline = 'middle';
-  spriteCtx.fillStyle = color;
-  spriteCtx.fillText(emoji, sprite.width / 2, sprite.height / 2);
-  const result = {
-    canvas: sprite,
-    width: sprite.width / dpr,
-    height: sprite.height / dpr,
-  };
-  // Bounded LRU: evict the oldest entry before inserting past the cap.
-  if (scene.emojiSprites.size >= _EMOJI_SPRITE_MAX_ENTRIES) {
-    const oldest = scene.emojiSprites.keys().next().value;
-    if (oldest !== undefined) scene.emojiSprites.delete(oldest);
-  }
-  scene.emojiSprites.set(key, result);
-  return result;
+  _requestThemeEmojiAssetPool(scene, 'clanker-emoji-drift');
+  return scene;
 }
 
 function _clankerDriftControls(pattern) {
@@ -3831,10 +4409,14 @@ function _clankerDriftFrameLerp(scene, time) {
   return { lerp: 1 - Math.exp(-elapsed / 48), elapsed };
 }
 
-function _clankerDriftState(shard, index, time, size, controls, lerpAlpha, elapsedMs = 0) {
+function _clankerDriftState(shard, index, time, size, controls, lerpAlpha, elapsedMs = 0, positionTime = null) {
   const driftSpeed = controls.driftSpeed * (1 + (shard.driftSpeedNoise * 2 - 1) * controls.driftSpeedVariation * .65);
-  const driftX = Math.sin(time * driftSpeed / (5900 + index % 7 * 340) + shard.phase) * shard.drift * driftSpeed;
-  const driftY = Math.cos(time * driftSpeed / (7000 + index % 5 * 410) + shard.phase) * shard.drift * .72 * driftSpeed;
+  // Emoji integrates positional phase independently so speed changes never
+  // rewind its wobble. Gem retains the original time/amplitude behavior.
+  const phaseTime = positionTime ?? time * driftSpeed;
+  const amplitude = positionTime == null ? driftSpeed : (shard.driftMotionAmplitude ?? driftSpeed);
+  const driftX = Math.sin(phaseTime / (5900 + index % 7 * 340) + shard.phase) * shard.drift * amplitude;
+  const driftY = Math.cos(phaseTime / (7000 + index % 5 * 410) + shard.phase) * shard.drift * .72 * amplitude;
   const rawX = shard.x + driftX;
   const rawY = shard.y + driftY;
   if (!Number.isFinite(shard.renderX) || !Number.isFinite(shard.renderY)) {
@@ -3915,35 +4497,176 @@ function _initClankerGemDrift() {
   });
 }
 
+function _resizeClankerEmojiDriftScene(scene, width, height) {
+  // Shrinking the viewport is layout, not a particle departure. Keep visible
+  // positions; bring fully clipped particles back in with their same artwork.
+  for (const shard of scene.shards) {
+    if (shard.driftDeparted) continue;
+    const halfWidth = shard.driftHalfWidth || 32;
+    const halfHeight = shard.driftHalfHeight || 32;
+    const x = Number.isFinite(shard.renderX) ? shard.renderX : shard.x;
+    const y = Number.isFinite(shard.renderY) ? shard.renderY : shard.y;
+    const insetX = Math.min(width / 2, halfWidth);
+    const insetY = Math.min(height / 2, halfHeight);
+    const nextX = x + halfWidth < 0 || x - halfWidth > width
+      ? Math.max(insetX, Math.min(width - insetX, x)) : x;
+    const nextY = y + halfHeight < 0 || y - halfHeight > height
+      ? Math.max(insetY, Math.min(height - insetY, y)) : y;
+    shard.x += nextX - x;
+    shard.y += nextY - y;
+    shard.renderX = nextX;
+    shard.renderY = nextY;
+  }
+  scene.driftResizePending = false;
+}
+
+function _ensureDriftEmojiAssets(scene, count, size, controls, time, width, height) {
+  const pool = scene.themeEmojiAssetPool;
+  if (!pool || !count) return;
+  if (scene.driftResizePending) return;
+  // Match large sprites and DPR when possible, with <=16M scene-owned pixels
+  // even at the 720-particle ceiling. Rain retains its existing source images.
+  const desired = Math.ceil((9 + 5 * controls.sizeVariation) * size * 2.3 * Math.min(window.devicePixelRatio || 1, 2));
+  // Keep one raster tier for this particle population so visible artwork is
+  // never replaced by another raster while resizing or changing effect size.
+  const dimension = scene.themeEmojiRasterDimension || Math.min(256,
+    Math.floor(Math.sqrt(16 * 1024 * 1024 / scene.shards.length)), Math.max(128, desired));
+  const key = `${count}:${dimension}`;
+  if (scene.themeEmojiActiveLoadKey !== key) {
+    scene.themeEmojiActiveLoadKey = key;
+    scene.themeEmojiRasterDimension = dimension;
+    _queueThemeEmojiAssetPreload(scene, 'clanker-emoji-drift', scene.shards.slice(0, count).map(shard => shard.emojiAssetId));
+  }
+  // An async preload may finish during resize. Apply only after geometry has
+  // settled, and start its fade at the actual spawn rather than fetch time.
+  for (let index = 0; index < count; index += 1) {
+    const shard = scene.shards[index];
+    const asset = shard.driftReplacement;
+    if (!asset) continue;
+    const previousId = shard.emojiAssetId;
+    shard.emojiAssetId = asset.id;
+    shard.emojiAsset = asset;
+    pool.entries[index] = asset.id;
+    const insetX = Math.min(width / 2, shard.driftHalfWidth || 32);
+    const insetY = Math.min(height / 2, shard.driftHalfHeight || 32);
+    shard.x = insetX + Math.random() * (width - insetX * 2);
+    shard.y = insetY + Math.random() * (height - insetY * 2);
+    shard.renderX = shard.x;
+    shard.renderY = shard.y;
+    shard.driftDeparted = false;
+    shard.driftReplacement = null;
+    shard.driftArrivedAt = performance.now();
+    if (!scene.shards.some(item => item.emojiAssetId === previousId)) scene.themeEmojiAssets.delete(previousId);
+    scene.themeEmojiAssets.set(asset.id, asset);
+    scene.themeEmojiArrivals?.delete(previousId);
+  }
+  if (scene.themeEmojiRefreshLoading || time < (scene.themeEmojiRefreshAt || 0)) return;
+  const index = scene.shards.slice(0, count).findIndex(shard => shard.driftDeparted);
+  // Never replace a visible or temporarily unloaded identity on a timer.
+  if (index < 0) return;
+  const assigned = new Set(scene.shards.map(shard => shard.emojiAssetId));
+  for (const shard of scene.shards) if (shard.driftReplacement) assigned.add(shard.driftReplacement.id);
+  let id = null;
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const candidate = _pickThemeEmojiAssetId(pool.refreshPool);
+    if (candidate && !assigned.has(candidate)) { id = candidate; break; }
+  }
+  if (!id) { scene.themeEmojiRefreshAt = time + 2000; return; }
+  scene.themeEmojiRefreshLoading = true;
+  const shard = scene.shards[index];
+  // The previous artwork has fully departed before this request is launched.
+  preloadThemeEmojiAssets([id], { concurrency: 1, maxDimension: dimension,
+    signal: scene.themeEmojiLoadController?.signal }).then(([asset]) => {
+    if (!asset || !_themeEmojiPoolSceneIsActive(scene, 'clanker-emoji-drift')
+        || scene.themeEmojiAssetPool !== pool || scene.themeEmojiActiveLoadKey !== key) return;
+    shard.driftReplacement = asset;
+    scene.themeEmojiRefreshAt = 0;
+    _invalidateBackgroundPaint();
+  }).catch(() => {}).finally(() => {
+    scene.themeEmojiRefreshLoading = false;
+    if (!shard.driftReplacement) scene.themeEmojiRefreshAt = time + 2000;
+  });
+}
+
 function _initClankerEmojiDrift() {
   _mountClankerEffect({
     id: 'clanker-emoji-drift-canvas',
     bodyClass: 'bg-pattern-clanker-emoji-drift',
     build: _buildClankerDriftScene,
+    resizeScene: _resizeClankerEmojiDriftScene,
     draw: (ctx, { width, height, time, reduced, scene, intensity, size, colors }) => {
       const controls = _clankerDriftControls('clanker-emoji-drift');
       const renderTime = reduced ? 0 : time;
       const driftFrame = _clankerDriftFrameLerp(scene, renderTime);
-      const canvasBounds = { left: 0, top: 0, right: width, bottom: height };
       ctx.imageSmoothingEnabled = true;
       const count = Math.min(scene.shards.length, Math.round(scene.baseCount * controls.totalQuantity));
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
+      _ensureDriftEmojiAssets(scene, count, size, controls, renderTime, width, height);
       for (let index = 0; index < count; index += 1) {
         const shard = scene.shards[index];
-        const { x, y, radius, bright, alphaScale, rotation } = _clankerDriftState(shard, index, renderTime, size, controls, driftFrame.lerp, driftFrame.elapsed);
-        const extent = radius * 1.5 + (bright ? 12 : 3) * size;
-        const edgeAlpha = _clankerEdgeAlpha(x, y, extent, canvasBounds);
-        if (!edgeAlpha) continue;
-        const fontSize = Math.max(12, radius * 2.3);
-        const sprite = _clankerEmojiSprite(scene, shard.emoji, fontSize, colors[shard.color]);
-        if (!sprite) continue;
+        if (shard.driftDeparted) continue;
+        const moving = !reduced && !scene.driftResizePending && controls.driftSpeed > 0;
+        // Retain this lifetime's original excursion size, including saved slow
+        // speeds; changing speed advances phase without scaling visible offsets.
+        if (shard.driftMotionAmplitude == null && controls.driftSpeed > 0) {
+          shard.driftMotionAmplitude = controls.driftSpeed
+            * (1 + (shard.driftSpeedNoise * 2 - 1) * controls.driftSpeedVariation * .65);
+        }
+        if (moving) {
+          // Variation is the sole speed spread: 0 is uniform, 100 gives stable
+          // 0.1–1.9x slow/fast particles around the same mean base movement.
+          const speedScale = .9 * controls.driftSpeed
+            * (1 + (shard.driftSpeedNoise * 2 - 1) * controls.driftSpeedVariation * .9);
+          const speed = 7.5 * size * speedScale;
+          const heading = shard.phase;
+          shard.x += Math.cos(heading) * speed * driftFrame.elapsed / 1000;
+          shard.y += Math.sin(heading) * speed * driftFrame.elapsed / 1000;
+          shard.driftMotionTime = (shard.driftMotionTime || 0) + driftFrame.elapsed * speedScale;
+        }
+        const { x, y, radius, bright, alphaScale, rotation } = _clankerDriftState(shard, index,
+          renderTime, size, controls, moving ? driftFrame.lerp : 0, driftFrame.elapsed, shard.driftMotionTime || 0);
+        // Pin the actual artwork for this lifetime, including while DPR or
+        // raster quality changes. Identity alone must not hide a visible swap.
+        if (shard.emojiAsset?.id !== shard.emojiAssetId) shard.emojiAsset = null;
+        const asset = shard.emojiAsset || _getThemeEmojiAssetForScene(scene, shard.emojiAssetId);
+        const assetReady = asset?.image && asset.width > 0 && asset.height > 0;
+        if (assetReady) shard.emojiAsset = asset;
+        const imageHeight = Math.max(12, radius * 2.3);
+        const imageWidth = imageHeight * (assetReady ? asset.width / asset.height : 1);
+        const absCos = Math.abs(Math.cos(rotation));
+        const absSin = Math.abs(Math.sin(rotation));
+        const glow = bright && assetReady ? _getThemeEmojiAlphaGlow(scene, asset, colors[shard.color]) : null;
+        // Reserve the full glow footprint even before its idle raster finishes.
+        const glowScale = assetReady ? Math.min(1,
+          _THEME_EMOJI_GLOW_SOURCE_MAX_DIMENSION / Math.max(asset.width, asset.height)) : 1;
+        const sourceWidth = assetReady ? Math.max(1, Math.round(asset.width * glowScale)) : 128;
+        const sourceHeight = assetReady ? Math.max(1, Math.round(asset.height * glowScale)) : 128;
+        const glowWidth = glow?.canvas ? imageWidth * glow.canvas.width / glow.sourceWidth
+          : imageWidth * (bright ? 1 + _THEME_EMOJI_GLOW_PADDING * 2 / sourceWidth : 1);
+        const glowHeight = glow?.canvas ? imageHeight * glow.canvas.height / glow.sourceHeight
+          : imageHeight * (bright ? 1 + _THEME_EMOJI_GLOW_PADDING * 2 / sourceHeight : 1);
+        const rotatedHalfWidth = (absCos * glowWidth + absSin * glowHeight) / 2;
+        const rotatedHalfHeight = (absSin * glowWidth + absCos * glowHeight) / 2;
+        shard.driftHalfWidth = rotatedHalfWidth;
+        shard.driftHalfHeight = rotatedHalfHeight;
+        const outside = x + rotatedHalfWidth < 0 || x - rotatedHalfWidth > width
+          || y + rotatedHalfHeight < 0 || y - rotatedHalfHeight > height;
+        if (outside && !reduced && !scene.driftResizePending && driftFrame.elapsed > 0) {
+          shard.driftDeparted = true;
+          continue;
+        }
+        if (!assetReady) continue;
         ctx.save();
         ctx.translate(x, y);
         ctx.rotate(rotation);
-        ctx.globalAlpha = Math.min(1, intensity * alphaScale * (bright ? .78 : .34)) * edgeAlpha;
-        if (bright) { ctx.shadowColor = colors[shard.color]; ctx.shadowBlur = 12 * size; }
-        ctx.drawImage(sprite.canvas, -sprite.width / 2, -sprite.height / 2, sprite.width, sprite.height);
+        const arrived = shard.driftArrivedAt ?? scene.themeEmojiArrivals?.get(asset.id);
+        const arrivalAlpha = reduced || arrived == null ? 1 : Math.min(1, Math.max(0, (performance.now() - arrived) / (shard.driftArrivedAt == null ? 180 : 800)));
+        const drawAlpha = Math.min(1, intensity * alphaScale * (bright ? .78 : .34)) * arrivalAlpha;
+        if (glow?.canvas) {
+          ctx.globalAlpha = drawAlpha * .34;
+          ctx.drawImage(glow.canvas, -glowWidth / 2, -glowHeight / 2, glowWidth, glowHeight);
+        }
+        ctx.globalAlpha = drawAlpha;
+        ctx.drawImage(asset.image, -imageWidth / 2, -imageHeight / 2, imageWidth, imageHeight);
         ctx.restore();
       }
     },
@@ -3958,7 +4681,6 @@ function _clankerGraphemes(value) {
   return Array.from(value);
 }
 
-const _CLANKER_CODE_RAIN_EMOJI_GLYPHS = _clankerGraphemes(_CLANKER_RAIN_EMOJI_CHARS);
 const _CLANKER_CODE_RAIN_COLLISION_SELECTORS = [
   '.chat-top-bar',
   '.chat-input-bar',
@@ -3988,14 +4710,17 @@ function _clankerCodeRainPattern(mode) {
 function _clankerCodeRainControls(mode) {
   const pattern = _clankerCodeRainPattern(mode);
   return {
-    quantity: getBackgroundEffectControlValue(pattern, 'splashQuantity', 1.4),
-    speed: getBackgroundEffectControlValue(pattern, 'splashRainSpeed', 1),
-    flicker: getBackgroundEffectControlValue(pattern, 'splashRainFlicker', .16),
+    // Junction's registry quantity is 6.3 but its source clamp makes four
+    // effective; the UI exposes that actual range. Down/rare-up stay host exceptions.
+    quantity: getBackgroundEffectControlValue(pattern, 'splashQuantity', 4),
+    speed: getBackgroundEffectControlValue(pattern, 'splashRainSpeed', 1.6),
+    flicker: getBackgroundEffectControlValue(pattern, 'splashRainFlicker', .27),
     spread: getBackgroundEffectControlValue(pattern, 'splashRainSpread', 1),
     rainDown: getBackgroundEffectControlValue(pattern, 'splashRainDown', true),
     reverseChance: getBackgroundEffectControlValue(pattern, 'splashRainReverseChance', 0),
     rareUpward: getBackgroundEffectControlValue(pattern, 'splashRareUpward', true),
     waves: getBackgroundEffectControlValue(pattern, 'splashRainWaves', false),
+    sideBounce: getBackgroundEffectControlValue(pattern, 'splashRainBounceSides', true),
     charVariety: getBackgroundEffectControlValue(pattern, 'splashCharVariety', 1),
     minOpacity: getBackgroundEffectControlValue(pattern, 'splashMinOpacity', .2),
     maxOpacity: getBackgroundEffectControlValue(pattern, 'splashMaxOpacity', 1),
@@ -4007,12 +4732,15 @@ function _clankerCodeRainControls(mode) {
     collisionForce: getBackgroundEffectControlValue(pattern, 'splashCollisionForce', 2.2),
     emojiMix: mode === 'matrix' && getBackgroundEffectControlValue(pattern, 'splashEmojiMix', false),
     emojiRarity: getBackgroundEffectControlValue(pattern, 'splashEmojiRarity', 10000000),
+    // The selected host mode is the programmatic source charset choice:
+    // Junction's registry default is Katakana and the emoji pattern uses its
+    // emoji charset without a parallel, divergent density implementation.
+    charsetPreset: mode === 'emoji' ? 'emoji' : 'katakana',
   };
 }
 
-// Topology keys rebuild the droplet set. UI-only keys (advanced settings,
-// direction, rare toggle, speed, bounce, …) are read live and must not reset
-// droplets or the running simulation.
+// These values determine source scene construction. Motion-only controls stay
+// live; source style rerolls whenever a drop recycles.
 const _RAIN_TOPOLOGY_FIELDS = [
   'quantity', 'charVariety', 'sizeVariance', 'minOpacity', 'maxOpacity', 'emojiMix', 'emojiRarity',
 ];
@@ -4023,270 +4751,178 @@ function _clankerCodeRainTopologyKey(mode, width, height, size) {
   return `${mode}:${width}:${height}:${size}:${parts.join(':')}`;
 }
 
-function _clankerCodeRainDirection(seed, controls, rareSeed = seed + 59) {
-  return composeRainDirection({
-    rainDown: controls.rainDown,
-    reverseChance: controls.reverseChance,
-    rareUpward: controls.rareUpward,
-    noise: _clankerNoise(seed),
-    rareNoise: _clankerNoise(rareSeed),
-  }).direction;
-}
-
 function _buildClankerCodeRainScene({ width, height, size, mode }) {
-  const emoji = mode === 'emoji';
-  const controls = _clankerCodeRainControls(mode);
-  const minOpacity = Math.min(controls.minOpacity, controls.maxOpacity);
-  const maxOpacity = Math.max(controls.minOpacity, controls.maxOpacity);
-  const cell = Math.max(emoji ? 42 : 17, (emoji ? 52 : 21) * size);
-  const streamCount = Math.max(emoji ? 22 : 46, Math.min(emoji ? 96 : 180, Math.ceil(width / cell * controls.quantity)));
-  const glyphSize = Math.max(emoji ? 20 : 11, (emoji ? 26 : 14) * size);
-  const glyphs = emoji ? _CLANKER_CODE_RAIN_EMOJI_GLYPHS : Array.from(_CLANKER_MATRIX_CHARS);
-  const varietyLength = Math.max(1, Math.ceil(glyphs.length * controls.charVariety));
-  const glyphPool = glyphs.slice(0, varietyLength);
-  const emojiPool = _CLANKER_CODE_RAIN_EMOJI_GLYPHS;
-  const pickChar = (seed, offset) => controls.emojiMix && _clankerNoise(seed + offset) < 1 / Math.max(1, controls.emojiRarity)
-    ? emojiPool[Math.floor(_clankerNoise(seed + offset + 1) * emojiPool.length)]
-    : glyphPool[Math.floor(_clankerNoise(seed + offset + 1) * glyphPool.length)];
-  const streams = Array.from({ length: streamCount }, (_, index) => {
-    const seed = index * 71 + (emoji ? 307 : 113);
-    const trailLength = emoji ? 2 + Math.floor(_clankerNoise(seed + 3) * 3) : 5 + Math.floor(_clankerNoise(seed + 3) * 9);
-    const x = ((index + .5) / streamCount) * width + (_clankerNoise(seed + 5) - .5) * cell * (.8 + controls.spread * .2);
-    const rareNoise = _clankerNoise(seed + 59);
-    const composed = composeRainDirection({
-      rainDown: controls.rainDown,
-      reverseChance: controls.reverseChance,
-      rareUpward: controls.rareUpward,
-      noise: _clankerNoise(seed + 31),
-      rareNoise,
-    });
-    const direction = composed.direction;
-    const spawn = spawnPosition({
-      direction,
-      rare: composed.rare,
-      waves: controls.waves,
-      width,
-      height,
-      radius: 0,
-      entryNoise: _clankerNoise(seed + 7),
-      lateralNoise: 0.5,
-      spread: controls.spread,
-      cell,
-      initialX: x,
-    });
-    // Non-rare random placement still uses the full-height scatter unless waves.
-    const y = controls.waves || composed.rare
-      ? spawn.y
-      : direction > 0
-        ? _clankerNoise(seed + 7) * height
-        : height - _clankerNoise(seed + 7) * height;
-    const initialSpeed = (emoji ? 44 : 74) * (0.72 + _clankerNoise(seed + 11) * .72) * Math.max(.65, size) * controls.speed;
-    const chars = Array.from({ length: trailLength + 6 }, (_, charIndex) => pickChar(seed, charIndex * 13) || glyphPool[0]);
-    return {
-      x,
-      y,
-      initialX: x,
-      initialSpeed,
-      speed: initialSpeed,
-      direction,
-      rare: composed.rare,
-      lateral: 0,
-      trailLength,
-      chars,
-      charIndex: Math.floor(_clankerNoise(seed + 19) * chars.length),
-      lastCell: Math.floor(y / glyphSize),
-      lastHitAt: -Infinity,
-      // Junction's splash assigns a discrete behind layer. Behind drops are
-      // dimmed and pass through; only foreground drops use the light shove.
-      behind: _clankerNoise(seed + 53) < .34,
-      color: index % 6,
-      colorNoise: _clankerNoise(seed + 37),
-      opacity: minOpacity + _clankerNoise(seed + 23) * (maxOpacity - minOpacity),
-      scale: Math.max(.45, Math.min(2.4, 1 + (_clankerNoise(seed + 41) * 2 - 1) * controls.sizeVariance)),
-      flickerCycle: -1,
-      flickerCharIndex: 0,
-      resetCount: 0,
-      seed,
-      phase: _clankerNoise(seed + 29) * Math.PI * 2,
-    };
-  });
-  return {
-    mode,
-    glyphSize,
-    cell,
-    streams,
-    obstacleTime: -Infinity,
-    obstacles: [],
-    lastTime: null,
-  };
-}
-
-function _clankerCodeRainObstacles(scene, time, field = null) {
-  // Shared obstacle-field helper: cached painted-alpha field, refreshed on
-  // geometry/style/scroll/resize rather than an expensive DOM scan per frame.
-  if (field) {
-    scene.obstacles = field.obstacles;
-    scene.obstacleTime = time;
-    return scene.obstacles;
-  }
-  if (time - scene.obstacleTime < 110) return scene.obstacles;
-  scene.obstacleTime = time;
-  scene.obstacles = [];
-  return scene.obstacles;
-}
-
-function _clankerCodeRainHit(stream, x, y, radius, obstacles) {
-  if (stream.behind) return null;
-  return obstacles.find(rect => x + radius > rect.left && x - radius < rect.right && y + radius > rect.top && y - radius < rect.bottom) || null;
-}
-
-function _resetClankerCodeRainStream(stream, scene, controls, width, height, radius) {
-  stream.resetCount += 1;
-  const rareNoise = _clankerNoise(stream.seed + stream.resetCount * 59);
-  const composed = composeRainDirection({
-    rainDown: controls.rainDown,
-    reverseChance: controls.reverseChance,
-    rareUpward: controls.rareUpward,
-    noise: _clankerNoise(stream.seed + stream.resetCount * 31),
-    rareNoise,
-  });
-  stream.direction = composed.direction;
-  stream.rare = composed.rare;
-  const spawn = spawnPosition({
-    direction: stream.direction,
-    rare: composed.rare,
-    waves: controls.waves,
+  return createJunctionRainScene({
     width,
     height,
-    radius,
-    entryNoise: _clankerNoise(stream.seed + stream.resetCount * 43),
-    lateralNoise: _clankerNoise(stream.seed + stream.resetCount * 47),
-    spread: controls.spread,
-    cell: scene.cell,
-    initialX: stream.initialX,
+    size,
+    mode,
+    controls: _clankerCodeRainControls(mode),
+    emojiCharset: _CLANKER_RAIN_EMOJI_CHARS,
   });
-  stream.y = spawn.y;
-  stream.x = spawn.x;
-  stream.speed = stream.initialSpeed;
-  stream.lateral = 0;
-  stream.lastCell = Math.floor(stream.y / scene.glyphSize);
 }
 
-function _advanceClankerCodeRainStream(stream, scene, controls, time, delta, width, height, obstacles) {
-  const radius = scene.glyphSize * stream.scale * (scene.mode === 'emoji' ? .42 : .5) * (1 + controls.collisionForce * .06);
-  const nextX = stream.x + stream.lateral * delta;
-  const nextY = stream.y + stream.speed * stream.direction * delta;
-  const hit = time - stream.lastHitAt > 130 ? _clankerCodeRainHit(stream, nextX, nextY, radius, obstacles) : null;
-  if (hit) {
-    // Junction collision is light: preserve nextY/vy/direction and sidestep
-    // along the obstacle edge. The .04 term is intentional and remains when
-    // both sliders are 0.
-    const response = resolveCollision({
-      x: nextX,
-      y: nextY,
-      radius,
-      obstacle: hit,
-      glyphSize: scene.glyphSize,
-      scale: stream.scale,
-      collisionForce: controls.collisionForce,
-      bounce: controls.bounce,
-      random: _clankerNoise(stream.seed + Math.floor(time / 160) * 17),
-      behind: stream.behind,
-      lastHitAt: stream.lastHitAt,
-      time,
-    });
-    if (response.hit) {
-      stream.x = response.x;
-      stream.y = response.y;
-      stream.lateral = response.lateral;
-      stream.lastHitAt = time;
-    } else {
-      stream.x = nextX;
-      stream.y = nextY;
+function _ensureCodeRainEmojiAssets(rain, mode) {
+  const pattern = _clankerCodeRainPattern(mode);
+  const enabled = mode === 'emoji'
+    || getBackgroundEffectControlValue(pattern, 'splashEmojiMix', false);
+  if (!enabled) {
+    rain.themeEmojiLoadController?.abort();
+    if (rain.themeEmojiAssetPool || rain.themeEmojiPoolLoading || rain.themeEmojiPoolRequestSignature) {
+      rain.themeEmojiPoolRequestId = (rain.themeEmojiPoolRequestId || 0) + 1;
+      rain.themeEmojiPoolRequestSignature = null;
+      rain.themeEmojiPoolLoading = false;
+      rain.themeEmojiAssetPool = null;
+      rain.themeEmojiAssets = new Map();
+      _clearThemeEmojiAssetAssignments(rain);
     }
-  } else {
-    stream.x = nextX;
-    stream.y = nextY;
-    stream.speed += (stream.initialSpeed - stream.speed) * Math.min(1, delta * 2.2);
-    stream.speed += stream.initialSpeed * (controls.gravity - .2) * delta * .35;
-    stream.speed = Math.max(stream.initialSpeed * .3, Math.min(stream.initialSpeed * 1.8, stream.speed));
-    stream.lateral *= Math.pow(.04, delta);
+    return;
   }
-  const currentCell = Math.floor(stream.y / scene.glyphSize);
-  if (currentCell !== stream.lastCell) {
-    stream.charIndex = (stream.charIndex + Math.abs(currentCell - stream.lastCell)) % stream.chars.length;
-    stream.lastCell = currentCell;
+  // applyBgPattern starts the catalogue request before mounting this owner.
+  // Never initiate a catalogue/image request from the frame callback.
+  if (!_themeEmojiCatalogPromise) return;
+  const sizeVariance = getBackgroundEffectControlValue(pattern, 'splashSizeVariance', .45);
+  const dimension = Math.min(128, Math.max(32, Math.ceil(rain.fontSize * Math.min(2.4, 1 + sizeVariance) * Math.min(window.devicePixelRatio || 1, 2))));
+  const changedDimension = rain.themeEmojiRasterDimension !== dimension;
+  rain.themeEmojiRasterDimension = dimension;
+  _requestThemeEmojiAssetPool(rain, pattern);
+  const pool = rain.themeEmojiAssetPool;
+  if (pool && changedDimension) _queueThemeEmojiAssetPreload(rain, pattern, _themeEmojiPoolIds(pool));
+  if (!pool) return;
+  for (const drop of rain.drops || []) {
+    if (!drop.emoji) {
+      drop.emojiAssetId = null;
+      drop.themeEmojiAssetAssigned = false;
+    } else if (!drop.themeEmojiAssetAssigned) {
+      drop.emojiAssetId = _pickThemeEmojiAssetId(pool);
+      drop.themeEmojiAssetAssigned = true;
+    }
   }
-  const flickerPeriod = 160 + (1 - controls.flicker) * 440;
-  const flickerCycle = Math.floor(time / flickerPeriod);
-  if (flickerCycle !== stream.flickerCycle) {
-    stream.flickerCycle = flickerCycle;
-    stream.flickerCharIndex = _clankerNoise(stream.seed + flickerCycle * 19) < controls.flicker
-      ? Math.floor(_clankerNoise(stream.seed + flickerCycle * 23) * stream.chars.length)
-      : stream.charIndex;
-  }
-  const travel = scene.glyphSize * stream.scale * (stream.trailLength + 2);
-  if (stream.direction > 0 && stream.y - travel > height + radius) {
-    _resetClankerCodeRainStream(stream, scene, controls, width, height, radius);
-  } else if (stream.direction < 0 && stream.y + travel < -radius) {
-    _resetClankerCodeRainStream(stream, scene, controls, width, height, radius);
-  }
-  stream.x = Math.max(-scene.cell, Math.min(width + scene.cell, stream.x));
 }
 
-function _drawClankerCodeRain(batch, { width, height, time, scene, intensity, size, colors, outline, reduced, rain, field, font }) {
-  const controls = _clankerCodeRainControls(scene.mode || rain.mode);
+function _clankerCodeRainObstacles(scene, field = null) {
+  // Cached DOM masks replace Junction's wordmark canvas. Per-drop probes only
+  // visit this bounded snapshot; they never read layout or rasterize text.
+  if (field) {
+    scene.obstacles = field.obstacles;
+    return scene.obstacles;
+  }
+  return scene.obstacles || [];
+}
+
+function _clankerCodeRainHit(x, y, radius, obstacles) {
+  for (const entry of obstacles) {
+    const surface = obstacleCollision(entry, x, y, radius);
+    if (surface) return surface;
+  }
+  return null;
+}
+
+function _clankerCodeRainVaryColor(base, amount, sample) {
+  // Junction `varyColor` changes RGB and carries alpha separately. Preserve
+  // that separation because the WebGL glyph path accepts hex tint only.
+  const rgb = hexToRgb(base);
+  if (!rgb || amount <= 0) return base || '#ffffff';
+  const shift = (sample * 2 - 1) * amount;
+  const lift = shift > 0 ? 255 * shift : 0;
+  const scale = 1 + Math.min(0, shift);
+  const channel = value => Math.max(0, Math.min(255, Math.round(value * scale + lift)));
+  return `#${[channel(rgb.r), channel(rgb.g), channel(rgb.b)]
+    .map(value => value.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function _acknowledgeRareRainPaint(drop, rain, alpha) {
+  if (!drop.rare || drop.direction >= 0) { drop._achievementPainted = false; return; }
+  if (alpha <= 0 || drop._achievementPainted || document.visibilityState !== 'visible'
+      || drop.x < 0 || drop.x > rain.width || drop.y < 0 || drop.y > rain.height) return;
+  drop._achievementPainted = true;
+  const accountId = achievementOwner();
+  // The graphics owner submits this batch after the paint callback returns.
+  requestAnimationFrame(() => {
+    if (document.visibilityState !== 'visible' || !document.querySelector('[id^="clanker-"][id$="rain-canvas"]')) return;
+    void recordPresentation('rain.droplet.painted', { directionUpward:true, rareDroplet:true,
+      paintedInVisibleViewport:true, tabActive:true, effectActive:true }, { accountId });
+  });
+}
+
+function _appendClankerCodeRainGlyph(batch, drop, rain, controls, intensity, colors, font) {
+  const alpha = Math.min(1, intensity * drop.alpha);
+  const fontSize = Math.max(2, Math.round(rain.fontSize * drop.scale));
+  if (drop.emoji) {
+    const asset = _getThemeEmojiAssetForScene(rain, drop.emojiAssetId);
+    if (!asset?.image || !(asset.width > 0) || !(asset.height > 0)) return;
+    const imageHeight = fontSize;
+    const imageWidth = imageHeight * asset.width / asset.height;
+    const imageY = drop.y - imageHeight;
+    if (drop.x + imageWidth < 0 || drop.x > rain.width
+        || imageY + imageHeight < 0 || imageY > rain.height) return;
+    batch.sprite(asset.image, drop.x, imageY, imageWidth, imageHeight, alpha);
+    _acknowledgeRareRainPaint(drop, rain, alpha);
+    return;
+  }
+  if (drop.y < -rain.fontSize * 4 || drop.y > rain.height + rain.fontSize
+      || drop.x < -rain.fontSize || drop.x > rain.width + rain.fontSize) return;
+  // The canonical Open Clank palette is always distributed over drops. Optional
+  // variation then mirrors Junction's `varyColor` on the selected base only.
+  const paletteIndex = Math.floor(drop.paletteVariant * colors.length) % colors.length;
+  const baseColor = colors[paletteIndex] || '#ffffff';
+  const color = _clankerCodeRainVaryColor(baseColor, controls.colorVariance, drop.colorShift);
+  batch.glyph(
+    drop.ch,
+    drop.x,
+    drop.y,
+    fontSize,
+    400,
+    color,
+    alpha,
+    'left',
+    'alphabetic',
+    font,
+    null,
+  );
+  _acknowledgeRareRainPaint(drop, rain, alpha);
+}
+
+function _drawClankerCodeRain(batch, { width, height, time, intensity, size, colors, reduced, rain, field }) {
+  const controls = _clankerCodeRainControls(rain.mode);
   const previousTime = rain.lastTime;
   rain.lastTime = time;
-  const delta = reduced || previousTime === null ? 0 : Math.min(48, Math.max(0, time - previousTime)) / 1000;
-  const obstacles = _clankerCodeRainObstacles(rain, time, field);
-  // Match Junction's compositing order: behind rain first, foreground rain
-  // second. The Open Clank canvas remains behind arbitrary DOM by design.
-  const streams = rain.streams.slice().sort((a, b) => Number(b.behind) - Number(a.behind));
-  for (const stream of streams) {
-    if (delta) _advanceClankerCodeRainStream(stream, rain, controls, time, delta, width, height, obstacles);
-    const glyphStep = rain.glyphSize * stream.scale * .92;
-    const charStart = stream.flickerCharIndex || stream.charIndex;
-    const colorOffset = Math.floor(stream.colorNoise * colors.length * controls.colorVariance);
-    const streamColor = (stream.color + colorOffset) % colors.length;
-    for (let index = 0; index <= stream.trailLength; index += 1) {
-      const y = stream.y - stream.direction * index * glyphStep;
-      if (y < -rain.glyphSize * 2 || y > height + rain.glyphSize * 2 || stream.x < -rain.glyphSize || stream.x > width + rain.glyphSize) continue;
-      const tailAlpha = (1 - index / (stream.trailLength + 1)) * stream.opacity * (stream.behind ? .66 : 1);
-      // Head-glyph glow (pre-S24 shadowBlur): only the leading glyph glows.
-      const glow = index === 0
-        ? { color: colors[streamColor], blur: ((rain.mode === 'emoji' ? 8 : 5) * size) }
-        : null;
-      batch.glyph(
-        stream.chars[(charStart + index) % stream.chars.length],
-        stream.x,
-        y,
-        rain.glyphSize * stream.scale,
-        400,
-        colors[(streamColor + index) % colors.length],
-        Math.min(1, intensity * tailAlpha * (index === 0 ? 1 : .72)),
-        'center',
-        'middle',
-        font,
-        glow,
-      );
-    }
+  const deltaSeconds = previousTime == null ? 0 : Math.min(50, Math.max(0, time - previousTime)) / 1000;
+  const obstacles = _clankerCodeRainObstacles(rain, field);
+  stepJunctionRain(rain, {
+    controls,
+    deltaSeconds,
+    reduced,
+    hitAt: (x, y, radius) => _clankerCodeRainHit(x, y, radius, obstacles),
+  });
+  _ensureCodeRainEmojiAssets(rain, rain.mode);
+  // Preserve Junction's behind/front ordering within the one background batch.
+  for (const drop of rain.drops) {
+    if (drop.behind) _appendClankerCodeRainGlyph(batch, drop, rain, controls, intensity, colors, 'monospace');
   }
-  return outline;
+  for (const drop of rain.drops) {
+    if (!drop.behind) _appendClankerCodeRainGlyph(batch, drop, rain, controls, intensity, colors, 'monospace');
+  }
 }
 
 function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
   if (document.getElementById(id)) return;
-  const host = document.getElementById('chat-container') || document.body;
-  const chatPane = host.id === 'chat-container';
+  // Rain uses the same persistent body host as the other Clanker scenes so
+  // chat minimize and pop-out cannot hide its viewport canvas.
+  const host = document.body;
+  const addedHostIsolation = !host.classList.contains('background-effect-host');
   const canvas = document.createElement('canvas');
   canvas.id = id;
-  canvas.style.cssText = chatPane
-    ? 'position:absolute;left:0;top:0;pointer-events:none;z-index:-1;'
-    : 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:-1;';
   canvas.setAttribute('aria-hidden', 'true');
-  if (chatPane) host.classList.add('background-effect-host');
+  // Isolate the body host so its negative canvas stays above the page
+  // background while remaining below every ordinary interface surface.
+  host.classList.add('background-effect-host');
   host.prepend(canvas);
+  // WebGL fallback may replace the DOM surface. Keep all theme lifecycle
+  // callbacks pointed at the currently mounted canvas.
+  let activeCanvas = canvas;
+
 
   // ONE scene owner via the graphics substrate consumer. theme.js must not
   // also run _runBackgroundCanvas for this canvas (hex: duplicate loop = flicker).
@@ -4302,23 +4938,14 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
   let height = 0;
   let dpr = 1;
   let topologyKey = '';
-
-  function updateCanvasLayout() {
-    if (!chatPane) return;
-    const rect = host.getBoundingClientRect();
-    canvas.style.left = `${-Math.round(rect.left)}px`;
-    canvas.style.top = `${-Math.round(rect.top)}px`;
-    canvas.style.width = `${window.innerWidth}px`;
-    canvas.style.height = `${window.innerHeight}px`;
-  }
-
   function measure() {
-    const rect = host.getBoundingClientRect();
-    const nextWidth = chatPane ? Math.max(1, window.innerWidth) : Math.max(1, Math.round(rect.width));
-    const nextHeight = chatPane ? Math.max(1, window.innerHeight) : Math.max(1, Math.round(rect.height));
-    const nextDpr = Math.min(window.devicePixelRatio || 1, 2);
-    return { nextWidth, nextHeight, nextDpr };
+    return {
+      nextWidth: Math.max(1, window.innerWidth),
+      nextHeight: Math.max(1, window.innerHeight),
+      nextDpr: Math.min(window.devicePixelRatio || 1, 2),
+    };
   }
+
 
   function ensureRain(scene, nextWidth, nextHeight, nextDpr) {
     const size = _getEffectSize();
@@ -4338,6 +4965,7 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
     rain.width = nextWidth;
     rain.height = nextHeight;
     topologyKey = key;
+    existing?.themeEmojiLoadController?.abort();
     scene.resetTopology({ documentState: { rain } });
     return rain;
   }
@@ -4350,7 +4978,7 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
     canvas,
     id,
     draw: ({ backend, batch, scene, time, reduced }) => {
-      if (!canvas.isConnected || !document.body.classList.contains(bodyClass)) {
+      if (!activeCanvas.isConnected || !document.body.classList.contains(bodyClass)) {
         return;
       }
       const measured = measure();
@@ -4358,28 +4986,23 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
       width = measured.nextWidth;
       height = measured.nextHeight;
       dpr = measured.nextDpr;
-      updateCanvasLayout();
       if (geometryChanged && consumer) {
         consumer.resize(width, height, dpr);
         field.invalidate();
       }
       const config = _readClankerEffectConfig(true);
       const rain = ensureRain(scene, width, height, dpr);
-      // Test/diagnostics seam: expose current scene state without a second owner.
-      canvas.__backgroundScene = rain;
-      const font = rain.mode === 'emoji' ? _CLANKER_EMOJI_FONT : "'Liga Comic Mono', 'Fira Code', monospace";
+      // Diagnostics expose the one background surface and its one scene.
+      activeCanvas.__backgroundScene = rain;
       _drawClankerCodeRain(batch, {
         width,
         height,
         time,
-        scene,
         rain,
         field,
-        font,
         intensity: config.intensity,
         size: config.size,
         colors: config.colors,
-        outline: config.outline,
         reduced,
       });
     },
@@ -4387,6 +5010,19 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
     win: window,
     doc: document,
     ownerHost: window,
+    onCanvasChange: (nextCanvas, previousCanvas) => {
+      activeCanvas = nextCanvas;
+      // Attribute copying lives in the consumer. Preserve the theme-only
+      // diagnostics/state hooks while a replacement occurs synchronously.
+      if (previousCanvas) {
+        for (const property of ['__backgroundScene', '__backgroundStaticCanvas']) {
+          if (Object.prototype.hasOwnProperty.call(previousCanvas, property)) {
+            nextCanvas[property] = previousCanvas[property];
+          }
+        }
+      }
+      installCanvasDiagnostics(nextCanvas);
+    },
   });
 
   // Reconcile the substrate owner with the theme background owner key so
@@ -4395,54 +5031,56 @@ function _mountClankerCodeRain({ id, bodyClass, mode, getSceneKey = null }) {
     if (!document.body.classList.contains(bodyClass)) dispose();
   });
   bodyWatcher.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-  const resizeObserver = typeof ResizeObserver === 'function'
-    ? new ResizeObserver(() => {
-      field.invalidate();
-      consumer.invalidate();
-    })
-    : null;
-  if (resizeObserver && chatPane) resizeObserver.observe(host);
   const handleWindowResize = () => {
     field.invalidate();
     consumer.invalidate();
   };
   window.addEventListener('resize', handleWindowResize, { passive: true });
 
+  let disposed = false;
   function dispose() {
+    if (disposed) return;
+    disposed = true;
     try { bodyWatcher.disconnect(); } catch (_) { /* already gone */ }
-    if (resizeObserver) resizeObserver.disconnect();
     window.removeEventListener('resize', handleWindowResize);
     field.dispose();
+    activeCanvas.__backgroundScene?.themeEmojiLoadController?.abort();
     consumer.dispose();
     if (_activeBackgroundEffectDispose === dispose) _activeBackgroundEffectDispose = null;
     if (window[_BACKGROUND_OWNER_KEY] === dispose) window[_BACKGROUND_OWNER_KEY] = null;
-    if (chatPane) host.classList.remove('background-effect-host');
-    canvas.remove();
+    if (addedHostIsolation) host.classList.remove('background-effect-host');
+    activeCanvas.remove();
   }
 
   const activeDispose = window[_BACKGROUND_OWNER_KEY] || _activeBackgroundEffectDispose;
   if (activeDispose) activeDispose();
   _activeBackgroundEffectDispose = dispose;
   window[_BACKGROUND_OWNER_KEY] = dispose;
-  canvas.dataset.backgroundEffectCanvas = 'true';
-  canvas.__disposeEffect = dispose;
+  function installCanvasDiagnostics(target = activeCanvas) {
+    target.dataset.backgroundEffectCanvas = 'true';
+    target.__disposeEffect = dispose;
 
-  // Diagnostics seam matching _mountClankerEffect: one paint without a second loop.
-  canvas.__backgroundPaint = () => {
-    const measured = measure();
-    width = measured.nextWidth;
-    height = measured.nextHeight;
-    dpr = measured.nextDpr;
-    consumer.resize(width, height, dpr);
-    field.invalidate();
-    consumer.invalidate();
-  };
+    // Diagnostics seam matching _mountClankerEffect: one paint without a
+    // second loop. This remains valid if creation synchronously falls back
+    // before the consumer has been assigned.
+    target.__backgroundPaint = () => {
+      const measured = measure();
+      width = measured.nextWidth;
+      height = measured.nextHeight;
+      dpr = measured.nextDpr;
+      if (consumer) {
+        consumer.resize(width, height, dpr);
+        field.invalidate();
+        consumer.invalidate();
+      }
+    };
+  }
+  installCanvasDiagnostics();
 
   const start = measure();
   width = start.nextWidth;
   height = start.nextHeight;
   dpr = start.nextDpr;
-  updateCanvasLayout();
   consumer.resize(width, height, dpr);
 }
 
@@ -4566,24 +5204,54 @@ function _initRain() {
   if (document.getElementById('rain-canvas')) return;
   const canvas = document.createElement('canvas');
   canvas.id = 'rain-canvas';
-  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:-1;';
   // Decorative background effect — hide from assistive tech so screen readers
   // don't announce an empty canvas and axe's "region" rule doesn't flag it.
   canvas.setAttribute('aria-hidden', 'true');
+  const addedIsolation = !document.body.classList.contains('background-effect-host');
+  document.body.classList.add('background-effect-host');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   let drops = [];
   const MAX_DROPS = 130;
+  let streaks = [];
+  let streakKey = '';
+
+  function clearStreaks() {
+    for (const streak of streaks) { streak.width = streak.height = 0; }
+    streaks = [];
+  }
+
+  function ensureStreaks(colors) {
+    const key = colors.join('|');
+    if (key === streakKey) return;
+    clearStreaks();
+    streakKey = key;
+    streaks = colors.map(color => {
+      const surface = document.createElement('canvas');
+      surface.width = 4;
+      surface.height = 128;
+      const paint = surface.getContext('2d');
+      const gradient = paint.createLinearGradient(0, 0, 0, 128);
+      gradient.addColorStop(0, 'transparent');
+      gradient.addColorStop(1, color);
+      paint.fillStyle = gradient;
+      paint.fillRect(0, 0, 4, 128);
+      return surface;
+    });
+  }
 
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
     // T18: recompute backing scale on every resize so zoom/display changes are
     // picked up instead of freezing the DPR captured at init.
     dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = W * dpr; canvas.height = H * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const backingScale = Math.min(dpr, 2048 / Math.max(W, H), Math.sqrt(4 * 1024 * 1024 / Math.max(1, W * H)));
+    canvas.width = Math.max(1, Math.floor(W * backingScale));
+    canvas.height = Math.max(1, Math.floor(H * backingScale));
+    ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
     drops = Array.from({ length: MAX_DROPS }, (_, index) => {
       const seed = index * 37 + 5;
       return { x:_clankerNoise(seed) * W, len:20 + _clankerNoise(seed + 3) * 52,
@@ -4595,24 +5263,19 @@ function _initRain() {
   function draw(time) {
     ctx.clearRect(0, 0, W, H);
     const { colors, size } = _readClankerEffectConfig();
+    ensureStreaks(colors);
     drops.forEach(d => {
       const effLen = d.len * size;
       const span = H + effLen * 2;
       const y = ((d.phase + time / 1000 * d.speed) % 1) * span - effLen;
-      const grad = ctx.createLinearGradient(d.x, y - effLen, d.x, y);
-      grad.addColorStop(0, 'transparent');
-      grad.addColorStop(1, colors[d.color]);
-      ctx.strokeStyle = grad;
       ctx.globalAlpha = d.alpha;
-      ctx.lineWidth = 1.2 * Math.min(2, Math.max(.6, size));
-      ctx.beginPath();
-      ctx.moveTo(d.x, y - effLen);
-      ctx.lineTo(d.x, y);
-      ctx.stroke();
+      const lineWidth = 1.2 * Math.min(2, Math.max(.6, size));
+      ctx.drawImage(streaks[d.color], d.x - lineWidth / 2, y - effLen, lineWidth, effLen);
     });
     ctx.globalAlpha = 1;
   }
-  _runBackgroundCanvas({ canvas, bodyClass: 'bg-pattern-rain', resize, paint: draw });
+  _runBackgroundCanvas({ canvas, bodyClass: 'bg-pattern-rain', resize, paint: draw,
+    onDispose: () => { clearStreaks(); if (addedIsolation) document.body.classList.remove('background-effect-host'); } });
 }
 
 // ── Constellations — static dots that slowly form/dissolve connecting lines ──
@@ -4891,6 +5554,7 @@ function _initEmbers() {
   let dpr = Math.min(window.devicePixelRatio || 1, 2);
   let W, H;
   let embers = [];
+  let emberSpriteStyleKey = '';
   function makeEmber(index) {
     const seed = index * 59 + 7;
     return {
@@ -4902,7 +5566,36 @@ function _initEmbers() {
       drift:5 + _clankerNoise(seed + 19) * 20,
       color:[1, 4, 3][index % 3],
       bright:index % 11 === 0,
+      sprite:null,
     };
+  }
+  function bakeEmberSprite(ember, color, size) {
+    const radius = ember.r * size;
+    const blur = (ember.bright ? 10 : 4) * size;
+    // Three blur radii retain the original soft edge without clipping it.
+    const padding = radius + blur * 3;
+    const logicalSize = Math.max(1, padding * 2);
+    const backingSize = Math.max(1, Math.ceil(logicalSize * dpr));
+    const sprite = document.createElement('canvas');
+    sprite.width = backingSize;
+    sprite.height = backingSize;
+    const spriteCtx = sprite.getContext('2d');
+    if (!spriteCtx) return null;
+    const backingScale = backingSize / logicalSize;
+    spriteCtx.setTransform(backingScale, 0, 0, backingScale, 0, 0);
+    spriteCtx.fillStyle = color;
+    spriteCtx.shadowColor = color;
+    spriteCtx.shadowBlur = blur;
+    spriteCtx.beginPath();
+    spriteCtx.arc(logicalSize / 2, logicalSize / 2, radius, 0, Math.PI * 2);
+    spriteCtx.fill();
+    return { canvas: sprite, width: logicalSize, height: logicalSize };
+  }
+  function refreshEmberSprites(colors, size) {
+    const styleKey = `${dpr}|${size}|${colors.join('\u0000')}`;
+    if (styleKey === emberSpriteStyleKey) return;
+    emberSpriteStyleKey = styleKey;
+    for (const ember of embers) ember.sprite = bakeEmberSprite(ember, colors[ember.color], size);
   }
   function resize() {
     W = window.innerWidth; H = window.innerHeight;
@@ -4912,26 +5605,24 @@ function _initEmbers() {
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     embers = Array.from({ length:96 }, (_, index) => makeEmber(index));
+    emberSpriteStyleKey = '';
   }
   function draw(time) {
     ctx.clearRect(0, 0, W, H);
     const { colors, size:sz } = _readClankerEffectConfig();
+    // Particle properties are static between resize/style changes, so preserve
+    // the original Canvas shadow in a DPR-aware sprite instead of rerasterizing
+    // 96 blurred circles every frame.
+    refreshEmberSprites(colors, sz);
     ctx.globalCompositeOperation = 'lighter';
-    embers.forEach(e => {
+    for (const e of embers) {
       const lifeRatio = (e.phase + time / 1000 * e.speed) % 1;
       const fade = Math.min(1, lifeRatio * 7, (1 - lifeRatio) * 7);
       const x = e.x + Math.sin(time / 1800 + e.wobble) * e.drift;
       const y = H + 18 - lifeRatio * (H + 36);
-      const r = e.r * sz;
-      ctx.fillStyle = colors[e.color];
       ctx.globalAlpha = fade * (e.bright ? .82 : .38);
-      ctx.shadowColor = colors[e.color];
-      ctx.shadowBlur = (e.bright ? 10 : 4) * sz;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
-    });
-    ctx.shadowBlur = 0;
+      if (e.sprite) ctx.drawImage(e.sprite.canvas, x - e.sprite.width / 2, y - e.sprite.height / 2, e.sprite.width, e.sprite.height);
+    }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
@@ -4939,7 +5630,7 @@ function _initEmbers() {
 }
 
 const themeModule = { initThemeUI, togglePopup, closePopup, makeDraggable,
-                       THEMES, applyTheme, applyThemeIdentity, applyColors, applyFontDensity, applyBgPattern,
+                       THEMES, applyTheme, applyThemeIdentity, applyColors, applyFontDensity, applyEdgeHardness, applyBgPattern,
                        applyBgEffectColor, applyBgEffectIntensity, applyBgEffectSize,
                        applyFrostedGlass,
                        save, getSaved, saveCustomTheme, deleteCustomTheme,

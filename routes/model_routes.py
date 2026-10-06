@@ -47,7 +47,7 @@ from src.endpoint_resolver import (
 )
 from src.model_catalog import build_model_catalog
 from src.chatgpt_subscription import is_chatgpt_subscription_base
-from src.auth_helpers import _auth_disabled, effective_user, owner_filter
+from src.auth_helpers import effective_user, owner_filter
 from src.openclank.mimo_projection import public_native_model_id
 from src.openclank.chat_routing import (
     ChatRouteUnavailable,
@@ -1332,7 +1332,7 @@ def _resolve_probe_key(ep) -> Optional[str]:
         return None
 
 
-def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False) -> dict:
+def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False, *, owner: str, endpoint_id: str = "") -> dict:
     """Send a realistic completion request to a single model. Returns {status, latency_ms, error?}."""
     provider = _safe_detect_provider(base)
     if _is_discovery_only_provider(provider):
@@ -1379,7 +1379,10 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
 
     try:
         t0 = _time.time()
-        r = httpx.post(target_url, headers=h, json=payload, timeout=timeout, verify=llm_verify())
+        from src.openclank.logging_capture_store import CAPTURE
+        r = CAPTURE.observe_probe(owner=owner, provider_id=provider, endpoint_id=endpoint_id,
+            model_id=model_id, url=target_url, headers=h, body=payload,
+            send=lambda: httpx.post(target_url, headers=h, json=payload, timeout=timeout, verify=llm_verify()))
         latency = round((_time.time() - t0) * 1000)
         if r.is_success:
             if not with_tools:
@@ -2235,7 +2238,7 @@ def _api_pin_seed(ep, cached_ids=None) -> Optional[List[str]]:
         cached_ids = _cached_model_ids(ep)
     if not cached_ids:
         return None
-    if not (getattr(ep, "owner", None) or "").strip() and not _auth_disabled():
+    if not (getattr(ep, "owner", None) or "").strip():
         return None
     base = _normalize_base(ep.base_url)
     kind = _effective_endpoint_kind(ep, base)
@@ -2250,38 +2253,8 @@ def _api_pin_seed(ep, cached_ids=None) -> Optional[List[str]]:
     return chat_capable_models(cached_ids) or None
 
 
-def _seed_api_pins_if_missing(db, ep) -> bool:
-    """Persist the vanilla pin seed for one row; True when the row changed.
-
-    Read-time repair: endpoint listings and catalogue fetches heal rows that
-    predate pin seeding, so visibility repair never relies solely on the
-    add-a-model interaction. The caller commits.
-    """
-    seed = _api_pin_seed(ep)
-    if seed is None:
-        return False
-    row = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep.id).first()
-    if row is None or _has_explicit_pinned_models(row) or _hidden_model_ids(row):
-        return False
-    row.pinned_models = json.dumps(seed)
-    if row is not ep:
-        ep.pinned_models = row.pinned_models
-    return True
 
 
-def backfill_api_endpoint_pins(db) -> int:
-    """Startup repair pass for rows created before pin seeding existed.
-
-    Idempotent; rows carrying explicit pins or a legacy hidden list are left
-    alone. Returns the number of rows healed (caller owns the session).
-    """
-    healed = 0
-    for ep in db.query(ModelEndpoint).all():
-        if _seed_api_pins_if_missing(db, ep):
-            healed += 1
-    if healed:
-        db.commit()
-    return healed
 
 
 def _api_key_fingerprint(api_key: Optional[str]) -> str:
@@ -2314,12 +2287,7 @@ def setup_model_routes(model_discovery):
             "auth_manager",
             None,
         )
-        if (
-            not owner
-            and not _auth_disabled()
-            and auth_manager is not None
-            and getattr(auth_manager, "is_configured", False)
-        ):
+        if not owner or not getattr(request.state, "authenticated", False):
             raise HTTPException(401, "Not authenticated")
         return owner
 
@@ -2726,18 +2694,6 @@ def setup_model_routes(model_discovery):
             chat_url = build_chat_url(base)
             kind = _effective_endpoint_kind(ep, base)
             category = _classify_endpoint(base, kind)
-            if _api_pin_seed(ep) is not None:
-                # Rows here are detached (the session closed after the query),
-                # so persist the vanilla seed through a fresh session. Healing
-                # on this read path means the FIRST catalogue fetch after a
-                # row loses/gains visibility already shows the right models.
-                _heal_db = SessionLocal()
-                try:
-                    if _seed_api_pins_if_missing(_heal_db, ep):
-                        _heal_db.commit()
-                        _invalidate_models_cache(owner)
-                finally:
-                    _heal_db.close()
             model_ids, pinned = _picker_models_for_endpoint(ep, base, kind)
 
             if model_ids:
@@ -2821,7 +2777,7 @@ def setup_model_routes(model_discovery):
             # Reject anonymous in configured deployments — no leaking the model
             # list to unauthenticated callers.
             auth_mgr = getattr(request.app.state, "auth_manager", None)
-            if not owner and not _auth_disabled() and auth_mgr is not None and getattr(auth_mgr, "is_configured", False):
+            if not owner and auth_mgr is not None and getattr(auth_mgr, "is_configured", False):
                 raise HTTPException(401, "Not authenticated")
         except HTTPException:
             raise
@@ -3100,7 +3056,7 @@ def setup_model_routes(model_discovery):
 
                 base = _normalize_base(ep_data["base_url"])
                 _with_tools = item.get("with_tools", False)
-                result = _probe_single_model(base, ep_data.get("api_key"), model_id, timeout=8, with_tools=_with_tools)
+                result = _probe_single_model(base, ep_data.get("api_key"), model_id, timeout=8, with_tools=_with_tools, owner=_model_owner(request), endpoint_id=ep_id)
                 result["model"] = model_id
                 result["endpoint_id"] = ep_id
                 results.append(result)
@@ -3174,7 +3130,7 @@ def setup_model_routes(model_discovery):
 
                 for model_id in models:
                     total += 1
-                    result = _probe_single_model(base, ep.get("api_key"), model_id, timeout=8)
+                    result = _probe_single_model(base, ep.get("api_key"), model_id, timeout=8, owner=_model_owner(request), endpoint_id=ep["id"])
                     result["type"] = "probe_result"
                     result["endpoint"] = ep["name"]
                     result["model"] = model_id
@@ -3530,7 +3486,6 @@ def setup_model_routes(model_discovery):
             }
             results = []
             from src.model_capabilities import endpoint_capability_states
-            upgraded_legacy_pins = False
             for r in rows:
                 all_models = _cached_model_ids(r)
                 hidden = _hidden_model_ids(r)
@@ -3638,12 +3593,7 @@ def setup_model_routes(model_discovery):
                             logger.debug(f"opportunistic cached_models refill failed for {r.id}: {_refill_err!r}")
                 base = _normalize_base(r.base_url)
                 kind = _effective_endpoint_kind(r, base)
-                if _seed_api_pins_if_missing(db, r):
-                    upgraded_legacy_pins = True
                 visible, pinned = _picker_models_for_endpoint(r, base, kind)
-                if _picker_requires_pinning(base, kind) and pinned and not _has_explicit_pinned_models(r):
-                    r.pinned_models = json.dumps(pinned)
-                    upgraded_legacy_pins = True
                 model_inventory_count = len(_merge_model_ids(all_models, pinned))
                 picker_requires_pinning = _picker_requires_pinning(base, kind)
                 status = "online" if (all_models or visible or pinned) else ("empty" if r.is_enabled else "offline")
@@ -3812,9 +3762,6 @@ def setup_model_routes(model_discovery):
                     "shared": True,
                     "shared_by": shared["shared_by"],
                 })
-            if upgraded_legacy_pins:
-                db.commit()
-                _invalidate_models_cache()
             return results
         finally:
             db.close()
@@ -4154,7 +4101,7 @@ def setup_model_routes(model_discovery):
             failed = []
             ok_count = 0
             for mid in chat_models:
-                result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8)
+                result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8, owner=_model_owner(request), endpoint_id=ep_data.get("id", ""))
                 result["model"] = mid
                 result["type"] = "probe_result"
                 result["endpoint"] = ep_data["name"]
@@ -4437,7 +4384,7 @@ def setup_model_routes(model_discovery):
                 raise HTTPException(404, "Model is not enabled on this endpoint")
             from src.endpoint_resolver import resolve_endpoint_runtime
             base, api_key = resolve_endpoint_runtime(ep, owner=getattr(ep, "owner", None))
-            result = _probe_single_model(base, api_key, model_id, timeout=10, with_tools=True)
+            result = _probe_single_model(base, api_key, model_id, timeout=10, with_tools=True, owner=_model_owner(request), endpoint_id=ep_id)
             from src.model_capabilities import capability_state, set_verified
             row = set_verified(db, ep, model_id, result.get("tool_support"))
             db.commit()

@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
-// Disposable G05 qualification.  A tiny Rust fixture builder creates a fresh
-// Wiki Redb containing generated equivalents of the eight historical shared
-// Wiki shapes.  The exact release bridge and FastAPI route/index then serve
-// those records to a real authenticated Chromium page.
+// Disposable G05 qualification: generated equivalents of eight historical
+// shared Wiki shapes live in a Files vault, using converted shared metadata.
+// FastAPI serves those read-only records to authenticated Chromium.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -15,8 +14,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const repo = process.cwd();
 const python = path.join(repo, 'venv', 'bin', 'python');
 const chrome = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'].find(fs.existsSync);
-const bridge = path.join(repo, 'packages', 'Copal', 'rust', 'copal-db', 'target', 'release', 'copal-bridge');
-if (!fs.existsSync(python) || !chrome || !fs.existsSync(bridge)) { console.log(JSON.stringify({ skipped:'requires venv/bin/python, Chrome, and the verified release bridge' })); process.exit(0); }
+if (!fs.existsSync(python) || !chrome) { console.log(JSON.stringify({ skipped:'requires venv/bin/python and Chrome' })); process.exit(0); }
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'copal-qol3-g05-'));
 const data = path.join(temporary, 'data');
 const evidence = fs.mkdtempSync(path.join(os.tmpdir(), 'copal-qol3-g05-evidence-'));
@@ -29,39 +27,47 @@ const names = [
   '.memes/What Is Wiki', '.memes/Creating and Linking Memes',
   '.memes/Story Navigation', '.memes/Fields and Properties',
   '.memes/Wiki vs Notes', '.memes/How Wiki Works',
-  '.memes/Meme-sized Page', '.memes/Meme-sized Tiddler',
+  '.memes/Meme-sized Page', '.memes/Meme-sized Document',
 ];
 const markers = names.map((_, index) => `G05-HISTORICAL-SHAPE-${index + 1}`);
 const fixtureBuilder = `
-use copal_db::Db;
-use serde_json::json;
-use std::path::PathBuf;
-fn main() {
-    let dir = PathBuf::from(std::env::args().nth(1).expect("data dir"));
-    let wiki = Db::open_with_name(&dir, "copal-wiki").expect("open wiki");
-    let names = ${JSON.stringify(names)};
-    let markers = ${JSON.stringify(markers)};
-    for (index, name) in names.iter().enumerate() {
-        let body = format!("# Historical Wiki shape {}\\n\\nGenerated compatibility page.\\n{}", index + 1, markers[index]);
-        let block = json!({"id": format!("g05-block-{}", index + 1), "type":"heading", "level":1, "text":format!("Historical Wiki shape {}", index + 1), "source":format!("# Historical Wiki shape {}", index + 1)});
-        let paragraph = json!({"id": format!("g05-paragraph-{}", index + 1), "type":"paragraph", "text":format!("Generated compatibility page.\\n{}", markers[index]), "source":format!("Generated compatibility page.\\n{}", markers[index])});
-        let record = json!({"schemaVersion":1,"body":{"type":"doc","blocks":[block,paragraph]},"properties":[],"relations":[],"tags":["g05","historical"],"extensions":{"interchange":{"source":body,"modified":false},"qualification":{"shape":index + 1}}});
-        wiki.create_builtin_seed_doc("wiki", name, &record.to_string(), Some("G05 generated historical equivalent")).expect("create builtin");
-    }
-    wiki.create_builtin_seed_doc("wiki", ".memes/G05 Malformed Record", "{malformed", Some("G05 malformed preservation fixture")).expect("create malformed");
-    wiki.create_builtin_seed_doc("wiki", ".memes/G05 Future Record", r#"{"schemaVersion":99,"body":{"type":"doc","blocks":[]},"futureField":"preserve"}"#, Some("G05 future preservation fixture")).expect("create future");
-}
+import asyncio, json, sys
+from pathlib import Path
+from src.openclank.copal_loose import LooseCopalBridge
+async def main():
+    bridge = LooseCopalBridge(Path(sys.argv[1]))
+    names, markers = json.loads(sys.argv[2]), json.loads(sys.argv[3])
+    scope = {"owner":"e", "workspace_id":"default"}
+    records = []
+    for index, (name, marker) in enumerate(zip(names, markers), 1):
+        title = f"Historical Wiki shape {index}"
+        paragraph = f"Generated compatibility page.\\n{marker}"
+        body = f"# {title}\\n\\n{paragraph}"
+        record = {"schemaVersion":1,"body":{"type":"doc","blocks":[{"id":f"g05-block-{index}","type":"heading","level":1,"text":title,"source":f"# {title}"},{"id":f"g05-paragraph-{index}","type":"paragraph","text":paragraph,"source":paragraph}]},"properties":[],"relations":[],"tags":["g05","historical"],"extensions":{"interchange":{"source":body,"modified":False},"qualification":{"shape":index}}}
+        records.append((name, json.dumps(record)))
+    records.extend([(".memes/G05 Malformed Record", "{malformed"), (".memes/G05 Future Record", json.dumps({"schemaVersion":99,"body":{"type":"doc","blocks":[]},"futureField":"preserve"}))])
+    ids = []
+    for name, content in records:
+        result = await bridge.call("create", {**scope,"kind":"wiki","corpus":"wiki","name":name,"content":content,"read_only":True})
+        ids.append(result["doc"]["id"])
+    # Synthetic offline fixture only: reproduce converted legacy shared rows.
+    # Mutable public create deliberately cannot grant shared ownership.
+    vault, manifest = bridge._scope(scope)
+    for document_id in ids:
+        manifest["documents"][document_id].update(owner="shared", workspace_id="global", builtin=True)
+    bridge._save(vault, manifest)
+    for document_id in ids:
+        doc = await bridge.call("get", {**scope,"id":document_id})
+        assert doc["owner"] == "shared" and doc["workspace_id"] == "global" and doc["builtin"] and doc["readOnly"]
+    print(json.dumps({"generated":len(ids),"storage":"files","sharedReadOnly":True}))
+asyncio.run(main())
 `;
-const helperRoot = path.join(temporary, 'fixture-builder');
-fs.mkdirSync(path.join(helperRoot, 'src'), { recursive:true });
-fs.writeFileSync(path.join(helperRoot, 'Cargo.toml'), `[package]\nname = "g05-fixture-builder"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\ncopal-db = { path = "${path.join(repo, 'packages/Copal/rust/copal-db')}" }\nserde_json = "1"\n`);
-fs.writeFileSync(path.join(helperRoot, 'src/main.rs'), fixtureBuilder);
-execFileSync('cargo', ['run', '--offline', '--quiet', '--manifest-path', path.join(helperRoot, 'Cargo.toml'), '--', path.join(data, 'copal-db')], { cwd:repo, env:{ ...process.env, CARGO_TARGET_DIR:path.join(temporary, 'cargo-target') }, stdio:['ignore','pipe','pipe'] });
+execFileSync(python, ['-B', '-c', fixtureBuilder, path.join(data, 'copal-vaults'), JSON.stringify(names), JSON.stringify(markers)], { cwd:repo, stdio:['ignore','pipe','pipe'] });
 
 const freePort = () => new Promise((resolve, reject) => { const server = net.createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(error => error ? reject(error) : resolve(port)); }); });
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
-const env = { ...process.env, DEBUG:'false', OPENCLANK_DEBUG:'false', AUTH_ENABLED:'true', OPENCLANK_RECOVERY_MODE:'true', OPEN_CLANK_AGENT_DRIVE:'disabled', COPAL_STORAGE:'redb', COPAL_DATA_DIR:path.join(data, 'copal-db'), COPAL_BRIDGE_COMMAND:bridge, OPEN_CLANK_DATA_DIR:data, DATABASE_URL:`sqlite:///${path.join(data, 'app.db')}`, PYTHONUNBUFFERED:'1' };
+const env = { ...process.env, DEBUG:'false', OPENCLANK_DEBUG:'false', AUTH_ENABLED:'true', OPENCLANK_RECOVERY_MODE:'true', OPEN_CLANK_AGENT_DRIVE:'disabled', COPAL_LOOSE_ROOT:path.join(data, 'copal-vaults'), OPEN_CLANK_DATA_DIR:data, DATABASE_URL:`sqlite:///${path.join(data, 'app.db')}`, PYTHONUNBUFFERED:'1' };
 let appOutput = '';
 const app = spawn(python, ['-m','uvicorn','app:app','--host','127.0.0.1','--port',String(port)], { cwd:repo, env, stdio:['ignore','pipe','pipe'] });
 const collect = chunk => { appOutput += String(chunk); if (appOutput.length > 30000) appOutput = appOutput.slice(-30000); };
@@ -124,7 +130,7 @@ try {
     await until(`document.querySelector('[data-wiki-document] .copal-document-error')`, `recovery ${name}`);
     assert(await evaluate(`document.querySelector('[data-wiki-document]')?.textContent.includes(${JSON.stringify(expectedAction)})`));
   }
-  console.log(JSON.stringify({ gate:'G05', passed:true, backend:'FastAPI → exact release Copal bridge → Redb (wiki store)', binary:bridge, buildIdentity:'sha256:cf2e8cb263061e16633321cc31bfc09346bec46a835c610fdff26ab0c489817a', artifactSha256:'sha256:1f75aeabadcfd68b8eeccf72e00316772855437b3c17181a3e3c4cc9e9d7eae0', historicalBuiltins:8, sharedOwner:'shared/global', userOverride:{ owner:'e', workspace:'g05-override', isolated:true }, recovery:{ malformed:'preserved + Download preserved source', future:'preserved + Download original' }, screenshots, evidenceDir:evidence }));
+  console.log(JSON.stringify({ gate:'G05', passed:true, backend:'FastAPI → Files-backed Copal Wiki vault', historicalBuiltins:8, sharedOwner:'shared/global', userOverride:{ owner:'e', workspace:'g05-override', isolated:true }, recovery:{ malformed:'preserved + Download preserved source', future:'preserved + Download original' }, screenshots, evidenceDir:evidence }));
 } finally {
   await browser?.close().catch(() => {}); if (app.exitCode == null) app.kill('SIGTERM'); for (let i = 0; i < 100 && app.exitCode == null; i += 1) await delay(50); if (app.exitCode == null) app.kill('SIGKILL'); app.stdout?.destroy(); app.stderr?.destroy(); fs.rmSync(temporary, { recursive:true, force:true, maxRetries:8, retryDelay:100 });
 }

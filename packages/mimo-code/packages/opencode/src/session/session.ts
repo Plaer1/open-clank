@@ -1,3 +1,4 @@
+import { recordSdkUsage } from "@/provider/logging-transport"
 import { Slug } from "@mimo-ai/shared/util/slug"
 import path from "path"
 import { BusEvent } from "@/bus/bus-event"
@@ -362,7 +363,33 @@ export function plan(input: { slug: string; time: { created: number } }) {
   return path.join(base, [input.time.created, input.slug].join("-") + ".md")
 }
 
-export const getUsage = (input: { model: Provider.Model; usage: LanguageModelUsage; metadata?: ProviderMetadata }) => {
+export const getUsage = (input: {
+  model: Provider.Model
+  usage: LanguageModelUsage
+  metadata?: ProviderMetadata
+  captureScope?: object
+  captureDispatchIDs?: string[]
+  mainReply?: boolean
+}) => {
+  const providerMetadata = input.metadata as
+    | Record<
+        string,
+        {
+          cacheCreationInputTokens?: unknown
+          usage?: { cacheWriteInputTokens?: unknown; cacheCreationInputTokens?: unknown }
+        }
+      >
+    | undefined
+  const reportedCacheWrite =
+    input.usage.inputTokenDetails?.cacheWriteTokens ??
+    providerMetadata?.anthropic?.cacheCreationInputTokens ??
+    providerMetadata?.vertex?.cacheCreationInputTokens ??
+    providerMetadata?.bedrock?.usage?.cacheWriteInputTokens ??
+    providerMetadata?.venice?.usage?.cacheCreationInputTokens
+  if (input.captureDispatchIDs) recordSdkUsage(input.captureScope, {
+    ...input.usage,
+    inputTokenDetails: { ...input.usage.inputTokenDetails, cacheWriteTokens: reportedCacheWrite },
+  }, input.captureDispatchIDs, input.mainReply)
   const safe = (value: number) => {
     if (!Number.isFinite(value)) return 0
     return value

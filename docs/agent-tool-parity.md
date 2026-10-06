@@ -1,6 +1,9 @@
 # Agent tool parity — one implementation per logical capability
 
-Identity metaplan Slice 05A record (2026-07-16). Generated from the live
+Historical identity Slice 05A record (2026-07-16). This describes the July
+architecture and retained decisions, not the current exact tool inventory or
+platform acceptance. Inspect current source registries before relying on counts
+or transport-specific implementation names. It was generated from the then-live
 registries: `src/openclank/lifetools_server.py` (`_BRIDGED_TOOLS` /
 `_ALL_EXCLUDED`), mimo's native tool registry, and the frankenmemory MCP
 descriptor. Rule: on the ACP path each logical capability has exactly ONE

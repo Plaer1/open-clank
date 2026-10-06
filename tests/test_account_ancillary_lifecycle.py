@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, GalleryImage, PublishedFile, Session
+from core.database import Base, FilesImageResource, PublishedFile, Session
 from src.openclank.account_ancillary_lifecycle import (
     AccountAncillaryLifecycle,
     AccountAncillaryLifecycleError,
@@ -66,7 +66,7 @@ def ancillary(tmp_path):
 
 
 def _seed_owner(lifecycle, factory, paths, owner: str, ordinal: int) -> dict[str, Path]:
-    gallery_id = f"gallery-{ordinal}"
+    image_id = f"gallery-{ordinal}"
     gallery_name = f"image-{ordinal}.png"
     published_id = f"{ordinal + 1:032x}"
     session_id = f"session-{ordinal}"
@@ -81,8 +81,8 @@ def _seed_owner(lifecycle, factory, paths, owner: str, ordinal: int) -> dict[str
             )
         )
         db.add(
-            GalleryImage(
-                id=gallery_id,
+            _files_image(
+                id=image_id,
                 filename=gallery_name,
                 prompt="private prompt",
                 owner=owner,
@@ -160,7 +160,7 @@ def _seed_owner(lifecycle, factory, paths, owner: str, ordinal: int) -> dict[str
 
 def _move_sql_owner(factory, source: str, target: str) -> None:
     with factory() as db:
-        for model in (GalleryImage, PublishedFile, Session):
+        for model in (FilesImageResource, PublishedFile, Session):
             db.query(model).filter(model.owner == source).update(
                 {model.owner: target}, synchronize_session=False
             )
@@ -169,7 +169,7 @@ def _move_sql_owner(factory, source: str, target: str) -> None:
 
 def _purge_sql_owner(factory, owner: str) -> None:
     with factory() as db:
-        for model in (GalleryImage, PublishedFile, Session):
+        for model in (FilesImageResource, PublishedFile, Session):
             db.query(model).filter(model.owner == owner).delete(
                 synchronize_session=False
             )
@@ -402,3 +402,26 @@ def test_rename_replays_after_one_domain_committed_before_checkpoint(ancillary, 
 
     receipt = lifecycle.reconcile_owner_rename("alice", "ada", manifest)
     assert receipt["state"] == "staged"
+
+
+def _files_image(**values):
+    """Build a Files-owned resource from legacy fixture metadata."""
+    filename = values.pop("filename", values.pop("name", "image"))
+    parent_id = values.pop("album_id", values.pop("parent_id", None))
+    prompt = values.pop("prompt", None)
+    model = values.pop("model", None)
+    file_hash = values.pop("file_hash", values.pop("digest", None))
+    size = values.pop("file_size", values.pop("size", 0))
+    provenance = dict(values.pop("provenance", {}) or {})
+    for key, value in (("prompt", prompt), ("model", model)):
+        if value is not None:
+            provenance[key] = value
+    is_folder = not filename or ("name" in values and parent_id is None)
+    return FilesImageResource(
+        id=values.pop("id"), owner=values.pop("owner", "alice"),
+        kind="folder" if is_folder else "image", parent_id=parent_id,
+        display_name=filename, locator=values.pop("locator", filename),
+        digest=file_hash, size=size, mime_type=values.pop("mime_type", None),
+        favorite=values.pop("favorite", False), is_active=values.pop("is_active", True),
+        provenance=provenance or None, **values,
+    )

@@ -3,7 +3,7 @@ import asyncio
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from core.database import Base, GalleryImage, GalleryAlbum
+from core.database import Base, FilesImageResource
 from routes.admin_wipe_routes import setup_admin_wipe_routes
 from fastapi import Request
 from fastapi import HTTPException
@@ -18,14 +18,14 @@ def test_wipe_gallery_clears_albums_and_only_proven_image_bytes(monkeypatch, tmp
     
     # 3. Populate test database with an album and an image linked to it
     db = TestSessionLocal()
-    album = GalleryAlbum(id="album-1", name="Trip to Rome")
-    image = GalleryImage(id="img-1", filename="rome1.jpg", album_id="album-1")
+    album = _files_image(id="album-1", name="Trip to Rome")
+    image = _files_image(id="img-1", filename="rome1.jpg", album_id="album-1")
     db.add(album)
     db.add(image)
     db.commit()
     
-    assert db.query(GalleryImage).count() == 1
-    assert db.query(GalleryAlbum).count() == 1
+    assert db.query(FilesImageResource).count() == 1
+    assert db.query(FilesImageResource).count() == 1
     db.close()
 
 
@@ -61,9 +61,9 @@ def test_wipe_gallery_clears_albums_and_only_proven_image_bytes(monkeypatch, tmp
     
     # 7. Assertions
     db = TestSessionLocal()
-    assert db.query(GalleryImage).count() == 0
-    # This assertion will fail before the fix because GalleryAlbum rows were not deleted
-    assert db.query(GalleryAlbum).count() == 0
+    assert db.query(FilesImageResource).count() == 0
+    # This assertion will fail before the fix because FilesImageResource rows were not deleted
+    assert db.query(FilesImageResource).count() == 0
     
     # Check returned stats
     assert result["status"] == "deleted"
@@ -102,3 +102,26 @@ def test_retired_memory_wipe_checks_admin_and_normalizes_before_database_or_prov
     assert exc_info.value.status_code == (410 if authorized else 403)
     if authorized:
         assert "Brain" in str(exc_info.value.detail)
+
+
+def _files_image(**values):
+    """Build a Files-owned resource from legacy fixture metadata."""
+    filename = values.pop("filename", values.pop("name", "image"))
+    parent_id = values.pop("album_id", values.pop("parent_id", None))
+    prompt = values.pop("prompt", None)
+    model = values.pop("model", None)
+    file_hash = values.pop("file_hash", values.pop("digest", None))
+    size = values.pop("file_size", values.pop("size", 0))
+    provenance = dict(values.pop("provenance", {}) or {})
+    for key, value in (("prompt", prompt), ("model", model)):
+        if value is not None:
+            provenance[key] = value
+    is_folder = not filename or ("name" in values and parent_id is None)
+    return FilesImageResource(
+        id=values.pop("id"), owner=values.pop("owner", "alice"),
+        kind="folder" if is_folder else "image", parent_id=parent_id,
+        display_name=filename, locator=values.pop("locator", filename),
+        digest=file_hash, size=size, mime_type=values.pop("mime_type", None),
+        favorite=values.pop("favorite", False), is_active=values.pop("is_active", True),
+        provenance=provenance or None, **values,
+    )

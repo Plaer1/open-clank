@@ -607,37 +607,13 @@ def _pending_writeback_uids(owner: str) -> tuple[list[str], list[str]]:
 
 
 def _load_caldav_accounts(owner: str) -> list:
-    """Return the list of CalDAV accounts for *owner*, auto-migrating the legacy
-    single-account ``caldav`` key to the new ``caldav_accounts`` list on first call.
-
-    The save step is best-effort: if ``_save_for_user`` is unavailable (e.g. in a
-    test with a minimal prefs mock) the migrated accounts are still returned; the
-    next real call will just re-run the cheap migration again.
-    """
-    import uuid as _uuid
+    """Read current owner-scoped CalDAV accounts without legacy rewriting."""
     from routes.prefs_routes import _load_for_user
-
     prefs = _load_for_user(owner) or {}
     if "caldav_accounts" in prefs:
         return list(prefs["caldav_accounts"] or [])
-    # Migrate legacy single-account config to the list format.
-    legacy = prefs.get("caldav", {}) or {}
-    if legacy.get("url"):
-        accounts = [{
-            "id": str(_uuid.uuid4()),
-            "label": "CalDAV",
-            "url": legacy["url"],
-            "username": legacy.get("username", ""),
-            "password": legacy.get("password", ""),
-        }]
-        prefs["caldav_accounts"] = accounts
-        prefs.pop("caldav", None)
-        try:
-            from routes.prefs_routes import _save_for_user
-            _save_for_user(owner, prefs)
-        except (ImportError, AttributeError):
-            pass  # best-effort; next call re-migrates from the still-present legacy key
-        return accounts
+    if (prefs.get("caldav") or {}).get("url"):
+        raise RuntimeError("Legacy CalDAV preferences require .clanker/tools/migrations/python/secondary.py caldav")
     return []
 
 

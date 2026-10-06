@@ -518,7 +518,7 @@ function wireClipboardAndDropLegacy({
 }) {
   // ── Paste ──
   window.addEventListener('paste', (e) => {
-    if (!state.editorOpen) return;
+    if (!state.editorOpen || !container.getClientRects().length) return;
 
     function pasteAsLayer(imgSource, label) {
       if (!state.editorOpen) return; // user closed mid-paste
@@ -683,7 +683,7 @@ export function wireClipboardAndDrop({
   const hideOverlay = () => { const overlay = container.querySelector('.ge-drop-overlay'); if (overlay) overlay.style.display = 'none'; };
 
   const onPaste = event => {
-    if (disposed || !state.editorOpen) return;
+    if (disposed || !state.editorOpen || !container.getClientRects().length) return;
     if (state.internalClipboard) {
       event.preventDefault(); event.stopImmediatePropagation();
       const clip = state.internalClipboard;

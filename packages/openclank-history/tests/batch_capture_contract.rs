@@ -409,3 +409,46 @@ fn batch_protocol_round_trip_keeps_preimage_and_absent_markers() {
     let decoded: ServiceRequest = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(decoded, wire);
 }
+
+#[tokio::test]
+async fn batch_expiry_removes_every_payload_root_after_reopen() {
+    use sha2::{Digest, Sha256};
+    use openclank_history::catalog::{LiveReceipt, LiveStatus, ResourceOutcome, VersionContent};
+    use openclank_history::operations::BatchAfterInput;
+    use openclank_history::retention::ExpiryState;
+    let root = tempdir().unwrap();
+    let coordinator = HistoryCoordinator::open(root.path().join("catalog"), root.path().join("lore"), "account").await.unwrap();
+    let adapter = CaptureAdapter::new(&coordinator);
+    adapter.prepare_batch(envelope(), vec![
+        entry("source", "source", "source", ResourceExistence::Present, Some(b"source-before")),
+        entry("destination", "destination", "destination", ResourceExistence::Present, Some(b"destination-before")),
+        entry("created", "created", "created", ResourceExistence::Absent, None),
+    ]).await.unwrap();
+    coordinator.begin_apply("batch-1").unwrap();
+    coordinator.record_live("batch-1", LiveReceipt { committed_resources: Vec::new(), action_id: "batch-1".into(), status: LiveStatus::Committed, fingerprint: None }).unwrap();
+    let after = ["source", "destination", "created"].into_iter().map(|id| {
+        let content = format!("{id}-after");
+        let fingerprint = format!("sha256:{:x}:{}", Sha256::digest(content.as_bytes()), content.len());
+        BatchAfterInput {
+            resource_key: key(id), locator: Some(Locator::from(id)), existence: ResourceExistence::Present,
+            resource_type: ResourceType::File, metadata: ResourceMetadata { mode: Some(0o640), size: Some(content.len() as u64), modified_millis: Some(7), opaque: None },
+            content: Some(Bytes::from(content)), fingerprint: fingerprint.clone(),
+            coverage: CaptureManifest { metadata: Some(serde_json::json!({"exact_after":true})), ..Default::default() },
+            outcome: ResourceOutcome { resource_id: id.into(), status: "Committed".into(), revision: Some(openclank_history::catalog::Revision::Opaque { kind: "fingerprint".into(), value: fingerprint }) },
+        }
+    }).collect();
+    let record = coordinator.capture_after_batch("batch-1", after).await.unwrap();
+    coordinator.complete("batch-1").unwrap();
+    let partition = coordinator.catalog().owner_partition("account").unwrap();
+    let receipts = record.before_resources.iter().filter_map(|r| r.before.as_ref()).chain(record.after_resources.iter().map(|r| &r.after)).cloned().collect::<Vec<_>>();
+    assert_eq!(coordinator.reclaim_checked("batch-1", 99).await.unwrap().state, ExpiryState::Expired);
+    coordinator.shutdown_checked().await.unwrap();
+    drop(adapter); drop(coordinator);
+    let store = openclank_history::HistoryStore::open(root.path().join("lore")).await.unwrap();
+    for receipt in receipts {
+        if let VersionContent::Bytes(reference) = receipt.content {
+            let address = lore_storage::Address { context: lore_storage::Context::from(reference.context), hash: reference.hash_hex.parse().unwrap() };
+            assert!(store.read(lore_storage::Partition::from(partition), address).await.is_err());
+        }
+    }
+}

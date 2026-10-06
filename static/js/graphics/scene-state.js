@@ -188,14 +188,14 @@ export function createDrawBatch() {
   const rects = [];
   const lines = [];
   const circles = [];
-  const glyphs = [];
+  const glyphCommands = [];
   return {
-    get size() { return rects.length + lines.length + circles.length + glyphs.length; },
+    get size() { return rects.length + lines.length + circles.length + glyphCommands.length; },
     clear() {
       rects.length = 0;
       lines.length = 0;
       circles.length = 0;
-      glyphs.length = 0;
+      glyphCommands.length = 0;
     },
     rect(x, y, w, h, color, alpha = 1) {
       rects.push({ x, y, w, h, color, alpha });
@@ -213,7 +213,15 @@ export function createDrawBatch() {
      *   batched atlas path).
      */
     glyph(text, x, y, size, weight, color, alpha = 1, align, baseline, font, glow) {
-      glyphs.push({ text, x, y, size, weight, color, alpha, align, baseline, font, glow: glow || null });
+      glyphCommands.push({
+        type: 'glyph',
+        value: { text, x, y, size, weight, color, alpha, align, baseline, font, glow: glow || null },
+      });
+    },
+    /** Queue an image sprite in the same painter order as glyphs. */
+    sprite(source, x, y, width, height, alpha = 1) {
+      if (!source) return;
+      glyphCommands.push({ type: 'sprite', source, x, y, width, height, alpha });
     },
     /** Flush the batch into a backend adapter and clear. */
     flush(backend) {
@@ -224,7 +232,32 @@ export function createDrawBatch() {
       if (rects.length) backend.drawRects(rects.slice());
       if (lines.length) backend.drawLines(lines.slice());
       if (circles.length) backend.drawCircles(circles.slice());
-      if (glyphs.length) backend.drawGlyphs(glyphs.slice());
+      if (glyphCommands.length) {
+        let glyphRun = [];
+        const flushGlyphRun = () => {
+          if (!glyphRun.length) return;
+          backend.drawGlyphs(glyphRun);
+          glyphRun = [];
+        };
+        for (const command of glyphCommands) {
+          if (command.type === 'glyph') {
+            glyphRun.push(command.value);
+            continue;
+          }
+          flushGlyphRun();
+          if (typeof backend.drawImage === 'function') {
+            backend.drawImage(
+              command.source,
+              command.x,
+              command.y,
+              command.width,
+              command.height,
+              command.alpha,
+            );
+          }
+        }
+        flushGlyphRun();
+      }
       this.clear();
     },
   };

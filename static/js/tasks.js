@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 /**
  * Tasks Module — scheduled recurring LLM prompts.
  */
@@ -436,42 +437,28 @@ function _statusDot(status) {
 }
 
 const _TASK_ICONS = {
-  // Chats
-  tidy_sessions:       '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
-  // Documents
-  tidy_documents:      '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
-  // Memory (brain)
-  consolidate_memory:  '<path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/>',
-  // Research (magnifying glass)
-  tidy_research:       '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
-  // Calendar
-  tidy_calendar:       '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
-  // Email
-  summarize_emails:    '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
-  draft_email_replies: '<polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>',
-  email_auto_translate:'<path d="M5 8h9"/><path d="M9 4v4"/><path d="M4 13c2.2-.2 4.2-1.1 5.5-2.8"/><path d="M10.5 13c-1.1-.6-2-1.5-2.7-2.8"/><path d="M14 20l4-9 4 9"/><path d="M15.4 17h5.2"/>',
-  extract_email_events:'<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/><path d="M7 14h5"/><path d="M7 18h8"/>',
-  classify_events:    '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/><path d="M8 15h.01M12 15h.01M16 15h.01"/>',
-  learn_sender_signatures:'<path d="M20 6 9 17l-5-5"/><path d="M14 6h6v6"/>',
-  check_email_urgency: '<path d="M13.73 21a2 2 0 0 1-3.46 0"/><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>',
-  // Skills
-  test_skills:         '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
-  audit_skills:        '<path d="M9 11l3 3L22 4"/><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v15H6.5A2.5 2.5 0 0 0 4 19.5z"/>',
-  // Assistant
-  daily_brief:         '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
-  // Generic action fallback (gear)
-  _action_default:     '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
-  // LLM task fallback (chat bubble)
-  _llm_default:        '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  "tidy_sessions": "chat",
+  "tidy_documents": "document",
+  "consolidate_memory": "memory",
+  "tidy_research": "research",
+  "tidy_calendar": "calendar",
+  "summarize_emails": "email",
+  "draft_email_replies": "reply",
+  "email_auto_translate": "translate",
+  "extract_email_events": "calendar",
+  "classify_events": "calendar",
+  "learn_sender_signatures": "contact",
+  "check_email_urgency": "bell",
+  "test_skills": "play",
+  "audit_skills": "skills",
+  "daily_brief": "clock",
+  "_action_default": "settings",
+  "_llm_default": "chat"
 };
 
 function _taskIcon(task) {
-  const action = task.action;
-  let path = _TASK_ICONS[action];
-  if (!path) {
-    path = task.task_type === 'action' ? _TASK_ICONS._action_default : _TASK_ICONS._llm_default;
-  }
-  return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4;flex-shrink:0;position:relative;top:-4px;">${path}</svg>`;
+  const id = _TASK_ICONS[task.action] || (task.task_type === 'action' ? 'settings' : 'chat');
+  return uiIcon(id, 13, { style: 'opacity:0.4;flex-shrink:0;position:relative;top:-4px;' });
 }
 
 const _MODEL_BACKED_ACTIONS = new Set([
@@ -492,7 +479,7 @@ function _taskAiMark(task) {
   const action = task?.action || '';
   const aiAction = _MODEL_BACKED_ACTIONS.has(action);
   if (!(kind === 'llm' || kind === 'research' || task?.model || task?.endpointUrl || aiAction)) return '';
-  return '<svg class="task-ai-mark" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-label="Uses model" title="Uses model"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>';
+  return uiIcon("sparkles", 10, {"className":"task-ai-mark","label":"Uses model"});
 }
 
 // ---- Custom pickers ----
@@ -639,18 +626,17 @@ const _CATEGORY_MAP = {
 // learned where things are.
 const _CATEGORY_ORDER = ['Cookbook', 'Other', 'Calendar', 'Email', 'Chats', 'Documents', 'Memory', 'Research', 'Skills', 'Assistant', 'System'];
 const _CATEGORY_ICONS = {
-  Calendar:  '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
-  Email:     '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
-  Chats:     '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
-  Documents: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
-  Memory:    '<path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/>',
-  Research:  '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
-  Skills:    '<path d="M9 11l3 3L22 4"/><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v15H6.5A2.5 2.5 0 0 0 4 19.5z"/>',
-  Assistant: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/><path d="M7 18a5 5 0 0 1 10 0"/>',
-  System:    '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
-  // Cookbook icon — matches the recipe-book glyph used on the sidebar.
-  Cookbook:  '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
-  Other:     '<circle cx="12" cy="12" r="3"/>',
+  "Calendar": "calendar",
+  "Email": "email",
+  "Chats": "chat",
+  "Documents": "document",
+  "Memory": "memory",
+  "Research": "research",
+  "Skills": "skills",
+  "Assistant": "contact",
+  "System": "computer",
+  "Cookbook": "cookbook",
+  "Other": "dot"
 };
 
 function _categoryFor(task) {
@@ -857,9 +843,9 @@ function _renderList() {
     const titleRow = document.createElement('div');
     titleRow.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;';
     const statusBadge = task.status === 'paused'
-      ? `<button type="button" class="task-status-badge task-state-badge task-paused-badge" data-task-status-action="resume" title="Paused - click to resume" style="position:relative;top:4px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg><span class="task-state-label">paused</span></button>`
+      ? `<button type="button" class="task-status-badge task-state-badge task-paused-badge" data-task-status-action="resume" title="Paused - click to resume" style="position:relative;top:4px;">${uiIcon("pause", 10)}<span class="task-state-label">paused</span></button>`
       : task.status === 'active'
-        ? `<button type="button" class="task-status-badge task-state-badge task-active-badge" data-task-status-action="pause" title="Active - click to pause" style="position:relative;top:4px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="7 4 19 12 7 20 7 4"/></svg><span class="task-state-label">active</span></button>`
+        ? `<button type="button" class="task-status-badge task-state-badge task-active-badge" data-task-status-action="pause" title="Active - click to pause" style="position:relative;top:4px;">${uiIcon("play", 10)}<span class="task-state-label">active</span></button>`
         : '';
     const builtinBadge = task.is_builtin
       ? `<span class="task-builtin-badge${task.is_modified ? ' modified' : ''}" title="${task.is_modified ? 'Built-in task — edited from its default' : 'Built-in task'}">built-in${task.is_modified ? ' · edited' : ''}</span>`
@@ -874,24 +860,24 @@ function _renderList() {
     menuBtn.title = 'Actions';
     menuBtn.style.position = 'relative';
     menuBtn.style.top = '4px';
-    menuBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>';
+    menuBtn.innerHTML = uiIcon("more", 14);
     menuBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       const items = [];
       // Run now stays in the kebab too for users coming from muscle-memory /
       // mobile long-press. The expanded card also shows it next to Edit.
-      if (task.status !== 'completed') items.push({ label: 'Run now', icon: '<polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>', action: () => _doRunNow(task.id) });
-      items.push({ label: 'Edit', icon: '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>', action: () => _showForm(task) });
-      if (task.status === 'active') items.push({ label: 'Pause', icon: '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>', action: () => _doPause(task.id) });
-      else if (task.status === 'paused') items.push({ label: 'Resume', icon: '<polygon points="5 3 19 12 5 21 5 3"/>', action: () => _doResume(task.id) });
-      items.push({ label: 'History', icon: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', action: () => _showRunHistory(task.id, task.name) });
+      if (task.status !== 'completed') items.push({ label: 'Run now', icon: 'play', action: () => _doRunNow(task.id) });
+      items.push({ label: 'Edit', icon: 'edit', action: () => _showForm(task) });
+      if (task.status === 'active') items.push({ label: 'Pause', icon: 'pause', action: () => _doPause(task.id) });
+      else if (task.status === 'paused') items.push({ label: 'Resume', icon: 'play', action: () => _doResume(task.id) });
+      items.push({ label: 'History', icon: 'clock', action: () => _showRunHistory(task.id, task.name) });
       if (task.is_builtin && task.is_modified) {
-        items.push({ label: 'Revert to default', icon: '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>', action: () => _doRevert(task.id) });
+        items.push({ label: 'Revert to default', icon: 'restore', action: () => _doRevert(task.id) });
       }
       if (_taskClearCacheLabel(task)) {
-        items.push({ label: 'Clear cache', icon: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/>', action: () => _doClearTaskCache(task.id, _taskClearCacheLabel(task)) });
+        items.push({ label: 'Clear cache', icon: 'trash', action: () => _doClearTaskCache(task.id, _taskClearCacheLabel(task)) });
       }
-      items.push({ label: 'Delete', icon: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>', action: () => _doDelete(task.id), danger: true });
+      items.push({ label: 'Delete', icon: 'trash', action: () => _doDelete(task.id), danger: true });
       _showTaskDropdown(menuBtn, items);
     });
     actionsWrap.appendChild(menuBtn);
@@ -932,7 +918,7 @@ function _renderList() {
       const runBtn = document.createElement('button');
       runBtn.className = 'memory-toolbar-btn task-detail-run-btn';
       runBtn.title = 'Run now';
-      runBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Run';
+      runBtn.innerHTML = uiIcon("play", 11, {"style":"vertical-align:-1px;margin-right:4px;"}) + "Run";
       runBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         _doRunNow(task.id);
@@ -942,7 +928,7 @@ function _renderList() {
     const editBtn = document.createElement('button');
     editBtn.className = 'memory-toolbar-btn task-detail-edit-btn';
     editBtn.title = 'Edit task';
-    editBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit';
+    editBtn.innerHTML = uiIcon("edit", 11, {"style":"vertical-align:-1px;margin-right:4px;"}) + "Edit";
     editBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       _showForm(task);
@@ -1098,7 +1084,7 @@ function _showTaskDropdown(anchor, items) {
     btn.style.cssText = 'display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:6px 10px;border:none;background:none;color:var(--fg);font-size:11px;font-family:inherit;cursor:pointer;border-radius:4px;transition:background 0.1s;';
     if (item.danger) btn.style.color = 'var(--color-error)';
     if (item.icon) {
-      btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6;flex-shrink:0;">${item.icon}</svg><span>${item.label}</span>`;
+      btn.innerHTML = `${uiIcon(item.icon, 13, { style: "opacity:0.6;flex-shrink:0;" })}<span>${item.label}</span>`;
     } else {
       btn.textContent = item.label;
     }
@@ -1146,12 +1132,9 @@ const _TASK_PRESETS = [
 
 // Icon for each preset, keyed off task/trigger type (24x24 stroke SVG).
 function _presetIcon(p) {
-  const wrap = (inner) => `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.4;flex-shrink:0;">${inner}</svg>`;
-  if (p.taskType === 'research') return wrap('<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>');
-  if (p.taskType === 'action') return wrap('<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10z"/>'); // sparkle
-  if (p.triggerType === 'webhook') return wrap('<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 0 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/>'); // link
-  if (p.triggerType === 'event') return wrap('<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>'); // activity pulse
-  return wrap('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'); // clock (scheduled prompt)
+  const id = p.taskType === 'research' ? 'research' : p.taskType === 'action' ? 'sparkles'
+    : p.triggerType === 'webhook' ? 'link' : p.triggerType === 'event' ? 'activity' : 'clock';
+  return uiIcon(id, 13, { style: 'opacity:0.4;flex-shrink:0;' });
 }
 
 function _showPresetPicker() {
@@ -1169,7 +1152,7 @@ function _showPresetPicker() {
   // description bar above so the input lines up with it visually.
   html += '<div class="task-ai-compose" style="display:flex;gap:6px;margin:6px 0 10px -4px;flex-wrap:wrap;align-items:center;">'
     + '<input type="text" id="task-ai-input" class="memory-search-input" style="flex:1 1 220px;min-width:0;" placeholder="Describe a task — e.g. &quot;every weekday 7am summarize my unread email&quot;" />'
-    + '<button class="memory-toolbar-btn active" id="task-ai-btn" title="Draft a task with AI" style="white-space:nowrap;height:28px;flex:0 0 auto;"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:3px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>Draft with AI</button>'
+    + "<button class=\"memory-toolbar-btn active\" id=\"task-ai-btn\" title=\"Draft a task with AI\" style=\"white-space:nowrap;height:28px;flex:0 0 auto;\">" + uiIcon("sparkles", 12, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Draft with AI</button>"
     + '</div>';
   html += '<div class="memory-list" style="max-height:none;flex:1;gap:0px;margin-top:2px;padding-right:8px;">';
   _TASK_PRESETS.forEach((p, i) => {
@@ -1224,18 +1207,18 @@ function _showForm(existing, initTaskType, initTriggerType) {
 
       <label class="task-form-label">Type</label>
       <div class="task-form-toggle" id="task-form-type-toggle">
-        <button class="task-toggle-btn ${curTaskType === 'llm' ? 'active' : ''}" data-val="llm" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>Prompt</button>
-        <button class="task-toggle-btn ${curTaskType === 'research' ? 'active' : ''}" data-val="research" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Research</button>
-        <button class="task-toggle-btn ${curTaskType === 'action' ? 'active' : ''}" data-val="action" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Action</button>
+        <button class="task-toggle-btn ${curTaskType === 'llm' ? 'active' : ''}" data-val="llm" style="position:relative;top:-4px;">${uiIcon("chat", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Prompt</button>
+        <button class="task-toggle-btn ${curTaskType === 'research' ? 'active' : ''}" data-val="research" style="position:relative;top:-4px;">${uiIcon("search", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Research</button>
+        <button class="task-toggle-btn ${curTaskType === 'action' ? 'active' : ''}" data-val="action" style="position:relative;top:-4px;">${uiIcon("play", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Action</button>
       </div>
 
       <div id="task-form-type-opts"></div>
 
       <label class="task-form-label">Trigger</label>
       <div class="task-form-toggle" id="task-form-trigger-toggle">
-        <button class="task-toggle-btn ${curTriggerType === 'schedule' ? 'active' : ''}" data-val="schedule" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Schedule</button>
-        <button class="task-toggle-btn ${curTriggerType === 'event' ? 'active' : ''}" data-val="event" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Event</button>
-        <button class="task-toggle-btn ${curTriggerType === 'webhook' ? 'active' : ''}" data-val="webhook" style="position:relative;top:-4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Webhook</button>
+        <button class="task-toggle-btn ${curTriggerType === 'schedule' ? 'active' : ''}" data-val="schedule" style="position:relative;top:-4px;">${uiIcon("clock", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Schedule</button>
+        <button class="task-toggle-btn ${curTriggerType === 'event' ? 'active' : ''}" data-val="event" style="position:relative;top:-4px;">${uiIcon("bell", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Event</button>
+        <button class="task-toggle-btn ${curTriggerType === 'webhook' ? 'active' : ''}" data-val="webhook" style="position:relative;top:-4px;">${uiIcon("link", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Webhook</button>
       </div>
 
       <div id="task-form-trigger-opts"></div>
@@ -1266,8 +1249,8 @@ function _showForm(existing, initTaskType, initTriggerType) {
       </label>
 
       <div class="task-form-actions">
-        <button id="task-form-cancel" class="memory-toolbar-btn"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
-        <button id="task-form-save" class="memory-toolbar-btn active"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><polyline points="20 6 9 17 4 12"/></svg>${existing?.id ? 'Save' : 'Create'}</button>
+        <button id="task-form-cancel" class="memory-toolbar-btn">${uiIcon("close", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Cancel</button>
+        <button id="task-form-save" class="memory-toolbar-btn active">${uiIcon("check", 11, {"style":"vertical-align:-1px;margin-right:4px;","role":"inherit"})}${existing?.id ? 'Save' : 'Create'}</button>
       </div>
     </div>
     </div>
@@ -1977,8 +1960,8 @@ async function _doToggleAll() {
 function _syncPauseAllButton() {
   const btn = document.getElementById('tasks-pause-all-btn');
   if (!btn) return;
-  const pauseIco = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:3px;"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
-  const playIco = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:3px;"><polygon points="6 4 20 12 6 20 6 4"/></svg>';
+  const pauseIco = uiIcon("pause", 11, {"style":"vertical-align:-1px;margin-right:3px;"});
+  const playIco = uiIcon("play", 11, {"style":"vertical-align:-1px;margin-right:3px;"});
   const hasActive = _tasks.some(t => t.status === 'active');
   const hasPaused = _tasks.some(t => t.status === 'paused');
   if (hasActive) {
@@ -2059,7 +2042,7 @@ async function _renderCompletedView() {
     <div class="admin-card tasks-activity-card tasks-completed-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0;">
       <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
         <h2 style="margin:0;padding:0;line-height:1;">Completed</h2>
-        <button class="memory-toolbar-btn" id="tasks-completed-refresh" title="Refresh" style="margin-left:auto;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg></button>
+        <button class="memory-toolbar-btn" id="tasks-completed-refresh" title="Refresh" style="margin-left:auto;">${uiIcon("refresh", 13, {"style":"vertical-align:-2px;"})}</button>
       </div>
       <p class="memory-desc">Completed assistant/research outputs you can open in chat.</p>
       <div id="tasks-completed-list" class="memory-list tasks-activity-list tasks-completed-list" style="flex:1;overflow:auto;font-size:13px;min-height:0;"></div>
@@ -2109,7 +2092,7 @@ async function _renderActivityView() {
     <div class="admin-card tasks-activity-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0;">
       <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
         <h2 style="margin:0;padding:0;line-height:1;">Activity</h2>
-        <button class="memory-toolbar-btn" id="tasks-activity-refresh" title="Refresh" style="margin-left:auto;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg></button>
+        <button class="memory-toolbar-btn" id="tasks-activity-refresh" title="Refresh" style="margin-left:auto;">${uiIcon("refresh", 13, {"style":"vertical-align:-2px;"})}</button>
       </div>
       <p class="memory-desc">Recent task runs across all scheduled tasks.</p>
       <div style="display:flex;align-items:center;gap:6px;margin:6px 0 8px;">
@@ -2472,11 +2455,11 @@ function _renderCompletedPreviewEntry(entry) {
         </div>
         <div class="doclib-chat-preview-actions">
           <button class="doclib-chat-copy-btn task-completed-copy-btn" type="button">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            ${uiIcon("copy", 11)}
             Copy
           </button>
           <button class="doclib-chat-open-btn task-completed-open-chat" type="button">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+            ${uiIcon("forward", 11)}
             Open chat
           </button>
         </div>
@@ -2723,31 +2706,31 @@ function _renderActivityEntry(entry, opts = {}) {
   let actionBtn = '';
   if (hasResult && _isChatWorthy) {
     actionBtn = `<button class="task-log-open-chat" type="button" title="Open this result in a chat to read full-width + ask follow-ups">
-         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+         ${uiIcon("chat", 11)}
          Open in chat
        </button>`;
     if (entry.kind === 'research' && entry.researchId) {
       actionBtn += `<button class="task-log-open-report" type="button" title="Open the visual research report">
-         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>
+         ${uiIcon("external", 11)}
          Visual report
        </button>`;
     }
   } else if (hasResult) {
     actionBtn = `<button class="task-log-copy" type="button" title="Copy this log entry">
-         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+         ${uiIcon("copy", 11)}
          Copy log
        </button>`;
   }
   const clearLabel = _taskClearCacheLabel(entry);
   if (hasResult && clearLabel && entry.taskId) {
     actionBtn += `<button class="task-log-clear-cache" type="button" title="Clear cached ${_escHtml(clearLabel)} for this task">
-         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
+         ${uiIcon("trash", 11)}
          Clear cache
        </button>`;
   }
   if (hasResult && entry.taskId) {
     actionBtn += `<button class="task-log-run-again" type="button" title="Run this task again">
-         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+         ${uiIcon("refresh", 11)}
          Run again
        </button>`;
   }
@@ -2763,8 +2746,8 @@ function _renderActivityEntry(entry, opts = {}) {
     const stale = !isQueued && (Date.now() - startMs) > 30 * 60 * 1000;
     const label = isQueued ? 'Queued' : stale ? 'Still running' : 'Running';
     const elapsedInit = isQueued ? '' : `<span class="task-log-running-elapsed" data-since="${startMs}">${_fmtElapsed(Date.now() - startMs)}</span>`;
-    const forceBtn = isQueued && entry.taskId ? `<button class="task-log-force-run" type="button" title="Start now in parallel, bypassing the queue"><svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg><span>Start now</span></button>` : '';
-    const stopBtn = entry.taskId ? `<button class="task-log-stop" type="button" title="Stop this task"><svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button>` : '';
+    const forceBtn = isQueued && entry.taskId ? `<button class="task-log-force-run" type="button" title="Start now in parallel, bypassing the queue">${uiIcon("play", 9)}<span>Start now</span></button>` : '';
+    const stopBtn = entry.taskId ? `<button class="task-log-stop" type="button" title="Stop this task">${uiIcon("stop", 9)}</button>` : '';
     rightHtml = `<span class="task-log-running-inline"><span class="task-log-running-label">${label}</span>${elapsedInit}<span data-spin-here="1"></span>${forceBtn}${stopBtn}</span>`;
   } else {
     rightHtml = `<span class="task-log-time" title="${_escHtml(tsAbs)}">${_escHtml(tsLabel)}</span>`;
@@ -2895,8 +2878,8 @@ function _renderMainView() {
       <div id="tasks-bulk-bar" class="memory-bulk-bar${_taskSelectMode ? '' : ' hidden'}" style="position:relative;top:-4px;">
         <label class="memory-bulk-check-all" style="position:relative;top:0px;"><input type="checkbox" id="tasks-select-all" /> All</label>
         <span id="tasks-selected-count">0 Selected</span>
-        <button id="tasks-bulk-delete" class="memory-toolbar-btn danger" style="position:relative;top:-2px;" disabled><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>Delete</button>
-        <button id="tasks-bulk-cancel" class="memory-toolbar-btn" title="Cancel (Esc)" style="margin-left:4px;padding:3px 6px;position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        <button id="tasks-bulk-delete" class="memory-toolbar-btn danger" style="position:relative;top:-2px;" disabled>${uiIcon("trash", 11, {"style":"vertical-align:-1px;margin-right:3px;"})}Delete</button>
+        <button id="tasks-bulk-cancel" class="memory-toolbar-btn" title="Cancel (Esc)" style="margin-left:4px;padding:3px 6px;position:relative;top:-2px;">${uiIcon("close", 11)}</button>
       </div>
       <div id="tasks-filter-chips" class="tasks-activity-filters" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px;position:relative;top:-4px;"></div>
       <div id="tasks-list" class="memory-list" style="flex:1;gap:4px;position:relative;top:-4px;"></div>
@@ -2962,25 +2945,25 @@ export function openTasks(focusId, opts) {
   modal.innerHTML = `
     <div class="modal-content tasks-modal-content">
       <div class="modal-header">
-        <h4 style="position:relative;top:-2px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/></svg>Clanker Tasks</h4>
+        <h4 style="position:relative;top:-2px;">${uiIcon("clock", 14, {"style":"vertical-align:-2px;margin-right:6px"})}Clanker Tasks</h4>
         <span style="flex:1"></span>
         <button class="close-btn" id="tasks-close">✖</button>
       </div>
       <div class="memory-tabs tasks-tabs" role="tablist">
         <button class="memory-tab tasks-tab active" data-tab="tasks" role="tab" aria-selected="true">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          ${uiIcon("tasks", 12, {"style":"vertical-align:-2px;margin-right:5px"})}
           Clanker Tasks <span id="tasks-tab-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span>
         </button>
         <button class="memory-tab tasks-tab" data-tab="activity" role="tab" aria-selected="false">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          ${uiIcon("activity", 12, {"style":"vertical-align:-2px;margin-right:5px"})}
           Activity
         </button>
         <button class="memory-tab tasks-tab" data-tab="completed" role="tab" aria-selected="false">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M20 6 9 17l-5-5"/></svg>
+          ${uiIcon("check", 12, {"style":"vertical-align:-2px;margin-right:5px","role":"success"})}
           Completed <span id="tasks-completed-tab-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span>
         </button>
         <button class="memory-tab tasks-tab" data-tab="new" role="tab" aria-selected="false">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+          ${uiIcon("add", 12, {"style":"vertical-align:-2px;margin-right:5px"})}
           Add
         </button>
       </div>

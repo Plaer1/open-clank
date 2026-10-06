@@ -1167,16 +1167,6 @@ def shell_approval_binding(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-@functools.lru_cache(maxsize=1)
-def _approval_grant_store():
-    from src.constants import DATA_DIR
-    from src.openclank.permission_grants import GrantStore
-
-    data_dir = Path(DATA_DIR)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return GrantStore(str(data_dir / "app.db"))
-
-
 async def _require_shell_approval_grant(
     command: str,
     *,
@@ -1195,6 +1185,8 @@ async def _require_shell_approval_grant(
     authority_workspace_id = str(
         ctx.get("authority_workspace_id") or ""
     ).strip()
+    from src.openclank.operation_approvals import canonical_workspace_id
+    authority_workspace_id = canonical_workspace_id(owner, authority_workspace_id)
     workspace = os.path.realpath(str(ctx.get("workspace") or cwd))
     actions = destructive_actions(command)
     target_facts = destructive_target_facts(
@@ -1254,21 +1246,6 @@ async def _require_shell_approval_grant(
             return binding
     except Exception:
         pass
-    try:
-        if _approval_grant_store().match(
-            _SHELL_APPROVAL_PERMISSION,
-            owner=owner,
-            session_id=session_id,
-            workspace=workspace,
-            workspace_id=authority_workspace_id,
-            resource=binding,
-        ):
-            audit("approval_reused")
-            return binding
-    except Exception:
-        # A broken durable store must never become an implicit approval.
-        pass
-
     # Owner permission mode (yolo/auto): approve with once semantics — no
     # durable grant is written, but the audit record stands.
     try:
@@ -1358,15 +1335,7 @@ async def _require_shell_approval_grant(
                         target_path=workspace,
                     )
                     if not persisted:
-                        _approval_grant_store().add(
-                            _SHELL_APPROVAL_PERMISSION,
-                            "*",
-                            owner=owner,
-                            session_id=grant_session,
-                            workspace=grant_workspace,
-                            workspace_id=grant_workspace_id,
-                            resource=binding,
-                        )
+                        option_id = "once"
                 else:
                     option_id = "once"
             except Exception as exc:
@@ -1398,6 +1367,11 @@ async def require_shell_approval(
     approved command will need. Declining the password prompt is not a veto —
     the command still runs and sudo fails non-interactively, exactly as before.
     """
+    if os.name == "nt" and ctx.get("owner") and ctx.get("workspace"):
+        from src.constants import FM_DB_PATH
+        from src.openclank.windows_shell_worker import native_policy_active, CONTAINMENT
+        if native_policy_active(workspace=str(ctx["workspace"]), owner=str(ctx["owner"]), db_path=FM_DB_PATH):
+            containment = CONTAINMENT
     binding = await _require_shell_approval_grant(
         command,
         ctx=ctx,
@@ -1899,6 +1873,12 @@ def contained_argv(
         else _working_bwrap()
     )
     if executable is None:
+        if overlay:
+            raise ShellContainmentError("workspace overlay requires bubblewrap containment")
+        if readonly_data_mounts:
+            raise ShellContainmentError(
+                "verified file snapshots require bubblewrap containment"
+            )
         if network_mode == "disabled":
             raise ShellContainmentError(
                 "network-disabled shell containment is unavailable"

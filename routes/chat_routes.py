@@ -200,8 +200,6 @@ def _immutable_account_id(request: Request, owner: str | None) -> str | None:
         resolved = None
     if resolved:
         return str(resolved)
-    if os.getenv("AUTH_ENABLED", "true").lower() == "false" and username == "local-installation":
-        return "local-installation"
     return None
 
 
@@ -1389,6 +1387,8 @@ def setup_chat_routes(
             # Protocol binding, not UI mode: ACP persistent sessions compact
             # in MiMo; host pre-dispatch compaction is skipped for them.
             has_persistent_engine=model_target.transport == "acp",
+            hex_workspace=workspace,
+            hex_workspace_id=selected_workspace_id,
         )
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
@@ -1568,12 +1568,12 @@ def setup_chat_routes(
             if not _privs.get("can_use_agent", True):
                 raise HTTPException(403, "Agent access is disabled for this account.")
 
-        # Native OpenCode host-path/process tools never inherit authority from
+        # Native OpenCode file/search tools never inherit authority from
         # the child process CWD. The current owner/workspace projection exposes
-        # only Rust-backed private lifetools and keeps every other file/process
-        # name fail-closed.
+        # only Rust-backed private file lifetools. Process execution retains its
+        # OS boundary and interactive approval policy.
         from src.tool_security import unavailable_strict_agent_tools
-        disabled_tools.update(unavailable_strict_agent_tools(_user, workspace))
+        disabled_tools.update(unavailable_strict_agent_tools(_user, workspace, workspace_id=selected_workspace_id, chat_id=session))
 
         # Global admin disabled tools
         from src.settings import get_setting
@@ -2049,6 +2049,11 @@ def setup_chat_routes(
                         provider_grant_id=getattr(sess, "provider_grant_id", None),
                         root_operation_id=root_operation_id,
                     )
+                    _agent_envelope["general_hex_snapshot_ref"] = {
+                        "boundary_id": root_operation_id,
+                        "snapshot_hash": ctx.general_hex_snapshot.get("snapshot_hash"),
+                        "state": ctx.general_hex_snapshot.get("state", "available"),
+                    }
 
                     # stream_agent_target -> run_agent is the one strict Agent
                     # admission door. It owns endpoint-to-ACP projection and
@@ -2214,6 +2219,26 @@ def setup_chat_routes(
                                     incognito=incognito,
                                 )
                                 if _saved_id:
+                                    # Successful terminal answer only; the error and interrupted
+                                    # save branches never enter this receipt producer.
+                                    try:
+                                        with SessionLocal() as achievement_db:
+                                            user_persisted = achievement_db.query(DBChatMessage.id).filter(
+                                                DBChatMessage.id == root_operation_id,
+                                                DBChatMessage.session_id == session,
+                                                DBChatMessage.role == "user",
+                                            ).first() is not None
+                                        if user_persisted and not _metrics_to_save.get("stopped") and not _metrics_to_save.get("error"):
+                                            from src.openclank.achievement_producers import record_activity
+                                            record_activity(request, "conversation.turn.completed", root_operation_id, {
+                                                "userTurnPersisted": True, "assistantCompleted": True,
+                                                "origin": "user_initiated", "conversationId": session, "sessionId": session,
+                                            }, workspace_id=selected_workspace_id)
+                                            record_activity(request, "chat.action.completed", root_operation_id, {
+                                                "sessionId": session, "workspaceId": selected_workspace_id, "authorized": True,
+                                            }, workspace_id=selected_workspace_id)
+                                    except Exception:
+                                        logger.warning("Completed chat achievement receipt unavailable")
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
                                     _root_turn_id = str(_metrics_to_save.get("root_turn_id") or "")
                                     if _root_turn_id:
@@ -2302,8 +2327,12 @@ def setup_chat_routes(
         if compare_mode:
             return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
-        agent_runs.start(session, _safe_stream(), owner=_user)
-        return StreamingResponse(agent_runs.subscribe(session), media_type="text/event-stream")
+        run = agent_runs.start(session, _safe_stream(), owner=_user)
+        return StreamingResponse(
+            agent_runs.subscribe(session, expected_run=run),
+            media_type="text/event-stream",
+            headers={"X-Agent-Run-ID": run.run_id},
+        )
 
     # The TUI control plane invokes this exact canonical handler in-process.
     # Keeping the callable private to the assembled app avoids a second chat
@@ -2318,7 +2347,8 @@ def setup_chat_routes(
     @router.get("/api/chat/resume/{session_id}")
     async def chat_resume(request: Request, session_id: str) -> StreamingResponse:
         _verify_session_owner(request, session_id)
-        if agent_runs.get_status(session_id) is None:
+        run = agent_runs.get_run(session_id)
+        if run is None:
             raise HTTPException(404, "No retained run for this session")
         raw_cursor = request.headers.get("last-event-id") or request.query_params.get("after") or "0"
         try:
@@ -2326,8 +2356,9 @@ def setup_chat_routes(
         except ValueError:
             raise HTTPException(400, "Invalid stream cursor")
         return StreamingResponse(
-            agent_runs.subscribe(session_id, after_seq=cursor),
+            agent_runs.subscribe(session_id, expected_run=run, after_seq=cursor),
             media_type="text/event-stream",
+            headers={"X-Agent-Run-ID": run.run_id},
         )
 
     # ------------------------------------------------------------------ #
@@ -2337,8 +2368,12 @@ def setup_chat_routes(
     @router.post("/api/chat/stop/{session_id}")
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
-        stopped = agent_runs.stop(session_id)
-        return {"stopped": stopped}
+        expected_run_id = request.headers.get("X-Agent-Run-ID") or None
+        stopped = agent_runs.stop(session_id, expected_run_id=expected_run_id)
+        return {
+            "stopped": stopped,
+            "run_id": agent_runs.get_run_id(session_id),
+        }
 
     # ------------------------------------------------------------------ #
     # POST /api/session/{session_id}/permission — resolve a pending mimo
@@ -2507,7 +2542,6 @@ def setup_chat_routes(
                 pass
             revoked = store.revoke_scope(
                 owner=owner,
-                workspace=legacy_workspace,
                 workspace_id=workspace_id,
             )
             pending = 0
@@ -2564,7 +2598,7 @@ def setup_chat_routes(
         return {"ok": True}
 
     @router.delete("/api/mimo/permission-grants/{grant_id}")
-    async def revoke_permission_grant(request: Request, grant_id: int) -> Dict[str, Any]:
+    async def revoke_permission_grant(request: Request, grant_id: str) -> Dict[str, Any]:
         owner = effective_user(request) or ""
         sup = getattr(request.app.state, "mimo_supervisor", None)
         store = sup.grant_store_for(owner) if sup and hasattr(sup, "grant_store_for") else getattr(sup, "grant_store", None)

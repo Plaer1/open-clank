@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import fnmatch
 import json
+import logging
 import mimetypes
 import os
+import re
 import sys
 import tempfile
 import uuid
@@ -31,17 +34,38 @@ from src.openclank.files_facade import (
 )
 from src.openclank.files_service_client import FilesServiceError, client_for_owner
 from src.openclank.filesystem_registry import FilesystemRegistryError, FilesystemRootRegistry
-from src.openclank.macos_host_apps import MacOSHostApps, MacOSHostAppsError
+from src.openclank.host_apps import host_apps, HostAppsError
 from routes.odysseus_files_routes import project_navigation_roots
 from src.openclank.resource_refs import issue_resource_ref, stable_resource_id
 
 
 _ORIGIN_PREFIX = "host:v1:"
+_LOG = logging.getLogger(__name__)
 
 
 def _origin(path: str) -> str:
-    payload = json.dumps({"path": str(path)}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    path = str(path)
+    if sys.platform == "win32":
+        # Rust canonical stat/list paths are verbatim; registry anchors are DOS.
+        # Keep native verbatim I/O semantics and fold only their prefix aliases,
+        # never filename case or distinct canonical resources.
+        if re.match(r"^[A-Za-z]:\\", path):
+            path = "\\\\?\\" + path[0].upper() + path[1:]
+        elif re.match(r"^\\\\\?\\[A-Za-z]:\\", path):
+            path = path[:4] + path[4].upper() + path[5:]
+        elif path.startswith("\\\\") and not path.startswith(("\\\\?\\", "\\\\.\\")):
+            path = "\\\\?\\UNC\\" + path[2:]
+    payload = json.dumps({"path": path}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return _ORIGIN_PREFIX + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def host_origin_for_path(path: str) -> str:
+    """Derive the same Host origin used by Files from a trusted server path.
+
+    This is an identity comparison helper only. Callers must still resolve the
+    path through ``HostFilesProvider.resource_for_path`` before authorizing it.
+    """
+    return _origin(os.path.realpath(str(path)))
 
 
 def _path(origin_id: str) -> str:
@@ -85,14 +109,19 @@ def _detected_mime(name: str, first_bytes: bytes) -> str:
     return mimetypes.guess_type(str(name))[0] or "application/octet-stream"
 
 
+# Generated from the shared first-party registry at editor build time. This is
+# an open-target hint only; Rust's bounded read still rejects binary/unsupported
+# text, and every operation retains the existing opaque-ref authorization.
+try:
+    _EDITOR_ASSOCIATIONS = json.loads(Path(__file__).with_name("editor_language_associations.json").read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    _EDITOR_ASSOCIATIONS = {}
+_EDITOR_BINARY_SUFFIX = re.compile(_EDITOR_ASSOCIATIONS.get("binarySuffixPattern", r"(?!)"), re.IGNORECASE)
+
+
 class HostFilesProvider:
     name = "host"
     _ROOT_SORTS = ("name", "kind")
-    _EDITOR_SUFFIXES = frozenset({
-        ".c", ".cc", ".cpp", ".css", ".go", ".h", ".hpp", ".html", ".java", ".js", ".jsx",
-        ".json", ".markdown", ".md", ".mdown", ".mdx", ".py", ".rs", ".scss", ".sh", ".sql",
-        ".swift", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
-    })
     _EDITOR_MIME_TYPES = frozenset({
         "application/javascript", "application/json", "application/ld+json", "application/xml",
         "text/css", "text/html", "text/markdown", "text/plain", "text/x-c", "text/x-python",
@@ -437,7 +466,7 @@ class HostFilesProvider:
             return self.client_factory(
                 context.owner_username,
                 app_scope=None if scope.get("host") else scope,
-                transport="grpc" if sys.platform == "darwin" else "framed",
+                transport="grpc" if sys.platform in {"darwin", "win32"} else "framed",
             )
         return self.client_factory(context.owner_username) if scope.get("host") else self.client_factory(
             context.owner_username, app_scope=scope,
@@ -448,7 +477,7 @@ class HostFilesProvider:
             return self.client_factory(
                 context.owner_username,
                 app_scope=None if scope.get("host") else scope,
-                transport="grpc" if sys.platform == "darwin" else "framed",
+                transport="grpc" if sys.platform in {"darwin", "win32"} else "framed",
             )
         return self._client(context, scope)
 
@@ -464,18 +493,28 @@ class HostFilesProvider:
         # can be opened through the same Rust read-lines service used by Code;
         # writes still require the caller's existing app-scoped service grant.
         if kind in {"folder", "directory", "recursive_directory"}:
-            return ("children", "stat", "search", *(('watch',) if sys.platform == "darwin" else ()), *(('write',) if writable else ()))
+            return ("children", "stat", "search", *(('watch',) if sys.platform in {"darwin", "win32"} else ()), *(('write',) if writable else ()))
         if kind == "file":
             return ("stat", "preview", "download", "open", *(('write', 'rename', 'move') if writable else ()))
         return ("stat",)
 
     def _path_writable(self, context: ProviderContext, path: str, scope: Mapping[str, Any] | None = None) -> bool:
-        scope = scope or self._scope(context)
+        if scope is None:
+            scope = self._scope(context)
         if scope.get("host"):
             return True
+        if "write" not in set(scope.get("capabilities") or []):
+            return False
+        visible_root_ids = set(scope.get("visible_root_ids") or [])
+        root_capabilities = scope.get("root_capabilities") or {}
         target = os.path.realpath(str(path))
         for assignment in self.registry.visibility_for_subject(context.owner_username):
             root = assignment.get("root") or {}
+            root_id = str(assignment.get("root_id") or "")
+            if root_id not in visible_root_ids or "write" not in set(root_capabilities.get(root_id) or []):
+                continue
+            if not root.get("enabled") or root.get("availability") != "available":
+                continue
             root_path = str(root.get("canonical_path") or "")
             if not root_path or "write" not in set(assignment.get("capabilities") or []) or "write" not in set(root.get("capabilities") or []):
                 continue
@@ -483,7 +522,7 @@ class HostFilesProvider:
                 if root.get("kind") == "exact_file":
                     if target == root_path:
                         return True
-                elif os.path.commonpath([root_path, target]) == root_path:
+                elif root.get("kind") == "recursive_directory" and os.path.commonpath([root_path, target]) == root_path:
                     return True
             except ValueError:
                 continue
@@ -492,7 +531,20 @@ class HostFilesProvider:
     @classmethod
     def _editor_file(cls, name: str, mime_type: str | None = None) -> bool:
         mime = str(mime_type or "").strip().lower()
-        return mime in cls._EDITOR_MIME_TYPES or mime.startswith("text/") or Path(name).suffix.lower() in cls._EDITOR_SUFFIXES
+        path = str(name).replace("\\", "/").lower()
+        leaf = path.rsplit("/", 1)[-1]
+        if _EDITOR_BINARY_SUFFIX.search(leaf):
+            return False
+        if mime in cls._EDITOR_MIME_TYPES or mime.startswith("text/"):
+            return True
+        if leaf in _EDITOR_ASSOCIATIONS.get("filenames", ()):
+            return True
+        if any(leaf.endswith(suffix) for suffix in _EDITOR_ASSOCIATIONS.get("suffixes", ())):
+            return True
+        if any(leaf.endswith(suffix) for suffix in _EDITOR_ASSOCIATIONS.get("conditionalSuffixes", ())):
+            return True
+        return any(fnmatch.fnmatchcase(path, pattern) or fnmatch.fnmatchcase(leaf, pattern)
+                   for pattern in _EDITOR_ASSOCIATIONS.get("patterns", ()))
 
     @classmethod
     def _representation(cls, name: str, data: Mapping[str, Any]) -> str:
@@ -543,7 +595,8 @@ class HostFilesProvider:
     def _resource(self, path: str, *, name: str, kind: str, size: int | None = None,
                   modified_unix_ms: int | None = None, provenance: Mapping[str, Any] | None = None,
                   writable: bool = False, revision: Mapping[str, Any] | None = None,
-                  action_receipt: Mapping[str, Any] | None = None) -> ProviderResource:
+                  action_receipt: Mapping[str, Any] | None = None,
+                  native_available: bool = False, native_icon_available: bool = False) -> ProviderResource:
         normalized_kind = {
             "directory": "folder",
             "recursive_directory": "folder",
@@ -558,14 +611,17 @@ class HostFilesProvider:
             name,
             normalized_kind,
             self._caps(normalized_kind, writable=writable),
-            parent_origin_id=_origin(str(Path(path).parent)) if normalized_kind in {"file", "folder"} else None,
+            # Physical roots have no parent; serializing / as its own parent
+            # creates a cycle in the facade's authorized reveal ancestry.
+            parent_origin_id=_origin(str(Path(path).parent)) if normalized_kind in {"file", "folder"} and Path(path).parent != Path(path) else None,
             mime_type=mime_type,
             size=size,
             modified_unix_ms=modified_unix_ms,
             provenance=dict(provenance or {"domain": "host"}),
             open_target={"app": "editor"} if normalized_kind == "file" and HostFilesProvider._editor_file(name, mime_type) else None,
             sort_kind=mime_type or normalized_kind,
-            native_thumbnail_available=(sys.platform == "darwin") if normalized_kind == "file" else False,
+            native_thumbnail_available=(sys.platform == "darwin" or native_available) if normalized_kind == "file" else False,
+            native_icon_available=native_icon_available if normalized_kind == "file" else False,
             child_sort_keys=SORT_KEYS if "children" in self._caps(normalized_kind, writable=writable) else (),
             action_receipt=action_receipt,
             revision=revision,
@@ -655,9 +711,12 @@ class HostFilesProvider:
             "target_before_kind": before_kind, "target_before_revision": before_revision,
             "ownership_path": ownership_path, "ownership_token": ownership_token,
         }
+        phase = "save_marker"
         try:
             self._directory_operation_save(context, operation, digest, marker)
+            phase = "mkdir"
             await self._client(context, scope).request("mkdir", target, {})
+            phase = "post_mkdir_stat"
             created = await self.stat(context, origin_id=_origin(target))
             if created.kind != "folder" or created.parent_origin_id != parent_origin_id:
                 raise FilesFacadeError("Host provider returned an invalid directory", code="provider_unavailable")
@@ -666,6 +725,10 @@ class HostFilesProvider:
             self._release_ownership(marker)
             return await self._directory_resource(context, complete)
         except FilesServiceError as exc:
+            code = exc.code if exc.code in {"root_unavailable", "denied", "invalid_path", "conflict",
+                "deadline_exceeded", "cancelled", "backpressure", "policy_generation_changed", "unauthorized"} else "other"
+            recovery = "preimage_unavailable" if str(exc) == "required recovery preimage unavailable; original preserved" else "unknown"
+            _LOG.warning("Host directory creation failed phase=%s code=%s recovery=%s", phase, code, recovery)
             if exc.code == "conflict" and collision == "reuse":
                 try:
                     existing = await self.stat(context, origin_id=_origin(target))
@@ -687,7 +750,10 @@ class HostFilesProvider:
             finally:
                 self._release_ownership(marker)
             raise _service_error(exc) from exc
-        except FilesFacadeError:
+        except FilesFacadeError as exc:
+            code = exc.code if exc.code in {"provider_unavailable", "resource_unavailable", "resource_changed",
+                "resource_ref_stale", "operation_pending"} else "other"
+            _LOG.warning("Host directory creation failed phase=%s code=%s recovery=unknown", phase, code)
             # A committed target with a lost post-mkdir stat/receipt must stay
             # recoverable through the pending marker. Known validation errors
             # are still surfaced; operation_status will either reconcile the
@@ -742,7 +808,7 @@ class HostFilesProvider:
                         "domain": "host",
                         "favorite": str(item["path"]) == default_path,
                     },
-                    writable="write" in set(item.get("capabilities") or []),
+                    writable=self._path_writable(context, str(item["path"]), scope),
                 )
                 for item in sorted(by_path.values(), key=lambda item: (
                     str(item.get("path")) != default_path,
@@ -797,7 +863,11 @@ class HostFilesProvider:
                     "include_hidden": False,
                     "case_sensitive": False,
                 })
-                matches = tuple(str(item) for item in (response.get("data") or {}).get("matches") or ())
+                search_data = response.get("data") or {}
+                matches = tuple(str(item) for item in search_data.get("matches") or ())
+                search_complete = search_data.get("complete")
+                if not isinstance(search_complete, bool):
+                    search_complete = None
                 rows: list[ProviderResource] = []
                 for match in matches:
                     metadata = await client.request("stat", match, {"include_fingerprint": False})
@@ -810,6 +880,8 @@ class HostFilesProvider:
                         size=int(data.get("size") or 0),
                         modified_unix_ms=int(data["modified_unix_ms"]) if data.get("modified_unix_ms") is not None else None,
                         writable=self._path_writable(context, canonical, scope),
+                        native_available=bool(metadata.get("native_thumbnails")),
+                        native_icon_available=bool(metadata.get("native_icons")),
                     ))
             except FilesServiceError as exc:
                 raise _service_error(exc) from exc
@@ -836,6 +908,7 @@ class HostFilesProvider:
                 next_cursor=None,
                 total=len(rows),
                 snapshot=f"host-search-{digest.hexdigest()[:24]}",
+                complete=search_complete,
             )
 
         payload: dict[str, Any] = {
@@ -866,6 +939,8 @@ class HostFilesProvider:
                 size=int(row.get("size") or 0),
                 modified_unix_ms=int(row["modified_unix_ms"]) if row.get("modified_unix_ms") is not None else None,
                 writable=self._path_writable(context, os.path.join(canonical, str(row.get("name") or "")), scope),
+                native_available=bool(response.get("native_thumbnails")),
+                native_icon_available=bool(response.get("native_icons")),
             )
             for row in data.get("entries") or ()
             if str(row.get("name") or "")
@@ -906,6 +981,8 @@ class HostFilesProvider:
             modified_unix_ms=int(data["modified_unix_ms"]) if data.get("modified_unix_ms") is not None else None,
             writable=self._path_writable(context, canonical, scope),
             revision={"kind": "hostFingerprint", "value": fingerprint} if fingerprint else None,
+            native_available=bool(response.get("native_thumbnails")),
+            native_icon_available=bool(response.get("native_icons")),
         )
 
     async def create_resource(
@@ -1024,15 +1101,44 @@ class HostFilesProvider:
             fingerprint = self._fingerprint_value(source_data)
             if expected_revision and fingerprint and str(expected_revision.get("value") or "") != fingerprint:
                 raise FilesFacadeError("Host resource revision is stale", code="resource_changed")
-            target = os.path.join(destination_path, Path(source_path).name)
-            payload = {
-                "destination": target,
-                "collision": collision,
-                "expected_fingerprint": {"algorithm": "sha256", "value": fingerprint} if fingerprint else None,
-                "operation_id": operation_id,
-                "item_id": item_id,
-            }
-            response = await self._client(context, scope).request(operation, source_path, payload)
+            name = Path(source_path).name
+            candidate = name
+            client = self._client(context, scope)
+            for attempt in range(101):
+                target = os.path.join(destination_path, candidate)
+                # The service transfer contract only accepts destination and
+                # fingerprint. Select Keep Both names here, as for imports;
+                # every candidate still passes the service's exclusive write.
+                candidate_operation = operation_id
+                if attempt:
+                    candidate_operation = "host-transfer-" + uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"{operation_id}:{item_id}:candidate:{attempt}"
+                    ).hex
+                payload = {
+                    "destination": target,
+                    "expected_fingerprint": {"algorithm": "sha256", "value": fingerprint} if fingerprint else None,
+                    "operation_id": candidate_operation,
+                    "item_id": item_id,
+                }
+                try:
+                    response = await client.request(operation, source_path, payload)
+                    break
+                except FilesServiceError as exc:
+                    if exc.code != "conflict" or collision != "rename" or attempt >= 100:
+                        raise
+                    # A conflict may also mean a stale source fingerprint.
+                    # Retry only a real occupied destination, with the same
+                    # source revision; never turn a revision failure into rename.
+                    checked = await client.request("stat", source_path, {"include_fingerprint": True})
+                    checked_fingerprint = self._fingerprint_value(checked.get("data") or {})
+                    if fingerprint and checked_fingerprint != fingerprint:
+                        raise FilesFacadeError("Host resource revision is stale", code="resource_changed") from exc
+                    try:
+                        await client.request("stat", target, {})
+                    except FilesServiceError:
+                        raise FilesFacadeError("Host transfer conflict could not be resolved", code="resource_changed") from exc
+                    stem, suffix = os.path.splitext(name)
+                    candidate = f"{stem} ({attempt + 2}){suffix}"
         except FilesServiceError as exc:
             if exc.code == "conflict":
                 raise FilesFacadeError("Host resource changed or destination already exists", code="resource_changed") from exc
@@ -1751,8 +1857,8 @@ class HostFilesProvider:
         if entry.kind != "file" or "open" not in entry.capabilities:
             raise FilesFacadeError("Host resource cannot be opened", code="resource_unavailable")
         try:
-            return await MacOSHostApps().discover_async(await self._authorized_path(context, origin_id))
-        except MacOSHostAppsError as error:
+            return await host_apps().discover_async(await self._authorized_path(context, origin_id))
+        except HostAppsError as error:
             raise FilesFacadeError(str(error), code=error.code) from error
 
     async def open_on_host(self, context: ProviderContext, *, origin_id: str, app_id: str) -> Mapping[str, str]:
@@ -1761,8 +1867,8 @@ class HostFilesProvider:
         if entry.kind != "file" or "open" not in entry.capabilities:
             raise FilesFacadeError("Host resource cannot be opened", code="resource_unavailable")
         try:
-            return await MacOSHostApps().launch_async(await self._authorized_path(context, origin_id), app_id)
-        except MacOSHostAppsError as error:
+            return await host_apps().launch_async(await self._authorized_path(context, origin_id), app_id)
+        except HostAppsError as error:
             raise FilesFacadeError(str(error), code=error.code) from error
 
     async def _authorized_path(self, context: ProviderContext, origin_id: str) -> str:
@@ -1826,16 +1932,35 @@ class HostFilesProvider:
             return {"outcome": "applied", "revision": current_snapshot["revision"], "snapshot": current_snapshot}
 
         try:
-            await client.request(
-                "patch",
-                path,
-                {
-                    "old": current_snapshot["envelope"]["text"],
-                    "new": text,
-                    "replace_all": True,
-                    "expected_fingerprint": {"algorithm": "sha256", "value": expected_value},
-                },
-            )
+            expected_fingerprint = {"algorithm": "sha256", "value": expected_value}
+            if current_snapshot["envelope"]["text"] == "":
+                # An empty match is not a text patch. Replace the complete
+                # empty snapshot through the native scoped CAS operation,
+                # preserving the decoder's encoding and optional BOM.
+                encoding = {"Utf8": "utf-8", "Utf16Le": "utf-16-le", "Utf16Be": "utf-16-be", "Utf32Le": "utf-32-le", "Utf32Be": "utf-32-be"}.get(str(current.get("encoding")), str(current.get("encoding") or ""))
+                encodings = {
+                    "utf-8": ("utf-8", b"\xef\xbb\xbf"),
+                    "utf-16-le": ("utf-16-le", b"\xff\xfe"),
+                    "utf-16-be": ("utf-16-be", b"\xfe\xff"),
+                    "utf-32-le": ("utf-32-le", b"\xff\xfe\x00\x00"),
+                    "utf-32-be": ("utf-32-be", b"\x00\x00\xfe\xff"),
+                }
+                if encoding not in encodings:
+                    raise FilesFacadeError("Host text encoding is unavailable", code="provider_unavailable")
+                codec, bom = encodings[encoding]
+                encoded = (bom if current.get("bom_bytes") else b"") + text.encode(codec)
+                await client.request("replace", path, {"bytes": list(encoded), "expected_fingerprint": expected_fingerprint})
+            else:
+                await client.request(
+                    "patch",
+                    path,
+                    {
+                        "old": current_snapshot["envelope"]["text"],
+                        "new": text,
+                        "replace_all": True,
+                        "expected_fingerprint": expected_fingerprint,
+                    },
+                )
         except FilesServiceError as exc:
             if exc.code != "conflict":
                 raise _service_error(exc) from exc
@@ -1859,22 +1984,34 @@ class HostFilesProvider:
         width: int,
         height: int,
         scale: float,
+        icon: bool = False,
     ) -> bytes:
         path = _path(origin_id)
         scope = self._scope(context)
         client = self._stream_client(context, scope)
+        phase = "open_handle"
         try:
             opened = await client.open_handle(path)
             handle = opened.get("handle")
             if not isinstance(handle, dict):
                 raise FilesServiceError("Rust filesystem service returned an invalid handle")
+            phase = "thumbnail_rpc"
             return await client.thumbnail_handle(
                 handle,
                 width=width,
                 height=height,
                 scale=scale,
+                **({"icon": True} if icon else {}),
             )
         except FilesServiceError as exc:
+            code = exc.code if type(exc.code) is str and exc.code in {
+                "denied", "invalid_path", "policy_generation_changed", "conflict",
+                "stale_cursor", "backpressure", "stale_handle", "root_unavailable",
+                "unsupported", "protocol_mismatch", "partial_stream", "deadline_exceeded",
+                "cancelled", "malformed_request", "history_binding_changed", "unauthorized",
+            } else "other"
+            _LOG.warning("Host native image failed phase=%s code=%s kind=%s",
+                         phase, code, "icon" if icon else "thumbnail")
             raise _service_error(exc) from exc
 
     async def watch(self, context: ProviderContext, *, origin_id: str):

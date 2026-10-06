@@ -1,7 +1,11 @@
+import { recordPresentation, acknowledgeVisible, achievementOwner } from './achievementProducer.js';
+import { uiIcon } from './uiIcons.js';
 import { openCalendar } from './calendar.js';
 import { formatBaseCell, makeDefaultBase, serializeBase, updateViewSort, canonicalSourceProperty, setFrontmatterProperty, flattenFilterToLines, hasNestedFilterGroups, parseFilterLines, removeBaseView, reorderBaseView, makeViewFromTemplate, VIEW_TYPES, parseDataviewQuery, reorderBaseColumn } from './copal/bases.js';
 import { createMarkdownEditor, createSourceEditor } from './copal/codemirror.js';
 import { createNotesFeature } from './copal/notesFeature.js';
+import { createBufferRegistry } from './copal/documentBuffers.js';
+import { createWikiWorkspace } from './copal/wikiWorkspace.js';
 import { databaseRelations, moveHeadingSection, moveHeadingSectionTo, outlineEntries, reparentHeading } from './copal/notesModel.js';
 import { createPlanningFeature } from './copal/planning.js';
 import { createTreeHouseFeature } from './copal/treehouse.js';
@@ -12,7 +16,7 @@ import { filesFacadeClient } from './filesFacadeClient.js';
 import { saveResourceSnapshot } from './codeEditor.js';
 import { prepareDocumentSave, commitDocumentSave, sameSaveScope } from './copal/documentSave.js';
 import { cloneEnvelope, normalizeResourceHandle, sameResourceKey, snapshotEnvelope } from './copal/resourceModel.js';
-import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, moveHeadingSection as moveGraphHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, facetCacheKey, mergeFacets } from './copal/graphModel.js';
+import { documentGraph, galaxyGraph, graphStorageKey, normalizeGraphState, headingEntries, headingTree, renameHeading, changeHeadingLevel, deleteHeadingSection, reparentHeadingSection, moveHeadingSection as moveGraphHeadingSection, GRAPH_MODES, structureEntries, structureTree, deriveFacets, matchesFilters, filterDocuments, reconcileFilters, officialDocsRoot, isOfficialDocument, facetCacheKey, mergeFacets } from './copal/graphModel.js';
 import { canHandleInput } from './copal/inputContext.js';
 import { extractReferenceSection } from './copal/markdownResources.js';
 import { createMarkdownRenderer, registerAppDestination } from './copal/markdownRenderer.js';
@@ -22,14 +26,14 @@ import { appletPath, updateAppletRoute, resolveAppletLocation } from './appletRo
 import { registerAdapter, createCodeMirrorContextAdapter } from './custom-context-menu.js';
 import { styledConfirm, styledPrompt } from './ui.js';
 
-const VIEWS = ['notes', 'timeline', 'graph', 'treehouse', 'todo'];
+const VIEWS = ['notes', 'wiki', 'timeline', 'graph', 'treehouse', 'achievements', 'todo'];
 // Mind is not a separate destination.  Its label is kept only as the legacy
 // deep-link alias text; Graph owns both views and Mind opens structure mode.
-const LABELS = { notes: 'Editor', wiki: 'Wiki', timeline: 'Timeline', galaxy: 'Galaxy', graph: 'Graph', mind: 'Graph', bases: 'Bases', treehouse: 'TreeHouse', todo: 'Meatbag Tasks' };
+const LABELS = { notes: 'Editor', wiki: 'Wiki', timeline: 'Timeline', galaxy: 'Galaxy', graph: 'Graph', mind: 'Graph', bases: 'Bases', treehouse: 'TreeHouse', achievements: 'Achievements', todo: 'Meatbag Tasks' };
 // Code and Notes remain accepted route/DOM aliases, but only the canonical
 // Editor destination participates in visible Copal launcher preferences.
-const COPAL_LAUNCHER_IDS = [...VIEWS.filter((view) => view !== 'notes'), 'notes', 'files'];
-const LAUNCHER_LABELS = { ...LABELS, code: 'Editor', files: 'Files' };
+const COPAL_LAUNCHER_IDS = [...VIEWS.filter((view) => view !== 'notes'), 'notes', 'files', 'imps', 'calendar'];
+const LAUNCHER_LABELS = { ...LABELS, code: 'Editor', files: 'Files', imps: 'Image Editor', calendar: 'Calendar' };
 const MEMES_MIME = 'application/vnd.openclank.memes+json';
 const HIDDEN_KINDS = new Set(['asset', 'planning', 'calendar-projection', 'treehouse-state', 'copal-tracks', 'copal-migration']);
 const state = {
@@ -51,15 +55,32 @@ const state = {
 };
 let planningFeature = null;
 let notesFeature = null;
+let wikiFeature = null;
+let wikiWorkspace = null;
+const sharedDocumentRegistry = createBufferRegistry();
+let sharedDocumentState = null;
+function documentState() {
+  const scope = JSON.stringify(saveScope());
+  if (sharedDocumentState?.scope !== scope) sharedDocumentState = { scope };
+  return sharedDocumentState;
+}
+function featureFor(view) { return view === 'wiki' ? wikiFeature : notesFeature; }
+
 
 function h(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs || {})) {
     if (key === 'class') node.className = value;
     else if (key === 'text') node.textContent = value;
+    else if (key === 'icon') { /* mounted after the text attributes below */ }
     else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2).toLowerCase(), value);
     else if (value === true) node.setAttribute(key, '');
     else if (value !== false && value != null) node.setAttribute(key, String(value));
+  }
+  if (attrs.icon) {
+    const icon = document.createElement('span');
+    icon.innerHTML = uiIcon(attrs.icon, 14, { role:'inherit', style:attrs.text ? 'margin-right:4px;' : '' });
+    node.prepend(icon);
   }
   for (const child of children.flat()) {
     if (child == null) continue;
@@ -237,12 +258,7 @@ async function loadDocuments(render = true) {
     let [result, planning] = await Promise.all([api('/documents?hidden=include', {}, scope.workspace), api('/planning', {}, scope.workspace)]);
     if (!current()) return;
     if (planning.migrationRequired) {
-      setStatus('Migrating Timeline events into canonical Redb notes…');
-      const migration = await api('/planning/migrate?dry_run=false', { method:'POST', body:JSON.stringify({ action:'apply' }) }, scope.workspace);
-      if (!current()) return;
-      projectionChanged(migration);
-      [result, planning] = await Promise.all([api('/documents?hidden=include', {}, scope.workspace), api('/planning', {}, scope.workspace)]);
-      if (!current()) return;
+      setStatus('Saved Timeline notes need explicit workspace migration. Their source is preserved.', true);
     }
     state.docs = (result.docs || []).map((doc) => notesFeature?.projectDocument?.(doc, scope) || doc);
     state.taskProjection = [];
@@ -261,7 +277,7 @@ async function loadDocuments(render = true) {
       for (const [view, context] of state.windows) if (context.window.visible) renderView(view);
       activateView(active);
     }
-    for (const context of state.windows.values()) context.window.setStatus(`${state.docs.length} documents · canonical Redb`);
+    for (const [view, context] of state.windows) context.window.setStatus(planning.migrationRequired ? 'Saved Timeline notes need explicit workspace migration; source preserved.' : view === 'achievements' ? '' : `${state.docs.length} documents`);
     reconcileCalendarProjection().catch(() => {});
   } catch (error) {
     if (!current()) return;
@@ -319,6 +335,8 @@ async function open(view = 'notes', push = true) {
   }
   if (!sameSaveScope(scope, saveScope())) return;
   context.window.focus();
+  const surface = { notes:'editor', graph:'graph', treehouse:'treehouse' }[view];
+  if (surface) acknowledgeVisible(context.window.body, 'surface.visited', { surface, visited:true }, { accountId:state.accountId, workspaceId:state.workspace });
 }
 
 function close(view = state.view, push = true, fromManager = false) {
@@ -329,66 +347,32 @@ function close(view = state.view, push = true, fromManager = false) {
   if (push) history.pushState({}, '', '/');
 }
 
-/** S21: Help opens the maintained handbook as Wiki-style docs inside Editor. */
-async function openClankHandbook() {
-  const homeName = 'OpenClank/Home';
-  const match = state.docs.find((item) => item.name === homeName || item.path === homeName);
-  if (match) {
-    openDocument(match.id, 'notes', true);
-    return match.id;
-  }
-  try {
-    const response = await fetch('/api/copal/official/home', { headers: { Accept: 'application/json' } });
-    if (response.ok) {
-      const home = await response.json();
-      // Article ids are `openclank-docs-*`; provisioned document ids are
-      // `doc_*`. Match the article's name and known aliases instead — those
-      // are the names actually present in `state.docs`.
-      const candidates = [home?.name, ...(Array.isArray(home?.aliases) ? home.aliases : [])].filter(Boolean);
-      for (const candidate of candidates) {
-        const hit = state.docs.find((item) => item.name === candidate || item.path === candidate);
-        if (hit) {
-          openDocument(hit.id, 'notes', true);
-          return hit.id;
-        }
-      }
-    }
-  } catch {
-    // fall through to folder
-  }
-  // Folder fallback: Files view at the official root.
-  if (typeof appletPath === 'function') {
-    const target = appletPath('files', { q: 'OpenClank' });
-    if (target) window.dispatchEvent(new CustomEvent('openclank:navigate', { detail: { href: target } }));
-  }
-  return null;
+/** Help opens one canonical handbook in the chosen applet presentation. */
+async function openClankHandbook({ presentation = 'copal' } = {}) {
+  const view = presentation === 'wiki' ? 'wiki' : 'notes';
+  const scope = saveScope();
+  const home = () => state.docs.find((doc) => doc.readOnly === true && isOfficialDocument(doc)
+    && String(doc.officialRef || doc.properties?.docId || '') === 'openclank-docs-home');
+  // Installed article bodies can advance while an applet stays open. Help
+  // refreshes through the normal index path, which preserves personal drafts.
+  await loadDocuments(false);
+  if (!sameSaveScope(scope, saveScope())) return null;
+  const match = home();
+  if (!match || !notesFeature) return null;
+  // Both entry points address the installed article, with independent
+  // window presentations over the shared canonical document core.
+  openDocument(match.id, view, true, { mode:'reading', revealHandbook:true });
+  return match.id;
 }
 window.openClankHandbook = openClankHandbook;
 
 function openDocument(id, view = state.view, push = true, options = {}) {
   const doc = state.docs.find((item) => item.id === id);
-  const wikiOwned = (doc && (doc.kind === 'wiki' || doc.kind === 'meme')) || view === 'wiki';
-  // S17: Wiki articles are typed documents inside the shared Editor. All Wiki
-  // document opens go through the Editor workspace so the S15 navigation
-  // intent (current / newTab / splitRight / splitBelow) is honored
-  // (L-S15-WIKI-INTENT). Legacy `openDocument(id, 'wiki')` callers resolve to
-  // this owner without a second window registry.
-  if (wikiOwned && notesFeature && doc) {
-    const context = ensureViewWindow('notes');
-    context.selected = id;
-    activateView('notes');
-    context.window.show(document.activeElement);
-    notesFeature.open(id, options);
-    state.selected = id;
-    if (push) updateRoute('notes');
-    context.window.focus();
-    return;
-  }
   const context = ensureViewWindow(view);
-  if (view === 'notes' && notesFeature) {
+  if (['notes', 'wiki'].includes(view) && featureFor(view)) {
     activateView(view);
     context.window.show(document.activeElement);
-    notesFeature.open(id, options);
+    featureFor(view).open(id, options);
     if (push) updateRoute(view);
     context.window.focus();
     return;
@@ -498,7 +482,7 @@ function setViewStatus(view, message, bad = false) {
 function showDocumentConflict(doc, localContent, remote, view, submittedSnapshot = null) {
   const scope = saveScope();
   const snapshot = notesFeature?.getDraftSnapshot?.(doc.id) || submittedSnapshot;
-  const envelope = structuredClone(snapshot?.envelope || { text:localContent, properties:doc.properties || {}, relations:doc.relations || [] });
+  const envelope = structuredClone(snapshot?.envelope || { text:localContent, properties:doc.properties || {}, relations:doc.relations || [], ...(doc.extensions == null ? {} : { extensions:doc.extensions }) });
   localContent = String(envelope.text || '');
   const current = () => sameSaveScope(scope, saveScope());
   const draftUnchanged = () => !snapshot || notesFeature?.getDraftSnapshot?.(doc.id)?.localRevision === snapshot.localRevision;
@@ -570,7 +554,7 @@ async function saveDocument(doc, content, rerender = false, view = state.view, o
   // queue's own save callback from re-entering this seam.
   if (!options.viaBuffer && (doc?.kind === 'base' || doc?.resource?.representation === 'base')) {
     const queued = await notesFeature?.queueDocumentSave?.(doc, content, {
-      flush:true,
+      flush:!['notes', 'wiki'].includes(view),
       snapshot:options.snapshot || null,
       baseRevision:options.baseRevision ?? null,
     });
@@ -578,14 +562,14 @@ async function saveDocument(doc, content, rerender = false, view = state.view, o
     return !!queued;
   }
   setViewStatus(view, 'Saving…');
-  let receipt = null;
+  let receipt = null, writeStarted = false;
   try {
     const prepared = prepareDocumentSave(doc, content, { snapshot:options.snapshot, scope, relationsFor:(text) => databaseRelations(text, state.docs) });
     content = prepared.payload.content;
-    receipt = await commitDocumentSave(prepared, (id, payload) => api(`/documents/${encodeURIComponent(id)}`, {
+    receipt = await commitDocumentSave(prepared, (id, payload) => { writeStarted = true; return api(`/documents/${encodeURIComponent(id)}`, {
       method:'PUT', body:JSON.stringify(payload),
       headers:scope.accountId ? { 'X-Copal-Account':scope.accountId } : {},
-    }, scope.workspace));
+    }, scope.workspace); });
     if (!current()) return options.returnReceipt ? { outcome:'failed', message:'The editing session changed' } : false;
     if (receipt.outcome !== 'applied') throw Object.assign(new Error('A newer version exists.'), { status:409, detail:{ doc:receipt.remote } });
     const result = receipt.result;
@@ -622,7 +606,7 @@ async function saveDocument(doc, content, rerender = false, view = state.view, o
     setViewStatus(view, error.message, true);
     const status = Number(error.status || 0);
     const retryable = error.retryable !== false && !(status >= 400 && status < 500);
-    return options.returnReceipt ? { outcome:'failed', code:error.code, retryable, message:error.message } : false;
+    return options.returnReceipt ? { outcome:'failed', code:error.code, retryable, status, uncertain:writeStarted && (status === 0 || status >= 500 || [408, 429].includes(status) || error.code === 'receipt_identity'), message:error.message } : false;
   }
 }
 
@@ -680,10 +664,49 @@ function convertPluginBlock(source, lang) {
   wireDialog(dialog); document.body.append(dialog); dialog.showModal(); name.focus(); name.select();
 }
 
+// Resolve Host media through owner-bound Files refs, never a guessed host URL.
+async function resolveHostCommentAsset(reference, origin) {
+  if (origin?.resource?.key?.provider !== 'host') return null;
+  let path;
+  try {path=decodeURIComponent(String(reference.target || '').split('#')[0]);} catch {return null;}
+  if (!path || path.startsWith('/') || path.includes('\\') || /^[a-z][a-z\d+.-]*:/i.test(path) || !/\.(?:png|jpe?g|gif|webp|svg|avif|bmp|ico|mp3|wav|ogg|m4a|flac|aac|mp4|webm|mov|m4v|pdf)$/i.test(path)) return null;
+  const parts=path.split('/').filter(part=>part && part!=='.');
+  if (!parts.length || parts.length>32) return null;
+  const scope=saveScope(), originalParent=origin.hostParentResourceRef;
+  const sourceRef=origin.resourceRef || origin.resource?.locator?.opaqueRef;
+  let parentRef=originalParent;
+  const current=()=>sameSaveScope(scope,saveScope()) && origin.hostParentResourceRef===originalParent;
+  if (!parentRef && sourceRef) parentRef=(await filesFacadeClient.reveal(sourceRef))?.parent?.ref;
+  if (!parentRef || !current()) return null;
+  for (let index=0;index<parts.length;index++) {
+    const name=parts[index];
+    if (name==='..') {parentRef=(await filesFacadeClient.reveal(parentRef))?.parent?.ref;if(!parentRef||!current())return null;continue;}
+    let cursor=null, match=null;
+    // Exact names are selected only from currently authorized child pages.
+    for(let pageIndex=0;pageIndex<20;pageIndex++) {
+      const page=await filesFacadeClient.children(parentRef,{query:name,limit:200,cursor});
+      if(!current())return null;
+      const matches=(page.entries || []).filter(item=>item.name===name);
+      if(matches.length>1 || (match && matches.length))return null;
+      if(matches.length)match=matches[0];
+      cursor=page.next_cursor || null;
+      if(!cursor)break;
+      if(pageIndex===19)throw new Error('Media folder lookup is incomplete; retry after narrowing the path.');
+    }
+    if(!match?.ref)return null;
+    const has=cap=>Array.isArray(match.capabilities)?match.capabilities.includes(cap):match.capabilities?.[cap]===true;
+    if(index<parts.length-1){if(!has('children'))return null;parentRef=match.ref;continue;}
+    if(!has('preview'))return null;
+    return {target:{kind:'asset',name:match.name,mimeType:match.mime_type,resourceRef:match.ref},url:filesFacadeClient.contentUrl(match.ref,{purpose:'preview'})};
+  }
+  return null;
+}
+
 const markdownRenderer = createMarkdownRenderer({
   h,
   documents:() => state.docs,
   findByName,
+  resolveAsset:resolveHostCommentAsset,
   assetUrl:target => target.resourceRef ? null : `${state.api}/api/copal/assets/${encodeURIComponent(target.id)}?workspace=${encodeURIComponent(state.workspace)}`,
   openTarget:(target, fragment, event) => {
     if (target?.kind === 'app-destination-error') {
@@ -695,11 +718,13 @@ const markdownRenderer = createMarkdownRenderer({
     // S17: Wiki opens are Editor documents and honor the shared navigation
     // intent (L-S15-WIKI-INTENT).
     openDocument(target.id, view, true, { intent });
-    if (fragment && view === 'notes') {
+    if (fragment && ['notes', 'wiki'].includes(view)) {
       const section = extractReferenceSection(target.text, fragment);
-      if (section.status === 'resolved') notesFeature?.focusSourceLine(target.id, section.line);
+      if (section.status === 'resolved') featureFor(view)?.focusSourceLine(target.id, section.line);
       else setStatus(`${section.status === 'ambiguous' ? 'Ambiguous' : 'Missing'} section: ${fragment}`, true);
     }
+    const cache = [...(state.windows.get(view)?.noteLeafViews?.values() || [])].find(item => item.docId === target.id && item.root?.isConnected && item.root.getClientRects().length);
+    return { documentId:cache?.docId, element:cache?.root };
   },
   onConvertPluginBlock:convertPluginBlock,
 });
@@ -707,47 +732,46 @@ const { renderMarkdown, renderPreview, renderReference } = markdownRenderer;
 
 // Register the default app destinations. Screens open/focus and preserve
 // drafts; they never toggle a window closed or start an unrelated chat.
+const resolvedElement = (element, documentId = null) => ({ element, documentId, destinationExists:!!element });
 registerAppDestination('chat', () => {
-  // Focus the existing conversation. Never start a new chat and never close
-  // an open Copal window — app links preserve chat identity and drafts.
   const input = document.getElementById('message');
-  if (input && typeof input.focus === 'function') {
-    input.focus({ preventScroll: true });
-    input.scrollIntoView?.({ block: 'nearest' });
-    return;
-  }
-  setStatus('Chat is still loading.', true);
+  if (!input || !window.sessionModule?.getCurrentSessionId?.()) return null;
+  input.focus({ preventScroll:true }); input.scrollIntoView?.({ block:'nearest' });
+  return resolvedElement(input);
 });
-registerAppDestination('settings', ({ panel }) => {
-  const open = window.settingsModule?.open;
-  if (typeof open === 'function') open(panel || 'appearance');
-  else setStatus('Settings are still loading.', true);
+registerAppDestination('settings', async ({ panel }) => {
+  if (typeof window.settingsModule?.open !== 'function') return null;
+  await window.settingsModule.open(panel || 'appearance');
+  return resolvedElement(document.getElementById('settings-modal'));
 });
-registerAppDestination('files', () => {
-  // Files is a shell applet, not a Copal view window. Open it through the
-  // same module the sidebar launcher uses; the old
-  // openclank:activate-applet dispatch had no listener and silently no-op'd.
-  const open = window.filesModule?.open;
-  if (typeof open === 'function') open();
-  else setStatus('Files is still loading.', true);
+registerAppDestination('files', async () => {
+  if (typeof window.filesModule?.open !== 'function') return null;
+  await window.filesModule.open();
+  return resolvedElement(document.getElementById('files-window'));
 });
-registerAppDestination('editor', () => openDocument(state.selected || state.docs[0]?.id || '', 'notes'));
-registerAppDestination('wiki', ({ panel, doc, event } = {}) => {
-  const target = doc || panel || state.selected || state.docs.find((item) => item.kind === 'wiki')?.id || '';
-  if (target) openDocument(target, 'wiki', true, { intent:navigationIntentFromEvent(event) });
-  else open('editor');
-});
-registerAppDestination('graph', () => { ensureViewWindow('graph'); activateView('graph'); });
-registerAppDestination('galaxy', () => { ensureViewWindow('graph'); activateView('graph'); });
-registerAppDestination('treehouse', () => { ensureViewWindow('treehouse'); activateView('treehouse'); });
-registerAppDestination('timeline', () => { ensureViewWindow('timeline'); activateView('timeline'); });
-registerAppDestination('tasks', () => { ensureViewWindow('todo'); activateView('todo'); });
+const resolveLinkedAppDocument = async ({ panel, event, screen }) => {
+  const doc = panel ? state.docs.find(item => item.id === panel || item.name === panel)
+    : state.docs.find(item => item.id === state.selected && (screen !== 'wiki' || item.kind === 'wiki')) || state.docs.find(item => screen !== 'wiki' || item.kind === 'wiki');
+  if (!doc || doc.kind === 'asset') return null;
+  const view = screen === 'wiki' ? 'wiki' : 'notes';
+  openDocument(doc.id, view, true, { intent:navigationIntentFromEvent(event) });
+  const cache = [...(state.windows.get(view)?.noteLeafViews?.values() || [])].find(item => item.docId === doc.id && item.root?.isConnected && item.root.getClientRects().length);
+  return resolvedElement(cache?.root, cache?.docId);
+};
+registerAppDestination('editor', resolveLinkedAppDocument);
+registerAppDestination('wiki', resolveLinkedAppDocument);
+for (const [screen, view] of [['graph','graph'], ['galaxy','graph'], ['achievements','achievements'], ['treehouse','treehouse'], ['timeline','timeline'], ['tasks','todo']]) {
+  registerAppDestination(screen, async () => {
+    const context = ensureViewWindow(view); activateView(view); context.window.show(document.activeElement);
+    await renderView(view); return resolvedElement(context.window.body);
+  });
+}
 registerAppDestination('memory', () => {
-  // Menmery lives behind the shell tool button (same open path as /memory,
-  // slash /brain and admin helpers), not a Copal view window.
   const opener = document.getElementById('tool-memory-btn') || document.getElementById('rail-memory');
-  if (opener) opener.click();
-  else setStatus('Menmery is still loading.', true);
+  if (!opener) return null;
+  const modal = document.getElementById('memory-modal');
+  if (!modal || modal.classList.contains('hidden')) opener.click();
+  return resolvedElement(modal);
 });
 
 
@@ -888,8 +912,8 @@ async function renameNote(doc, name) {
   // A rename advances the document head. Commit the current Editor snapshot
   // first so the same user's pending body edit is not left behind on the old
   // CAS base and reported later as an unrelated external conflict.
-  if (notesFeature?.flushDocument && !await notesFeature.flushDocument(doc.id)) {
-    throw new Error('The latest edit could not be saved, so the document was not renamed.');
+  if (!await notesFeature?.resolveDirtyDocuments?.([doc.id], { force:true, title:'Rename document' })) {
+    throw new Error('The document was not renamed; resolve its unsaved changes first.');
   }
   const result = await api(`/documents/${encodeURIComponent(doc.id)}/rename`, { method:'POST', body:JSON.stringify({ name }) });
   await loadDocuments();
@@ -898,6 +922,11 @@ async function renameNote(doc, name) {
 
 function renderNotes() {
   notesFeature?.render();
+}
+function renderWiki() {
+  const current = state.windows.get('wiki');
+  if (current && !current.noteWorkspace && !current.selected) current.selected = state.docs.find(doc => doc.kind === 'wiki' && !doc.builtin)?.id || state.docs.find(doc => doc.kind === 'wiki')?.id || null;
+  wikiFeature?.render();
 }
 
 function wikiText(doc) {
@@ -921,48 +950,24 @@ async function exportWikiMemes() {
   setStatus('Wiki exported as wiki.memes');
 }
 
-async function previewWikiConversion(doc) {
-  const previewScope = saveScope();
-  const response = await fetch(`${state.api}/api/copal/documents/${encodeURIComponent(doc.id)}/convert/preview?workspace=${encodeURIComponent(state.workspace)}`, {
-    method:'POST', headers:{ 'Content-Type':'application/json', ...(state.accountId ? { 'X-Copal-Account':state.accountId } : {}) },
-    body:JSON.stringify({ base:doc.head }),
-  });
-  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || 'The Wiki conversion could not be previewed');
-  const preview = await response.json();
-  if (!sameSaveScope(previewScope, saveScope())) return;
-  if (String(preview.documentId || '') !== String(doc.id) || !preview.sourceDigest || String(preview.base || '') !== String(doc.head || '')) {
-    throw new Error('The Wiki conversion preview has no valid source/base identity');
-  }
-  const dialog = h('dialog', { class:'copal-dialog copal-wiki-conversion-preview' },
-    h('h2', { text:'Preview conversion' }),
-    h('p', { text:`No changes have been made. Original source: ${preview.sourceBytes} bytes · SHA-256 ${preview.sourceDigest}.` }),
-    h('pre', { class:'copal-conversion-diff', text:`${preview.diff || 'The native projection is byte-equivalent.'}${preview.diffTruncated ? '\n\n[Diff truncated for preview memory bounds.]' : ''}` }),
-    preview.diagnostics?.length ? h('ul', {}, ...preview.diagnostics.map(item => h('li', { text:item.message || String(item) }))) : null);
-  const convert = h('button', { class:'copal-btn primary', text:'Convert', onclick:async() => {
-    if (!sameSaveScope(previewScope, saveScope())) { dialog.close(); setStatus('Conversion preview expired after the account or workspace changed.', true); return; }
-    const current = state.docs.find((item) => item.id === doc.id);
-    if (!current || String(current.head || '') !== String(preview.base || '')) { dialog.close(); setStatus('The Wiki source changed since preview; preview it again.', true); return; }
-    const currentRawSourceDigest = current.rawSource?.sha256 || current.extensions?.rawSource?.sha256;
-    if (currentRawSourceDigest && String(currentRawSourceDigest) !== String(preview.sourceDigest)) { dialog.close(); setStatus('The Wiki source changed since preview; preview it again.', true); return; }
-    convert.disabled = true;
-    try {
-      const result = await api(`/documents/${encodeURIComponent(doc.id)}/convert`, { method:'POST', body:JSON.stringify({ base:doc.head }) });
-      dialog.close(); await loadDocuments(false); renderWiki(); setStatus('Wiki Markdown converted into an editable native record.');
-      return result;
-    } catch (error) { convert.disabled = false; setStatus(error.message, true); }
-  } });
-  dialog.append(h('div', { class:'copal-dialog-actions' }, h('button', { class:'copal-btn', text:'Cancel', onclick:() => dialog.close() }), convert));
-  wireDialog(dialog); document.body.append(dialog); dialog.showModal();
+function canMakeEditableWikiCopy(doc) {
+  // Resolve the current document identity before deciding: copy preparation
+  // strips official metadata, but that must not grant a built-in article copy authority.
+  const source = state.docs.find((item) => item.id === doc?.id) || doc;
+  return source?.kind === 'wiki' && source.readOnly === true && !isOfficialDocument(source);
 }
 
 async function makeEditableWikiCopy(doc) {
+  if (!canMakeEditableWikiCopy(doc)) throw new Error('This Wiki article is not available to copy.');
+  const scope = saveScope(), sourceId = doc.id, sourceRevision = doc.head;
   const proposed = `${doc.name} copy`;
   const name = await styledPrompt('Choose a name for the editable Wiki copy.', { title: 'Make editable copy', defaultValue: proposed, confirmText: 'Create copy', maxLength: 512 });
-  if (!name) return;
+  if (!name || !sameSaveScope(scope, saveScope())) return;
+  if (!canMakeEditableWikiCopy(doc)) throw new Error('This Wiki article is not available to copy.');
   const actionId = `wiki-copy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   const result = await api('/documents', {
     method:'POST',
-    body:JSON.stringify({ actionId, name, kind:'wiki', corpus:'wiki', content:wikiText(doc), properties:doc.properties || {}, relations:doc.relations || [] }),
+    body:JSON.stringify({ actionId, name, kind:'wiki', corpus:'wiki', copySourceId:sourceId, copySourceRevision:sourceRevision }),
   });
   await loadDocuments(false);
   const copy = result?.doc?.id ? state.docs.find((item) => item.id === result.doc.id) : null;
@@ -971,7 +976,7 @@ async function makeEditableWikiCopy(doc) {
 }
 
 async function createWikiArticle() {
-  const name = await styledPrompt('Choose the name shown in the Editor.', { title:'New Wiki article', defaultValue:'Untitled article', confirmText:'Create', maxLength:160 });
+  const name = await styledPrompt('Choose the page name shown in Wiki.', { title:'New Wiki article', defaultValue:'Untitled article', confirmText:'Create', maxLength:160 });
   if (!name) return;
   const result = await api('/documents', { method:'POST', body:JSON.stringify({ name, kind:'wiki', content:'', corpus:'wiki' }) });
   await loadDocuments(false);
@@ -1002,7 +1007,7 @@ async function previewWikiMemes(file) {
       method:'POST', headers:state.accountId ? { 'X-Copal-Account':state.accountId } : {}, body:form,
     });
     if (!imported.ok) throw new Error((await imported.json().catch(() => ({}))).detail || 'The .memes import failed');
-    dialog.close(); await loadDocuments(false); renderWiki(); setStatus(restore ? 'Wiki .memes restore complete' : 'Wiki .memes import complete');
+    dialog.close(); await loadDocuments(false); renderNotes(); setStatus(restore ? 'Wiki .memes restore complete' : 'Wiki .memes import complete');
   };
   const form = new FormData(); form.append('file', file, file.name);
   const response = await fetch(`${state.api}/api/copal/preview/memes?workspace=${encodeURIComponent(state.workspace)}`, {
@@ -1021,51 +1026,6 @@ async function previewWikiMemes(file) {
   wireDialog(dialog); document.body.append(dialog); dialog.showModal();
 }
 
-function renderWiki() {
-  // S17: the horizontal story-card carousel is retired. Wiki articles open as
-  // typed documents inside the shared Editor (tabs/splits, navigation intent).
-  // This view is the Wiki library/home: list, create, and native .memes
-  // export/import. Document identity, save ownership and recovery state are
-  // unchanged.
-  const docs = state.docs.filter((doc) => doc.kind === 'wiki' && !HIDDEN_KINDS.has(doc.kind));
-  const query = state.filter.trim().toLowerCase();
-  const libraryDocs = docs.filter((doc) => !query || doc.name.toLowerCase().includes(query) || wikiText(doc).toLowerCase().includes(query));
-  const newArticle = async () => {
-    const name = await styledPrompt('Choose the name shown in the Editor.', { title: 'New Wiki article', defaultValue: 'Untitled article', confirmText: 'Create', maxLength: 160 });
-    if (!name) return;
-    const result = await api('/documents', { method: 'POST', body: JSON.stringify({ name, kind: 'wiki', content: '', corpus: 'wiki' }) });
-    await loadDocuments(false);
-    openDocument(result.doc.id, 'wiki');
-    renderWiki();
-  };
-  const importInput = h('input', { type: 'file', accept: `.memes,${MEMES_MIME}`, hidden: true, 'aria-label': 'Import .memes file' });
-  importInput.addEventListener('change', () => { const file = importInput.files?.[0]; importInput.value = ''; previewWikiMemes(file).catch(error => setStatus(error.message, true)); });
-  const library = h('aside', { class: 'copal-pane' },
-    h('div', { class: 'copal-pane-header' },
-      h('span', { text: 'Wiki articles' }),
-      h('button', { class: 'copal-btn', text: '+ Article', onclick: newArticle }),
-      h('button', { class: 'copal-btn', text: 'Export .memes', onclick: () => exportWikiMemes().catch(error => setStatus(error.message, true)) }),
-      h('button', { class: 'copal-btn', text: 'Import .memes', onclick: () => importInput.click() })));
-  const rows = h('div', { class: 'copal-scroll', 'data-wiki-library': '' });
-  for (const doc of libraryDocs) {
-    const badges = [];
-    if (doc.builtin) badges.push(h('span', { class: 'copal-chip', text: 'built-in' }));
-    if (doc.readOnly) badges.push(h('span', { class: 'copal-chip', text: 'read only' }));
-    if (doc.note_error || doc.recoveryState || doc.rawPreserved) badges.push(h('span', { class: 'copal-chip', text: 'recovery' }));
-    rows.append(h('button', {
-      class: 'copal-doc-row',
-      'data-wiki-document': doc.id,
-      onclick: (event) => openDocument(doc.id, 'wiki', true, { intent: navigationIntentFromEvent(event) }),
-    }, h('strong', { text: doc.name }), ...badges));
-  }
-  if (!libraryDocs.length) rows.append(h('p', { class: 'copal-empty-inline', text: query ? 'No articles match this search.' : 'No Wiki articles yet.' }));
-  library.append(importInput, rows);
-  const shell = h('div', { class: 'copal-layout' }, library, h('section', { style: 'grid-column:2 / -1;min-width:0;overflow:hidden' },
-    h('div', { class: 'copal-empty' },
-      h('h2', { text: 'Wiki articles live in the Editor' }),
-      h('p', { text: 'Open an article from the list to edit it as a typed document with tabs and splits. Legacy Wiki links resolve here.' }))));
-  state.body.replaceChildren(shell);
-}
 
 function allPlanningTasks(data = planningData()) {
   return (data.tracks || []).flatMap((track) => (track.tasks || []).map((task) => ({ ...task, track, primaryTrackId: track.id })));
@@ -1092,9 +1052,9 @@ function renderCalendar() {
   const data = planningData(); const tasks = allPlanningTasks(data).filter((task, index, all) => all.findIndex((item) => item.id === task.id) === index);
   const seed = state.calendarMonth || validDate(data.today) || new Date(); const first = new Date(seed.getFullYear(), seed.getMonth(), 1); const gridStart = addDays(first, -first.getDay());
   const toolbar = h('div', { class: 'copal-timeline-toolbar' },
-    h('button', { class: 'copal-btn', text: '←', onclick: () => { state.calendarMonth = new Date(first.getFullYear(), first.getMonth() - 1, 1); renderCalendar(); } }),
+    h('button', { class: 'copal-btn', icon:'back', title:'Previous month', 'aria-label':'Previous month', onclick: () => { state.calendarMonth = new Date(first.getFullYear(), first.getMonth() - 1, 1); renderCalendar(); } }),
     h('strong', { text: first.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }) }),
-    h('button', { class: 'copal-btn', text: '→', onclick: () => { state.calendarMonth = new Date(first.getFullYear(), first.getMonth() + 1, 1); renderCalendar(); } }));
+    h('button', { class: 'copal-btn', icon:'forward', title:'Next month', 'aria-label':'Next month', onclick: () => { state.calendarMonth = new Date(first.getFullYear(), first.getMonth() + 1, 1); renderCalendar(); } }));
   const calendar = h('div', { class: 'copal-calendar' });
   for (let day = 0; day < 42; day++) {
     const date = addDays(gridStart, day); const key = iso(date);
@@ -1142,7 +1102,7 @@ function resolveView(view, mode = null) {
   if (view === 'editor') view = 'notes';
   // Wiki is a document type owned by the shared Editor. Keep the legacy view
   // name as a route alias, but never create or restore a second window.
-  if (view === 'wiki') view = 'notes';
+  // Wiki retains its own applet; both controllers share canonical buffers.
   // Bases is an Editor leaf now. Keep the old URL as a compatibility alias so
   // bookmarks open the selected Base in the shared Editor workspace.
   if (view === 'bases') view = 'notes';
@@ -1204,6 +1164,11 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     selectedNodeId:modeState.selection?.nodeId || null,
   };
   const vb = { ...modeState.camera };
+  const initialCamera = { ...vb }, cameraViewId = crypto.randomUUID();
+  const cameraOwner = achievementOwner();
+  let cameraStart = null;
+  const cameraFacts = camera => ({ accepted:true, populatedView:nodes.length > 0, viewId:cameraViewId,
+    scale:1000 / camera.w, panX:-camera.x * 1000 / camera.w, panY:-camera.y * 650 / camera.h });
   const MIN_VIEW = 20, MAX_VIEW = 80000, MAX_MOUNTED = 300;
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const persist = () => {
@@ -1227,7 +1192,12 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     const useRaf = typeof globalThis.requestAnimationFrame === 'function';
     const frame = useRaf ? globalThis.requestAnimationFrame.bind(globalThis) : (callback) => setTimeout(callback, 0);
     cameraFrameCancel = useRaf ? globalThis.cancelAnimationFrame?.bind(globalThis) : clearTimeout;
-    cameraFrame = frame(() => { cameraFrame = 0; cameraFrameCancel = null; if (destroyed || !root.isConnected) return; svgEl.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); persist(); updateZoomBounds?.(); });
+    cameraFrame = frame(() => { cameraFrame = 0; cameraFrameCancel = null; if (destroyed || !root.isConnected) return; svgEl.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`); persist(); updateZoomBounds?.();
+      if (nodes.length && root.getClientRects().length && document.visibilityState === 'visible') {
+        cameraStart ||= recordPresentation('graph.camera.gesture', { ...cameraFacts(initialCamera), start:true }, { accountId:cameraOwner, workspaceId:state.workspace });
+        void cameraStart.then(() => recordPresentation('graph.camera.gesture', cameraFacts(vb), { accountId:cameraOwner, workspaceId:state.workspace }));
+      }
+    });
   };
 
   // B1: compute edge sets for highlight
@@ -1384,12 +1354,12 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     vb.y = anchor.y - ratioY * height;
     applyCamera();
   };
-  const zoomIn = h('button', { class:'copal-graph-ctrl', text:'Zoom in', title:'Zoom in', 'aria-label':'Zoom in', onclick:() => { if (vb.w > MIN_VIEW) zoomAroundCenter(0.8); } });
-  const zoomOut = h('button', { class:'copal-graph-ctrl', text:'Zoom out', title:'Zoom out', 'aria-label':'Zoom out', onclick:() => { if (vb.w < MAX_VIEW) zoomAroundCenter(1.25); } });
-  const reset = h('button', { class:'copal-graph-ctrl', text:'Reset view', title:'Reset view', 'aria-label':'Reset view', onclick:() => { Object.assign(vb, { x:0, y:0, w:1000, h:650 }); applyCamera(); } });
+  const zoomIn = h('button', { class:'copal-graph-ctrl', icon:'add', text:'Zoom in', title:'Zoom in', 'aria-label':'Zoom in', onclick:() => { if (vb.w > MIN_VIEW) zoomAroundCenter(0.8); } });
+  const zoomOut = h('button', { class:'copal-graph-ctrl', icon:'remove', text:'Zoom out', title:'Zoom out', 'aria-label':'Zoom out', onclick:() => { if (vb.w < MAX_VIEW) zoomAroundCenter(1.25); } });
+  const reset = h('button', { class:'copal-graph-ctrl', icon:'restore', text:'Reset view', title:'Reset view', 'aria-label':'Reset view', onclick:() => { Object.assign(vb, { x:0, y:0, w:1000, h:650 }); applyCamera(); } });
   // Fit frames the mounted graph content in the viewport without relying on
   // button zoom as the primary navigation mechanism.
-  const fit = h('button', { class:'copal-graph-ctrl', text:'Fit', title:'Fit graph', 'aria-label':'Fit graph to view', onclick:() => {
+  const fit = h('button', { class:'copal-graph-ctrl', icon:'expand', text:'Fit', title:'Fit graph', 'aria-label':'Fit graph to view', onclick:() => {
     const points = [...positions.values()].filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
     if (!points.length) { Object.assign(vb, { x:0, y:0, w:1000, h:650 }); applyCamera(); return; }
     const minX = Math.min(...points.map((point) => point.x)) - 80;
@@ -1428,6 +1398,7 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
   const searchInput = h('input', { class: 'copal-graph-search', type: 'search', placeholder: 'Search nodes…', 'aria-label': 'Search graph nodes', value: graphState.searchQuery });
   const filters = h('div', { class: 'copal-graph-filters' });
   const facetRows = [];
+  let pendingAchievementFacet = null, previousResultCount = null;
   const FACET_PAGE = 8;
   const addFacetGroup = (title, values, selectedSet, onChange) => {
     if (!Array.isArray(values) || !values.length) return;
@@ -1443,7 +1414,7 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
         const label = value === '' ? '(root)' : value;
         const cb = h('label', { class: 'copal-graph-filter-label' });
         const input = h('input', { type: 'checkbox', checked: selectedSet.has(value) || undefined });
-        input.addEventListener('change', () => { if (input.checked) selectedSet.add(value); else selectedSet.delete(value); onChange(); });
+        input.addEventListener('change', () => { if (input.checked) selectedSet.add(value); else selectedSet.delete(value); pendingAchievementFacet = { facet:title, value:String(value) }; onChange(); });
         cb.append(input, h('span', { text: label, title: `${label} · ${item.count ?? ''}`.trim() }));
         row.append(cb);
       }
@@ -1482,7 +1453,7 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
   searchInput.addEventListener('input', () => { graphState.searchQuery = searchInput.value; rebuildGraph(); });
 
   // B4: screen-reader summary
-  const resetFilters = h('button', { class:'copal-btn', text:'Reset filters', title:'Reset graph search and facet filters', 'aria-label':'Reset graph filters', onclick:() => {
+  const resetFilters = h('button', { class:'copal-btn', icon:'restore', text:'Reset filters', title:'Reset graph search and facet filters', 'aria-label':'Reset graph filters', onclick:() => {
     graphState.searchQuery = '';
     // Mutate in place: facet groups keep a reference to these collections.
     graphState.activeKinds.clear();
@@ -1524,6 +1495,13 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
       visibleIds.add(node.id);
     }
     mountGraph(visibleIds);
+    if (pendingAchievementFacet && previousResultCount != null && previousResultCount !== visibleIds.size
+        && facets?.generation && facets.generation !== 'local') {
+      acknowledgeVisible(root, 'graph.filter.applied', { ...pendingAchievementFacet, facetFromScopedGeneration:true,
+        resultCountBefore:previousResultCount, resultCountAfter:visibleIds.size }, { accountId:cameraOwner, workspaceId:state.workspace });
+    }
+    pendingAchievementFacet = null;
+    previousResultCount = visibleIds.size;
     const visibleEdges = edges.filter((edge) => visibleIds.has(edge.from) && visibleIds.has(edge.to)).length;
     info.textContent = visibleIds.size ? `Graph showing ${visibleIds.size} nodes and ${visibleEdges} edges${visibleIds.size > MAX_MOUNTED ? ` · showing first ${MAX_MOUNTED}; search to navigate` : ''}` : 'No graph results. Reset filters or search again.';
     updateInspector(graphState.selectedNodeId ? nodesById.get(graphState.selectedNodeId) : null);
@@ -1689,7 +1667,7 @@ function renderGraph() {
   // B2: respect dot-folder toggle from workspace settings
   let docs = visibleDocs();
   try {
-    const saved = JSON.parse(localStorage.getItem(copalStorageKey('odysseus-copal-notes-layout', state.workspace)) || '{}');
+    const saved = JSON.parse(localStorage.getItem(copalStorageKey(`odysseus-copal-${view}-layout`, state.workspace)) || '{}');
     const showDot = saved?.left?.showDotFolders === true;
     if (!showDot) docs = docs.filter((doc) => {
       // Canonical .memes Wiki pages are first-party graph sources. The
@@ -1720,6 +1698,7 @@ function renderGraph() {
     const graph = graphSvg(projection.nodes, projection.edges, openNode, view.mode, facets);
     state.body.querySelector('.copal-graph-wrap')?._copalDestroy?.();
     state.body.replaceChildren(h('div', { class:'copal-timeline-toolbar' }, h('label', {}, 'Graph view ', mode)), graph);
+    if (view.mode === 'documents') acknowledgeVisible(graph, 'graph.mode.presented', { mode:'linked', nodeCount:projection.nodes.length }, { accountId:state.accountId, workspaceId:state.workspace });
     if (focusedId) graph.querySelector(`[data-graph-id="${CSS.escape(focusedId)}"]`)?.focus({ preventScroll:true });
   };
   // Mount immediately with locally derived facets, then refine with the lazy
@@ -2104,7 +2083,7 @@ function renderMind() {
   } else {
     // Toolbar
     const toolbar = h('div', { class: 'copal-mind-toolbar' },
-      h('button', { class: 'copal-btn', text: '+ Heading', onclick: () => mindMindAddHeading(doc) }),
+      h('button', { class: 'copal-btn', icon:'add', text:'Heading', onclick: () => mindMindAddHeading(doc) }),
       h('button', { class: 'copal-btn', text: 'Delete', onclick: () => { if (navigation.selectedLine) { const n = flattenMindTree(treeNodes).find((e) => e.line === navigation.selectedLine); if (n) mindMindDeleteHeading(doc, n); } } }),
       h('button', { class: 'copal-btn', text: '\u2191', title: 'Move up', 'aria-label':'Move heading up', onclick: () => { if (navigation.selectedLine && mindMutationAllowed(doc)) { const original = entries.find((entry) => entry.line === navigation.selectedLine) || { text:'' }; const result = notesFeature?.applyDocumentTransaction?.(doc, (current) => moveGraphHeadingSection(current, navigation.selectedLine, -1), { origin:'heading-move' }); remapMindSelection(result, original, navigation.selectedLine); if (result?.outcome === 'queued') renderMind(); } } }),
       h('button', { class: 'copal-btn', text: '\u2193', title: 'Move down', 'aria-label':'Move heading down', onclick: () => { if (navigation.selectedLine && mindMutationAllowed(doc)) { const original = entries.find((entry) => entry.line === navigation.selectedLine) || { text:'' }; const result = notesFeature?.applyDocumentTransaction?.(doc, (current) => moveGraphHeadingSection(current, navigation.selectedLine, 1), { origin:'heading-move' }); remapMindSelection(result, original, navigation.selectedLine); if (result?.outcome === 'queued') renderMind(); } } }),
@@ -2118,6 +2097,7 @@ function renderMind() {
 
   mindEl.append(picker, treePane);
   state.body.replaceChildren(mindEl);
+  acknowledgeVisible(mindEl, 'graph.mode.presented', { mode:'structure', nodeCount:entries.length }, { accountId:state.accountId, workspaceId:state.workspace });
 
   // Focus selected
   if (navigation.selectedLine) {
@@ -2394,7 +2374,7 @@ async function renderBases(targetBody = state.body, embeddedDoc = null) {
   }
   let base = embeddedDoc && bases.some((doc) => doc.id === embeddedDoc.id) ? embeddedDoc : (bases.find((doc) => doc.id === state.baseId) || bases[0]); state.baseId = base.id;
   const shell = h('div', { class: 'copal-bases-workspace copal-base-leaf' });
-  const browser = h('aside', { class: 'copal-pane copal-base-browser' }, h('div', { class: 'copal-pane-header' }, h('span', { text: 'Bases' }), h('button', { class: 'copal-btn', text: 'Trash', title: 'Restore deleted Bases', onclick: () => showTrash('base') }), h('button', { class: 'copal-btn', text: '+', title: 'Create Base', 'aria-label': 'Create Base', onclick: () => createBaseDocument({ onComplete: rerender }) })));
+  const browser = h('aside', { class: 'copal-pane copal-base-browser' }, h('div', { class: 'copal-pane-header' }, h('span', { text: 'Bases' }), h('button', { class: 'copal-btn', text: 'Trash', title: 'Restore deleted Bases', onclick: () => showTrash('base') }), h('button', { class: 'copal-btn', icon:'add', title: 'Create Base', 'aria-label': 'Create Base', onclick: () => createBaseDocument({ onComplete: rerender }) })));
   const list = h('div', { class: 'copal-scroll' });
   for (const item of bases) list.append(h('button', { class: `copal-doc-row${item.id === base.id ? ' active' : ''}`, 'data-base-id': item.id, text: item.name, onclick: () => { state.baseId = item.id; state.baseView = null; state.basePage = 1; rerender(); } }));
   browser.append(list);
@@ -2419,7 +2399,7 @@ async function renderBases(targetBody = state.body, embeddedDoc = null) {
     toolbar.append(viewSelect,
       h('span', { class:'copal-base-count', text:`${result.sourceTruncated ? 'Partial results: ' : ''}${result.total} result${result.total === 1 ? '' : 's'} from ${result.sourceCount} documents${result.resultLimited ? ` · view limited to ${result.resultLimit}` : ''}` }),
       h('button', { class: 'copal-btn', text: 'Configure', onclick: () => configureBase(base, result.definition, view.id, rerender) }),
-      h('button', { class: 'copal-btn', text: '+ View', onclick: () => addBaseView(base, result.definition, rerender) }),
+      h('button', { class: 'copal-btn', icon:'add', text:'View', onclick: () => addBaseView(base, result.definition, rerender) }),
       h('button', { class: 'copal-btn', text: 'Rename', onclick: () => renameBaseDocument(base, rerender) }),
       h('button', { class: 'copal-btn', text: 'Duplicate', onclick: () => duplicateBaseDocument(base, rerender) }),
       h('button', { class: 'copal-btn', text: 'History', onclick: () => showHistory(base) }),
@@ -2431,7 +2411,7 @@ async function renderBases(targetBody = state.body, embeddedDoc = null) {
         const reordered = reorderBaseView(result.definition, view.id, 'down');
         if (reordered && await saveDocument(base, serializeBase(reordered), false)) { state.baseDefinition = reordered; rerender(); }
       } }),
-      h('button', { class: 'copal-btn danger', text: '× View', title: 'Delete this view', disabled: result.definition.views.length <= 1, onclick: async () => {
+      h('button', { class: 'copal-btn danger', icon:'close', text:'View', title: 'Delete this view', disabled: result.definition.views.length <= 1, onclick: async () => {
         if (!await styledConfirm(`Delete view "${view.name}"?`, { title: 'Delete Base view', confirmText: 'Delete view', danger: true })) return;
         const removed = removeBaseView(result.definition, view.id);
         if (removed && await saveDocument(base, serializeBase(removed), false)) { state.baseDefinition = removed; state.baseView = null; rerender(); }
@@ -2523,7 +2503,8 @@ async function renderBases(targetBody = state.body, embeddedDoc = null) {
         const cell = h('th', { style: column.width ? `width:${column.width}px` : '' }, h('button', {
           class: 'copal-base-sort', type: 'button',
           'aria-label': `Sort by ${column.label}${sort ? `, ${sort.direction}, priority ${sortIndex + 1}` : ''}`,
-          text: `${column.label}${sort ? ` ${sort.direction === 'asc' ? '\u2191' : '\u2193'}${view.sorts.length > 1 ? sortIndex + 1 : ''}` : ''}`,
+          icon: sort ? (sort.direction === 'asc' ? 'chevron-up' : 'chevron-down') : '',
+          text: `${column.label}${sort && view.sorts.length > 1 ? ` ${sortIndex + 1}` : ''}`,
           onclick: async (event) => {
             const next = updateViewSort(result.definition, view.id, column.property, event.shiftKey);
             if (await saveDocument(base, serializeBase(next), false)) { state.baseDefinition = next; state.basePage = 1; rerender(); }
@@ -2743,7 +2724,7 @@ async function transformBaseCommand(base, request, command) {
     baseRevision:revision,
     scope:request?.scope || null,
   });
-  return { ...receipt, definition:transformed.definition, definitionRevision:receipt?.acknowledgedLocalRevision ?? definitionRevision, baseLocalRevision:localRevision, source:transformed.source };
+  return { ...receipt, definition:transformed.definition, definitionRevision:receipt?.localRevision ?? receipt?.acknowledgedLocalRevision ?? definitionRevision, baseLocalRevision:localRevision, source:transformed.source };
 }
 
 function applyBaseCellsToEnvelope(source, rowCells, envelope = {}) {
@@ -2810,7 +2791,7 @@ async function retryBaseCellFailures(base, failedRows, mode) {
     }
     const entry = { rowKey:failure.rowKey, documentId:failure.documentId, resourceKey:failure.resourceKey, sourceId:source?.id || failure.sourceId, cells, receipt };
     receipts.push(entry);
-    if (receipt.outcome !== 'applied' && receipt.outcome !== 'unchanged') failures.push({ ...entry, ...receipt, retryKind:pasteFailureKind(receipt, notesFeature?.documentRetryState?.(source?.id)), cells });
+    if (!['applied', 'unchanged', 'queued'].includes(receipt.outcome)) failures.push({ ...entry, ...receipt, retryKind:pasteFailureKind(receipt, notesFeature?.documentRetryState?.(source?.id)), cells });
   }
   return pastePartialResult(base, receipts, failures, skipped);
 }
@@ -2832,11 +2813,11 @@ async function applyBaseCells(base, cells = []) {
     let receipt;
     try {
       notesFeature?.queueSave?.({ ...source, properties:transformed.envelope.properties, relations:transformed.envelope.relations, extensions:transformed.envelope.extensions }, transformed.envelope.text, { baseRevision:snapshot?.expectedRevision?.value, origin:'sheet-cell', history:true, sheet:true });
-      receipt = pasteReceipt(await notesFeature?.flushDocument?.(source.id, { returnReceipt:true }));
+      receipt = { outcome:'queued', localRevision:notesFeature?.getDraftSnapshot?.(source.id)?.localRevision };
     } catch (error) { receipt = { outcome:'failed', message:error.message }; }
     const entry = { rowKey:row.rowKey, documentId:row.documentId, resourceKey:row.resourceKey, sourceId:source.id, cells:rowCells, receipt };
     receipts.push(entry);
-    if (receipt.outcome !== 'applied' && receipt.outcome !== 'unchanged') failures.push({ ...entry, ...receipt, retryKind:pasteFailureKind(receipt, notesFeature?.documentRetryState?.(source.id)) });
+    if (!['applied', 'unchanged', 'queued'].includes(receipt.outcome)) failures.push({ ...entry, ...receipt, retryKind:pasteFailureKind(receipt, notesFeature?.documentRetryState?.(source.id)) });
   }
   return pastePartialResult(base, receipts, failures, skipped);
 }
@@ -2999,7 +2980,7 @@ planningFeature = createPlanningFeature({
   queryMarkdownTasks:(options) => loadTaskProjection(true, options),
   patchMarkdownTask:(item, checked) => toggleTask(item, checked),
 });
-notesFeature = createNotesFeature({
+function buildDocumentFeature(view) { return createNotesFeature({
   h,
   api,
   state,
@@ -3007,6 +2988,7 @@ notesFeature = createNotesFeature({
   createSourceEditor,
   renderMarkdown,
   renderPreview,
+  renderComment:(body, doc) => markdownRenderer.renderComment(body, doc),
   formatBaseCell,
   saveDocument,
   renameNote,
@@ -3023,16 +3005,45 @@ notesFeature = createNotesFeature({
   uploadAttachment,
   commitAttachment,
   abortAttachment,
-  activateNotes:() => activateView('notes'),
+  activateNotes:() => activateView(view),
+  getContext:() => state.windows.get(view),
+  presentationId:view, registerGlobalOpener:view === 'notes',
+  resourceBufferRegistry:sharedDocumentRegistry, getSharedDocumentState:documentState,
+  onSourceChanged:(id, value, changes) => featureFor(view === 'wiki' ? 'notes' : 'wiki')?.receiveDocumentSource(id, value, changes),
+  onSaveStateChanged:(id, value) => featureFor(view === 'wiki' ? 'notes' : 'wiki')?.receiveSaveState(id, value),
+  afterRender:view === 'wiki' ? shell => wikiWorkspace?.decorate(shell) : null,
   renderTimeline:(body) => planningFeature.renderTimeline(body),
   openEventEditor:(eventId) => planningFeature.openEventEditor(eventId),
   baseAdapter:createBaseSheetAdapter(),
   makeEditableWikiCopy,
-  previewWikiConversion,
+  canCopyWikiArticle:canMakeEditableWikiCopy,
   createWikiArticle,
   importWikiMemes:importWikiMemesFromEditor,
   exportWikiMemes:exportWikiMemesFromEditor,
-});
+}); }
+notesFeature = buildDocumentFeature('notes');
+wikiFeature = buildDocumentFeature('wiki');
+wikiWorkspace = createWikiWorkspace({ h, core:{
+  capture:() => wikiFeature.captureEditorTarget(),
+  isCurrent:target => wikiFeature.editorTargetCurrent(target),
+  documents:() => state.docs,
+  pinned:() => wikiFeature.getContext()?.noteWorkspace?.bookmarks || [],
+  recent:() => wikiFeature.getContext()?.noteWorkspace?.recent || [],
+  isOfficial:isOfficialDocument,
+  open:id => openDocument(id, 'wiki'), mode:mode => wikiFeature.setMode(mode),
+  pin:id => wikiFeature.pinDocument(id), save:() => wikiFeature.runCommand('save'),
+  history:id => { const doc = state.docs.find(item => item.id === id); if (doc) showHistory(doc); },
+  openEditor:id => openDocument(id, 'notes'), create:createWikiArticle, copy:makeEditableWikiCopy,
+  canCopy:canMakeEditableWikiCopy,
+  importMemes:importWikiMemesFromEditor, exportMemes:exportWikiMemesFromEditor,
+  properties:() => wikiFeature.showDocumentPanel('properties'), links:() => wikiFeature.showDocumentPanel('links'),
+  notify:message => wikiFeature.getContext()?.window.setStatus(message, true),
+  insertMedia:target => wikiFeature.insertAttachment(target),
+} });
+
+function renderAchievements() {
+  treeHouse.renderAchievementsPanel(state.body);
+}
 
 function renderTreeHouse() {
   treeHouse.render(state.body);
@@ -3041,8 +3052,12 @@ function renderTreeHouse() {
 async function toggleTask(item, checked) {
   const openDoc = item?.doc && state.docs.find((value) => value.id === item.doc.id);
   const draft = openDoc ? notesFeature?.getDraftSnapshot?.(openDoc.id) : null;
-  if (openDoc && draft?.envelope?.text != null) {
-    const source = String(draft.envelope.text);
+  if (openDoc && draft && !['notes', 'wiki'].includes(state.view)) {
+    if (!await notesFeature?.resolveDirtyDocuments?.([openDoc.id], { force:true, title:'Update task in document' })) return;
+    item = { ...item, sourceRevision:{ kind:'copalHead', value:openDoc.head } };
+  }
+  if (openDoc && ['notes', 'wiki'].includes(state.view)) {
+    const source = String(draft?.envelope?.text ?? openDoc.text ?? '');
     const expected = String(item.anchor?.expectedText || '');
     const first = expected ? source.indexOf(expected) : -1;
     const second = first >= 0 ? source.indexOf(expected, first + expected.length) : -1;
@@ -3050,7 +3065,7 @@ async function toggleTask(item, checked) {
     const replacement = expected.replace(/(\[[ xX]\])/, checked ? '[x]' : '[ ]');
     const next = `${source.slice(0, first)}${replacement}${source.slice(first + expected.length)}`;
     notesFeature.queueSave(openDoc, next);
-    await notesFeature.flushDocument?.(openDoc.id);
+    if (!['notes', 'wiki'].includes(state.view)) setStatus('Task change is in the open Editor draft. Save the document to commit it.');
     return;
   }
   if (item.resourceKey && item.anchor && item.sourceRevision) {
@@ -3083,6 +3098,10 @@ async function createMarkdownTask() {
   if (!doc) { setStatus('Open an editable note before creating a task.', true); return; }
   const title = await styledPrompt('Task title', { title: 'New task', defaultValue: 'New task', confirmText: 'Create task', maxLength: 240 });
   if (!title?.trim()) return;
+  if (['notes', 'wiki'].includes(state.view)) {
+    notesFeature?.applyDocumentTransaction?.(doc, source => `${source}${source && !source.endsWith('\n') ? '\n' : ''}- [ ] ${title.trim()}`, { origin:'task-create' });
+    openDocument(doc.id, 'notes'); return;
+  }
   if (doc.resource?.key) {
     void api('/tasks/create', { method:'POST', body:JSON.stringify({
       actionId:`editor-task-create-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
@@ -3092,7 +3111,7 @@ async function createMarkdownTask() {
   }
   const current = String(doc.text || '');
   notesFeature?.queueSave(doc, `${current}${current && !current.endsWith('\n') ? '\n' : ''}- [ ] ${title.trim()}`);
-  void notesFeature?.flushDocument?.(doc.id);
+  setStatus('Task added to the Editor draft. Save to commit it.');
   openDocument(doc.id, 'notes');
 }
 
@@ -3206,9 +3225,10 @@ function renderView(view = state.view) {
   // renderCalendar intentionally remains in this module as dormant,
   // recoverable boutique plumbing. Odysseus's native Calendar owns the active
   // route/menu and receives Copal events through the backend projector.
-  const renderers = { notes: renderNotes, wiki: renderWiki, timeline: renderTimeline, galaxy: renderGalaxy, graph: renderGraph, mind: renderMind, bases: renderBases, treehouse: renderTreeHouse, todo: renderTodo };
-  (renderers[view] || renderNotes)();
+  const renderers = { notes: renderNotes, wiki: renderWiki, timeline: renderTimeline, galaxy: renderGalaxy, graph: renderGraph, mind: renderMind, bases: renderBases, treehouse: renderTreeHouse, achievements: renderAchievements, todo: renderTodo };
+  const rendered = (renderers[view] || renderNotes)();
   persistActiveContext();
+  return rendered;
 }
 
 function ensureViewWindow(view) {
@@ -3218,6 +3238,7 @@ function ensureViewWindow(view) {
   const windowApi = createCopalWindow({
     id:modalId,
     label:LABELS[view],
+    icon: { notes:'code', wiki:'book', timeline:'timeline', graph:'graph', treehouse:'treehouse', achievements:'check', todo:'tasks' }[view] || 'document',
     subtitle:'Open Clank',
     minWidth:view === 'timeline' ? 720 : 560,
     minHeight:420,
@@ -3228,36 +3249,40 @@ function ensureViewWindow(view) {
       activateView(view); markActive(); localStorage.setItem(copalStorageKey('odysseus-copal-view'), view);
       if (resolveAppletLocation(location.pathname, location.search)?.target === 'editor') updateRoute(view, true);
     },
+  onBeforeClose:() => ['notes', 'wiki'].includes(view) ? featureFor(view)?.beforeWindowClose?.() : true,
   onClosed:() => {
-    if (view === 'notes') notesFeature?.destroy();
+    if (['notes', 'wiki'].includes(view)) featureFor(view)?.destroy();
     if (view === 'graph') state.windows.get('graph')?.window.body?.querySelector('.copal-graph-wrap')?._copalDestroy?.();
     markActive();
   },
   });
   const search = h('input', { class:'copal-search', type:'search', placeholder:`Search ${LABELS[view]}…`, 'aria-label':`Search ${LABELS[view]}` });
   const context = { view, window:windowApi, search, selected:null, filter:'', reading:false };
-  if (view === 'notes') {
+  if (['notes', 'wiki'].includes(view)) {
     try {
-      const saved = JSON.parse(localStorage.getItem(copalStorageKey('odysseus-copal-notes-layout', state.workspace)) || '{}');
-      notesFeature?.loadSaved(context, saved);
+      const saved = JSON.parse(localStorage.getItem(copalStorageKey(`odysseus-copal-${view}-layout`, state.workspace)) || '{}');
+      featureFor(view)?.loadSaved(context, saved);
       context.selected = saved.selected || null;
     } catch (_) {}
   }
   state.windows.set(view, context);
+  if (view === 'wiki' && !context.selected) context.selected = state.docs.find(doc => doc.kind === 'wiki')?.id || null;
   search.addEventListener('input', () => { activateView(view); context.filter = search.value; state.filter = search.value; renderView(view); });
   const activate = (callback) => (...args) => { activateView(view); return callback(...args); };
-  if (view === 'notes') {
+  if (['notes', 'wiki'].includes(view)) {
     windowApi.actions.append(
-      h('button', { class:'copal-btn', text:'⌕', title:'Quick switcher', 'aria-label':'Quick switcher', onclick:() => notesFeature?.showChooser() }),
-      h('button', { class:'copal-btn', text:'⌘', title:'Editor commands', 'aria-label':'Editor commands', onclick:() => notesFeature?.showCommands() }),
+      h('button', { class:'copal-btn', icon:'search', title:'Quick switcher', 'aria-label':'Quick switcher', onclick:activate(() => featureFor(view)?.showChooser()) }),
+      h('button', { class:'copal-btn', icon:'menu', title:'Editor commands', 'aria-label':'Editor commands', onclick:activate(() => featureFor(view)?.showCommands()) }),
     );
+  } else if (view === 'achievements') {
+    windowApi.actions.append(h('button', { class:'copal-btn', icon:'refresh', title:'Refresh Achievements', 'aria-label':'Refresh Achievements', onclick:activate(() => renderView('achievements')) }));
   } else {
     windowApi.actions.append(search);
-    if (['wiki','treehouse'].includes(view)) windowApi.actions.append(h('button', { class:'copal-btn primary', text:'+ New', onclick:activate(createDocument) }));
+    if (['wiki','treehouse'].includes(view)) windowApi.actions.append(h('button', { class:'copal-btn primary', icon:'add', text:'New', onclick:activate(createDocument) }));
     windowApi.actions.append(
-      h('button', { class:'copal-btn copal-header-secondary', text:'Import', title:'Import Obsidian vault', onclick:activate(importVault) }),
-      h('button', { class:'copal-btn copal-header-secondary', text:'Export', title:'Export for Obsidian', onclick:() => { window.location.href = `/api/copal/export/obsidian?workspace=${encodeURIComponent(state.workspace)}`; } }),
-      h('button', { class:'copal-btn', text:'↻', title:`Refresh ${LABELS[view]}`, 'aria-label':`Refresh ${LABELS[view]}`, onclick:activate(() => loadDocuments()) }),
+      h('button', { class:'copal-btn copal-header-secondary', icon:'download', text:'Import', title:'Import Obsidian vault', onclick:activate(importVault) }),
+      h('button', { class:'copal-btn copal-header-secondary', icon:'upload', text:'Export', title:'Export for Obsidian', onclick:() => { window.location.href = `/api/copal/export/obsidian?workspace=${encodeURIComponent(state.workspace)}`; } }),
+      h('button', { class:'copal-btn', icon:'refresh', title:`Refresh ${LABELS[view]}`, 'aria-label':`Refresh ${LABELS[view]}`, onclick:activate(() => loadDocuments()) }),
     );
   }
   return context;
@@ -3275,7 +3300,7 @@ function buildWorkspace() {
 const ENTRY_VIS_KEY = 'copal_entry_visibility';
 function defaultEntryVisibility() {
   const map = {};
-  for (const view of COPAL_LAUNCHER_IDS) map[view] = true;
+  for (const view of COPAL_LAUNCHER_IDS) map[view] = view !== 'wiki';
   return map;
 }
 async function loadEntryVisibility() {
@@ -3318,14 +3343,17 @@ export async function updateEntryVisibility(id, visible) {
   try { await saveEntryVisibility(); applyEntryVisibility(); return { ...state.entryVisibility }; }
   catch (error) { state.entryVisibility = previous; applyEntryVisibility(); throw error; }
 }
-export async function setAllEntryVisibility(visible) {
+async function replaceEntryVisibility(map) {
   if (!state.entryVisibility) throw new Error('Copal Appearance is not ready');
   const previous = { ...state.entryVisibility };
-  state.entryVisibility = Object.fromEntries(COPAL_LAUNCHER_IDS.map((id) => [id, visible === true]));
+  state.entryVisibility = map;
   try { await saveEntryVisibility(); applyEntryVisibility(); return { ...state.entryVisibility }; }
   catch (error) { state.entryVisibility = previous; applyEntryVisibility(); throw error; }
 }
-export function resetEntryVisibility() { return setAllEntryVisibility(true); }
+export function setAllEntryVisibility(visible) {
+  return replaceEntryVisibility(Object.fromEntries(COPAL_LAUNCHER_IDS.map((id) => [id, visible === true])));
+}
+export function resetEntryVisibility() { return replaceEntryVisibility(defaultEntryVisibility()); }
 export function whenReady() {
   if (state.entryVisibilityError) return Promise.reject(state.entryVisibilityError);
   if (state.storageNamespace && state.entryVisibility !== null) return Promise.resolve();
@@ -3416,6 +3444,7 @@ function suspendCopalScope() {
     persistActiveContext();
   }
   notesFeature?.suspendScope();
+  wikiFeature?.suspendScope();
   planningFeature?.suspendScope?.();
   treeHouse.suspendScope();
   state.events?.close(); state.events = null;
@@ -3571,12 +3600,14 @@ export async function openResource(resourceRef) {
     id, name:String(payload.name || response.resource.name || 'Untitled'), kind:String(payload.kind || 'text'), corpus:String(payload.corpus || 'host'),
     text:snapshot.envelope.text, properties:payload.properties && typeof payload.properties === 'object' ? payload.properties : {}, relations:[],
     tags:Array.isArray(payload.tags) ? payload.tags : [], readOnly:resource.capabilities.edit !== true, resourceRef, resource,
-    resourceKey:resource.key, resourceSnapshot:snapshot, savePolicy:resource.key.provider === 'host' ? 'explicit' : 'autosave', sourceKind:resource.key.provider,
+    resourceKey:resource.key, resourceSnapshot:snapshot, savePolicy:'explicit', sourceKind:resource.key.provider,
   };
   const index = state.docs.findIndex((doc) => doc.id === id);
   if (index >= 0) state.docs[index] = injected; else state.docs.push(injected);
   notesFeature.open(id); return id;
 }
+export function customizeExplorer(view = 'notes') { const context = ensureViewWindow(view); activateView(view); context.window.show(document.activeElement); featureFor(view)?.render(); return featureFor(view)?.customizeExplorer(); }
+
 export function getNotesPanels() { ensureViewWindow('notes'); return notesFeature?.getNotesPanels?.() || []; }
 export function updateNotesPanel(id, patch = {}) { ensureViewWindow('notes'); return notesFeature?.updateNotesPanel?.(id, patch) || []; }
 
@@ -3607,11 +3638,17 @@ export async function flushActiveAgentResource() {
   // Notes owns the only currently shared draft queue. Other views either save
   // through their existing explicit controls or are projections; the method is
   // intentionally awaited so Chat can add future editor flushers centrally.
-  if (state.view === 'notes' && notesFeature?.flushAll) await notesFeature.flushAll();
+  if (['notes', 'wiki'].includes(state.view)) {
+    const current = state.windows.get(state.view);
+    if (current?.noteDrafts?.size || [...(current?.noteBuffers?.values() || [])].some(buffer => buffer.state().dirty)) {
+      featureFor(state.view)?.persistRecovery?.();
+      throw new Error('The Editor has unsaved changes. Save explicitly before sharing its saved document with the agent.');
+    }
+  }
   return true;
 }
 
 window.__odysseusGetActiveCopalContext = getActiveAgentContext;
 window.__odysseusFlushActiveCopalResource = flushActiveAgentResource;
 
-export default { init, open, close, openResource, getNotesSettings, updateNotesSettings, getNotesPanels, updateNotesPanel, getFilesMutationBridgeInstallations, getActiveAgentContext, flushActiveAgentResource, whenReady, getAppearanceEntries, getEntryVisibility, updateEntryVisibility, setAllEntryVisibility, resetEntryVisibility };
+export default { init, open, close, openResource, getNotesSettings, updateNotesSettings, customizeExplorer, getNotesPanels, updateNotesPanel, getFilesMutationBridgeInstallations, getActiveAgentContext, flushActiveAgentResource, whenReady, getAppearanceEntries, getEntryVisibility, updateEntryVisibility, setAllEntryVisibility, resetEntryVisibility };

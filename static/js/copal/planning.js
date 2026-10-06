@@ -1,3 +1,4 @@
+import { uiIcon } from '../uiIcons.js';
 import { assignEventLanes } from './timeline.js';
 import {
   DATE_RE,
@@ -209,7 +210,17 @@ function control(tag, attrs = {}, value = '') {
   return node;
 }
 
-export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus, projectionChanged, openDocument, filesClient = filesFacadeClient, getScope = null, openMarkdownTask = null, createMarkdownTask = null, patchMarkdownTask = null, queryMarkdownTasks = null, loadMoreMarkdownTasks = null, canLoadMoreMarkdownTasks = () => false }) {
+export function createPlanningFeature({ h: makeElement, api, getPlanning, refresh, setStatus, projectionChanged, openDocument, filesClient = filesFacadeClient, getScope = null, openMarkdownTask = null, createMarkdownTask = null, patchMarkdownTask = null, queryMarkdownTasks = null, loadMoreMarkdownTasks = null, canLoadMoreMarkdownTasks = () => false }) {
+  // Only explicit chrome IDs are decorated; authored track/lesson emoji stays text.
+  function h(tag, { icon, ...attrs } = {}, ...children) {
+    const node = makeElement(tag, attrs, ...children);
+    if (icon) {
+      node.insertAdjacentHTML('afterbegin', uiIcon(icon, 14, { style: attrs.text ? 'margin-right:4px;' : '' }));
+      if (!attrs.text && !attrs['aria-label']) node.setAttribute('aria-label', attrs.title || icon);
+    }
+    return node;
+  }
+
   const timeline = {
     dayWidth: DEFAULT_DAY_WIDTH,
     laneHeight: 56,
@@ -506,7 +517,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
     tags.addEventListener('input', () => { draft.tags = tags.value.split(',').map((item) => item.trim()).filter(Boolean); markEditorDirty(); });
     form.append(h('div', { class:'copal-form-grid' }, field('Priority', priority), field('Status', status)), field('Tags (comma separated)', tags));
 
-    const stages = h('section', { class:'copal-stage-editor' }, h('header', {}, h('strong', { text:'Stages (sub-events)' }), h('button', { type:'button', class:'copal-btn', text:'+ Add', onclick:() => { (draft.stages ||= []).push({ id:randomId('stage'), title:'New stage', done:false, date:null }); markEditorDirty(); renderEventEditor(); } })));
+    const stages = h('section', { class:'copal-stage-editor' }, h('header', {}, h('strong', { text:'Stages (sub-events)' }), h('button', { type:'button', class:'copal-btn', icon: 'add', text: 'Add', onclick:() => { (draft.stages ||= []).push({ id:randomId('stage'), title:'New stage', done:false, date:null }); markEditorDirty(); renderEventEditor(); } })));
     for (const [index, stage] of (draft.stages || []).entries()) {
       const done = control('input', { type:'checkbox', 'aria-label':`Complete ${stage.title}` }); done.checked = !!stage.done;
       done.addEventListener('change', () => { stage.done = done.checked; markEditorDirty(); });
@@ -515,9 +526,9 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
       const date = control('input', { type:'date', 'aria-label':`Stage ${index + 1} date` }, stage.date || '');
       date.addEventListener('change', () => { stage.date = date.value || null; markEditorDirty(); });
       stages.append(h('div', { class:'copal-stage-row' }, done, name, date,
-        h('button', { type:'button', class:'copal-btn', text:'↑', disabled:index === 0, 'aria-label':'Move stage up', onclick:() => { [draft.stages[index - 1], draft.stages[index]] = [draft.stages[index], draft.stages[index - 1]]; markEditorDirty(); renderEventEditor(); } }),
-        h('button', { type:'button', class:'copal-btn', text:'↓', disabled:index === draft.stages.length - 1, 'aria-label':'Move stage down', onclick:() => { [draft.stages[index + 1], draft.stages[index]] = [draft.stages[index], draft.stages[index + 1]]; markEditorDirty(); renderEventEditor(); } }),
-        h('button', { type:'button', class:'copal-btn danger', text:'×', 'aria-label':'Remove stage', onclick:() => { draft.stages.splice(index, 1); markEditorDirty(); renderEventEditor(); } })));
+        h('button', { type:'button', class:'copal-btn', icon: 'up', text: '', disabled:index === 0, 'aria-label':'Move stage up', onclick:() => { [draft.stages[index - 1], draft.stages[index]] = [draft.stages[index], draft.stages[index - 1]]; markEditorDirty(); renderEventEditor(); } }),
+        h('button', { type:'button', class:'copal-btn', icon: 'chevron-down', text: '', disabled:index === draft.stages.length - 1, 'aria-label':'Move stage down', onclick:() => { [draft.stages[index + 1], draft.stages[index]] = [draft.stages[index], draft.stages[index + 1]]; markEditorDirty(); renderEventEditor(); } }),
+        h('button', { type:'button', class:'copal-btn danger', icon: 'trash', text: '', 'aria-label':'Remove stage', onclick:() => { draft.stages.splice(index, 1); markEditorDirty(); renderEventEditor(); } })));
     }
     form.append(stages);
 
@@ -548,7 +559,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
 
       const excDates = h('div', { class:'copal-recurrence-exceptions' });
       for (const exc of (rec.exceptionDates || [])) {
-        const chip = h('span', { class:'copal-recurrence-chip' }, exc, h('button', { type:'button', class:'copal-btn', text:'×', 'aria-label':`Remove exception ${exc}`, onclick:() => { rec.exceptionDates = rec.exceptionDates.filter((d) => d !== exc); markEditorDirty(); renderEventEditor(); } }));
+        const chip = h('span', { class:'copal-recurrence-chip' }, exc, h('button', { type:'button', class:'copal-btn', icon: 'trash', text: '', 'aria-label':`Remove exception ${exc}`, onclick:() => { rec.exceptionDates = rec.exceptionDates.filter((d) => d !== exc); markEditorDirty(); renderEventEditor(); } }));
         excDates.append(chip);
       }
       const addExc = control('input', { type:'date', 'aria-label':'Add exception date' });
@@ -1175,7 +1186,7 @@ export function createPlanningFeature({ h, api, getPlanning, refresh, setStatus,
     const root = h('section', { class:'copal-meatbag-tasks copal-pane' });
     const header = h('header', { class:'copal-pane-header' });
     const count = h('strong', { text:`Meatbag Tasks · ${allItems.length}` });
-    header.append(count, h('button', { class:'copal-btn primary', text:'+ Task', onclick:() => createMarkdownTask ? createMarkdownTask() : createEvent({ startDate:null, dueDate:null, trackId:null, floating:true }) }));
+    header.append(count, h('button', { class:'copal-btn primary', icon: 'add', text: 'Task', onclick:() => createMarkdownTask ? createMarkdownTask() : createEvent({ startDate:null, dueDate:null, trackId:null, floating:true }) }));
     if (loadMoreMarkdownTasks) header.append(h('button', { class:'copal-btn', text:'Load more', disabled:!canLoadMoreMarkdownTasks(), onclick:() => loadMoreMarkdownTasks() }));
 
     // ── Controls row 1: search + core filters ──

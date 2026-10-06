@@ -34,39 +34,14 @@ if (Script.release) {
   throw new Error("Upstream MiMo release publishing is disabled; use the Open Clank release workflow")
 }
 
-// Load migrations from migration directories
-const migrationDirs = (
-  await fs.promises.readdir(path.join(dir, "migration"), {
-    withFileTypes: true,
-  })
-)
-  .filter((entry) => entry.isDirectory() && /^\d{4}\d{2}\d{2}\d{2}\d{2}\d{2}/.test(entry.name))
-  .map((entry) => entry.name)
-  .sort()
-
-const migrations = await Promise.all(
-  migrationDirs.map(async (name) => {
-    const file = path.join(dir, "migration", name, "migration.sql")
-    const sql = await Bun.file(file).text()
-    const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(name)
-    const timestamp = match
-      ? Date.UTC(
-          Number(match[1]),
-          Number(match[2]) - 1,
-          Number(match[3]),
-          Number(match[4]),
-          Number(match[5]),
-          Number(match[6]),
-        )
-      : 0
-    return { sql, timestamp, name }
-  }),
-)
-console.log(`Loaded ${migrations.length} migrations`)
-
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
+const targetArgument = process.argv.indexOf("--target")
+const explicitTarget = targetArgument < 0 ? undefined : process.argv[targetArgument + 1]
+if (targetArgument >= 0 && (!explicitTarget || explicitTarget.startsWith("--"))) {
+  throw new Error("--target requires an explicit engine target")
+}
 const plugin = createSolidTransformPlugin()
 // const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
 // Web UI temporarily disabled
@@ -160,7 +135,12 @@ const allTargets: {
   },
 ]
 
-const targets = singleFlag
+const targetName = (item: (typeof allTargets)[number]) =>
+  [item.os === "win32" ? "windows" : item.os, item.arch, item.avx2 === false ? "baseline" : undefined, item.abi]
+    .filter(Boolean).join("-")
+const targets = explicitTarget
+  ? allTargets.filter((item) => targetName(item) === explicitTarget)
+  : singleFlag
   ? allTargets.filter((item) => {
       if (item.os !== process.platform || item.arch !== process.arch) {
         return false
@@ -180,6 +160,8 @@ const targets = singleFlag
       return true
     })
   : allTargets
+
+if (explicitTarget && targets.length !== 1) throw new Error(`Unsupported engine target: ${explicitTarget}`)
 
 await $`rm -rf dist`
 
@@ -270,7 +252,6 @@ for (const item of targets) {
     entrypoints: ["./src/index.ts", parserWorker, workerPath, ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : [])],
     define: {
       MIMOCODE_VERSION: `'${Script.version}'`,
-      OPENCODE_MIGRATIONS: JSON.stringify(migrations),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       OPENCODE_WORKER_PATH: workerPath,
       MIMOCODE_CHANNEL: `'${Script.channel}'`,

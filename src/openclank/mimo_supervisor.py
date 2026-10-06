@@ -131,36 +131,6 @@ def _pick_small_model(providers: dict) -> str | None:
     return None
 
 
-def migrate_agent_runtime_root(data_dir: Path, *, rollback: bool = False) -> Path:
-    """Atomically move embedded-agent state under Open Clank's runtime root."""
-    data_dir = Path(data_dir)
-    legacy = data_dir / "mimocode"
-    current = data_dir / "runtime" / "agent-engine"
-    source, target = (current, legacy) if rollback else (legacy, current)
-    status = "unchanged"
-    if source.exists() and not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        source.rename(target)
-        status = "rolled_back" if rollback else "migrated"
-    elif source.exists() and target.exists():
-        status = "conflict"
-        logger.error(
-            "Open Clank agent-runtime migration conflict: both %s and %s exist",
-            source,
-            target,
-        )
-
-    marker_dir = data_dir / ".migrations"
-    marker_dir.mkdir(parents=True, exist_ok=True)
-    marker = marker_dir / "open-clank-agent-runtime-v1.json"
-    marker.write_text(json.dumps({
-        "canonical": str(current.relative_to(data_dir)),
-        "legacy": str(legacy.relative_to(data_dir)),
-        "status": status,
-        "version": 1,
-    }, sort_keys=True) + "\n", encoding="utf-8")
-    marker.chmod(0o600)
-    return legacy if rollback else current
 
 
 def _mimo_child_environment(owner: str = "") -> dict[str, str]:
@@ -184,6 +154,12 @@ def _mimo_child_environment(owner: str = "") -> dict[str, str]:
         for name, value in os.environ.items()
         if name in allowed or name.startswith("LC_")
     }
+    if os.name == "nt":
+        # Bun's Windows networking requires this OS runtime locator. Keep
+        # the remaining parent environment excluded from the owner worker.
+        system_root = os.environ.get("SYSTEMROOT")
+        if system_root:
+            env["SystemRoot"] = system_root
     env.update(frankenmemory_child_env())
     env["FM_WORKSPACE_ID"] = chat_workspace()
     # This is a supervisor-to-child handoff, not model-controlled input. The
@@ -350,6 +326,8 @@ class MimoSupervisor:
             self._owner,
             active_workspace=policy_root,
             app_visibility=context.get("app_visibility"),
+            workspace_id=str(context.get("authority_workspace_id") or ""),
+            chat_id=str(chat_id),
         )
         active = scope.get("active_folder") or {}
         approved_root = str(active.get("canonical_path") or "")
@@ -390,6 +368,7 @@ class MimoSupervisor:
         env["OPEN_CLANK_OWNER"] = str(self._owner or "")
         env["OPEN_CLANK_PROJECT_POLICY_BRIDGE"] = "required"
         http_auth_fd: int | None = None
+        http_auth_pipe = None
         # Server directory-containment check (middleware.ts:24-29): when no
         # server password is set, the server requires requested directories to
         # be within its CWD. Change the child's CWD to the host user's home so
@@ -495,7 +474,12 @@ class MimoSupervisor:
         logger.info("mimo child MIMOCODE_HOME: %s", env["MIMOCODE_HOME"])
 
         try:
-            http_auth_fd = self._configure_internal_http_auth(env)
+            if os.name == "nt":
+                from src.openclank.worker_windows import WorkerAuthPipe
+                env["MIMOCODE_SERVER_USERNAME"] = self.__http_username
+                http_auth_pipe = WorkerAuthPipe(env)
+            else:
+                http_auth_fd = self._configure_internal_http_auth(env)
             spawn_options = {
                 "stdin": asyncio.subprocess.PIPE,
                 "stdout": asyncio.subprocess.PIPE,
@@ -518,7 +502,14 @@ class MimoSupervisor:
             inherited_fds = tuple(fd for fd in (http_auth_fd,) if fd is not None)
             if inherited_fds:
                 spawn_options["pass_fds"] = inherited_fds
-            self._proc = await asyncio.create_subprocess_exec(
+            if os.name == "nt":
+                from src.openclank.worker_windows import spawn_owned
+                async def spawn_worker(*argv, **options):
+                    process, self._windows_job = await spawn_owned(*argv, **options)
+                    return process
+            else:
+                spawn_worker = asyncio.create_subprocess_exec
+            self._proc = await spawn_worker(
                 # --print-logs mirrors mimo's own log stream to stderr, which
                 # _drain_stderr folds into the host log — ONE log to read
                 # instead of chasing per-owner files under data/mimocode.
@@ -526,12 +517,31 @@ class MimoSupervisor:
                 "--print-logs",
                 **spawn_options,
             )
+            if http_auth_pipe is not None:
+                await http_auth_pipe.deliver(self._proc, self.__http_password)
         except NotImplementedError as exc:
             # A synchronous fallback cannot safely provide the asyncio stream
             # objects ACPClient requires; the old fallback also leaked a first
             # untracked child before spawning a second one.
             raise RuntimeError("async subprocess support is required for mimo ACP") from exc
+        except BaseException:
+            # Includes cancelled or failed credential handoff after child creation.
+            job = getattr(self, "_windows_job", None)
+            if job is not None:
+                job.close()
+                self._windows_job = None
+            if self._proc is not None:
+                proc, self._proc = self._proc, None
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    await proc.wait()
+            raise
         finally:
+            if http_auth_pipe is not None:
+                http_auth_pipe.close()
             if http_auth_fd is not None:
                 os.close(http_auth_fd)
 
@@ -558,6 +568,8 @@ class MimoSupervisor:
             artifact_store=artifact_store,
             executor_broker=self._local_executor_broker,
         )
+        from src.openclank.logging_capture_store import CAPTURE
+        await asyncio.to_thread(CAPTURE.recover_generation, self._managed_callbacks.owner, self._managed_callbacks.holder_id)
         self._managed_callbacks.register(self._client)
 
         # Build permission handler: caller-supplied handler takes precedence.
@@ -627,6 +639,7 @@ class MimoSupervisor:
                 else None
             ),
         )
+        self._bridge._logging_callbacks = self._managed_callbacks
         self._bridge.set_session_delete_callback(self.delete_session)
 
         # Ordinary restart recovers SQLite ↔ session-map crash-seam candidates
@@ -726,7 +739,7 @@ class MimoSupervisor:
         # SIGINT/SIGTERM death usually means host shutdown (systemd kills the
         # whole cgroup before our shutdown event runs). Give stop() a moment
         # to raise the flag before treating it as a crash worth restarting.
-        if returncode in (-signal.SIGINT, -signal.SIGTERM):
+        if os.name != "nt" and returncode in (-signal.SIGINT, -signal.SIGTERM):
             await asyncio.sleep(2.0)
             if self._stopping:
                 return
@@ -783,6 +796,11 @@ class MimoSupervisor:
         elif self._health_task is asyncio.current_task():
             self._health_task = None
 
+        job = getattr(self, "_windows_job", None)
+        if job is not None:
+            job.close()
+            self._windows_job = None
+
         if self._stderr_task and not self._stderr_task.done():
             self._stderr_task.cancel()
             try:
@@ -801,6 +819,12 @@ class MimoSupervisor:
                 except Exception:
                     pass
 
+        if self._managed_callbacks is not None:
+            try:
+                await asyncio.to_thread(self._managed_callbacks.teardown_logging)
+            except Exception as exc:
+                logger.warning("managed logging teardown unavailable: %s", type(exc).__name__)
+            self._managed_callbacks = None
         self._client = None
         self._bridge = None
 
@@ -843,8 +867,21 @@ class MimoSupervisor:
             logger.info("mimo child exited gracefully (code %d)", proc.returncode)
         except asyncio.TimeoutError:
             logger.warning("mimo child did not exit in time, killing")
-            proc.kill()
+            job = getattr(self, "_windows_job", None)
+            if job is not None:
+                job.close()
+                self._windows_job = None
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
             await proc.wait()
+        finally:
+            job = getattr(self, "_windows_job", None)
+            if job is not None:
+                job.close()
+                self._windows_job = None
 
         if self._stderr_task and not self._stderr_task.done():
             self._stderr_task.cancel()
@@ -880,7 +917,30 @@ class MimoSupervisor:
 
         if not self._client or not self.is_alive():
             raise RuntimeError("Open Clank managed operation router is unavailable")
-        return await self._client.execute_managed_operation(payload)
+        root = str(payload.get("rootOperationID") or "")
+        admission_gap = False
+        callbacks = self._managed_callbacks
+        if callbacks is not None:
+            try:
+                await asyncio.to_thread(callbacks.register_logging_operation, root,
+                    {"operation_type": payload.get("operation"), "actor_kind": "internal",
+                     "incognito": bool((payload.get("options") or {}).get("incognito")),
+                     "allowed_routes": payload.get("routes") or []})
+            except Exception as exc:
+                admission_gap = True
+                logger.warning("managed operation logging unavailable: %s", type(exc).__name__)
+        try:
+            result = await self._client.execute_managed_operation(payload)
+            if admission_gap:
+                result = {**result, "identityCoverage": "partial",
+                          "lossReasons": list(dict.fromkeys([*(result.get("lossReasons") or []), "admission_unavailable"]))}
+            return result
+        finally:
+            if callbacks is not None:
+                try:
+                    await asyncio.to_thread(callbacks.finish_logging_operation, root)
+                except Exception as exc:
+                    logger.warning("managed operation logging finalization unavailable: %s", type(exc).__name__)
 
     async def managed_engine_call(self, method: str, params: dict) -> dict:
         """Invoke one exact host-to-engine managed provider extension."""
@@ -1127,14 +1187,13 @@ class AgentWorkerLease:
 
 
 class MimoSupervisorPool:
-    """Lazy owner-keyed Open Clank agent runtimes; auth-disabled mode keeps one worker."""
+    """Lazy authenticated owner-keyed Open Clank agent runtimes."""
 
     def __init__(
         self,
         *,
         memory_provider=None,
         safe_dirs: list[str] | None = None,
-        auth_enabled: bool = True,
         initial_owner: str = "",
         host_provider_owner: str = "",
         data_dir: Path | None = None,
@@ -1146,7 +1205,6 @@ class MimoSupervisorPool:
     ) -> None:
         self._memory_provider = memory_provider
         self._safe_dirs = safe_dirs
-        self._auth_enabled = auth_enabled
         self._initial_owner = self._key(initial_owner) if initial_owner else ""
         self._host_provider_owner = self._key(host_provider_owner) if host_provider_owner else ""
         self._workers: dict[str, MimoSupervisor] = {}
@@ -1164,7 +1222,9 @@ class MimoSupervisorPool:
         from src.openclank.permission_grants import GrantStore
 
         root = Path(data_dir) if data_dir is not None else Path(DATA_DIR)
-        self._agent_runtime_root = migrate_agent_runtime_root(root)
+        self._agent_runtime_root = root / "runtime" / "agent-engine"
+        if (root / "mimocode").exists():
+            raise RuntimeError("Agent runtime data does not match this release. Stop writers and keep a complete backup; restore the matching release or prepare an offline conversion.")
         self._owners_root = self._agent_runtime_root / "owners"
         self._grant_store = grant_store or GrantStore(str(root / "app.db"))
         # Sync catalogue routes run in Starlette's worker threads, while the
@@ -1291,11 +1351,7 @@ class MimoSupervisorPool:
         runtime root. Auth-disabled installs have exactly one local runtime,
         so their unpartitioned engine data is that local user's data.
         """
-        if not self._auth_enabled:
-            candidate = self._agent_runtime_root / "data"
-            if candidate.is_symlink():
-                raise RuntimeError("agent data root cannot be a symlink")
-            return [candidate] if candidate.is_dir() else []
+        pass
         root = self._runtime_home(owner)
         if root.is_symlink():
             raise RuntimeError("agent owner runtime root cannot be a symlink")
@@ -1348,8 +1404,6 @@ class MimoSupervisorPool:
         keys: list[str] = []
         runtime_root = (
             self._runtime_home(owner)
-            if self._auth_enabled
-            else self._agent_runtime_root
         )
         for data_dir in self._owner_memory_data_dirs(owner):
             relative_root = data_dir.relative_to(runtime_root).as_posix()
@@ -1404,7 +1458,7 @@ class MimoSupervisorPool:
 
     async def preview_owner_memory(self, owner: str) -> dict[str, object]:
         key = self._key(owner)
-        if self._auth_enabled and not key:
+        if not key:
             raise RuntimeError("authenticated agent-memory reset requires an owner")
         return self._agent_memory_snapshot(key)
 
@@ -1416,7 +1470,7 @@ class MimoSupervisorPool:
     ) -> dict[str, object]:
         """Clear authored memory files/index rows without deleting sessions."""
         key = self._key(owner)
-        if self._auth_enabled and not key:
+        if not key:
             raise RuntimeError("authenticated agent-memory reset requires an owner")
         lifecycle_keys = self._begin_owner_lifecycle(key)
         try:
@@ -1524,14 +1578,13 @@ class MimoSupervisorPool:
 
     def _new_worker(self, owner: str, snapshot, generation: int, fence: str, lifecycle_epoch: str | None = None) -> MimoSupervisor:
         runtime_home = None
-        if self._auth_enabled:
-            runtime_home = self._runtime_home(owner) / "generations" / f"{generation}-{fence}"
+        runtime_home = self._runtime_home(owner) / "generations" / f"{generation}-{fence}"
         return MimoSupervisor(
             owner=owner,
             memory_provider=self._memory_provider,
             safe_dirs=self._safe_dirs,
             runtime_home=runtime_home,
-            partitioned=self._auth_enabled,
+            partitioned=True,
             grant_store=self._grant_store,
             projection_snapshot=snapshot,
             projection_generation=generation,
@@ -1692,9 +1745,7 @@ class MimoSupervisorPool:
     async def start(self) -> None:
         self._event_loop = asyncio.get_running_loop()
         self._reclaim_retired_generations()
-        if not self._auth_enabled:
-            await self.for_owner("")
-            return
+        pass
         owners = {self._initial_owner, self._host_provider_owner} - {""}
         results = await asyncio.gather(
             *(self.for_owner(owner) for owner in owners),
@@ -1764,10 +1815,9 @@ class MimoSupervisorPool:
 
     async def for_owner(self, owner: str | None) -> MimoSupervisor:
         key = self._key(owner)
-        if self._auth_enabled and not key:
+        if not key:
             raise RuntimeError("authenticated Open Clank agent execution requires an owner")
-        if not self._auth_enabled:
-            key = ""
+        pass
         return await self._ensure_worker(key)
 
     async def execute_operation(self, owner: str | None, payload: dict) -> dict:
@@ -1789,10 +1839,9 @@ class MimoSupervisorPool:
         """Pin one owner worker generation for a provider mutation/OAuth flow."""
 
         key = self._key(owner)
-        if self._auth_enabled and not key:
+        if not key:
             raise RuntimeError("authenticated provider control requires an owner")
-        if not self._auth_enabled:
-            key = ""
+        pass
         epoch = self._owner_lifecycle_epoch(key)
         self._assert_owner_lifecycle(key, epoch)
         while True:
@@ -1849,13 +1898,12 @@ class MimoSupervisorPool:
         from src.openclank.mimo_projection import build_projection_snapshot, safe_additive_delta
 
         key = self._key(owner)
-        if self._auth_enabled and not key:
+        if not key:
             raise SupervisorAdmissionError(
                 "SUPERVISOR_UNAVAILABLE", "Authenticated Agent execution requires an owner",
                 phase="identity", retryable=False,
             )
-        if not self._auth_enabled:
-            key = ""
+        pass
         epoch = self._owner_lifecycle_epoch(key)
         self._assert_owner_lifecycle(key, epoch)
         pending = False
@@ -2027,7 +2075,7 @@ class MimoSupervisorPool:
                 self._workers.pop(owner, None)
 
     def worker_for_owner(self, owner: str | None) -> MimoSupervisor | None:
-        key = self._key(owner) if self._auth_enabled else ""
+        key = self._key(owner)
         return self._workers.get(key)
 
     def _default_worker(self) -> MimoSupervisor | None:
@@ -2039,23 +2087,17 @@ class MimoSupervisorPool:
         # A catalogue is an owner capability boundary, not a process-wide
         # inventory.  In authenticated mode an absent/unknown owner must not
         # fall back to the initial worker or merge models from other owners.
-        if self._auth_enabled:
-            key = self._key(owner)
-            if not key:
-                return []
-            worker = self._workers.get(key)
-        else:
-            worker = self._workers.get("")
+        key = self._key(owner)
+        if not key:
+            return []
+        worker = self._workers.get(key)
         return worker.available_models() if worker else []
 
     def provider_apis(self, owner: str | None = None) -> dict[str, str]:
-        if self._auth_enabled:
-            key = self._key(owner)
-            if not key:
-                return {}
-            worker = self._workers.get(key)
-        else:
-            worker = self._workers.get("")
+        key = self._key(owner)
+        if not key:
+            return {}
+        worker = self._workers.get(key)
         return worker.provider_apis() if worker else {}
 
     async def refresh_model_catalog(self, *, owner: str | None = None) -> list:
@@ -2154,7 +2196,7 @@ class MimoSupervisorPool:
         owner: str | None = None,
         mimo_session_id: str | None = None,
     ) -> None:
-        if self._auth_enabled and owner is None:
+        if owner is None:
             raise RuntimeError(
                 "authenticated Open Clank agent session deletion requires an owner"
             )
@@ -2162,8 +2204,7 @@ class MimoSupervisorPool:
         candidates = [
             worker
             for worker in self._workers.values()
-            if not self._auth_enabled
-            or self._key(getattr(worker, "_owner", "")) == owner_key
+            if self._key(getattr(worker, "_owner", "")) == owner_key
         ]
         worker = next(
             (
@@ -2188,7 +2229,7 @@ class MimoSupervisorPool:
         )
 
     def mapped_sessions(self, owner: str | None = None) -> dict[str, str]:
-        if self._auth_enabled and owner is None:
+        if owner is None:
             return {}
         owner_key = self._key(owner)
         result: dict[str, str] = {}
@@ -2196,8 +2237,7 @@ class MimoSupervisorPool:
             if (
                 candidate.bridge
                 and (
-                    not self._auth_enabled
-                    or self._key(getattr(candidate, "_owner", "")) == owner_key
+                    self._key(getattr(candidate, "_owner", "")) == owner_key
                 )
             ):
                 result.update(candidate.bridge.mapped_sessions())
@@ -2362,10 +2402,9 @@ class MimoSupervisorPool:
         fresh worker from current policy under the incremented lifecycle epoch.
         """
         key = self._key(owner)
-        if self._auth_enabled and not key:
+        if not key:
             raise RuntimeError("authenticated projection invalidation requires an owner")
-        if not self._auth_enabled:
-            key = ""
+        pass
         lifecycle_keys = self._begin_owner_lifecycle(key)
         try:
             await self._quiesce_owner_lifecycle(lifecycle_keys)
@@ -2553,13 +2592,11 @@ class MimoSupervisorPool:
     def owner_lifecycle_inventory(self, owner: str) -> dict[str, object]:
         """Return the content-free Agent runtime/grant account inventory."""
         key = self._key(owner)
-        if self._auth_enabled and not key:
+        if not key:
             raise RuntimeError("authenticated Agent lifecycle requires an owner")
         self._validate_owner_lifecycle_roots()
         runtime = (
             self._runtime_inventory_at(key, self._runtime_home(key))
-            if self._auth_enabled
-            else self._runtime_inventory_at(key, self._agent_runtime_root)
         )
         grants = self._grant_store.owner_inventory(key)
         material = json.dumps(
@@ -2595,7 +2632,7 @@ class MimoSupervisorPool:
     async def preview_owner_rename(self, old_owner: str, new_owner: str) -> dict[str, object]:
         old_key = self._key(old_owner)
         new_key = self._key(new_owner)
-        if not self._auth_enabled or not old_key or not new_key or old_key == new_key:
+        if not old_key or not new_key or old_key == new_key:
             raise RuntimeError("distinct authenticated Agent owners are required")
         for lifecycle_owner in (old_key, new_key):
             self._assert_no_owner_purge(lifecycle_owner)
@@ -2715,7 +2752,7 @@ class MimoSupervisorPool:
         """Converge a possibly interrupted runtime/grant owner move."""
         old_key = self._key(old_owner)
         new_key = self._key(new_owner)
-        if not self._auth_enabled or not old_key or not new_key or old_key == new_key:
+        if not old_key or not new_key or old_key == new_key:
             raise RuntimeError("distinct authenticated Agent owners are required")
         expected, _expected_target = self._validate_agent_manifest(
             manifest,
@@ -2838,7 +2875,7 @@ class MimoSupervisorPool:
         """Restore complete or component-partial lifecycle state to old_owner."""
         old_key = self._key(old_owner)
         new_key = self._key(new_owner)
-        if not self._auth_enabled or not old_key or not new_key or old_key == new_key:
+        if not old_key or not new_key or old_key == new_key:
             raise RuntimeError("distinct authenticated Agent owners are required")
         expected, _expected_target = self._validate_agent_manifest(
             manifest,
@@ -2965,7 +3002,7 @@ class MimoSupervisorPool:
     ) -> dict[str, object]:
         """Physically purge a frozen owner partition with crash replay."""
         key = self._key(owner)
-        if not self._auth_enabled or not key:
+        if not key:
             raise RuntimeError("authenticated Agent purge requires an owner")
         if not isinstance(expected, dict) or expected.get("schema_version") != 1:
             raise RuntimeError("invalid Agent purge inventory")

@@ -35,7 +35,7 @@
 
   function langOf(el) {
     const raw =
-      (el.dataset && el.dataset.lang) ||
+      (el.dataset && (el.dataset.lang || el.dataset.language)) ||
       (el.className && (el.className.match(LANG_RE) || [])[1]) ||
       '';
     const key = String(raw).toLowerCase();
@@ -64,21 +64,32 @@
     const lang = langOf(el);
     if (!lang) return;
     const html = codeHtml(el.textContent, lang);
-    if (html === null) return;
+    if (html === null) { el.dataset.hlFailed = '1'; return; }
     el.innerHTML = html;
-    el.dataset.hlDone = '1';
+    el.dataset.hlDone = '1'; delete el.dataset.hlFailed;
     // The .hljs class keeps the historical block styling (background, padding)
     // that was applied by highlight.js itself; span colors come from Shiki.
     el.classList.add('hljs');
   }
 
+  const workQueue = new Set();
+  let workFrame = null;
+  function schedulePaint(run) {
+    workQueue.add(run);
+    if (workFrame !== null) return;
+    const drain = () => {
+      workFrame = null;
+      const run = workQueue.values().next().value;
+      if (run) { workQueue.delete(run); run(); }
+      if (workQueue.size) workFrame = requestAnimationFrame(drain);
+    };
+    workFrame = requestAnimationFrame(drain);
+  }
   function flush() {
-    const elements = [...queue];
-    queue.clear();
-    elements.forEach(paint);
-    const painters = [...painterQueue];
-    painterQueue.clear();
-    painters.forEach(run => run());
+    const elements = [...queue]; queue.clear();
+    elements.forEach(el => schedulePaint(() => paint(el)));
+    const painters = [...painterQueue]; painterQueue.clear();
+    painters.forEach(schedulePaint);
   }
 
   function highlight(el) {
@@ -195,31 +206,75 @@
   }
 
   const ready = new Promise((resolve) => {
+    const deadline = setTimeout(() => { failed = true; releasePlain(); resolve(false); }, 4000);
+    const settle = value => { clearTimeout(deadline); resolve(value); };
     const api = window.__odysseusShiki;
     if (!api || !api.ready) {
       failed = true;
       releasePlain();
       console.warn('highlighter: shiki bundle missing; code renders plain');
-      resolve(false);
+      settle(false);
       return;
     }
     api.ready
       .then((h) => {
         engine = h;
         flush();
-        resolve(true);
+        failed = false; settle(true);
       })
       .catch((err) => {
         failed = true;
         releasePlain();
         console.warn('highlighter: shiki failed to initialize', err);
-        resolve(false);
+        settle(false);
       });
   });
 
+  const visibleTasks = new WeakMap();
+  const blockObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+    for (const entry of entries) if (entry.isIntersecting) {
+      blockObserver.unobserve(entry.target);
+      const run = visibleTasks.get(entry.target); visibleTasks.delete(entry.target);
+      if (run) schedulePaint(run);
+    }
+  }) : null;
+
+  // Rendered blocks only; never call this on a CodeMirror editable surface.
+  function prepareElement(el, language) {
+    if (!el) return Promise.resolve(false);
+    el.dataset.lang = String(language || '');
+    if (!langOf(el)) { el.dataset.syntaxReady = 'plain'; return Promise.resolve(false); }
+    el.style.visibility = 'hidden'; el.setAttribute('aria-busy', 'true');
+    el.dataset.syntaxReady = 'loading';
+    const finish = highlighted => {
+      el.style.visibility = ''; el.setAttribute('aria-busy', 'false');
+      el.dataset.syntaxReady = highlighted ? 'ready' : 'plain';
+      if (!highlighted) el.dataset.hlFailed = '1';
+      return highlighted;
+    };
+    if (el.textContent.length > 131072) return Promise.resolve(finish(false));
+    return new Promise(resolve => {
+      let finished = false;
+      const settle = highlighted => {
+        if (finished) return; finished = true; clearTimeout(deadline);
+        blockObserver?.unobserve(el); visibleTasks.delete(el); resolve(finish(highlighted));
+      };
+      // Includes queued/never-mounted work: no retained observer can conceal
+      // or hold a discarded block forever. This is a failure bound, not a delay.
+      const deadline = setTimeout(() => settle(false), 4000);
+      (engine ? Promise.resolve(true) : ready).then(available => {
+        if (finished) return;
+        if (!available || failed) { settle(false); return; }
+        const run = () => { if (finished) return; if (el.isConnected) paint(el); settle(el.dataset.hlDone === '1'); };
+        if (blockObserver) { visibleTasks.set(el, run); blockObserver.observe(el); }
+        else schedulePaint(run);
+      }).catch(() => settle(false));
+    });
+  }
+
   window.odysseusHighlight = {
     highlight,
-    highlightAll,
+    highlightAll, prepareElement,
     createStreamingPainter,
     detect,
     codeHtml: (code, lang) => codeHtml(code, lang),

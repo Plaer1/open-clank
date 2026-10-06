@@ -50,18 +50,28 @@ def _contract() -> dict[str, Any]:
     return json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
 
 
+@lru_cache(maxsize=1)
+def _validated_contract():
+    """Validate the pinned shared definitions once, outside timed admission."""
+    try:
+        from jsonschema import Draft202012Validator
+    except ImportError as exc:  # pragma: no cover - packaging invariant
+        raise ManagedProtocolError("managed provider schema validation is unavailable") from exc
+    contract = _contract()
+    Draft202012Validator.check_schema(contract)
+    return contract, Draft202012Validator
+
+
+def prepare_managed_method_validation() -> None:
+    """Readiness warmup before a worker's callback channel becomes active."""
+    _validated_contract()
+
+
 @lru_cache(maxsize=None)
 def _method_validator(method: str, direction: str):
     """Compile one validator without ever formatting a secret-bearing value."""
 
-    try:
-        from jsonschema import Draft202012Validator
-    except ImportError as exc:  # pragma: no cover - packaging invariant
-        raise ManagedProtocolError(
-            "managed provider schema validation is unavailable"
-        ) from exc
-
-    contract = _contract()
+    contract, Draft202012Validator = _validated_contract()
     mapping = contract.get("x-openclank-methods", {}).get(method)
     if not isinstance(mapping, dict):
         raise ManagedMethodValidationError("unsupported managed provider callback")
@@ -82,7 +92,9 @@ def _method_validator(method: str, direction: str):
         raise ManagedMethodValidationError(
             "managed provider callback has no pinned wire schema"
         )
-    Draft202012Validator.check_schema(schema)
+    # The wrapper is constructed here from fixed fields and already validated
+    # pinned definitions. Rechecking all $defs for every request/result costs
+    # longer than the admission budget and adds no payload validation.
     return Draft202012Validator(schema)
 
 

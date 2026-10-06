@@ -62,8 +62,8 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
     mapping = schema.get("x-openclank-methods")
     if not isinstance(methods, list) or not isinstance(operations, list) or not isinstance(mapping, dict):
         raise RuntimeError("managed schema is missing method or operation metadata")
-    if len(methods) != 25 or len(set(methods)) != 25:
-        raise RuntimeError(f"managed contract must contain 25 unique methods; found {len(methods)}")
+    if len(methods) != 30 or len(set(methods)) != 30:
+        raise RuntimeError(f"managed contract must contain 30 unique methods; found {len(methods)}")
     if len(operations) != 16 or len(set(operations)) != 16:
         raise RuntimeError(f"managed contract must contain 16 unique operations; found {len(operations)}")
     if set(mapping) != set(methods):
@@ -72,9 +72,12 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
     provider_store = [method for method in methods if method.startswith("_openclank/provider-store/")]
     provider_control = [method for method in methods if method.startswith("_openclank/provider-control/")]
     operation_methods = [method for method in methods if method.startswith("_openclank/operations/")]
-    session_methods = [method for method in methods if method.startswith("_openclank/session/")]
-    if (len(provider_store), len(provider_control), len(operation_methods), len(session_methods)) != (9, 7, 6, 3):
-        raise RuntimeError("managed method families must contain 9 store, 7 control, 6 operation, and 3 session methods")
+    # History is a host-owned session capability: it has no caller-supplied
+    # owner or chat selector and is authenticated from the engine session.
+    session_methods = [method for method in methods if method.startswith(("_openclank/session/", "_openclank/history/"))]
+    logging_methods = [method for method in methods if method.startswith("_openclank/logging/")]
+    if (len(provider_store), len(provider_control), len(operation_methods), len(session_methods), len(logging_methods)) != (9, 7, 6, 6, 2):
+        raise RuntimeError("managed method families must contain 9 store, 7 control, 6 operation, 6 session and 2 logging methods")
     directions = {method: mapping[method].get("direction") for method in methods}
     if any(direction not in {"engine_to_host", "host_to_engine"} for direction in directions.values()):
         raise RuntimeError("managed method wire mappings must declare a valid callback direction")
@@ -91,6 +94,7 @@ def _bindings(schema: dict[str, Any], digest: str) -> dict[str, Any]:
         "provider_control_methods": provider_control,
         "operation_methods": operation_methods,
         "session_methods": session_methods,
+        "logging_methods": logging_methods,
         "engine_methods": engine_methods,
         "host_callback_methods": [method for method in methods if method not in engine_methods],
         "operations": operations,
@@ -121,6 +125,7 @@ PROVIDER_STORE_METHODS = {tuple_literal(data["provider_store_methods"])}
 PROVIDER_CONTROL_METHODS = {tuple_literal(data["provider_control_methods"])}
 OPERATION_METHODS = {tuple_literal(data["operation_methods"])}
 SESSION_METHODS = {tuple_literal(data["session_methods"])}
+LOGGING_METHODS = {tuple_literal(data["logging_methods"])}
 MANAGED_METHODS = frozenset({tuple_literal(data["methods"])})
 ENGINE_METHODS = frozenset({tuple_literal(data["engine_methods"])})
 HOST_CALLBACK_METHODS = frozenset({tuple_literal(data["host_callback_methods"])})
@@ -147,6 +152,7 @@ export const PROVIDER_STORE_METHODS = {array(data["provider_store_methods"])}
 export const PROVIDER_CONTROL_METHODS = {array(data["provider_control_methods"])}
 export const OPERATION_METHODS = {array(data["operation_methods"])}
 export const SESSION_METHODS = {array(data["session_methods"])}
+export const LOGGING_METHODS = {array(data["logging_methods"])}
 export const OPERATIONS = {array(data["operations"])}
 export const METHOD_DIRECTIONS = {directions}
 
@@ -154,7 +160,7 @@ export type ProviderStoreMethod = (typeof PROVIDER_STORE_METHODS)[number]
 export type ProviderControlMethod = (typeof PROVIDER_CONTROL_METHODS)[number]
 export type OperationMethod = (typeof OPERATION_METHODS)[number]
 export type SessionMethod = (typeof SESSION_METHODS)[number]
-export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod | SessionMethod
+export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod | SessionMethod | (typeof LOGGING_METHODS)[number]
 export type Operation = (typeof OPERATIONS)[number]
 '''
 

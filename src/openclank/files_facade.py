@@ -49,13 +49,12 @@ OPEN_TARGET_APPS = frozenset(
         "copal_notes",
         "document_editor",
         "editor",
-        "gallery",
         "imps",
         "library",
         "research",
     }
 )
-EXACT_REISSUE_PROVIDERS = frozenset({"copal", "gallery", "library"})
+EXACT_REISSUE_PROVIDERS = frozenset({"copal", "files", "library"})
 MAX_REVEAL_ANCESTORS = 32
 PUBLIC_PROVENANCE_KEYS = frozenset(
     {
@@ -202,6 +201,7 @@ class ProviderResource:
     # preserves compatibility with providers that have not negotiated a
     # platform adapter yet, while Host explicitly reports false off macOS.
     native_thumbnail_available: bool | None = None
+    native_icon_available: bool = False
     sort_kind: str | None = None
     child_sort_keys: tuple[str, ...] = ()
     # Provider-owned mutation receipt. This stays internal until FilesFacade
@@ -219,6 +219,7 @@ class ProviderPage:
     next_cursor: str | None = None
     total: int | None = None
     snapshot: str | None = None
+    complete: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -1693,7 +1694,7 @@ class FilesFacade:
                     item["receipt_id"] = history.get("receipt_id") or history.get("action_id")
             receipt = retain_import_binding({"operation_id": operation, "generation": context.policy_generation, "state": "complete", "items": [item]})
             self._save_operation(context, operation, digest, context.policy_generation, receipt)
-            return receipt
+            return _public_operation(receipt)
         if not isinstance(result, Mapping):
             failed = {"operation_id": operation, "generation": int(context.policy_generation), "state": "partial", "items": [{"item_id": item_id, "outcome": "failed", "code": "provider_unavailable"}]}
             self._save_operation(context, operation, digest, context.policy_generation, retain_import_binding(failed))
@@ -1711,7 +1712,7 @@ class FilesFacade:
         receipt["generation"] = int(context.policy_generation)
         receipt = retain_import_binding(receipt)
         self._save_operation(context, operation, digest, context.policy_generation, receipt)
-        return receipt
+        return _public_operation(receipt)
 
     async def prepare_attachment(self, context: ProviderContext, *, operation_id: str, generation: int, source: Mapping[str, Any], target: Mapping[str, Any], mode: str) -> dict[str, Any]:
         requested_generation = _strict_nonnegative_int(generation, "generation")
@@ -2045,6 +2046,7 @@ class FilesFacade:
                 "download_name": entry.download_name,
                 "preview_kind": entry.preview_kind,
                 "native_thumbnail_available": entry.native_thumbnail_available,
+                "native_icon_available": entry.native_icon_available,
                 "sort_kind": sort_kind or None,
                 "sort_keys": list(child_sort_keys),
             }
@@ -2088,9 +2090,7 @@ class FilesFacade:
         return (
             (app == "copal_notes" and entry.kind in {"document", "note", "wiki"})
             or (app == "editor" and entry.kind == "file")
-            # Imps is the retired Gallery's replacement owner for images;
-            # `gallery` stays for any not-yet-repointed legacy provider.
-            or (app in {"gallery", "imps"} and entry.kind == "image" and entry.preview_kind == "image")
+            or (app == "imps" and entry.kind == "image" and entry.preview_kind == "image")
             or (app == "document_editor" and entry.kind == "document")
             or (app == "chat" and entry.kind == "chat")
             or (app == "research" and entry.kind == "research")
@@ -2448,7 +2448,7 @@ class FilesFacade:
                     "exp": now + CURSOR_TTL_SECONDS * 1000,
                 }
             )
-        return {
+        result = {
             "version": FACADE_VERSION,
             "parent_id": parent.stable_id,
             "entries": entries,
@@ -2458,6 +2458,9 @@ class FilesFacade:
             "sort": normalized_sort,
             "sort_keys": list(sort_keys),
         }
+        if page.complete is not None:
+            result["search_complete"] = page.complete
+        return result
 
     async def stat(self, context: ProviderContext, *, resource_ref: str) -> dict[str, Any]:
         provider, ref = self._provider_for_ref(context, resource_ref, capability="stat")
@@ -3068,12 +3071,6 @@ class FilesFacade:
             "document_editor": {
                 "title", "language", "content", "version", "session_ref", "archived", "read_only",
             },
-            "gallery": {
-                "provider", "resource_id",
-                "filename", "prompt", "caption", "model", "size", "quality", "tags", "ai_tags",
-                "favorite", "taken_at", "created_at", "updated_at", "camera", "width", "height",
-                "file_size", "media_type", "read_only",
-            },
             "imps": {
                 "provider", "resource_id",
                 "filename", "prompt", "caption", "model", "size", "quality", "tags", "ai_tags",
@@ -3206,17 +3203,23 @@ class FilesFacade:
         width: int,
         height: int,
         scale: float,
+        icon: bool = False,
     ) -> bytes:
         provider, ref = self._provider_for_ref(context, resource_ref, capability="preview")
         render = getattr(provider, "thumbnail", None)
         if not callable(render):
             raise FilesFacadeError("native content thumbnail is unavailable", code="provider_unavailable")
+        if icon:
+            current = await provider.stat(context, origin_id=ref.origin_id)
+            if current.kind != "file" or not current.native_icon_available:
+                raise FilesFacadeError("native file icon is unavailable", code="provider_unavailable")
         png = await render(
             context,
             origin_id=ref.origin_id,
             width=width,
             height=height,
             scale=scale,
+            **({"icon": True} if icon else {}),
         )
         if len(png) > 4 * 1024 * 1024 or not png.startswith(b"\x89PNG\r\n\x1a\n"):
             raise FilesFacadeError("native content thumbnail is invalid", code="provider_unavailable")

@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK HWFIT SUB-MODULE
 // "What Fits?" hardware model fitting UI
@@ -1999,7 +2000,7 @@ export function _expandModelRow(row, modelData) {
 }
 
 const _HWFIT_ENGINE_GLYPHS = {
-  '': '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line><circle cx="8" cy="6" r="2" fill="currentColor" stroke="none"></circle><circle cx="16" cy="12" r="2" fill="currentColor" stroke="none"></circle><circle cx="10" cy="18" r="2" fill="currentColor" stroke="none"></circle></svg>',
+  '': uiIcon('sliders', 14),
   vllm: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l7 16 7-16"></path><path d="M14 4l4 9 3-9"></path></svg>',
   sglang: '<span aria-hidden="true" style="display:block;width:14px;height:14px;background:currentColor;-webkit-mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;"></span>',
   mlx: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18V6l4 7 4-7v12"></path><path d="M16 6v12"></path><path d="M20 6v12"></path></svg>',
@@ -2013,9 +2014,9 @@ function _hwfitEngineGlyph(value) {
 }
 
 const _HWFIT_USECASE_GLYPHS = {
-  general: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>',
-  multimodal: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>',
-  image_gen: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="M21 15l-5-5L5 21"></path></svg>',
+  general: uiIcon("chat", 14),
+  multimodal: uiIcon("eye", 14),
+  image_gen: uiIcon("image", 14),
 };
 
 function _hwfitUsecaseGlyph(value) {
@@ -2568,7 +2569,7 @@ export function _hwfitInit() {
         const saveBtn = entry.querySelector('.cookbook-server-save-btn.saved');
         if (saveBtn) {
           saveBtn.classList.remove('saved');
-          saveBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save';
+          saveBtn.innerHTML = uiIcon("save", 11, {"style":"margin-right:4px;flex-shrink:0;"}) + "Save";
         }
       });
     });
@@ -2608,7 +2609,7 @@ export function _hwfitInit() {
           }));
         } catch (_) {}
         saveBtn.classList.add('saved');
-        saveBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#50fa7b" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>Saved';
+        saveBtn.innerHTML = uiIcon("check", 11, {"style":"margin-right:4px;flex-shrink:0;","role":"inherit"}) + "Saved";
         uiModule.showToast('Server saved');
       });
     }

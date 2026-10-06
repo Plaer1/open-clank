@@ -17,20 +17,13 @@ def test_compare_uses_only_normalized_managed_routes():
     assert "headers" not in start_body
 
 
-def test_gallery_image_operations_use_managed_owner_scoped_routes():
-    body = Path("routes/gallery/gallery_routes.py").read_text(encoding="utf-8")
+def test_imps_operations_use_managed_owner_scoped_routes():
+    body = Path("routes/imps_routes.py").read_text(encoding="utf-8")
     assert "ModelEndpoint" not in body
-    assert "_managed_gallery_transform(" in body
-    for marker in (
-        "async def gallery_ai_upscale",
-        "async def gallery_style_transfer",
-        "async def inpaint_proxy",
-        "async def harmonize_image",
-    ):
-        section = body.split(marker, 1)[1].split("@router.", 1)[0]
-        assert "user = require_privilege(request, \"can_generate_images\")" in section
-        assert "_managed_gallery_transform(" in section
-        assert "owner=user" in section
+    assert "Direct image endpoints are retired" in body
+    assert 'require_privilege(request, "can_generate_images")' in body
+    for operation in ("image.inpaint", "image.img2img", "image.segment", "image.remove_background"):
+        assert operation in body
 
 
 def test_research_endpoint_resolution_uses_managed_owner_binding():

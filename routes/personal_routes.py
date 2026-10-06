@@ -1,5 +1,6 @@
 # routes/personal_routes.py
 """Routes for personal documents management."""
+import asyncio
 import os
 import hashlib
 import json
@@ -729,6 +730,14 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         APIRouter instance with personal docs routes
     """
     router = APIRouter(prefix="/api/personal")
+    # Each owner has one lifecycle lane for RAG/tracking mutations.  Different
+    # accounts can progress independently; one account cannot interleave an
+    # add, direct upload, or delete across the unsynchronised RAG index.
+    _owner_lifecycle_locks: dict[str, asyncio.Lock] = {}
+
+    def _owner_lifecycle_lock(owner: str | None) -> asyncio.Lock:
+        key = str(owner or "local-installation").strip().lower()
+        return _owner_lifecycle_locks.setdefault(key, asyncio.Lock())
 
     def _rag():
         """Get the current RAG manager, retrying init if needed."""
@@ -796,12 +805,19 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             # Use the RAGManager to index the directory
             rag = _rag()
             if rag:
-                result = rag.index_personal_documents(directory, owner=owner)
-                
+                # Directory indexing walks files and persists the derived RAG
+                # state.  Keep that blocking work off the request loop so a
+                # large admitted personal tree does not stall chat streams.
+                async with _owner_lifecycle_lock(owner):
+                    result = await asyncio.to_thread(
+                        rag.index_personal_documents, directory, owner=owner
+                    )
+                    if result["success"]:
+                        # Keep tracking in the same owner lifecycle transition as
+                        # indexing so a concurrent upload/delete cannot overwrite it.
+                        personal_docs_manager.add_directory(directory, index=False)
+
                 if result["success"]:
-                    # Also update the personal_docs_manager to track this directory
-                    personal_docs_manager.add_directory(directory, index=False)
-                    
                     return {
                         "success": True,
                         "message": f"Successfully indexed {result['indexed_count']} chunks from {directory}",
@@ -882,12 +898,14 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             else:
                 pending.append((upload, content_bytes))
 
-        result = _index_personal_upload_batch(
-            pending=pending,
-            user=user,
-            rag=rag,
-            personal_docs_manager=personal_docs_manager,
-        )
+        async with _owner_lifecycle_lock(user):
+            result = await asyncio.to_thread(
+                _index_personal_upload_batch,
+                pending=pending,
+                user=user,
+                rag=rag,
+                personal_docs_manager=personal_docs_manager,
+            )
 
         return {
             "success": True,
@@ -900,45 +918,45 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
     async def delete_file_from_rag(filepath: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
         """Delete a specific file from RAG index and optionally from disk."""
         try:
-            # Remove chunks from RAG vector store (best-effort)
-            removed = 0
-            rag = _rag()
-            if rag:
+            async with _owner_lifecycle_lock(owner):
+                # Remove chunks from RAG vector store (best-effort)
+                removed = 0
+                rag = _rag()
+                if rag:
+                    try:
+                        removed = rag.delete_by_source(filepath, owner=owner)
+                    except TypeError:
+                        # Keep narrow compatibility with older test/extension
+                        # doubles whose method predates owner-scoped RAG.  The
+                        # canonical Frankenmemory implementation accepts owner;
+                        # never use this fallback for it.
+                        removed = rag.delete_by_source(filepath)
+                    except Exception as e:
+                        logger.warning(f"RAG removal failed for {filepath}: {e}")
+
+                # Delete file from disk if it's in the caller's own uploads dir.
+                # Scope to the per-owner subdir, not the shared uploads root, so one
+                # admin can't delete another user's personal files by path.
+                deleted_from_disk = False
                 try:
-                    removed = rag.delete_by_source(filepath, owner=owner)
-                except TypeError:
-                    # Keep narrow compatibility with older test/extension
-                    # doubles whose method predates owner-scoped RAG.  The
-                    # canonical Frankenmemory implementation accepts owner;
-                    # never use this fallback for it.
-                    removed = rag.delete_by_source(filepath)
-                except Exception as e:
-                    logger.warning(f"RAG removal failed for {filepath}: {e}")
+                    abs_target = os.path.realpath(filepath)
+                    base_abs = os.path.realpath(_personal_upload_dir_for_owner(owner, create=False))
+                    in_uploads = (
+                        abs_target == base_abs
+                        or os.path.commonpath([abs_target, base_abs]) == base_abs
+                    )
+                except ValueError:
+                    # commonpath raises on mixed drives / non-comparable paths
+                    in_uploads = False
+                if in_uploads and abs_target != base_abs:
+                    try:
+                        os.remove(abs_target)
+                        deleted_from_disk = True
+                    except FileNotFoundError:
+                        pass  # already gone — race with another request or cleanup
 
-            # Delete file from disk if it's in the caller's own uploads dir.
-            # Scope to the per-owner subdir, not the shared uploads root, so one
-            # admin can't delete another user's personal files by path.
-            deleted_from_disk = False
-            try:
-                abs_target = os.path.realpath(filepath)
-                base_abs = os.path.realpath(_personal_upload_dir_for_owner(owner, create=False))
-                in_uploads = (
-                    abs_target == base_abs
-                    or os.path.commonpath([abs_target, base_abs]) == base_abs
-                )
-            except ValueError:
-                # commonpath raises on mixed drives / non-comparable paths
-                in_uploads = False
-            if in_uploads and abs_target != base_abs:
-                try:
-                    os.remove(abs_target)
-                    deleted_from_disk = True
-                except FileNotFoundError:
-                    pass  # already gone — race with another request or cleanup
-
-            # Exclude the file from the listing (persists across restarts)
-            personal_docs_manager.exclude_file(filepath)
-
+                # Exclude the file from the listing (persists across restarts)
+                personal_docs_manager.exclude_file(filepath)
             return {
                 "success": True,
                 "removed_chunks": removed,

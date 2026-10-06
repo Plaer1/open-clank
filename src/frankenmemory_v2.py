@@ -140,79 +140,20 @@ def _job_tables_ready(conn: sqlite3.Connection) -> bool:
     return required.issubset({str(row[0]) for row in rows})
 
 
-def _ensure_trust_schema(conn: sqlite3.Connection) -> None:
-    """Install the additive owner-relative Trust assignment stream.
-
-    The legacy ``trust``/``confidence`` columns remain compatibility fields;
-    this table is the only mutable user-facing Trust authority.  Assignments
-    are append-only and scoped to the authenticated owner.
-    """
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS fm_v2_trust_assignments (
-            owner_id TEXT NOT NULL,
-            assignment_id TEXT NOT NULL,
-            subject_kind TEXT NOT NULL,
-            subject_id TEXT NOT NULL,
-            subject_revision INTEGER NOT NULL,
-            workspace_key TEXT NOT NULL DEFAULT '',
-            project_key TEXT NOT NULL DEFAULT '',
-            assignment_revision INTEGER NOT NULL,
-            state TEXT NOT NULL,
-            trust REAL,
-            actor_type TEXT NOT NULL,
-            actor_id TEXT NOT NULL,
-            reason_code TEXT NOT NULL,
-            rationale TEXT NOT NULL DEFAULT '',
-            evidence_json TEXT NOT NULL DEFAULT '[]',
-            supersedes_assignment_id TEXT,
-            content_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY(owner_id, assignment_id),
-            UNIQUE(owner_id, subject_kind, subject_id, subject_revision, assignment_revision),
-            CHECK (subject_kind IN ('knowledge_revision','candidate_revision','source_revision','document_revision','code_claim_revision','derived_artifact_revision')),
-            CHECK (subject_revision > 0),
-            CHECK (project_key = '' OR workspace_key <> ''),
-            CHECK (state IN ('unreviewed','assigned','revoked')),
-            CHECK ((state = 'assigned' AND trust IS NOT NULL AND trust >= 0 AND trust <= 1) OR (state <> 'assigned' AND trust IS NULL)),
-            CHECK (actor_type = 'owner'),
-            CHECK (reason_code IN ('owner_review','owner_pin','owner_correction','owner_retraction','import_review','migration_review'))
-        )
-        """
-    )
-    conn.execute(
-        """CREATE INDEX IF NOT EXISTS idx_fm_v2_trust_latest
-           ON fm_v2_trust_assignments(owner_id, subject_kind, subject_id, subject_revision, assignment_revision DESC)"""
-    )
+def _require_trust_schema(conn: sqlite3.Connection) -> None:
+    """Admit the current native schema without creating missing sidecars."""
+    present = {row[1] for row in conn.execute("PRAGMA table_info(fm_v2_trust_assignments)")}
+    if not set(['owner_id', 'assignment_id', 'subject_kind', 'subject_id', 'subject_revision', 'workspace_key', 'project_key', 'assignment_revision', 'state', 'trust', 'actor_type', 'actor_id', 'reason_code', 'rationale', 'evidence_json', 'supersedes_assignment_id', 'content_hash', 'created_at']).issubset(present):
+        raise V2OperationError("unsupported_contract", "Legacy FM sidecars require .clanker/tools/migrations/python/secondary.py fm-v2-sidecars")
 
 
-def _ensure_manifest_schema(conn: sqlite3.Connection) -> None:
-    """Install the sealed derived-job manifest sidecar if absent."""
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS fm_v2_job_manifests (
-            owner_id TEXT NOT NULL,
-            manifest_id TEXT NOT NULL,
-            job_id TEXT NOT NULL,
-            phase TEXT NOT NULL,
-            selected_json TEXT NOT NULL,
-            completed_json TEXT NOT NULL DEFAULT '[]',
-            reused_json TEXT NOT NULL DEFAULT '[]',
-            failed_json TEXT NOT NULL DEFAULT '[]',
-            waived_json TEXT NOT NULL DEFAULT '[]',
-            config_hash TEXT NOT NULL,
-            model_hash TEXT NOT NULL,
-            tool_hash TEXT NOT NULL,
-            input_hash TEXT NOT NULL,
-            parent_manifest_id TEXT,
-            content_hash TEXT NOT NULL,
-            sealed_at TEXT NOT NULL,
-            PRIMARY KEY(owner_id, manifest_id),
-            UNIQUE(owner_id, job_id, phase),
-            CHECK (phase IN ('selection','outcome'))
-        )
-        """
-    )
+
+def _require_manifest_schema(conn: sqlite3.Connection) -> None:
+    """Admit the current native schema without creating missing sidecars."""
+    present = {row[1] for row in conn.execute("PRAGMA table_info(fm_v2_job_manifests)")}
+    if not set(['owner_id', 'manifest_id', 'job_id', 'phase', 'selected_json', 'completed_json', 'reused_json', 'failed_json', 'waived_json', 'config_hash', 'model_hash', 'tool_hash', 'input_hash', 'parent_manifest_id', 'content_hash', 'sealed_at']).issubset(present):
+        raise V2OperationError("unsupported_contract", "Legacy FM sidecars require .clanker/tools/migrations/python/secondary.py fm-v2-sidecars")
+
 
 
 def _required_text(value: Any, field: str) -> str:
@@ -307,6 +248,20 @@ def _json_list(value: Any, field: str) -> list[str]:
     return list(dict.fromkeys(item.strip() for item in value))
 
 
+class _AttachmentConnection(sqlite3.Connection):
+    def commit(self):
+        super().commit()
+        from src.openclank.attachment_admission import settle_references
+        settle_references(getattr(self, "attachment_claims", []))
+        self.attachment_claims = []
+
+    def rollback(self):
+        super().rollback()
+        from src.openclank.attachment_admission import settle_references
+        settle_references(getattr(self, "attachment_claims", []), committed=False)
+        self.attachment_claims = []
+
+
 class V2Repository:
     """Tenant-scoped append-only repository for the canonical v2 tables."""
 
@@ -314,7 +269,8 @@ class V2Repository:
         self.db_path = str(db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
+        conn = sqlite3.connect(self.db_path, timeout=30, isolation_level=None, factory=_AttachmentConnection)
+        conn.attachment_claims = []
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         if int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
@@ -323,8 +279,8 @@ class V2Repository:
         if not _tables_ready(conn):
             conn.close()
             raise V2OperationError("unsupported_contract", "Frankenmemory v2 schema is unavailable")
-        _ensure_trust_schema(conn)
-        _ensure_manifest_schema(conn)
+        _require_trust_schema(conn)
+        _require_manifest_schema(conn)
         return conn
 
     @staticmethod
@@ -339,6 +295,10 @@ class V2Repository:
         payload: Mapping[str, Any],
         now: str,
     ) -> str:
+        from src.openclank.attachment_admission import admit_references
+        admitted = admit_references(owner, "memery", payload)
+        if isinstance(conn, _AttachmentConnection):
+            conn.attachment_claims.extend(admitted)
         change_set_id = "cs_v2_" + uuid.uuid4().hex
         conn.execute(
             "INSERT INTO fm_v2_change_sets(owner_id,change_set_id,actor_type,actor_id,reason,source_event_id,contract_version,content_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -1900,7 +1860,7 @@ def seal_job_manifest(
             conn.execute("PRAGMA foreign_keys=ON")
             if not _tables_ready(conn):
                 raise V2OperationError("unsupported_contract", "Frankenmemory v2 schema is unavailable")
-            _ensure_manifest_schema(conn)
+            _require_manifest_schema(conn)
             # Sealing is a read-then-insert: a deferred transaction lets a
             # concurrent sealer pass the same existence check and hit the
             # UNIQUE(owner_id, job_id, phase) constraint instead of the
@@ -1936,7 +1896,7 @@ def list_current_records(
     owner: str,
     workspace_id: Optional[str] = None,
     project_id: Optional[str] = None,
-    limit: int = 1000,
+    limit: Optional[int] = 1000,
     require_legacy_presence: bool = False,
     identity: Optional[str] = None,
     db_path: str = FM_DB_PATH,
@@ -1956,17 +1916,18 @@ def list_current_records(
     identity_key = str(identity or "").strip()
     if not owner or (project and not workspace):
         return []
-    try:
-        limit = max(1, min(int(limit), 5000))
-    except (TypeError, ValueError):
-        limit = 1000
+    if limit is not None:
+        try:
+            limit = max(1, min(int(limit), 5000))
+        except (TypeError, ValueError):
+            limit = 1000
     try:
         with sqlite3.connect(db_path, timeout=30) as conn:
             conn.row_factory = sqlite3.Row
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if not {"fm_v2_knowledge_blocks", "fm_v2_knowledge_revisions"}.issubset(tables):
                 return []
-            _ensure_trust_schema(conn)
+            _require_trust_schema(conn)
             scopes = [("", "")]
             if workspace:
                 scopes.append((workspace, ""))
@@ -2003,7 +1964,7 @@ def list_current_records(
                     " OR r.source_event_id='memory:'||?)"
                 )
                 params.extend([identity_key, identity_key, identity_key])
-            params.append(limit)
+            params.append(-1 if limit is None else limit)
             rows = conn.execute(
                 f"""
                 WITH current_rows AS (
@@ -2164,7 +2125,7 @@ def search_current_records(
         owner=owner,
         workspace_id=workspace_id,
         project_id=project_id,
-        limit=min(5000, max(top_k * 8, 100)),
+        limit=None,
         require_legacy_presence=require_legacy_presence,
         db_path=db_path,
     )
@@ -2620,7 +2581,7 @@ def mirror_import_job(
             conn.execute("PRAGMA foreign_keys=ON")
             if not _tables_ready(conn):
                 return False
-            _ensure_manifest_schema(conn)
+            _require_manifest_schema(conn)
             payload = json.dumps({"filename": filename, "session_id": session_id, "suggestion_count": len(result or []), "suggestions": result or []}, sort_keys=True)
             job_id = "job_" + _hash(key)[:32]
             existing = conn.execute(
@@ -2673,3 +2634,65 @@ def mirror_import_job(
     except (OSError, sqlite3.Error, TypeError, ValueError):
         logger.exception("v2 import job mirror failed")
         return False
+
+
+def conversation_source_workspaces(*, owner: str, session_id: str, db_path: str) -> list[str]:
+    """Discover actual exact-chat capture bindings at the pinned authority."""
+    if not owner or not session_id:
+        raise V2OperationError("invalid_source", "owner and exact conversation id required")
+    with sqlite3.connect("file:" + __import__("urllib.parse", fromlist=["quote"]).quote(str(db_path), safe="/") + "?mode=ro", uri=True) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"curated", "raw", "candidates", "fm_v2_jobs"}.issubset(tables):
+            raise V2OperationError("source_detach_unavailable", "source authority schema is unavailable")
+        workspaces = {str(row[0] or "") for table in ("curated", "raw", "candidates") for row in conn.execute(f"SELECT DISTINCT workspace_id FROM {table} WHERE owner=? AND session_id=?", (owner, session_id))}
+        # Completed durable receipts preserve binding discovery on a retry
+        # after navigation links were already detached in another workspace.
+        for workspace, encoded in conn.execute("SELECT workspace_key,result_json FROM fm_v2_jobs WHERE owner_id=? AND kind IN ('conversation_capture','conversation_source_removed') AND state='succeeded'", (owner,)):
+            result = json.loads(encoded or "{}")
+            if isinstance(result, dict) and result.get("session_id") == session_id:
+                workspaces.add(str(workspace or ""))
+    return sorted(workspaces)
+
+
+def mark_conversation_source_removed(*, owner: str, session_id: str,
+                                     workspace_id: str, db_path: str) -> dict[str, Any]:
+    """Atomically detach exact chat navigation links; retain admitted content.
+
+    Memory event/evidence IDs remain valid independent lineage. A durable job
+    receipt makes a retry return the original committed counts.
+    """
+    if not str(owner or "").strip() or not str(session_id or "").strip():
+        raise V2OperationError("invalid_source", "owner and exact conversation id required")
+    key = "conversation-source-removed:" + _hash([owner, workspace_id, session_id])
+    now = _now()
+    with sqlite3.connect(db_path, timeout=30) as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("BEGIN IMMEDIATE")
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"curated", "raw", "candidates", "fm_v2_jobs"}.issubset(tables):
+            raise V2OperationError("source_detach_unavailable", "source authority schema is unavailable")
+        previous = conn.execute("SELECT result_json FROM fm_v2_jobs WHERE owner_id=? AND idempotency_key=? AND state='succeeded'", (owner, key)).fetchone()
+        if previous:
+            return {**json.loads(previous[0]), "already_applied": True}
+        counts = {}
+        for table in ("curated", "raw"):
+            rows = conn.execute(f"SELECT id,metadata FROM {table} WHERE owner=? AND session_id=? AND workspace_id=?", (owner, session_id, workspace_id)).fetchall()
+            for record_id, encoded in rows:
+                metadata = json.loads(encoded or "null")
+                if not isinstance(metadata, dict):
+                    metadata = {"previous_metadata": metadata} if metadata is not None else {}
+                metadata["conversation_source_removed"] = {"session_id": session_id, "removed_at": now}
+                conn.execute(f"UPDATE {table} SET session_id='',session_key='',metadata=? WHERE owner=? AND id=?", (json.dumps(metadata, sort_keys=True), owner, record_id))
+            counts[table] = len(rows)
+        counts["candidates"] = conn.execute(
+            "UPDATE candidates SET session_id='',reason=reason||? WHERE owner=? AND session_id=? AND workspace_id=?",
+            (" [conversation_source_removed:" + session_id + "]", owner, session_id, workspace_id),
+        ).rowcount
+        receipt = {"complete": True, "owner": owner, "session_id": session_id,
+                   "workspace_id": workspace_id, "detached": counts,
+                   "independent_content_retained": True, "already_applied": False}
+        job_id = "job_" + _hash(key)[:32]
+        conn.execute("INSERT INTO fm_v2_jobs(owner_id,job_id,kind,workspace_key,project_key,idempotency_key,state,attempt_count,input_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (owner, job_id, "conversation_source_removed", workspace_id, "", key, "queued", 0, _hash([owner, session_id]), now, now))
+        conn.execute("UPDATE fm_v2_jobs SET state='active',attempt_count=1 WHERE owner_id=? AND job_id=?", (owner, job_id))
+        conn.execute("UPDATE fm_v2_jobs SET state='succeeded',result_json=? WHERE owner_id=? AND job_id=?", (json.dumps(receipt, sort_keys=True), owner, job_id))
+        return receipt

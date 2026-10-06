@@ -153,6 +153,7 @@ export type AuthServices = {
     flowID: string
     redirectURI: string
     state: string
+    expiresAt: number
   }): Promise<ProviderAuth.Authorization | undefined>
   exchange(input: {
     providerID: ProviderID
@@ -210,6 +211,14 @@ function object(value: unknown, label: string): Record<string, unknown> {
 function text(value: unknown, label: string, max = 2048): string {
   if (typeof value !== "string" || value.length === 0 || value.length > max || value.includes("\0")) {
     throw new ProviderControlError(`${label} is invalid`)
+  }
+  return value
+}
+
+function userCode(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== "string" || !/^[A-Za-z0-9-]{4,64}$/.test(value)) {
+    throw new ProviderControlError("OAuth user code is invalid")
   }
   return value
 }
@@ -1158,6 +1167,7 @@ export class ControlPlane {
         flowID: flow.flowID,
         redirectURI: text(input.redirectURI, "OAuth redirect URI", 2048),
         state: text(input.state, "OAuth state", 256),
+        expiresAt: flow.expiresAt,
       })
     } catch (error) {
       this.flows.delete(flow.flowID)
@@ -1167,6 +1177,7 @@ export class ControlPlane {
       this.flows.delete(flow.flowID)
       throw new ProviderControlError("OAuth authorization did not start")
     }
+    const publicUserCode = userCode(authorization.userCode)
     if (authorization.method === "auto") {
       flow.task = this.exchange(flow)
     }
@@ -1175,6 +1186,7 @@ export class ControlPlane {
       url: authorization.url,
       method: authorization.method,
       instructions: authorization.instructions,
+      ...(publicUserCode === undefined ? {} : { userCode: publicUserCode }),
       expiresAt: flow.expiresAt,
     }
   }

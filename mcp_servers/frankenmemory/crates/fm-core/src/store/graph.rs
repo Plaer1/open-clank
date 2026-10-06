@@ -1282,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_v1_db_gains_graph_tables() {
+    fn legacy_v1_db_is_rejected_without_upgrade() {
         // Fresh store is already v2; simulate a v1 DB by dropping graph
         // tables and stamping v1, then re-running init.
         let s = store();
@@ -1294,16 +1294,12 @@ mod tests {
             .unwrap();
             conn.pragma_update(None, "user_version", 1).unwrap();
         }
-        s.init_tables().unwrap();
+        assert!(s.init_tables().is_err());
         let conn = s.conn.lock().unwrap();
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, crate::store::sqlite::SCHEMA_VERSION);
-        let n: i64 = conn
-            .query_row("SELECT count(*) FROM graph_nodes", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 0);
+        assert_eq!(v, 1);
     }
 }
 

@@ -156,14 +156,12 @@ ACHIEVEMENT_RARITY = {
 
 # Registered app destinations (clank://<key>).  Lesson bodies and Open
 # destination actions resolve through the shared registry in
-# static/js/copal/markdownRenderer.js; no /copal/* or separate Wiki/Gallery/Mind
-# launcher is taught here.
+# static/js/copal/markdownRenderer.js; Wiki is its own page workspace while
+# Gallery and Mind retain their current Files/Graph destinations.
 APP_DESTINATIONS = {
     "chat": {"label": "Chat", "href": "/", "locator": "#message"},
     "editor": {"label": "Editor", "href": "/editor", "locator": "[data-copal-view=notes]"},
-    # /wiki remains the compatibility route; the shipped destination is the
-    # shared Editor's notes window, with Wiki mode selected by the document.
-    "wiki": {"label": "Wiki in Editor", "href": "/wiki", "locator": "[data-copal-view=notes]"},
+    "wiki": {"label": "Wiki", "href": "/wiki", "locator": "[data-copal-view=wiki]"},
     "files": {"label": "Files", "href": "/files", "locator": "[data-files-launcher]"},
     "graph": {"label": "Graph", "href": "/graph", "locator": "[data-copal-view=graph]"},
     "galaxy": {"label": "Galaxy", "href": "/galaxy", "locator": "[data-copal-view=graph]"},
@@ -176,7 +174,7 @@ APP_DESTINATIONS = {
     "settings/history": {"label": "History", "href": "/settings/history", "locator": "#rail-settings"},
     "settings/file-access": {"label": "File access", "href": "/settings/file-access", "locator": "#rail-settings"},
     "settings/integrations": {"label": "Integrations", "href": "/settings/integrations", "locator": "#rail-settings"},
-    "memory": {"label": "Menmery", "href": "/memory", "locator": "#tool-memory-btn"},
+    "memory": {"label": "Memery", "href": "/memory", "locator": "#tool-memory-btn"},
 }
 
 
@@ -218,7 +216,7 @@ _CLASSES: tuple[dict[str, Any], ...] = (
     {
         "key": "house-collaborate",
         "title": "Work With Your Clanker",
-        "summary": "Models, chat identity, tool authority, goals, schedules and the difference between Menmery and Lore.",
+        "summary": "Models, chat identity, tool authority, goals, schedules and the difference between Memery and Lore.",
         "description": (
             "Open Clank assumes you already know how to talk to an assistant. "
             "These lessons cover what is distinctive here: account-aware models, "
@@ -397,25 +395,25 @@ _CLASSES: tuple[dict[str, Any], ...] = (
             ),
             _lesson(
                 "house-collaborate.menmery-and-lore",
-                "Menmery review and recall versus Lore recovery",
+                "Memery review and recall versus Lore recovery",
                 "Two different tools, used for two different jobs.",
                 "self-check",
                 "memory",
                 (
-                    "**Menmery** is the sidebar where memory lives: candidates "
+                    "**Memery** is the sidebar where memory lives: candidates "
                     "waiting for your review, and search over what you kept. You "
                     "accept a candidate explicitly; nothing is written behind your "
                     "back. **Lore** is recovery: retained versions of your work and "
                     "the receipts that let you restore them."
                 ),
                 (
-                    "Confusing the two wastes time. Menmery answers \"what does the "
+                    "Confusing the two wastes time. Memery answers \"what does the "
                     "assistant know about me?\" Lore answers \"how do I get yesterday's "
                     "version back?\" Review is about the future; restore is about the "
                     "past."
                 ),
                 (
-                    "Open [Menmery](clank://memory) and review a pending candidate — "
+                    "Open [Memery](clank://memory) and review a pending candidate — "
                     "accept one you actually want. Then search for a record and open "
                     "it. Separately, open a document's history and look at the "
                     "retained versions; those are Lore's material.\n\n"
@@ -586,24 +584,24 @@ _CLASSES: tuple[dict[str, Any], ...] = (
             ),
             _lesson(
                 "house-documents.wiki-within",
-                "Wiki pages and Markdown chunks in the same Editor",
-                "A Wiki-type page linked to a note, both opened and edited in one Editor.",
+                "Wiki pages and the shared Editor core",
+                "A Wiki page linked to a note, with shared identity and drafts across Wiki and Editor.",
                 "verified",
                 "wiki",
                 (
-                    "A Wiki page is a document type, not a separate application. "
-                    "Create one from the [Wiki view in Editor](clank://wiki) and it opens in "
-                    "the same Editor as everything else. Wiki pages hold Markdown "
+                    "[Wiki](clank://wiki) has its own page-authoring applet and uses "
+                    "the shared Editor document core. Choose New page, then use "
+                    "Rich formatting or explicit Source view. Wiki pages hold Markdown "
                     "chunks and link to other documents; the link is real, and the "
                     "backlink shows up on the target."
                 ),
                 (
-                    "One editor means one set of habits: the same shortcuts, the "
-                    "same links, the same search. The Wiki view is a filtered "
-                    "shelf of page types — the writing model does not change."
+                    "Wiki and Editor share the canonical document buffer, saves, history "
+                    "and attachments. Open in Editor or Open in Wiki changes presentation "
+                    "without copying the page or losing its unsaved draft."
                 ),
                 (
-                    "Open the [Wiki view in Editor](clank://wiki) and create a Wiki-type "
+                    "Open the [Wiki](clank://wiki) and create a Wiki-type "
                     "page. Write a short chunk and link it to another readable "
                     "document. Reopen the link, then check the backlink on the "
                     "target.\n\n"
@@ -1408,7 +1406,7 @@ def field_guide_manifest() -> dict[str, Any]:
         "lessons": lessons,
         "sections": copy.deepcopy(SECTION_SPECS),
         "suggestedOrder": list(SUGGESTED_ORDER),
-        "legacyLessonMap": dict(LEGACY_LESSON_MAP),
+        "legacyLessonMap": {},
         "legacyTemplateVersions": list(LEGACY_TEMPLATE_VERSIONS),
         "classKeys": list(CLASS_KEYS),
         "lessonKeys": [lesson["key"] for lesson in lessons],
@@ -1612,14 +1610,7 @@ def _install_courses(result: dict[str, Any], owner_id: str, manifest: dict[str, 
 
 
 def instantiate_field_guide(state: dict[str, Any], owner_id: str) -> dict[str, Any]:
-    """Install or upgrade the template into an owner state.
-
-    The previous same-key early return froze installed content forever.  This
-    entry point now installs on first use and upgrades older published
-    revisions in place, preserving edited/user-authored lessons and drafts and
-    recording the change for recovery.  Learner progress is never reset and
-    old self-check completions never become new feats.
-    """
+    """Install the current guide into fresh state; existing versions must be current."""
     result = copy.deepcopy(state)
     manifest = field_guide_manifest()
     validate_field_guide_manifest(manifest)
@@ -1628,72 +1619,18 @@ def instantiate_field_guide(state: dict[str, Any], owner_id: str) -> dict[str, A
     if installed.get("templateKey") == FIELD_GUIDE_TEMPLATE_KEY and installed.get("templateVersion") == FIELD_GUIDE_TEMPLATE_VERSION:
         return result
 
-    owner_suffix = hashlib.sha256(str(owner_id).encode("utf-8")).hexdigest()[:12]
-    upgrade_report: dict[str, Any] = {
-        "from": installed.get("templateVersion") or None,
-        "to": FIELD_GUIDE_TEMPLATE_VERSION,
-        "preservedEdited": [],
-        "replacedUnmodified": [],
-        "legacyProgress": [],
-        "legacyIdMap": dict(LEGACY_LESSON_MAP),
-    }
-
-    if installed.get("templateKey") == FIELD_GUIDE_TEMPLATE_KEY and installed.get("templateVersion") in LEGACY_TEMPLATE_VERSIONS:
-        # Versioned upgrade from the 17-Class chain.  Template-owned (unmodified)
-        # lessons are replaced; anything the learner or an author edited is kept
-        # as user content and is never overwritten.
-        for activity_id, activity in list(result.get("activities", {}).items()):
-            legacy_key = str(activity.get("fieldGuideKey") or "")
-            if not legacy_key or legacy_key not in LEGACY_LESSON_FINGERPRINTS:
-                continue
-            if _lesson_fingerprint(activity) == LEGACY_LESSON_FINGERPRINTS[legacy_key]:
-                upgrade_report["replacedUnmodified"].append({"lessonKey": legacy_key, "activityId": activity_id})
-            else:
-                upgrade_report["preservedEdited"].append({"lessonKey": legacy_key, "activityId": activity_id})
-        for event in result.get("events", []):
-            if event.get("type") != "activity.completed":
-                continue
-            data = event.get("data") or {}
-            legacy_key = str(data.get("fieldGuideKey") or "")
-            if legacy_key in LEGACY_LESSON_MAP:
-                upgrade_report["legacyProgress"].append({
-                    "oldLessonKey": legacy_key,
-                    "newLessonKey": LEGACY_LESSON_MAP[legacy_key],
-                    "at": event.get("at"),
-                    "countsTowardNewGuide": False,
-                })
-        # Drop only the unmodified template-owned courses/activities/badges.
-        # Edited field-guide records and every user-authored Class remain.
-        replaced_ids = {item["activityId"] for item in upgrade_report["replacedUnmodified"]}
-        replaced_courses = {
-            str(activity.get("courseId"))
-            for activity in result.get("activities", {}).values()
-            if activity.get("id") in replaced_ids
-        }
-        for activity_id in replaced_ids:
-            result.get("activities", {}).pop(activity_id, None)
-        for course_id in replaced_courses:
-            course = result.get("courses", {}).pop(course_id, None)
-            if not course:
-                continue
-            for module_id in list(course.get("moduleIds") or []):
-                result.get("modules", {}).pop(module_id, None)
-            for badge_id, badge in list(result.get("badges", {}).items()):
-                if badge.get("courseId") == course_id and str(badge.get("fieldGuideKey") or "").startswith("fg-"):
-                    result["badges"].pop(badge_id, None)
-        # Learner progress rows that pointed at removed template activities are
-        # left intact as history; projections ignore missing activities.  We
-        # deliberately do not delete enrolments or completion events.
-
+    if installed:
+        raise ValueError("This Field Guide uses an unsupported source format. Preserve it and convert it offline before importing it into the current release.")
+    upgrade_report = {"from": None, "to": FIELD_GUIDE_TEMPLATE_VERSION, "preservedEdited": [], "replacedUnmodified": [], "legacyProgress": [], "legacyIdMap": {}}
     result = _install_courses(result, owner_id, manifest, version_suffix=FIELD_GUIDE_TEMPLATE_VERSION)
 
-    # Keep the old-to-new mapping and upgrade report for historical display.
+    # Fresh template metadata belongs to the newly created catalogue.
     result["fieldGuide"] = {
         "templateKey": manifest["templateKey"],
         "templateVersion": manifest["templateVersion"],
         "coverageContract": manifest["coverageContract"],
         "suggestedOrder": manifest["suggestedOrder"],
-        "legacyLessonMap": dict(LEGACY_LESSON_MAP),
+        "legacyLessonMap": {},
         "ownerAccountId": owner_id,
         "freeExploration": True,
     }
@@ -1704,8 +1641,8 @@ def instantiate_field_guide(state: dict[str, Any], owner_id: str) -> dict[str, A
     # This is the TreeHouse-side Lore record; host-level Lore capture of the
     # same change is a separate integration boundary (see receipt).
     result.setdefault("events", []).append({
-        "id": f"event:field-guide-upgrade:{FIELD_GUIDE_TEMPLATE_VERSION}",
-        "type": "fieldGuide.upgraded",
+        "id": f"event:field-guide-install:{FIELD_GUIDE_TEMPLATE_VERSION}",
+        "type": "fieldGuide.installed",
         "subjectId": owner_id,
         "entityType": "fieldGuide",
         "entityId": FIELD_GUIDE_TEMPLATE_KEY,
@@ -1727,12 +1664,6 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def upgrade_field_guide(state: dict[str, Any], owner_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Explicit upgrade entry point.  Returns (state, upgrade report)."""
-    before = copy.deepcopy(state.get("extensions", {}).get("fieldGuideUpgrade") or {})
-    result = instantiate_field_guide(state, owner_id)
-    report = result.get("extensions", {}).get("fieldGuideUpgrade") or before
-    return result, report
 
 
 __all__ = [
@@ -1745,5 +1676,4 @@ __all__ = [
     "field_guide_manifest",
     "validate_field_guide_manifest",
     "instantiate_field_guide",
-    "upgrade_field_guide",
 ]

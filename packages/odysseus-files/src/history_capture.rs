@@ -201,9 +201,10 @@ impl HistoryServiceHook {
         let canonical = self.canonical_target(path)?;
         self.authorized_roots
             .iter()
-            .filter(|root| root.contains(&canonical))
-            .max_by_key(|root| root.canonical_path.components().count())
-            .map(|root| (root, canonical))
+            .enumerate()
+            .filter(|(_, root)| root.contains(&canonical))
+            .max_by_key(|(index, root)| (root.canonical_path.components().count(), std::cmp::Reverse(*index)))
+            .map(|(_, root)| (root, canonical))
             .ok_or_else(|| "resource is outside the authorized Files roots".into())
     }
 
@@ -245,10 +246,15 @@ impl HistoryServiceHook {
             }
             Ok(value)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = payload;
-            Err("history IPC is unsupported on this platform".into())
+            let mut frame = serde_json::to_vec(&payload).map_err(|error| error.to_string())?;
+            frame.push(b'\n');
+            if frame.len() > 1024 * 1024 { return Err("history frame exceeds the 1 MiB service limit".into()); }
+            let response = windows_channel::exchange(&self.socket_path, &frame).map_err(|error| error.to_string())?;
+            let value: Value = serde_json::from_slice(&response).map_err(|error| error.to_string())?;
+            if value.get("Error").is_some() || value.get("error").is_some() { return Err(value.to_string()); }
+            Ok(value)
         }
     }
 
@@ -560,7 +566,6 @@ impl MutationCaptureHook for HistoryServiceHook {
             );
             return Err("target is outside the authorized workspace root".into());
         }
-        let first = &targets[0];
         let mut resource_ids = Vec::with_capacity(targets.len());
         let mut created_resource_ids: Vec<String> = Vec::new();
         for target in targets {
@@ -615,7 +620,7 @@ impl MutationCaptureHook for HistoryServiceHook {
             "tool_id": "odysseus-files",
             "timestamp_millis": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
             "coverage": {"metadata": {"coverage_kind": if targets.len() > 1 { "Partial" } else { "KnownMutationHooks" }, "roots": self.authorized_roots.iter().map(|root| format!("root:{}", root.root_id)).collect::<Vec<_>>(), "exclusions": if targets.len() > 1 { vec!["non-primary targets use resource outcomes"] } else { Vec::<&str>::new() }}},
-            "per_resource_outcomes": targets.iter().zip(resource_ids.iter()).map(|(target, resource_id)| json!({"resource_id": resource_id, "coverage": if target.resource_id == first.resource_id { "ExactBeforeOnly" } else { "ObservedAfterOnly" }, "before_fingerprint": Self::fingerprint(target.before.as_deref())})).collect::<Vec<_>>(),
+            "per_resource_outcomes": null,
         });
         let envelope = json!({
             "protocol_version": 1,
@@ -730,34 +735,10 @@ impl MutationCaptureTicket for ServiceTicket {
     }
 
     fn complete(self: Box<Self>, after: Vec<CaptureAfter>) -> Result<(), String> {
+        let result: Result<(), String> = (|| {
         let auth = self.hook.auth();
         let control = json!({"protocol_version": 1, "auth": auth, "action_id": self.action_id});
-        if after.len() != self.resource_ids.len() {
-            let error = format!(
-                "history after-state cardinality mismatch: expected {}, got {}",
-                self.resource_ids.len(),
-                after.len()
-            );
-            self.hook
-                .set_status(&self.action_id, "pending", "after-cardinality", Some(error.clone()));
-            return Err(error);
-        }
-        let first = after.first();
-        let content = first.and_then(|target| target.after.as_deref());
-        let live = json!({"action_id": self.action_id, "status": "Committed", "fingerprint": HistoryServiceHook::fingerprint(content)});
-        // The physical mutation has already committed. Publish the live and
-        // exact after-state receipts before moving the service-owned identity.
-        // A registry failure is then an explicit reconciliation task attached
-        // to an already durable history action.
-        let mut registry_error = None;
-        if let Err(error) = self
-            .hook
-            .request(json!({"RecordLive": {"envelope": control, "receipt": live}}))
-        {
-            self.hook
-                .set_status(&self.action_id, "failed", "live", Some(error.clone()));
-            return Err(error);
-        }
+        if after.len() != self.resource_ids.len() { return Err("history after-state cardinality mismatch".into()); }
         let mut complete_entries = Vec::with_capacity(after.len());
         let mut staged_uploads = Vec::new();
         for ((item, resource_id), physical_path) in after
@@ -785,7 +766,7 @@ impl MutationCaptureTicket for ServiceTicket {
                 .after
                 .as_deref()
                 .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)));
-            let mut entry = json!({
+            let entry = json!({
                 "resource_key": {"account_id": self.hook.account_id, "workspace_id": self.hook.workspace_id, "provider": "odysseus-files", "resource_id": resource_id},
                 "locator": {"display_name": physical_path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default(), "location_label": physical_path.to_string_lossy(), "opaque_ref": resource_id},
                 "existence": if item.after.is_some() { "Present" } else { "Absent" },
@@ -797,6 +778,24 @@ impl MutationCaptureTicket for ServiceTicket {
                 "coverage": {"byte_len": item.after.as_ref().map_or(0, |bytes| bytes.len()), "content_digest": after_digest, "metadata": {"exact_after": true}},
                 "outcome": {"resource_id": resource_id, "status": "Committed", "revision": {"Opaque": {"kind": "fingerprint", "value": fingerprint}}},
             });
+            complete_entries.push(entry);
+        }
+        // Journal every terminal resource proof before any optional payload upload.
+        let committed_resources: Vec<Value> = complete_entries.iter().map(|entry| {
+            let mut proof = entry.clone();
+            for field in ["content", "staged_upload_id", "outcome"] { proof.as_object_mut().unwrap().remove(field); }
+            proof
+        }).collect();
+        let live = json!({"action_id": self.action_id, "status": "Committed",
+            "fingerprint": complete_entries.first().and_then(|entry| entry.get("fingerprint")),
+            "committed_resources": committed_resources});
+        self.hook.request(json!({"RecordLive": {"envelope": control, "receipt": live}}))?;
+        let mut registry_error = None;
+        if let Some(commit) = self.registry_commit.as_ref() {
+            self.hook.write_registry_journal(&self.action_id, commit)?;
+        }
+        for (entry, item) in complete_entries.iter_mut().zip(after.iter()) {
+            let fingerprint = entry["fingerprint"].as_str().unwrap_or("missing").to_owned();
             if let Some(content) = item.after.as_deref() {
                 if content.len() > INLINE_CONTENT_BYTES {
                     let upload_id = self.hook.stage_content(&self.action_id, content, &fingerprint)?;
@@ -805,7 +804,6 @@ impl MutationCaptureTicket for ServiceTicket {
                     staged_uploads.push(upload_id);
                 }
             }
-            complete_entries.push(entry);
         }
         let result = self.hook.request(json!({"CompleteBatch": {"envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id}, "batch_version": 1, "entries": complete_entries}}));
         if result.is_err() {
@@ -853,6 +851,33 @@ impl MutationCaptureTicket for ServiceTicket {
             .filter(|status| status.status == "complete")
             .map(|_| ())
             .ok_or_else(|| "history after capture failed".into())
+        })();
+        if let Err(error) = &result {
+            if let Some(commit) = self.registry_commit.as_ref() {
+                let _ = self.hook.write_registry_journal(&self.action_id, commit);
+            }
+            // If snapshot assembly failed before proof publication, retain the
+            // known committed outcome without inventing missing original proof.
+            let _ = self.hook.request(json!({"RecordLive": {
+                "envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id},
+                "receipt": {"action_id": self.action_id, "status": "Committed"}
+            }}));
+            let _ = self.hook.request(json!({"AfterUnavailable": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id}}));
+            self.hook.set_status(&self.action_id, "failed", "after", Some(error.clone()));
+        }
+        result
+    }
+
+    fn after_unavailable(self: Box<Self>, error: String) {
+        let _ = self.hook.request(json!({"RecordLive": {
+            "envelope": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id},
+            "receipt": {"action_id": self.action_id, "status": "Committed", "after_unavailable": true}
+        }}));
+        if let Some(commit) = self.registry_commit.as_ref() {
+            let _ = self.hook.write_registry_journal(&self.action_id, commit);
+        }
+        let _ = self.hook.request(json!({"AfterUnavailable": {"protocol_version": 1, "auth": self.hook.auth(), "action_id": self.action_id}}));
+        self.hook.set_status(&self.action_id, "failed", "after", Some(error));
     }
 
     fn abort(self: Box<Self>) {
@@ -964,4 +989,76 @@ fn encode_hex(bytes: &[u8]) -> String {
         output.push(TABLE[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+
+#[cfg(windows)]
+mod windows_channel {
+    use super::*;
+    use std::{ffi::c_void, io, time::{Duration, Instant}};
+    type Handle = *mut c_void;
+    #[repr(C)]
+    struct Overlapped { internal: usize, internal_high: usize, offset: u32, offset_high: u32, event: Handle }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateFileW(name: *const u16, access: u32, share: u32, attrs: *mut c_void, disposition: u32, flags: u32, template: Handle) -> Handle;
+        fn WaitNamedPipeW(name: *const u16, timeout: u32) -> i32;
+        fn CreateEventW(attrs: *mut c_void, manual: i32, initial: i32, name: *const u16) -> Handle;
+        fn ResetEvent(event: Handle) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+        fn ReadFile(handle: Handle, buffer: *mut c_void, size: u32, read: *mut u32, ov: *mut Overlapped) -> i32;
+        fn WriteFile(handle: Handle, buffer: *const c_void, size: u32, written: *mut u32, ov: *mut Overlapped) -> i32;
+        fn WaitForSingleObject(handle: Handle, timeout: u32) -> u32;
+        fn GetOverlappedResult(handle: Handle, ov: *mut Overlapped, count: *mut u32, wait: i32) -> i32;
+        fn CancelIoEx(handle: Handle, ov: *mut Overlapped) -> i32;
+    }
+    struct Owned(Handle);
+    impl Drop for Owned { fn drop(&mut self) { unsafe { CloseHandle(self.0); } } }
+    pub fn exchange(path: &Path, frame: &[u8]) -> io::Result<Vec<u8>> {
+        let logical = path.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "History endpoint is not Unicode"))?;
+        let name = format!(r"\\.\pipe\openclank-history-{:x}", Sha256::digest(logical.as_bytes()));
+        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let remaining = || deadline.saturating_duration_since(Instant::now()).as_millis().min(u32::MAX as u128) as u32;
+        let pipe = loop {
+            let handle = unsafe { CreateFileW(wide.as_ptr(), 0xc0000000, 0, std::ptr::null_mut(), 3, 0x40000000, std::ptr::null_mut()) };
+            if handle as isize != -1 { break Owned(handle); }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(231) || remaining() == 0 { return Err(error); }
+            if unsafe { WaitNamedPipeW(wide.as_ptr(), remaining()) } == 0 { return Err(io::Error::last_os_error()); }
+        };
+        let event = Owned(unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null()) });
+        if event.0.is_null() { return Err(io::Error::last_os_error()); }
+        let transfer = |buffer: *mut c_void, size: usize, write: bool| -> io::Result<usize> {
+            unsafe { ResetEvent(event.0); }
+            let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event: event.0 };
+            let mut count = 0;
+            let ok = unsafe { if write { WriteFile(pipe.0, buffer, size as u32, &mut count, &mut ov) } else { ReadFile(pipe.0, buffer, size as u32, &mut count, &mut ov) } };
+            if ok == 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(997) { return Err(error); }
+                if unsafe { WaitForSingleObject(event.0, remaining()) } != 0 {
+                    unsafe { CancelIoEx(pipe.0, &mut ov); GetOverlappedResult(pipe.0, &mut ov, &mut count, 1); }
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "History pipe deadline expired"));
+                }
+                if unsafe { GetOverlappedResult(pipe.0, &mut ov, &mut count, 0) } == 0 { return Err(io::Error::last_os_error()); }
+            }
+            Ok(count as usize)
+        };
+        let mut sent = 0;
+        while sent < frame.len() {
+            let count = transfer(frame[sent..].as_ptr() as *mut c_void, frame.len() - sent, true)?;
+            if count == 0 { return Err(io::Error::new(io::ErrorKind::WriteZero, "History pipe write made no progress")); }
+            sent += count;
+        }
+        let mut response = Vec::new();
+        loop {
+            let mut chunk = [0u8; 65536];
+            let count = transfer(chunk.as_mut_ptr() as *mut c_void, chunk.len(), false)?;
+            if count == 0 { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "History response ended before newline")); }
+            response.extend_from_slice(&chunk[..count]);
+            if response.len() > 1024 * 1024 { return Err(io::Error::new(io::ErrorKind::InvalidData, "History response exceeds frame limit")); }
+            if response.last() == Some(&b'\n') { return Ok(response); }
+        }
+    }
 }

@@ -32,7 +32,6 @@ RESERVED_COMMANDS = {
     "server",
     "engine",
     "hex",
-    "migrate",
     "help",
 }
 
@@ -81,11 +80,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     hexes.add_argument("hex_args", nargs=argparse.REMAINDER)
 
-    migrate = sub.add_parser("migrate", help="run fail-closed data migrations")
-    migrate_sub = migrate.add_subparsers(dest="migration_command", required=True)
-    providers = migrate_sub.add_parser("providers", help="migrate legacy provider state")
-    providers.add_argument("--owner")
-    providers.add_argument("--auth-disabled", action="store_true")
     return parser
 
 
@@ -259,25 +253,11 @@ def _run_hex(args) -> int:
     return int(hex_main(list(args.hex_args)))
 
 
-def _run_migrate(args) -> int:
-    script = REPO_ROOT / "scripts" / "openclank_bootstrap.py"
-    values = ["migrate", "providers"]
-    if args.owner:
-        values.extend(["--owner", args.owner])
-    if args.auth_disabled:
-        values.append("--auth-disabled")
-    if getattr(sys, "frozen", False):
-        from scripts.openclank_bootstrap import main as bootstrap_main
-
-        return int(bootstrap_main(values))
-    return subprocess.call([sys.executable, str(script), *values], cwd=REPO_ROOT)
-
-
 def _run_managed_server(values: list[str]) -> int:
     """Private frozen entrypoint used by local TUI auto-start.
 
     It is intentionally absent from argparse/help and is accepted only by a
-    frozen release payload.  Verification and migration finish before the
+    frozen release payload.  Verification and current-store validation finish before the
     FastAPI application module is imported.
     """
 
@@ -355,8 +335,6 @@ def main(argv: list[str] | None = None) -> int:
             return _run_engine(args)
         if args.command == "hex":
             return _run_hex(args)
-        if args.command == "migrate":
-            return _run_migrate(args)
         return 2
     except (ProfileError, ServerManagerError, TuiClientError) as exc:
         print(f"openclank: {exc}", file=sys.stderr)

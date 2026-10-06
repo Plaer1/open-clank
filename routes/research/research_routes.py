@@ -13,9 +13,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from core.middleware import INTERNAL_TOOL_OWNER_HEADER, INTERNAL_TOOL_USER
-from src.auth_helpers import _auth_disabled, get_current_user
-from core.auth import RESERVED_USERNAMES
+from core.middleware import INTERNAL_TOOL_USER
+from src.auth_helpers import effective_user, require_authenticated_request
 from src.constants import DEEP_RESEARCH_DIR
 from src.openclank.chat_routing import (
     ChatRouteUnavailable,
@@ -208,10 +207,9 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         data isn't owner-scoped in the on-disk JSON yet, so we at least
         block anonymous access. Multi-tenant deploys should additionally
         verify the session belongs to this user."""
-        user = get_current_user(request)
+        require_authenticated_request(request)
+        user = str(effective_user(request) or "").strip().lower()
         if not user:
-            if _auth_disabled():
-                return ""
             raise HTTPException(401, "Not authenticated")
         return user
 
@@ -488,20 +486,18 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         """Launch a research job from the dedicated panel."""
         from src.auth_helpers import require_privilege
         user = require_privilege(request, "can_use_research")
-        if user == INTERNAL_TOOL_USER:
-            tool_owner = (request.headers.get(INTERNAL_TOOL_OWNER_HEADER) or "").strip()
-            if tool_owner and tool_owner not in RESERVED_USERNAMES:
-                auth_mgr = getattr(request.app.state, "auth_manager", None)
-                if auth_mgr is not None and getattr(auth_mgr, "is_configured", False):
-                    try:
-                        privs = auth_mgr.get_privileges(tool_owner) or {}
-                        if not privs.get("can_use_research", True):
-                            raise HTTPException(403, f"Your account is not allowed to can use research.")
-                    except HTTPException:
-                        raise
-                    except Exception:
-                        pass
-                user = tool_owner
+        internal_request = user == INTERNAL_TOOL_USER
+        user = _require_user(request)
+        if internal_request:
+            auth_mgr = getattr(request.app.state, "auth_manager", None)
+            if auth_mgr is None:
+                raise HTTPException(503, "Privilege authority unavailable")
+            try:
+                privs = auth_mgr.get_privileges(user)
+            except Exception as exc:
+                raise HTTPException(503, "Privilege authority unavailable") from exc
+            if not isinstance(privs, dict) or privs.get("can_use_research") is not True:
+                raise HTTPException(403, "Your account is not allowed to use research.")
         session_id = f"rp-{uuid.uuid4().hex[:12]}"
 
         try:

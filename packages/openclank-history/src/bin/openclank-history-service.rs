@@ -1,49 +1,39 @@
-//! Unix single-writer history service boundary. Windows transport is unsupported here.
+//! Authenticated single-writer History boundary with native host transport.
 
-#[cfg(unix)]
 use openclank_history::catalog::{ActionRecord, ActionState, BeginResult};
-#[cfg(unix)]
 use openclank_history::operations::{
     batch_capture_digest, begin, capture_input_digest, BatchAfterInput, BatchCaptureInput,
     HistoryCoordinator,
 };
-#[cfg(unix)]
 use openclank_history::protocol::{
     validate as protocol_validate, validate_control as protocol_validate_control,
     BatchCompleteEntry, BatchPrepareEntry, ControlEnvelope, ProtocolError, RequestEnvelope, ResourceHandle,
-    ServiceRequest, ServiceResponse,
+    ResourceVersionRestorePreview, RestoreDestinationPreview, RestoreEffect, ServiceRequest,
+    ServiceResponse,
 };
-#[cfg(unix)]
 use openclank_history::registry::{ResourceRegistration, ResourceRegistry};
-#[cfg(unix)]
 use openclank_history::restore::{
     apply_restore_authorized_durable, prepare_restore_authorized, FilesystemRestoreProvider,
-    RestoreProvider,
+    RestoreProvider, RestoreRequest,
 };
-#[cfg(unix)]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(unix)]
 const MAX_FRAME: usize = 1024 * 1024;
 const MAX_BATCH_RESOURCES: usize = 1024;
 const MAX_BATCH_INLINE_BYTES: usize = 512 * 1024;
-#[cfg(unix)]
 const MAX_STAGE_CHUNK: usize = 512 * 1024;
 /// Staging is a disk-safety reservation, not a per-file eligibility limit. A
 /// provider may upload any size that its configured history budget and the
 /// available staging reservation can admit. Operators can tune this bound for
 /// a small disk with the environment setting; it is deliberately much larger
 /// than the IPC frame size.
-#[cfg(unix)]
 const DEFAULT_STAGING_QUOTA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-#[cfg(unix)]
 const DEFAULT_STAGING_TTL_MILLIS: u64 = 15 * 60 * 1000;
-#[cfg(unix)]
 const DEFAULT_MAX_ACTIVE_STAGES: usize = 64;
 
-#[cfg(unix)]
 #[derive(Clone, Debug, serde::Deserialize)]
 struct ServerCredential {
     actor_id: String,
@@ -59,7 +49,6 @@ struct ServerCredential {
 /// from its root registry and passed to this process at startup. A request may
 /// name only one of these root ids; the path is checked against the same record
 /// before it enters the service-owned resource map.
-#[cfg(unix)]
 #[derive(Clone, Debug, serde::Deserialize)]
 struct AuthorizedHistoryRoot {
     root_id: String,
@@ -70,24 +59,23 @@ struct AuthorizedHistoryRoot {
     account_ids: BTreeSet<String>,
     #[serde(default)]
     workspace_ids: BTreeSet<String>,
+    /// Empty preserves assigned-root semantics; trusted host roots bind exact human actors.
+    #[serde(default)]
+    actor_ids: BTreeSet<String>,
 }
 
-#[cfg(unix)]
 fn default_root_kind() -> String {
     "recursive_directory".into()
 }
 
-#[cfg(unix)]
 fn root_is_exact(root: &AuthorizedHistoryRoot) -> bool {
     root.kind == "exact_file"
 }
 
-#[cfg(unix)]
 struct StagedIoPermit {
     active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[cfg(unix)]
 impl Drop for StagedIoPermit {
     fn drop(&mut self) {
         self.active
@@ -95,7 +83,6 @@ impl Drop for StagedIoPermit {
     }
 }
 
-#[cfg(unix)]
 #[derive(Clone, Debug)]
 struct StagedUpload {
     actor_id: String,
@@ -111,14 +98,12 @@ struct StagedUpload {
     io_active_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[cfg(unix)]
 #[derive(Clone, Debug)]
 struct OwnedStagedUpload {
     upload_id: String,
     io_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
-#[cfg(unix)]
 #[derive(Clone, Debug)]
 struct AuthBindings {
     credentials: Vec<ServerCredential>,
@@ -126,7 +111,6 @@ struct AuthBindings {
     legacy_token: Option<String>,
 }
 
-#[cfg(unix)]
 #[derive(Clone, Debug, serde::Deserialize)]
 struct AuthorityManifest {
     generation: u64,
@@ -135,7 +119,6 @@ struct AuthorityManifest {
     authorized_roots: Vec<AuthorizedHistoryRoot>,
 }
 
-#[cfg(unix)]
 impl AuthBindings {
     fn reload_credentials_file(&mut self, path: Option<&std::path::Path>) -> Vec<String> {
         let Some(path) = path else {
@@ -323,7 +306,6 @@ fn qualification_abort(stage: &str) {
     }
 }
 
-#[cfg(unix)]
 fn valid_upload_id(upload_id: &str) -> bool {
     upload_id.len() <= 128
         && !upload_id.is_empty()
@@ -332,7 +314,6 @@ fn valid_upload_id(upload_id: &str) -> bool {
             .any(|character| character.is_whitespace() || matches!(character, '/' | '\\' | '\0'))
 }
 
-#[cfg(unix)]
 fn staged_fingerprint_valid(fingerprint: &str, content_length: u64) -> bool {
     let Some(rest) = fingerprint.strip_prefix("sha256:") else {
         return false;
@@ -347,18 +328,15 @@ fn staged_fingerprint_valid(fingerprint: &str, content_length: u64) -> bool {
         && length.parse::<u64>().ok() == Some(content_length)
 }
 
-#[cfg(unix)]
 fn staged_upload_path(root: &std::path::Path, upload_id: &str) -> std::path::PathBuf {
     root.join(format!(".openclank-stage-{upload_id}.part"))
 }
 
-#[cfg(unix)]
 fn remove_staged_upload(upload: &StagedUpload, staged_bytes: &std::sync::atomic::AtomicU64) {
     let _ = std::fs::remove_file(&upload.path);
     staged_bytes.fetch_sub(upload.content_length, std::sync::atomic::Ordering::AcqRel);
 }
 
-#[cfg(unix)]
 async fn remove_owned_staged_uploads(
     staged_uploads: &std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StagedUpload>>>,
     staged_bytes: &std::sync::atomic::AtomicU64,
@@ -383,7 +361,6 @@ async fn remove_owned_staged_uploads(
     }
 }
 
-#[cfg(unix)]
 async fn owned_staged_ids_for_entries(
     staged_uploads: &std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StagedUpload>>>,
     entries: &[BatchPrepareEntry],
@@ -420,7 +397,6 @@ async fn owned_staged_ids_for_entries(
         .collect()
 }
 
-#[cfg(unix)]
 async fn read_owned_staged_upload(
     staged_uploads: &std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StagedUpload>>>,
     captured: &OwnedStagedUpload,
@@ -486,7 +462,6 @@ async fn read_owned_staged_upload(
     verification.0
 }
 
-#[cfg(unix)]
 fn reap_staged_uploads(
     uploads: &mut BTreeMap<String, StagedUpload>,
     now_millis: u64,
@@ -511,7 +486,6 @@ fn reap_staged_uploads(
     }
 }
 
-#[cfg(unix)]
 fn verify_staged_upload(upload: &StagedUpload) -> Result<(), String> {
     let metadata = std::fs::metadata(&upload.path).map_err(|error| error.to_string())?;
     if metadata.len() != upload.content_length || upload.written != upload.content_length {
@@ -557,20 +531,6 @@ fn verify_staged_upload(upload: &StagedUpload) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn available_staging_bytes(path: &std::path::Path) -> Option<u64> {
-    let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
-    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // `path` is a NUL-free, service-owned staging directory and `stats` is
-    // initialized only after the OS reports success.
-    let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
-    if result != 0 {
-        return None;
-    }
-    let stats = unsafe { stats.assume_init() };
-    (stats.f_bavail as u64).checked_mul(stats.f_frsize as u64)
-}
-
 #[cfg(all(unix, feature = "test_faults"))]
 fn qualification_stage_io_delay() {
     let Some(milliseconds) = std::env::var("OPENCLANK_HISTORY_TEST_STAGE_IO_DELAY_MS")
@@ -583,7 +543,6 @@ fn qualification_stage_io_delay() {
     std::thread::sleep(std::time::Duration::from_millis(milliseconds));
 }
 
-#[cfg(unix)]
 fn staging_budget_error(
     coordinator: &HistoryCoordinator,
     staging_root: &std::path::Path,
@@ -612,7 +571,7 @@ fn staging_budget_error(
     // Leave a small operational reserve for the catalog and the next atomic
     // rename. This check is only a disk admission guard; it does not make a
     // permanent file-size eligibility rule.
-    let free = available_staging_bytes(staging_root).unwrap_or(u64::MAX);
+    let free = openclank_history::platform::available_bytes(staging_root).ok_or("history_paused_disk: available disk capacity could not be established")?;
     let free_for_stage = free.saturating_sub(64 * 1024 * 1024);
     if requested > free_for_stage {
         return Err(format!(
@@ -622,7 +581,6 @@ fn staging_budget_error(
     Ok(())
 }
 
-#[cfg(unix)]
 async fn handle_staging_fast(
     request: ServiceRequest,
     auth_bindings: &AuthBindings,
@@ -718,8 +676,7 @@ async fn handle_staging_fast(
                                     Ok(file) => {
                                         #[cfg(unix)]
                                         {
-                                            use std::os::unix::fs::PermissionsExt;
-                                            let _ = file.set_permissions(
+                                                                                    let _ = file.set_permissions(
                                                 std::fs::Permissions::from_mode(0o600),
                                             );
                                         }
@@ -1308,20 +1265,6 @@ async fn handle_staging_fast(
     }
 }
 
-#[cfg(unix)]
-struct SocketGuard {
-    socket: String,
-    lock: String,
-}
-#[cfg(unix)]
-impl Drop for SocketGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket);
-        let _ = std::fs::remove_file(&self.lock);
-    }
-}
-
-#[cfg(unix)]
 async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> std::io::Result<Option<Vec<u8>>> {
@@ -1349,7 +1292,6 @@ async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
-#[cfg(unix)]
 fn owner_allowed(owner: &str, actor: &str, account: &str, grants: &[(String, String)]) -> bool {
     owner == account
         || grants
@@ -1357,7 +1299,59 @@ fn owner_allowed(owner: &str, actor: &str, account: &str, grants: &[(String, Str
             .any(|(granted_actor, granted_owner)| granted_actor == actor && granted_owner == owner)
 }
 
-#[cfg(unix)]
+fn registered_files_resource_key(
+    resource_id: &str,
+    auth: &openclank_history::protocol::AuthContext,
+    grants: &[(String, String)],
+    resource_map: &std::path::Path,
+    host_root: &std::path::Path,
+    authorized_roots: &[AuthorizedHistoryRoot],
+    allow_inactive_history: bool,
+) -> Result<
+    (
+        openclank_history::catalog::ResourceKey,
+        ResourceHandle,
+        ResourceRegistration,
+    ),
+    &'static str,
+> {
+    if resource_id.is_empty() || resource_id.len() > 256 {
+        return Err("resource_not_found");
+    }
+    let registry = ResourceRegistry::load(resource_map).map_err(|_| "resource_unavailable")?;
+    let Some(entry) = registry.entries.get(resource_id).cloned() else {
+        return Err("resource_not_found");
+    };
+    if (!entry.active && !allow_inactive_history)
+        || entry.account_id.is_empty()
+        || entry.workspace_id.is_empty()
+        || !owner_allowed(
+            &entry.account_id,
+            &auth.actor_id,
+            &auth.account_id,
+            grants,
+        )
+    {
+        return Err("resource_unavailable");
+    }
+    if resolve_registered_path(&auth.actor_id, &entry, host_root, authorized_roots).is_err() {
+        return Err("resource_unavailable");
+    }
+    let key = openclank_history::catalog::ResourceKey {
+        account_id: entry.account_id.clone(),
+        workspace_id: entry.workspace_id.clone(),
+        provider: "odysseus-files".into(),
+        resource_id: entry.resource_id.clone(),
+    };
+    let handle = ResourceHandle {
+        resource_id: entry.resource_id.clone(),
+        account_id: entry.account_id.clone(),
+        workspace_id: entry.workspace_id.clone(),
+        generation: entry.generation,
+    };
+    Ok((key, handle, entry))
+}
+
 fn request_resources_allowed(
     request: &openclank_history::operations::ActionRequest,
     actor: &str,
@@ -1372,7 +1366,6 @@ fn request_resources_allowed(
             .all(|resource| owner_allowed(&resource.account_id, actor, account, grants))
 }
 
-#[cfg(unix)]
 fn trusted_registry_aliases(
     request: &openclank_history::operations::ActionRequest,
     resource_map: &std::path::Path,
@@ -1402,13 +1395,11 @@ fn trusted_registry_aliases(
         .collect()
 }
 
-#[cfg(unix)]
 fn complete_batch_digest(entries: &[BatchCompleteEntry]) -> String {
     let bytes = serde_json::to_vec(entries).expect("complete batch entries are serializable");
     blake3::hash(&bytes).to_hex().to_string()
 }
 
-#[cfg(unix)]
 fn authorize(
     coordinator: &HistoryCoordinator,
     envelope: &ControlEnvelope,
@@ -1446,7 +1437,6 @@ fn authorize(
     Ok(action)
 }
 
-#[cfg(unix)]
 fn valid_resource_id(resource_id: &str) -> bool {
     resource_id.starts_with("file:")
         && resource_id.len() <= 256
@@ -1455,7 +1445,44 @@ fn valid_resource_id(resource_id: &str) -> bool {
             .any(|character| character.is_whitespace() || matches!(character, '/' | '\\' | '\0'))
 }
 
-#[cfg(unix)]
+/// A restricted registered resource cannot be borrowed by another actor in
+/// capture/batch/control requests, even when the account credential is wildcard.
+fn restricted_resource_frame(frame: &[u8], map: &std::path::Path, roots: &[AuthorizedHistoryRoot], bindings: &AuthBindings, coordinator: &HistoryCoordinator) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(frame) else { return false; };
+    let Some(body) = value.as_object().and_then(|object| object.values().next()) else { return false; };
+    let Some(auth_value) = body.get("envelope").unwrap_or(body).get("auth") else { return false; };
+    let Ok(auth) = serde_json::from_value::<openclank_history::protocol::AuthContext>(auth_value.clone()) else { return false; };
+    let exact_binding = bindings.authenticate(&auth).is_ok_and(|binding| binding.actor_id != "*" && binding.actor_id == auth.actor_id);
+    let Ok(registry) = ResourceRegistry::load(map) else { return roots.iter().any(|root| !root.actor_ids.is_empty()); };
+    fn root_denied(actors: &BTreeSet<String>, actor: &str, exact: bool) -> bool { !actors.is_empty() && (!exact || !actors.contains(actor)) }
+    fn entry_denied(entry: &ResourceRegistration, actor: &str, exact: bool, roots: &[AuthorizedHistoryRoot]) -> bool {
+        root_denied(&entry.actor_ids, actor, exact) || roots.iter().any(|root| root.root_id == entry.root_id && root_denied(&root.actor_ids, actor, exact))
+    }
+    fn denied(value: &serde_json::Value, actor: &str, exact: bool, registry: &ResourceRegistry, roots: &[AuthorizedHistoryRoot], coordinator: &HistoryCoordinator) -> bool {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(entry) = object.get("resource_id").and_then(|id| id.as_str()).and_then(|id| registry.entries.get(id)) {
+                    if entry_denied(entry, actor, exact, roots) { return true; }
+                }
+                if let Some(root) = object.get("root_id").and_then(|id| id.as_str()).and_then(|id| roots.iter().find(|root| root.root_id == id)) {
+                    if root_denied(&root.actor_ids, actor, exact) { return true; }
+                }
+                for key in ["action_id", "source_action_id"] {
+                    if let Some(action) = object.get(key).and_then(|id| id.as_str()).and_then(|id| coordinator.catalog().get_action(id).ok().flatten()) {
+                        for resource in std::iter::once(&action.resource_key).chain(action.guard_resource_ids.iter()).chain(action.modified_resource_ids.iter()) {
+                            if registry.entries.get(&resource.resource_id).is_some_and(|entry| entry_denied(entry, actor, exact, roots)) { return true; }
+                        }
+                    }
+                }
+                object.values().any(|value| denied(value, actor, exact, registry, roots, coordinator))
+            }
+            serde_json::Value::Array(values) => values.iter().any(|value| denied(value, actor, exact, registry, roots, coordinator)),
+            _ => false,
+        }
+    }
+    denied(body, &auth.actor_id, exact_binding, &registry, roots, coordinator)
+}
+
 fn registry_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1463,9 +1490,9 @@ fn registry_timestamp() -> u64 {
         .as_millis() as u64
 }
 
-#[cfg(unix)]
 fn registry_registration(
     registry: &ResourceRegistry,
+    actor_id: &str,
     resource_id: &str,
     account_id: &str,
     workspace_id: &str,
@@ -1482,6 +1509,7 @@ fn registry_registration(
         return Err("resource registration path is invalid".into());
     }
     let (root_id, root_path) = registry_destination(
+        actor_id,
         account_id,
         workspace_id,
         root_id,
@@ -1496,6 +1524,7 @@ fn registry_registration(
     if let Some(existing) =
         registry.active_for_path(account_id, workspace_id, &root_path, relative_path)
     {
+        resolve_registered_path(actor_id, existing, host_root, authorized_roots)?;
         if !resource_id.is_empty() && existing.resource_id != resource_id {
             return Err("resource path is already bound to another identity".into());
         }
@@ -1515,6 +1544,7 @@ fn registry_registration(
     }
     Ok((
         ResourceRegistration {
+            actor_ids: authorized_roots.iter().find(|root| root.root_id == root_id).map(|root| root.actor_ids.clone()).unwrap_or_default(),
             resource_id: id,
             account_id: account_id.to_owned(),
             workspace_id: workspace_id.to_owned(),
@@ -1529,8 +1559,8 @@ fn registry_registration(
     ))
 }
 
-#[cfg(unix)]
 fn registry_destination(
+    actor_id: &str,
     account_id: &str,
     workspace_id: &str,
     requested_root_id: Option<&str>,
@@ -1557,7 +1587,8 @@ fn registry_destination(
             .iter()
             .find(|binding| binding.root_id == requested_root_id)
             .ok_or_else(|| "provider root identity is unauthorized".to_owned())?;
-        if (!binding.account_ids.is_empty() && !binding.account_ids.contains(account_id))
+        if (!binding.actor_ids.is_empty() && !binding.actor_ids.contains(actor_id))
+            || (!binding.account_ids.is_empty() && !binding.account_ids.contains(account_id))
             || (!binding.workspace_ids.is_empty() && !binding.workspace_ids.contains(workspace_id))
         {
             return Err("provider root is unauthorized for this account/workspace".into());
@@ -1611,12 +1642,13 @@ fn registry_destination(
     Ok((root_id, root.to_string_lossy().into_owned()))
 }
 
-#[cfg(unix)]
 fn resolve_registered_path(
+    actor_id: &str,
     entry: &ResourceRegistration,
     host_root: &std::path::Path,
     authorized_roots: &[AuthorizedHistoryRoot],
 ) -> Result<std::path::PathBuf, String> {
+    if !entry.actor_ids.is_empty() && !entry.actor_ids.contains(actor_id) { return Err("registered provider resource is unauthorized for this actor".into()); }
     let root = if authorized_roots.is_empty() {
         ResourceRegistry::canonical_root(&entry.root_path, host_root)
             .map_err(|error| format!("registered root is unauthorized: {error}"))?
@@ -1625,7 +1657,8 @@ fn resolve_registered_path(
             .iter()
             .find(|binding| binding.root_id == entry.root_id)
             .ok_or_else(|| "registered provider root is no longer authorized".to_owned())?;
-        if (!binding.account_ids.is_empty() && !binding.account_ids.contains(&entry.account_id))
+        if (!binding.actor_ids.is_empty() && !binding.actor_ids.contains(actor_id))
+            || (!binding.account_ids.is_empty() && !binding.account_ids.contains(&entry.account_id))
             || (!binding.workspace_ids.is_empty()
                 && !binding.workspace_ids.contains(&entry.workspace_id))
         {
@@ -1689,7 +1722,142 @@ fn resolve_registered_path(
     Ok(resolved)
 }
 
-#[cfg(unix)]
+async fn restore_registered_resource_version(
+    coordinator: &HistoryCoordinator,
+    envelope: ControlEnvelope,
+    restore_id: String,
+    resource_id: String,
+    version_ref: String,
+    expected_destination_fingerprint: String,
+    auth_bindings: &AuthBindings,
+    grants: &[(String, String)],
+    resource_map: &std::path::Path,
+    host_root: &std::path::Path,
+    receipt_root: &std::path::Path,
+    authorized_roots: &[AuthorizedHistoryRoot],
+) -> ServiceResponse {
+    if let Err(error) = auth_bindings.validate_control_cap(&envelope, "restore") {
+        return ServiceResponse::Error {
+            code: format!("{error:?}"),
+        };
+    }
+    if restore_id.trim().is_empty()
+        || restore_id.len() > 256
+        || envelope.action_id != restore_id
+        || expected_destination_fingerprint.trim().is_empty()
+        || expected_destination_fingerprint.len() > 256
+    {
+        return ServiceResponse::Error {
+            code: "selected restore requires a matching restore id and reviewed destination fingerprint".into(),
+        };
+    }
+    let (destination_key, _handle, registration) = match registered_files_resource_key(
+        &resource_id,
+        &envelope.auth,
+        grants,
+        resource_map,
+        host_root,
+        authorized_roots,
+        true,
+    ) {
+        Ok(value) => value,
+        Err(code) => {
+            return ServiceResponse::Unavailable {
+                code: code.into(),
+                message: "registered Files resource is missing or unavailable".into(),
+            }
+        }
+    };
+    if destination_key.account_id != envelope.auth.account_id {
+        return ServiceResponse::Unavailable {
+            code: "resource_unavailable".into(),
+            message: "restore requires an account-owned Files resource".into(),
+        };
+    }
+    let (source_version, source_receipt) = match coordinator
+        .resolve_resource_version(&destination_key, &version_ref)
+    {
+        Ok(selection) => selection,
+        Err(error) => {
+            return ServiceResponse::Unavailable {
+                code: error.code().into(),
+                message: error.message(),
+            }
+        }
+    };
+    let destination_path = match resolve_registered_path(
+        &envelope.auth.actor_id,
+        &registration,
+        host_root,
+        authorized_roots,
+    ) {
+        Ok(path) => path,
+        Err(_) => {
+            return ServiceResponse::Unavailable {
+                code: "resource_unavailable".into(),
+                message: "registered Files destination is unavailable".into(),
+            }
+        }
+    };
+    let mut provider = FilesystemRestoreProvider::new_with_receipt_root(
+        &destination_path,
+        receipt_root,
+    );
+    let observed_destination_fingerprint = match provider.current_fingerprint() {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => {
+            return ServiceResponse::Unavailable {
+                code: "resource_unavailable".into(),
+                message: "registered Files destination cannot be read".into(),
+            }
+        }
+    };
+    let observed_for_review = observed_destination_fingerprint
+        .as_deref()
+        .unwrap_or("missing");
+    let prior_restore = coordinator.catalog().get_restore::<openclank_history::restore::RestoreJournal>(&restore_id);
+    if prior_restore.is_err() { return ServiceResponse::Error { code: "restore journal unavailable".into() }; }
+    if prior_restore.ok().flatten().is_none() && expected_destination_fingerprint != observed_for_review {
+        return ServiceResponse::Error {
+            code: "restore outcome: Conflict".into(),
+        };
+    }
+    let request = RestoreRequest {
+        restore_id,
+        account_id: destination_key.account_id.clone(),
+        source_action_id: source_version.action_id,
+        source_version_id: source_version.version_id,
+        destination: destination_key,
+        expected_destination_fingerprint: if expected_destination_fingerprint == "missing" {
+            None
+        } else {
+            Some(expected_destination_fingerprint)
+        },
+        require_current_capture: true,
+    };
+    let plan = match prepare_restore_authorized(
+        coordinator,
+        &request,
+        &source_receipt,
+        observed_destination_fingerprint.as_deref(),
+    )
+    .await
+    {
+        Ok(plan) => plan,
+        Err(outcome) => {
+            return ServiceResponse::Error {
+                code: format!("restore outcome: {outcome:?}"),
+            }
+        }
+    };
+    match apply_restore_authorized_durable(coordinator, &request, &plan, &mut provider).await {
+        Ok(receipt) => ServiceResponse::Restore(receipt),
+        Err(outcome) => ServiceResponse::Error {
+            code: format!("restore outcome: {outcome:?}"),
+        },
+    }
+}
+
 fn resource_handle(registration: &ResourceRegistration) -> ResourceHandle {
     ResourceHandle {
         resource_id: registration.resource_id.clone(),
@@ -1699,19 +1867,17 @@ fn resource_handle(registration: &ResourceRegistration) -> ResourceHandle {
     }
 }
 
-#[cfg(unix)]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use bytes::Bytes;
     use std::env;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
+    use std::io::Write;
     use std::sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     };
     use tokio::io::{AsyncWriteExt, BufReader};
-    use tokio::net::UnixListener;
+
 
     let args: Vec<String> = env::args().collect();
     let socket = args
@@ -1741,11 +1907,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .get(7)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| receipt_root.join("host-resources.json"));
+    // Validate/initialize Lore before auxiliary service paths (such as
+    // staging beside a resource map under lore_root) can make a fresh root
+    // appear to contain unknown preexisting data. The same guarded check runs
+    // again when HistoryCoordinator opens the store below.
+    openclank_history::HistoryStore::initialize_root(lore)?;
     let staging_root = resource_map
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join(".openclank-history-staging");
     std::fs::create_dir_all(&staging_root)?;
+    openclank_history::platform::protect_private_directory(&staging_root)?;
     if let Ok(entries) = std::fs::read_dir(&staging_root) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1829,71 +2001,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .map(|binding| binding.account_id.clone())
         })
         .unwrap_or_else(|| "bootstrap".into());
-    let lock_path = format!("{socket}.lock");
-    if Path::new(socket).exists() {
-        let pid = std::fs::read_to_string(&lock_path)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok());
-        let alive = pid.is_some_and(|pid| {
-            std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .status()
-                .is_ok_and(|status| status.success())
-        });
-        if alive || !Path::new(&lock_path).exists() {
-            return Err("refusing existing socket path".into());
-        }
-        std::fs::remove_file(socket)?;
-    }
-    if Path::new(&lock_path).exists() {
-        let pid = std::fs::read_to_string(&lock_path)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok());
-        let alive = pid.is_some_and(|pid| {
-            std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .status()
-                .is_ok_and(|status| status.success())
-        });
-        if alive {
-            return Err("history installation is already locked".into());
-        }
-        std::fs::remove_file(&lock_path)?;
-    }
-    let mut lock = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-        .map_err(|_| "history installation is already locked")?;
-    let _resource_guard = SocketGuard {
-        socket: socket.clone(),
-        lock: lock_path.clone(),
-    };
-    use std::io::Write;
-    if std::env::var("OPENCLANK_HISTORY_FAIL_STARTUP")
-        .ok()
-        .as_deref()
-        == Some("pid")
-    {
-        return Err("injected pid startup failure".into());
-    }
-    writeln!(lock, "{}", std::process::id())?;
-    if std::env::var("OPENCLANK_HISTORY_FAIL_STARTUP")
-        .ok()
-        .as_deref()
-        == Some("bind")
-    {
-        return Err("injected bind startup failure".into());
-    }
-    let listener = UnixListener::bind(socket)?;
-    if std::env::var("OPENCLANK_HISTORY_FAIL_STARTUP")
-        .ok()
-        .as_deref()
-        == Some("chmod")
-    {
-        return Err("injected chmod startup failure".into());
-    }
-    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
+    let mut listener = openclank_history::platform::Listener::bind(socket)?;
     let coordinator = Arc::new(tokio::sync::Mutex::new(
         HistoryCoordinator::open(catalog, lore, &account).await?,
     ));
@@ -1919,7 +2027,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let staging_admission = Arc::new(tokio::sync::Mutex::new(()));
     let stopping = Arc::new(AtomicBool::new(false));
     while !stopping.load(Ordering::Acquire) {
-        let (stream, _) =
+        let stream =
             match tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
                 .await
             {
@@ -1942,7 +2050,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let staged_bytes = staged_bytes.clone();
         let staging_admission = staging_admission.clone();
         tokio::spawn(async move {
-            let (read, mut write) = stream.into_split();
+            let (read, mut write) = tokio::io::split(stream);
             let mut reader = BufReader::new(read);
             loop {
                 let frame = match read_frame(&mut reader).await {
@@ -1988,6 +2096,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             None => authorized_roots.clear(),
                         }
                     }
+                }
+                let restricted = {
+                    let coordinator = coordinator.lock().await;
+                    restricted_resource_frame(&frame, &resource_map, &authorized_roots, &auth_bindings, &coordinator)
+                };
+                if restricted {
+                    let response = ServiceResponse::Error { code: "provider root is unauthorized for this actor".into() };
+                    let encoded = serde_json::to_string(&response).expect("error response serializes");
+                    if write.write_all(encoded.as_bytes()).await.is_err() || write.write_all(b"\n").await.is_err() { break; }
+                    continue;
                 }
                 if let Ok(request) = serde_json::from_slice::<ServiceRequest>(&frame) {
                     if let Some(response) = handle_staging_fast(
@@ -2523,8 +2641,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                                 Ok(file) => {
                                                     #[cfg(unix)]
                                                     {
-                                                        use std::os::unix::fs::PermissionsExt;
-                                                        let _ = file.set_permissions(
+                                                                                                            let _ = file.set_permissions(
                                                             std::fs::Permissions::from_mode(0o600),
                                                         );
                                                     }
@@ -3185,6 +3302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     let suggested = resource_id.as_deref().unwrap_or_default();
                                     let (registration, created) = registry_registration(
                                         &registry,
+                                        &envelope.auth.actor_id,
                                         suggested,
                                         &account_id,
                                         &workspace_id,
@@ -3213,6 +3331,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 }
                             }
                             Err(error) => ServiceResponse::Error { code: error },
+                        },
+                        Ok(ServiceRequest::ListRegisteredResources {
+                            envelope,
+                            cursor,
+                            limit,
+                        }) => match auth_bindings
+                            .validate_control_cap(&envelope, "read")
+                            .map_err(|error| format!("{error:?}"))
+                        {
+                            Err(error) => ServiceResponse::Error { code: error },
+                            Ok(_) if !(1..=100).contains(&limit) => ServiceResponse::Unavailable {
+                                code: "invalid_limit".into(),
+                                message: "registered resource page size must be between 1 and 100".into(),
+                            },
+                            Ok(_) => {
+                                let start = match cursor.as_deref() {
+                                    None => Some(0usize),
+                                    Some(value) if value.len() <= 20 => value.parse::<usize>().ok(),
+                                    Some(_) => None,
+                                };
+                                match (start, ResourceRegistry::load(&resource_map)) {
+                                    (None, _) => ServiceResponse::Unavailable {
+                                        code: "invalid_cursor".into(),
+                                        message: "registered resource cursor is invalid".into(),
+                                    },
+                                    (_, Err(_)) => ServiceResponse::Unavailable {
+                                        code: "resource_unavailable".into(),
+                                        message: "registered Files resources are unavailable".into(),
+                                    },
+                                    (Some(start), Ok(registry)) => {
+                                        let mut eligible = registry.entries.values().filter(|entry| {
+                                            entry.account_id == envelope.auth.account_id
+                                                && !entry.workspace_id.is_empty()
+                                                && resolve_registered_path(
+                                                    &envelope.auth.actor_id,
+                                                entry,
+                                                    &host_root,
+                                                    &authorized_roots,
+                                                )
+                                                .is_ok()
+                                        }).cloned().skip(start);
+                                        let mut items = eligible.by_ref().take(usize::from(limit)).collect::<Vec<_>>();
+                                        let has_more = eligible.next().is_some();
+                                        let next_cursor = has_more
+                                            .then(|| start.saturating_add(items.len()).to_string());
+                                        ServiceResponse::RegisteredResources(
+                                            openclank_history::protocol::RegisteredResourcePage {
+                                                items: std::mem::take(&mut items),
+                                                next_cursor,
+                                            },
+                                        )
+                                    }
+                                }
+                            }
                         },
                         Ok(ServiceRequest::UpdateResource {
                             envelope,
@@ -3243,6 +3415,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             },
                                         )?;
                                     if !current.active
+                                        || resolve_registered_path(&envelope.auth.actor_id, &current, &host_root, &authorized_roots).is_err()
                                         || current.account_id != account_id
                                         || current.workspace_id != workspace_id
                                     {
@@ -3253,6 +3426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     }
                                     let (destination_root_id, destination_root) =
                                         registry_destination(
+                                            &envelope.auth.actor_id,
                                             &account_id,
                                             &workspace_id,
                                             root_id.as_deref(),
@@ -3278,6 +3452,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                         ));
                                     }
                                     let mut updated = current;
+                                    updated.actor_ids = authorized_roots.iter().find(|root| root.root_id == replacement.0).map(|root| root.actor_ids.clone()).unwrap_or_default();
                                     updated.root_id = replacement.0;
                                     updated.root_path = replacement.1;
                                     updated.relative_path = relative_path;
@@ -3328,6 +3503,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             },
                                         )?;
                                     if !current.active
+                                        || resolve_registered_path(&envelope.auth.actor_id, &current, &host_root, &authorized_roots).is_err()
                                         || current.account_id != account_id
                                         || current.workspace_id != workspace_id
                                     {
@@ -3338,6 +3514,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     }
                                     let (destination_root_id, destination_root) =
                                         registry_destination(
+                                            &envelope.auth.actor_id,
                                             &account_id,
                                             &workspace_id,
                                             root_id.as_deref(),
@@ -3394,6 +3571,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             replaced.updated_millis = registry_timestamp();
                                         }
                                     }
+                                    current.actor_ids = authorized_roots.iter().find(|root| root.root_id == destination_root_id).map(|root| root.actor_ids.clone()).unwrap_or_default();
                                     current.root_id = destination_root_id;
                                     current.root_path = destination_root;
                                     current.relative_path = relative_path;
@@ -3436,7 +3614,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                                 )
                                             },
                                         )?;
-                                    if entry.account_id != envelope.auth.account_id {
+                                    if entry.account_id != envelope.auth.account_id
+                                        || resolve_registered_path(&envelope.auth.actor_id, &entry, &host_root, &authorized_roots).is_err() {
                                         return Err(std::io::Error::new(
                                             std::io::ErrorKind::PermissionDenied,
                                             "resource revoke is unauthorized",
@@ -3478,6 +3657,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                             },
                                         )?;
                                     if !entry.active
+                                        || resolve_registered_path(&envelope.auth.actor_id, &entry, &host_root, &authorized_roots).is_err()
                                         || !owner_allowed(
                                             &entry.account_id,
                                             &envelope.auth.actor_id,
@@ -3612,6 +3792,244 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             },
                             Err(error) => ServiceResponse::Error { code: error },
                         },
+                        Ok(ServiceRequest::ListResourceVersions {
+                            envelope,
+                            resource_id,
+                            cursor,
+                            limit,
+                        }) => match auth_bindings
+                            .validate_control_cap(&envelope, "read")
+                            .map_err(|error| format!("{error:?}"))
+                        {
+                            Err(error) => ServiceResponse::Error { code: error },
+                            Ok(_) => match registered_files_resource_key(
+                                &resource_id,
+                                &envelope.auth,
+                                &grants,
+                                &resource_map,
+                                &host_root,
+                                &authorized_roots,
+                                true,
+                            ) {
+                                Err(code) => ServiceResponse::Unavailable {
+                                    code: code.into(),
+                                    message: if code == "resource_not_found" {
+                                        "registered Files resource is missing".into()
+                                    } else {
+                                        "registered Files resource is no longer active or authorized".into()
+                                    },
+                                },
+                                Ok((resource_key, _handle, _entry)) => match coordinator.list_resource_versions(
+                                    &resource_key,
+                                    cursor.as_deref(),
+                                    limit,
+                                ) {
+                                    Ok(page) => ServiceResponse::Versions(page),
+                                    Err(error) => ServiceResponse::Unavailable {
+                                        code: error.code().into(),
+                                        message: error.message(),
+                                    },
+                                },
+                            },
+                        },
+                        Ok(ServiceRequest::ResolveResourceVersion {
+                            envelope,
+                            resource_id,
+                            version_ref,
+                        }) => match auth_bindings
+                            .validate_control_cap(&envelope, "read")
+                            .map_err(|error| format!("{error:?}"))
+                        {
+                            Err(error) => ServiceResponse::Error { code: error },
+                            Ok(_) => match registered_files_resource_key(
+                                &resource_id,
+                                &envelope.auth,
+                                &grants,
+                                &resource_map,
+                                &host_root,
+                                &authorized_roots,
+                                true,
+                            ) {
+                                Err(code) => ServiceResponse::Unavailable {
+                                    code: code.into(),
+                                    message: if code == "resource_not_found" {
+                                        "registered Files resource is missing".into()
+                                    } else {
+                                        "registered Files resource is no longer active or authorized".into()
+                                    },
+                                },
+                                Ok((resource_key, resource, _entry)) => match coordinator
+                                    .resolve_resource_version(&resource_key, &version_ref)
+                                {
+                                    Ok((version, receipt)) => {
+                                        ServiceResponse::ResourceVersionSelection {
+                                            resource,
+                                            version,
+                                            receipt,
+                                        }
+                                    }
+                                    Err(error) => ServiceResponse::Unavailable {
+                                        code: error.code().into(),
+                                        message: error.message(),
+                                    },
+                                },
+                            },
+                        },
+                        Ok(ServiceRequest::PreviewResourceVersionRestore {
+                            envelope,
+                            resource_id,
+                            version_ref,
+                        }) => match auth_bindings
+                            .validate_control_cap(&envelope, "restore")
+                            .map_err(|error| format!("{error:?}"))
+                        {
+                            Err(error) => ServiceResponse::Error { code: error },
+                            Ok(_) => match registered_files_resource_key(
+                                &resource_id,
+                                &envelope.auth,
+                                &grants,
+                                &resource_map,
+                                &host_root,
+                                &authorized_roots,
+                                true,
+                            ) {
+                                Err(code) => ServiceResponse::Unavailable {
+                                    code: code.into(),
+                                    message: "registered Files resource is missing or unavailable".into(),
+                                },
+                                Ok((resource_key, _resource, _entry))
+                                    if resource_key.account_id != envelope.auth.account_id =>
+                                {
+                                    ServiceResponse::Unavailable {
+                                        code: "resource_unavailable".into(),
+                                        message: "restore requires an account-owned Files resource".into(),
+                                    }
+                                }
+                                Ok((resource_key, resource, entry)) => match coordinator
+                                    .resolve_resource_version(&resource_key, &version_ref)
+                                {
+                                    Err(error) => ServiceResponse::Unavailable {
+                                        code: error.code().into(),
+                                        message: error.message(),
+                                    },
+                                    Ok((source, _receipt)) => match resolve_registered_path(
+                                        &envelope.auth.actor_id,
+                                        &entry,
+                                        &host_root,
+                                        &authorized_roots,
+                                    ) {
+                                        Err(_) => ServiceResponse::Unavailable {
+                                            code: "resource_unavailable".into(),
+                                            message: "registered Files destination is unavailable".into(),
+                                        },
+                                        Ok(destination_path) => {
+                                            let provider = FilesystemRestoreProvider::new_with_receipt_root(
+                                                &destination_path,
+                                                &receipt_root,
+                                            );
+                                            match provider.current_fingerprint() {
+                                                Ok(current) => {
+                                                    let destination_exists = current.is_some();
+                                                    ServiceResponse::ResourceVersionRestorePreview(
+                                                        ResourceVersionRestorePreview {
+                                                            resource,
+                                                            source,
+                                                            destination: RestoreDestinationPreview {
+                                                                expected_fingerprint: current
+                                                                    .unwrap_or_else(|| "missing".into()),
+                                                                exists: destination_exists,
+                                                            },
+                                                            effect: if destination_exists {
+                                                                RestoreEffect::Replace
+                                                            } else {
+                                                                RestoreEffect::Create
+                                                            },
+                                                            requires_confirmation: true,
+                                                            captures_current_destination: true,
+                                                        },
+                                                    )
+                                                }
+                                                Err(_) => ServiceResponse::Unavailable {
+                                                    code: "resource_unavailable".into(),
+                                                    message: "registered Files destination cannot be read".into(),
+                                                },
+                                            }
+                                        }
+                                    },
+                                },
+                            },
+                        },
+                        Ok(ServiceRequest::ReadResourceVersionChunk {
+                            envelope,
+                            resource_id,
+                            version_ref,
+                            offset,
+                            length,
+                        }) => match auth_bindings
+                            .validate_control_cap(&envelope, "read")
+                            .map_err(|error| format!("{error:?}"))
+                        {
+                            Err(error) => ServiceResponse::Error { code: error },
+                            Ok(_) => match registered_files_resource_key(
+                                &resource_id,
+                                &envelope.auth,
+                                &grants,
+                                &resource_map,
+                                &host_root,
+                                &authorized_roots,
+                                true,
+                            ) {
+                                Err(code) => ServiceResponse::Unavailable {
+                                    code: code.into(),
+                                    message: if code == "resource_not_found" {
+                                        "registered Files resource is missing".into()
+                                    } else {
+                                        "registered Files resource is no longer active or authorized".into()
+                                    },
+                                },
+                                Ok((resource_key, _handle, _entry)) => match coordinator
+                                    .read_resource_version_chunk(
+                                        &resource_key,
+                                        &version_ref,
+                                        offset,
+                                        length,
+                                    )
+                                    .await
+                                {
+                                    Ok((version, content, eof)) => {
+                                        ServiceResponse::ResourceVersionChunk {
+                                            version,
+                                            offset,
+                                            content,
+                                            eof,
+                                        }
+                                    }
+                                    Err(error) => ServiceResponse::Unavailable {
+                                        code: error.code().into(),
+                                        message: error.message(),
+                                    },
+                                },
+                            },
+                        },
+                        Ok(ServiceRequest::GetCaptureAction(envelope)) => {
+                            match auth_bindings.validate_control_cap(&envelope, "capture")
+                                .map_err(|error| format!("{error:?}"))
+                                .and_then(|_| authorize(&coordinator, &envelope, &envelope.auth.account_id, &grants)) {
+                                Ok(record) => ServiceResponse::Action(record),
+                                Err(error) => ServiceResponse::Error { code: error },
+                            }
+                        }
+                        Ok(ServiceRequest::AfterUnavailable(envelope)) => {
+                            match auth_bindings.validate_control_cap(&envelope, "capture")
+                                .map_err(|error| format!("{error:?}"))
+                                .and_then(|_| authorize(&coordinator, &envelope, &envelope.auth.account_id, &grants)) {
+                                Ok(_) => match coordinator.after_unavailable(&envelope.action_id) {
+                                    Ok(record) => ServiceResponse::Action(record),
+                                    Err(error) => ServiceResponse::Error { code: error.to_string() },
+                                },
+                                Err(error) => ServiceResponse::Error { code: error },
+                            }
+                        }
                         Ok(ServiceRequest::Reconcile { envelope, receipt }) => {
                             match auth_bindings
                                 .validate_control_cap(&envelope, "capture")
@@ -3781,6 +4199,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 },
                             }
                         }
+                        Ok(ServiceRequest::RestoreResourceVersion {
+                            envelope,
+                            restore_id,
+                            resource_id,
+                            version_ref,
+                            expected_destination_fingerprint,
+                        }) => {
+                            restore_registered_resource_version(
+                                &coordinator,
+                                envelope,
+                                restore_id,
+                                resource_id,
+                                version_ref,
+                                expected_destination_fingerprint,
+                                &auth_bindings,
+                                &grants,
+                                &resource_map,
+                                &host_root,
+                                &receipt_root,
+                                &authorized_roots,
+                            )
+                            .await
+                        }
                         Ok(ServiceRequest::RestoreHost {
                             envelope,
                             request,
@@ -3843,6 +4284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                                 return None;
                                             }
                                             resolve_registered_path(
+                                                &envelope.auth.actor_id,
                                                 entry,
                                                 &host_root,
                                                 &authorized_roots,
@@ -3922,12 +4364,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         });
     }
     Ok(())
-}
-
-#[cfg(not(unix))]
-fn main() {
-    eprintln!("openclank-history-service: Windows transport is unsupported in this slice");
-    std::process::exit(2);
 }
 
 #[cfg(all(test, unix))]

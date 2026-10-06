@@ -1324,7 +1324,7 @@ def setup_cookbook_routes(
             # Local: run hf download in the background (tmux on POSIX, a detached
             # process + logfile on Windows where tmux doesn't exist).
             if req.env_prefix:
-                lines.append(_safe_env_prefix(req.env_prefix))
+                lines.append(_safe_env_prefix(req.env_prefix, bash_windows=local_windows))
             else:
                 lines.append("deactivate 2>/dev/null; hash -r")
             # Show whether the HF token reached this run (masked) — tells a gated
@@ -2205,7 +2205,7 @@ def setup_cookbook_routes(
             if req.gpus:
                 runner_lines.append(f"export CUDA_VISIBLE_DEVICES='{req.gpus}'")
             if req.env_prefix:
-                runner_lines.append(_safe_env_prefix(req.env_prefix))
+                runner_lines.append(_safe_env_prefix(req.env_prefix, bash_windows=local_windows))
             else:
                 runner_lines.append("deactivate 2>/dev/null; hash -r")
             _append_venv_nvidia_library_path_lines(runner_lines, cmd=req.cmd)

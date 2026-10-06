@@ -135,6 +135,10 @@ COPY --from=openclank-bun-builder /engine/ /app/libexec/openclank/engine/
 COPY --from=openclank-history-builder /build/packages/openclank-history/target/release/openclank-history-service /app/libexec/openclank/history/openclank-history-service
 ENV APP_RESOURCES=/app
 
+# A source checkout must install its pinned offline artwork before building.
+# This performs no network fetch and fails for missing/corrupt/wrong payloads.
+RUN python scripts/emoji_asset_bundle.py verify
+
 # Create data directory (mount a volume here for persistence)
 RUN mkdir -p data logs services/cache/search
 

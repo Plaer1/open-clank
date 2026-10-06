@@ -101,6 +101,77 @@ def test_atomic_batch_prepares_once_and_completes_one_action(tmp_path):
     assert envelope["coverage"]["kind"] == "ObservedAfterOnly"
 
 
+def test_history_envelope_carries_pinned_action_context(tmp_path):
+    client = FakeHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-authenticated",
+        account_id="account-authenticated",
+        workspace_id="chat-authenticated",
+        session_id="chat-authenticated",
+        run_id="run-pinned",
+        task_id="task-pinned",
+        tool_id="mimo-bash",
+        roots=(str(tmp_path),),
+        client=client,
+    )
+    target = tmp_path / "note.txt"
+    target.write_text("before", encoding="utf-8")
+    handle = history_capture.begin_file_capture(
+        str(target), operation="shell", context=context, action_id="action-durable"
+    )
+    assert handle.available
+    envelope = client.calls[0][1][0]
+    assert envelope["action_id"] == "action-durable"
+    assert envelope["actor_id"] == "actor-authenticated"
+    assert envelope["actor_account_id"] == "account-authenticated"
+    assert envelope["session_id"] == "chat-authenticated"
+    assert envelope["run_id"] == "run-pinned"
+    assert envelope["task_id"] == "task-pinned"
+    assert envelope["tool_id"] == "mimo-bash"
+    target.write_text("after", encoding="utf-8")
+    assert history_capture.complete_file_capture(handle, str(target))["history_status"] == "complete"
+
+
+def test_context_mapping_does_not_invent_identity(tmp_path):
+    context = history_capture.context_from_mapping(
+        {
+            "history_capture": True,
+            "actor_id": "actor",
+            "account_id": "account",
+            "workspace_id": "chat",
+            "history_roots": [str(tmp_path)],
+            "session_id": "chat",
+            "run_id": "run",
+            "task_id": "task",
+            "tool_id": "mimo-bash",
+        }
+    )
+    assert context is not None
+    assert (context.session_id, context.run_id, context.task_id, context.tool_id) == (
+        "chat", "run", "task", "mimo-bash"
+    )
+
+
+def test_capture_finish_is_single_use_after_service_failure(tmp_path):
+    class FailingClient(FakeHistoryClient):
+        def complete(self, action_id, *, content, fingerprint):
+            self.calls.append(("complete", (action_id, content, fingerprint)))
+            raise RuntimeError("simulated complete failure")
+
+    client = FailingClient()
+    context = _context(tmp_path, client)
+    target = tmp_path / "once.txt"
+    target.write_text("before", encoding="utf-8")
+    handle = history_capture.begin_file_capture(
+        str(target), operation="replace", context=context, action_id="single-use"
+    )
+    target.write_text("after", encoding="utf-8")
+    first = history_capture.complete_file_capture(handle, str(target))
+    second = handle.finish(after=b"different")
+    assert first == second
+    assert [name for name, _ in client.calls].count("complete") == 1
+
+
 def test_history_unavailable_does_not_block_live_write(tmp_path):
     context = _context(tmp_path, None)
     target = tmp_path / "note.md"
@@ -342,3 +413,281 @@ def test_registered_filesystem_tool_receives_trusted_context(tmp_path, monkeypat
     assert result["exit_code"] == 0
     assert result["history"]["history_status"] == "complete"
     assert [name for name, _ in client.calls] == ["prepare", "record_live", "complete"]
+
+
+def test_root_journal_owns_every_granted_root_for_persistent_writer_handoff(tmp_path):
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+        run_id="run-1",
+        task_id="task-1",
+        tool_id="mimo-bash",
+    )
+    journal = history_capture.RootJournal(str(tmp_path / "roots.journal.json"))
+    state = journal.open(
+        action_id="shell:sess-a:job1",
+        writer_owner=owner,
+        roots=[str(root_a), str(root_b)],
+    )
+    assert state["phase"] == "open"
+    assert state["generation"] == 0
+    assert set(state["roots"]) == {str(root_a.resolve()), str(root_b.resolve())}
+    assert state["writer_owner"]["owner_id"] == "alice"
+    assert state["writer_owner"]["action_id"] == "shell:sess-a:job1"
+
+
+def test_root_journal_hands_off_cleanly_across_restart(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+    )
+    first = history_capture.RootJournal(str(path))
+    opened = first.open(
+        action_id="shell:sess-a:job1",
+        writer_owner=owner,
+        roots=[str(tmp_path)],
+    )
+    assert opened["generation"] == 0
+
+    # A restarted process cannot silently steal a live in-memory batch handle,
+    # even when its persistent identity is identical.
+    second = history_capture.RootJournal(str(path))
+    with pytest.raises(history_capture.RootJournalError, match="live lease"):
+        second.open(
+            action_id="shell:sess-a:job1",
+            writer_owner=owner,
+            roots=[str(tmp_path)],
+        )
+    assert second.read()["generation"] == opened["generation"]
+
+
+def test_root_journal_restart_shaped_open_state_is_not_success(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+    )
+    journal = history_capture.RootJournal(str(path))
+    journal.open(
+        action_id="shell:sess-a:job1",
+        writer_owner=owner,
+        roots=[str(tmp_path)],
+    )
+    # Restart-shaped: the journal is still open after the worker vanished.
+    # It must never be read as a completed capture.
+    state = journal.read()
+    assert state["phase"] == "open"
+    assert state["result"] is None
+    # Honest terminalization for the vanished worker.
+    closed = journal.abandon("capture worker exited before after-state reconciliation completed")
+    assert closed["phase"] == "abandoned"
+    assert closed["result"]["history_status"] == "failed"
+    assert closed["result"]["capture_phase"] == "after_failed"
+
+
+def test_persistent_owner_handoff_requires_continuing_root_journal(tmp_path):
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+    )
+    missing = history_capture.RootJournal(str(tmp_path / "absent.journal.json"))
+    with pytest.raises(history_capture.RootJournalError, match="continuing root journal"):
+        missing.handoff(owner)
+
+
+def test_root_journal_persistent_owner_handoff_is_recorded(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+        run_id="run-1",
+        task_id="task-1",
+        tool_id="bash",
+    )
+    journal = history_capture.RootJournal(str(path))
+    journal.open(
+        action_id="shell:sess-a:job1",
+        writer_owner=owner,
+        roots=[str(tmp_path)],
+    )
+    continuing = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+        run_id="run-1",
+        task_id="task-1",
+        tool_id="bash",
+    )
+    state = journal.handoff(continuing)
+    assert state["generation"] == 1
+    assert state["writer_owner"]["tool_id"] == "bash"
+    assert state["phase"] == "open"
+
+
+def test_root_journal_rejects_handoff_that_changes_run_task_or_tool_identity(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice", session_id="sess-a", action_id="shell:sess-a:job1",
+        run_id="run-1", task_id="task-1", tool_id="bash",
+    )
+    journal = history_capture.RootJournal(str(path))
+    journal.open(action_id=owner.action_id, writer_owner=owner, roots=[str(tmp_path)])
+    changed = history_capture.WriterOwner(
+        owner_id="alice", session_id="sess-a", action_id=owner.action_id,
+        run_id="run-2", task_id="task-1", tool_id="bash",
+    )
+    with pytest.raises(history_capture.RootJournalError, match="writer-owner mismatch"):
+        journal.handoff(changed)
+
+
+def test_root_journal_stale_generation_cannot_settle_after_continuation_claim(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice", session_id="sess-a", action_id="shell:sess-a:job1",
+        run_id="run-1", task_id="task-1", tool_id="bash",
+    )
+    first = history_capture.RootJournal(str(path))
+    first.open(action_id=owner.action_id, writer_owner=owner, roots=[str(tmp_path)])
+    continuing = history_capture.RootJournal(str(path))
+    continuing.claim_recovery(owner)
+    with pytest.raises(history_capture.RootJournalError, match="lease is stale"):
+        first.settle({"history_status": "complete", "capture_phase": "complete"})
+    settled = continuing.settle({"history_status": "complete", "capture_phase": "complete"})
+    assert settled["phase"] == "settled"
+
+
+def test_root_journal_abandon_strips_false_success(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+    )
+    journal = history_capture.RootJournal(str(path))
+    journal.open(
+        action_id="shell:sess-a:job1",
+        writer_owner=owner,
+        roots=[str(tmp_path)],
+    )
+    # A late writer result that claims completion must not survive abandon.
+    closed = journal.abandon(
+        "late_writer_unsettled",
+        {"history_status": "complete", "capture_phase": "complete"},
+    )
+    assert closed["phase"] == "abandoned"
+    assert closed["result"]["history_status"] == "failed"
+
+
+def test_root_journal_settle_is_single_use_and_keeps_first_terminal(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+    )
+    journal = history_capture.RootJournal(str(path))
+    journal.open(
+        action_id="shell:sess-a:job1",
+        writer_owner=owner,
+        roots=[str(tmp_path)],
+    )
+    first = journal.settle(
+        {"history_status": "complete", "capture_phase": "complete", "receipt": {"ok": True}}
+    )
+    assert first["phase"] == "settled"
+    second = journal.abandon("too-late", {"history_status": "failed"})
+    assert second["phase"] == "settled"
+    assert second["result"]["history_status"] == "complete"
+
+
+def test_root_journal_rejects_writer_owner_mismatch_on_restart(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+    )
+    journal = history_capture.RootJournal(str(path))
+    journal.open(
+        action_id="shell:sess-a:job1",
+        writer_owner=owner,
+        roots=[str(tmp_path)],
+    )
+    stranger = history_capture.WriterOwner(
+        owner_id="bob",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+    )
+    with pytest.raises(history_capture.RootJournalError, match="writer-owner mismatch"):
+        journal.open(
+            action_id="shell:sess-a:job1",
+            writer_owner=stranger,
+            roots=[str(tmp_path)],
+        )
+
+
+def test_root_journal_handoff_rejects_foreign_writer_owner(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+    )
+    journal = history_capture.RootJournal(str(path))
+    journal.open(
+        action_id="shell:sess-a:job1",
+        writer_owner=owner,
+        roots=[str(tmp_path)],
+    )
+    # A foreign owner/session that only matches action_id must not take over.
+    foreign = history_capture.WriterOwner(
+        owner_id="bob",
+        session_id="sess-b",
+        action_id="shell:sess-a:job1",
+    )
+    with pytest.raises(history_capture.RootJournalError, match="writer-owner mismatch"):
+        journal.handoff(foreign)
+    state = journal.read()
+    assert state["phase"] == "open"
+    assert state["generation"] == 0
+    assert state["writer_owner"]["owner_id"] == "alice"
+    assert state["writer_owner"]["session_id"] == "sess-a"
+
+
+def test_root_journal_open_rejects_already_terminal(tmp_path):
+    path = tmp_path / "roots.journal.json"
+    owner = history_capture.WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:job1",
+    )
+    journal = history_capture.RootJournal(str(path))
+    journal.open(
+        action_id="shell:sess-a:job1",
+        writer_owner=owner,
+        roots=[str(tmp_path)],
+    )
+    journal.settle({"history_status": "complete", "capture_phase": "complete"})
+    with pytest.raises(history_capture.RootJournalError, match="already terminal"):
+        journal.open(
+            action_id="shell:sess-a:job1",
+            writer_owner=owner,
+            roots=[str(tmp_path)],
+        )
+
+
+def test_root_journal_close_does_not_mint_phantom_on_missing_path(tmp_path):
+    missing = history_capture.RootJournal(str(tmp_path / "absent.journal.json"))
+    closed = missing.abandon("never opened")
+    assert closed["phase"] == "abandoned"
+    assert not (tmp_path / "absent.journal.json").exists()

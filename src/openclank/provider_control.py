@@ -125,6 +125,7 @@ class OAuthHostFlow:
     target_account_id: Optional[str] = None
     expected_revision: Optional[int] = None
     status: str = "pending"
+    public_start: Optional[dict[str, Any]] = field(default=None, repr=False)
     account_public: Optional[dict[str, Any]] = None
     error_code: Optional[str] = None
 
@@ -215,14 +216,17 @@ class OAuthHostFlow:
         }
         if self.target_account_id:
             result["target_account_id"] = self.target_account_id
-        if start is not None:
+        visible_start = start if start is not None else self.public_start
+        if visible_start is not None and self.status in {"pending", "running"}:
             result.update(
                 {
-                    "url": start.get("url"),
-                    "method": start.get("method"),
-                    "instructions": start.get("instructions", ""),
+                    "url": visible_start.get("url"),
+                    "method": visible_start.get("method"),
+                    "instructions": visible_start.get("instructions", ""),
                 }
             )
+            if visible_start.get("userCode") is not None:
+                result["user_code"] = visible_start["userCode"]
         if self.account_public is not None:
             result["account"] = dict(self.account_public)
         if self.error_code:
@@ -273,10 +277,21 @@ class OAuthHostFlowStore:
             return rows
 
     def expired(self, *, now: Optional[datetime] = None) -> list[OAuthHostFlow]:
+        timestamp = now or datetime.now(timezone.utc)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        timestamp = timestamp.astimezone(timezone.utc)
+        retention = timedelta(seconds=OAUTH_FLOW_TTL_SECONDS)
+        terminal = {"complete", "failed", "cancelled", "expired"}
         with self._lock:
-            rows = [flow for flow in self._flows.values() if flow.expired(now=now)]
-            for flow in rows:
-                self._flows.pop(flow.flow_id, None)
+            rows: list[OAuthHostFlow] = []
+            for flow in list(self._flows.values()):
+                if flow.status in terminal:
+                    if timestamp >= flow.expires_at + retention:
+                        self._flows.pop(flow.flow_id, None)
+                    continue
+                if flow.expired(now=timestamp):
+                    rows.append(flow)
             return rows
 
 

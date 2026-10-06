@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from src.openclank.copal_bridge import CopalBridgeError
+from src.openclank.copal_errors import CopalBridgeError
 import src.openclank.copal_loose as copal_loose
 from src.openclank.copal_loose import LooseCopalBridge
 

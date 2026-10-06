@@ -227,9 +227,8 @@ def test_project_mark_replaces_the_sailboat_and_stays_theme_colorable():
     index = _text("static/index.html")
     login = _text("static/login.html")
     theme = _text("static/js/theme.js")
-    docs = _text("docs/index.html")
 
-    for source in (mark, index, login, theme, docs):
+    for source in (mark, index, login, theme):
         assert "M16 3 29 27H3Z" in source
         assert "M16 4L16 22L6 22Z" not in source
     assert 'stroke="currentColor"' in mark

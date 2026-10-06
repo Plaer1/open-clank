@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // Model Picker — chatbox model selector dropdown
 // Extracted from sessions.js
 
@@ -881,7 +882,7 @@ function _initModelPickerDropdown() {
         const header = document.createElement('div');
         header.className = 'mp-provider-header';
         header.innerHTML =
-          `<svg class="mp-provider-chevron${isCollapsed ? ' collapsed' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`
+          uiIcon('chevron-down', 10, { className: `mp-provider-chevron${isCollapsed ? ' collapsed' : ''}` })
           + `<span class="mp-provider-name">${_providerGroupName(provider)}</span>`
           + `<span class="mp-provider-count">${models.length}</span>`;
         header.addEventListener('click', (e) => {

@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // static/js/chat.js
 
 /**
@@ -24,6 +25,13 @@ import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
 import {
+  applyModelMetricsState,
+  applyModelRouteEventState,
+  inheritModelRouteState,
+} from './chatModelProvenance.js';
+import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
+import { createLiveThinkingThrottle } from './liveThinkingThrottle.js';
+import {
   claimAssistantContext,
   commitAssistantContext,
   restoreAssistantContext,
@@ -31,7 +39,7 @@ import {
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
-  const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
+  const RESEARCH_SVG = uiIcon("search", 16);
 
   let API_BASE = '';
   let currentAbort = null;
@@ -573,9 +581,9 @@ import {
   let currentSpinner = null; // Track current spinner for stop cleanup
 
   // Background streaming support
-  const _backgroundStreams = new Map(); // sessionId -> { status, accumulated, sourcesHtml, abortCtrl, query, metrics }
-  const _activeStreams = new Map();     // sessionId -> { abortCtrl, holder, query, startedAt }
-  const _resumingStreams = new Set();   // sessionId -> a resumeStream() reader is live (re-attach lock)
+  const _backgroundStreams = new Map(); // sessionId -> { status, accumulated, sourcesHtml, abortCtrl, query, metrics, runId }
+  const _activeStreams = new Map();     // sessionId -> { abortCtrl, holder, query, startedAt, runId }
+  const _resumingStreams = new Map();   // sessionId -> detached run ID while a resumeStream() reader is live
   let _streamSessionId = null; // Session ID for the currently active reader loop
   let _lastReaderActivity = 0; // Timestamp of last reader.read() success — used to detect frozen streams
   let _webLockRelease = null;  // Function to release the Web Lock held during streaming
@@ -659,6 +667,25 @@ import {
     }
   }
 
+  // A detached run can be replaced before a delayed Stop or timeout fires.
+  // Send the identity received with the stream when present, so an old browser
+  // controller cannot cancel the session's newer run. Old servers and direct
+  // compare streams do not issue an identity, and retain the unheaded stop
+  // compatibility lane.
+  function _stopDetachedRun(sessionId) {
+    if (!sessionId) return;
+    const active = _activeStreams.get(sessionId);
+    const background = _backgroundStreams.get(sessionId);
+    const runId = (active && active.runId) || (background && background.runId) ||
+      _resumingStreams.get(sessionId) || '';
+    const headers = runId ? { 'X-Agent-Run-ID': runId } : undefined;
+    fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers,
+    }).catch(() => {});
+  }
+
   function _syncForegroundStreamGlobals() {
     const active = _getForegroundStreamState();
     isStreaming = !!active;
@@ -711,7 +738,7 @@ import {
     bubble.dataset.imageUrl = imageUrl;
     chatBox.appendChild(bubble);
     uiModule.scrollHistory();
-    window.dispatchEvent(new CustomEvent('gallery-refresh'));
+    window.dispatchEvent(new CustomEvent('imps-refresh'));
     return true;
   }
 
@@ -775,7 +802,7 @@ import {
       void submitBtn.offsetWidth;
       // Arrow launches up, then stop icon lands in
       submitBtn.classList.add('anim-launch');
-      const _stopSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+      const _stopSvg = uiIcon("stop", 14);
       // Wait for the launch keyframe to finish (0.3s) before swapping the
       // arrow out for the stop icon — otherwise the swap happens mid-flight
       // and the user sees nothing fly out.
@@ -809,7 +836,7 @@ import {
         setTimeout(window._updateSendBtnIcon, 50);
       } else {
         var icons = window._odysseusBtnIcons;
-        submitBtn.innerHTML = icons ? icons.send : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+        submitBtn.innerHTML = icons ? icons.send : uiIcon("up", 16);
         submitBtn.title = 'Send message';
         submitBtn.classList.remove('mic-mode', 'newchat-mode');
       }
@@ -849,7 +876,7 @@ import {
 	    actions.className = 'plan-inline-actions';
 	    actions.innerHTML = `
 	      <button type="button" class="plan-inline-execute">
-	        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="7 4 20 12 7 20 7 4"></polygon></svg>
+	        ${uiIcon("play", 12)}
 	        Execute
 	      </button>
 	      <button type="button" class="plan-inline-clear">Clear</button>`;
@@ -923,7 +950,7 @@ import {
     wrap.className = 'msg msg-user msg-user-queued';
     wrap.dataset.queueId = item.id;
     wrap.title = 'Queued - click to send now and stop the current response';
-    wrap.innerHTML = `<div class="role">You <span class="queued-pill"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>Queued</span></div><div class="body">${_escapeQueueText(item.message)}</div>`;
+    wrap.innerHTML = `<div class="role">You <span class="queued-pill">${uiIcon("play", 8)}Queued</span></div><div class="body">${_escapeQueueText(item.message)}</div>`;
     wrap.addEventListener('click', (ev) => {
       if (ev.target && ev.target.closest && ev.target.closest('button, a, textarea, input')) return;
       _promoteQueuedRequest(item.id);
@@ -1768,12 +1795,7 @@ import {
             timedOut = true;
             abortCtrl._reason = 'timeout';
             try {
-              if (streamSessionId) {
-                fetch(`/api/chat/stop/${encodeURIComponent(streamSessionId)}`, {
-                  method: 'POST',
-                  credentials: 'same-origin',
-                }).catch(() => {});
-              }
+              if (streamSessionId) _stopDetachedRun(streamSessionId);
             } catch (_) {}
             abortCtrl.abort();
           }
@@ -1796,6 +1818,7 @@ import {
           query: streamQuery,
           startedAt: Date.now(),
           lastActivity: Date.now(),
+          runId: '',
         });
         _syncForegroundStreamGlobals();
         holder._researchQuery = msg; // Store query for notification text
@@ -1914,6 +1937,13 @@ import {
         throw error;
       }
       if (res.ok) commitAssistantContext(helpClaim);
+      const runId = res.headers.get('X-Agent-Run-ID') || '';
+      if (runId) {
+        const active = _activeStreams.get(streamSessionId);
+        if (active) active.runId = runId;
+        const background = _backgroundStreams.get(streamSessionId);
+        if (background) background.runId = runId;
+      }
       _sendPerf.mark('chat_stream_headers');
       _sendPerf.report('headers_received');
       
@@ -2019,8 +2049,9 @@ import {
         const newRole = document.createElement('div');
         newRole.className = 'role';
         const metaS = sessionModule.getSessions().find(s => s.id === streamSessionId);
-        const requested = holder?._requestedModel || metaS?.model || modelName;
-        const actual = holder?._actualModel || requested;
+        inheritModelRouteState(holder, roundHolder, newWrap, metaS?.model || modelName);
+        const requested = newWrap._requestedModel;
+        const actual = newWrap._actualModel;
         newRole.textContent = _modelRouteLabel(requested, actual) || '';
         _applyModelColor(newRole, actual);
         newWrap.appendChild(newRole);
@@ -2045,7 +2076,7 @@ import {
 
       // Tool-aware thinking spinner
       let _lastToolName = '';
-      const _searchIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:4px"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+      const _searchIcon = uiIcon("search", 14, {"style":"vertical-align:-2px;margin-right:4px"});
       const _toolLabels = {
         'web_search': 'Searching',
         'bash': 'Running',
@@ -2107,16 +2138,27 @@ import {
 
       // Auto-show thinking spinner after text stops streaming
       let _textPauseTimer = null;
+      const _thinkingSpinnerThrottle = createLiveThinkingThrottle(() => {
+        _textPauseTimer = null;
+        if (!document.querySelector('.agent-thinking-dots') && isStreaming) {
+          _showThinkingSpinner(_thinkingLabel());
+        }
+      }, {
+        delay: 400,
+        schedule(callback, ms) {
+          _textPauseTimer = setTimeout(callback, ms);
+          return _textPauseTimer;
+        },
+        cancel(timer) {
+          clearTimeout(timer);
+          if (_textPauseTimer === timer) _textPauseTimer = null;
+        },
+      });
       function _scheduleThinkingSpinner() {
-        if (_textPauseTimer) clearTimeout(_textPauseTimer);
-        _textPauseTimer = setTimeout(() => {
-          if (!document.querySelector('.agent-thinking-dots') && isStreaming) {
-            _showThinkingSpinner(_thinkingLabel());
-          }
-        }, 400);
+        _thinkingSpinnerThrottle.update(null);
       }
       _cancelThinkingTimer = () => {
-        if (_textPauseTimer) { clearTimeout(_textPauseTimer); _textPauseTimer = null; }
+        _thinkingSpinnerThrottle.cancel();
       };
 
       // Document streaming state (text-fence detection)
@@ -2249,6 +2291,7 @@ import {
 
       let _nextIsError = false;
       let _streamSawDone = false;
+      let _streamTerminalError = null;
       let _firstVisibleOutputSeen = false;
       const markFirstVisibleOutput = () => {
         if (_firstVisibleOutputSeen) return;
@@ -2294,6 +2337,7 @@ import {
                 abortCtrl,
                 query: streamQuery,
                 metrics: null,
+                runId: (_activeStreams.get(streamSessionId) || {}).runId || '',
               });
               if (sessionModule && sessionModule.markStreaming) {
                 sessionModule.markStreaming(streamSessionId);
@@ -2379,7 +2423,8 @@ import {
               // Handle SSE error events (e.g. HTTP 404 from provider)
               if (_nextIsError || json.status >= 400) {
                 _nextIsError = false;
-                const rawError = typeof json.error === 'string' ? json.error : json.error?.message;
+                const terminalStreamError = createTerminalStreamError(json);
+                const rawError = terminalStreamError.message;
                 const actionText = {
                   repair_credentials: 'Repair the endpoint credentials in Settings → Added Models.',
                 };
@@ -2388,10 +2433,11 @@ import {
                   : [];
                 const errMsg = [json.text || rawError || `Error ${json.status || 'unknown'}`, ...actions]
                   .join(' ');
+                _streamTerminalError = createTerminalStreamError(json, errMsg);
                 console.error('Stream error:', errMsg);
                 if (spinner && spinner.element) spinner.destroy();
-                typewriterInto(roundHolder.querySelector('.body'), errMsg);
-                break;
+                try { await reader.cancel(); } catch (_) {}
+                break streamReadLoop;
               }
               if (json.delta || json.type === 'agent_prep' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
@@ -2856,8 +2902,7 @@ import {
                 if (!_isBg && holder) {
                   const roleEl = holder.querySelector('.role');
                   if (roleEl) {
-                    holder._requestedModel = json.requested_model || json.model || holder._requestedModel;
-                    holder._actualModel = json.model || holder._actualModel || holder._requestedModel;
+                    applyModelRouteEventState(json, holder, roundHolder, modelName, _sameModelName);
                     if (json.suffix) holder._roleSuffix = json.suffix;
                     // Prepend character name if sent by server or set locally
                     var _charName = json.character_name || (presetsModule.getCharacterName ? presetsModule.getCharacterName() : '');
@@ -2876,8 +2921,9 @@ import {
                   var _selM = _shortModel(json.selected_model || '');
                   var _ansM = _shortModel(json.answered_by || '');
                   uiModule.showToast('⚠ ' + _selM + ' failed — answered by ' + _ansM, 6000);
-                  if (holder) {
-                    var _rEl = holder.querySelector('.role');
+                  var _fallbackHolder = applyModelRouteEventState(json, holder, roundHolder, modelName, _sameModelName);
+                  if (_fallbackHolder) {
+                    var _rEl = _fallbackHolder.querySelector('.role');
                     if (_rEl) {
                       var _tsS = _rEl.querySelector('.role-timestamp');
                       _rEl.textContent = _ansM + ' (fallback) ';
@@ -2885,12 +2931,9 @@ import {
                         (json.reason ? ': ' + json.reason : '') + ' — answered by ' + (json.answered_by || '');
                       _applyModelColor(_rEl, json.answered_by);
                       if (_tsS) _rEl.appendChild(_tsS);
-                      holder._requestedModel = json.selected_model || holder._requestedModel || modelName;
-                      const _hasResolvedActual = holder._actualModel && !_sameModelName(holder._actualModel, holder._requestedModel);
-                      holder._actualModel = _hasResolvedActual ? holder._actualModel : (json.answered_by || holder._actualModel || holder._requestedModel);
-                      _setRoleModelLabel(_rEl, holder._requestedModel, holder._actualModel, {
-                        suffix: holder._roleSuffix,
-                        characterName: holder._characterName,
+                      _setRoleModelLabel(_rEl, _fallbackHolder._requestedModel, _fallbackHolder._actualModel, {
+                        suffix: _fallbackHolder._roleSuffix,
+                        characterName: _fallbackHolder._characterName,
                         reason: json.reason,
                       });
                     }
@@ -2935,12 +2978,11 @@ import {
                   try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
                 }
               } else if (json.type === 'model_actual') {
-                if (!_isBg && holder) {
-                  holder._requestedModel = json.requested_model || holder._requestedModel || modelName;
-                  holder._actualModel = json.model || holder._actualModel || holder._requestedModel;
-                  _setRoleModelLabel(holder.querySelector('.role'), holder._requestedModel, holder._actualModel, {
-                    suffix: holder._roleSuffix,
-                    characterName: holder._characterName,
+                if (!_isBg) {
+                  var _modelHolder = applyModelRouteEventState(json, holder, roundHolder, modelName, _sameModelName);
+                  if (_modelHolder) _setRoleModelLabel(_modelHolder.querySelector('.role'), _modelHolder._requestedModel, _modelHolder._actualModel, {
+                    suffix: _modelHolder._roleSuffix,
+                    characterName: _modelHolder._characterName,
                   });
                 }
               } else if (json.type === 'attachments') {
@@ -3029,8 +3071,7 @@ import {
               } else if (json.type === 'metrics') {
                 metrics = json.data;
                 if (!_isBg && holder && metrics) {
-                  holder._requestedModel = metrics.requested_model || holder._requestedModel || modelName;
-                  holder._actualModel = metrics.model || holder._actualModel || holder._requestedModel;
+                  applyModelMetricsState(metrics, holder, roundHolder, modelName);
                 }
                 if (_isBg) {
                   var bgM = _backgroundStreams.get(streamSessionId);
@@ -3557,6 +3598,9 @@ import {
         }
       }
 
+      if (_streamTerminalError) {
+        throw _streamTerminalError;
+      }
       if (!_streamSawDone) {
         throw new Error('Stream closed before completion');
       }
@@ -3575,15 +3619,16 @@ import {
       const _isBgFinal = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
       if (!_isBgFinal) {
         finalMeta = sessionModule.getSessions().find(s => s.id === sessionModule.getCurrentSessionId());
-        const _finalActualModel = metrics?.model || holder._actualModel || finalMeta?.model;
-        const _finalRequestedModel = metrics?.requested_model || holder._requestedModel || finalMeta?.model || _finalActualModel;
+        const _finalModelHolder = applyModelMetricsState(metrics, holder, roundHolder, finalMeta?.model) || roundHolder || holder;
+        const _finalActualModel = _finalModelHolder?._actualModel || finalMeta?.model;
+        const _finalRequestedModel = _finalModelHolder?._requestedModel || finalMeta?.model || _finalActualModel;
         // Prepend character name if set
         var _charNameFinal = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
-        const roleEl = holder.querySelector('.role');
+        const roleEl = _finalModelHolder?.querySelector('.role');
         if (roleEl) {
           _setRoleModelLabel(roleEl, _finalRequestedModel, _finalActualModel, {
-            suffix: holder._roleSuffix,
-            characterName: _charNameFinal || holder._characterName,
+            suffix: _finalModelHolder._roleSuffix,
+            characterName: _charNameFinal || _finalModelHolder._characterName,
           });
         }
         holder.dataset.raw = accumulated;
@@ -3783,8 +3828,8 @@ import {
         if (accumulated && window.aiTTSManager && window.aiTTSManager.autoPlay) {
           const ttsBtn = holder.querySelector('.ai-tts-button');
           if (ttsBtn) {
-            var ICON_PLAY_TTS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
-            var ICON_STOP_TTS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
+            var ICON_PLAY_TTS = uiIcon("play", 14);
+            var ICON_STOP_TTS = uiIcon("stop", 14);
             const resetFn = () => {
               ttsBtn.innerHTML = ICON_PLAY_TTS;
               ttsBtn.classList.remove('playing', 'loading');
@@ -4020,7 +4065,7 @@ import {
           // cap. Only auto-recover from connection-class failures; deterministic
           // errors (unsupported tools, 4xx/5xx, parse failures) surface right away
           // instead of burning the nudge budget on a guaranteed-to-fail retry.
-          if (!(_isRecoverableStreamErr(err) && _tryAutoRecover(holder, accumulated, streamSessionId))) {
+          if (!(isRecoverableStreamError(err) && _tryAutoRecover(holder, accumulated, streamSessionId))) {
             // Early failures (for example a Copal flush error) happen before
             // the response holder exists. Never paint them into an older
             // assistant turn or silently lose them because a global selector
@@ -4186,7 +4231,7 @@ import {
           || _streamSessionId
           || (window.sessionModule && window.sessionModule.getCurrentSessionId && window.sessionModule.getCurrentSessionId());
         if (_sid) {
-          fetch(`/api/chat/stop/${encodeURIComponent(_sid)}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+          _stopDetachedRun(_sid);
         }
       } catch (_) {}
     }
@@ -4197,18 +4242,6 @@ import {
   // preserve the partial, then re-submit a completion handshake by reusing the
   // existing continue/resume path. Returns false at the cap so the caller can
   // surface the failure instead of nudging forever.
-  // Only auto-recover from connection-class failures (the genuine "silently
-  // died" case). Deterministic errors — unsupported tools, HTTP 4xx/5xx, JSON
-  // parse failures — will fail identically on retry, so surfacing them
-  // immediately is both more honest and avoids wasting the nudge budget.
-  function _isRecoverableStreamErr(err) {
-    if (!err) return false;
-    if (err.name === 'TypeError') return true;   // fetch/reader network failure
-    const m = (err.message || '').toLowerCase();
-    if (/\btool\b|unsupported|json|parse|\b4\d\d\b|\b5\d\d\b/.test(m)) return false;
-    return /network|fetch|connection|reset|closed|aborted|stream|tim(?:e|ed)\s?out|econn|eof/.test(m);
-  }
-
   function _tryAutoRecover(holder, accumulated, sessionId) {
     if (_autoNudges >= _AUTO_NUDGE_CAP) return false;
     _autoNudges++;
@@ -4410,6 +4443,7 @@ import {
       abortCtrl: active.abortCtrl,
       query: active.query || (active.holder ? (active.holder._researchQuery || '') : ''),
       metrics: null,
+      runId: active.runId || '',
     });
     // Mark session with pulsing dot in sidebar
     if (sessionModule && sessionModule.markStreaming) {
@@ -4447,7 +4481,7 @@ import {
     // Claim the session before the first await.  Refresh/session-switch hooks
     // can call resumeStream concurrently; checking then fetching before taking
     // this lock lets both callers attach and render the same detached run.
-    _resumingStreams.add(sessionId);
+    _resumingStreams.set(sessionId, '');
 
     let res;
     try {
@@ -4460,6 +4494,7 @@ import {
       _resumingStreams.delete(sessionId);
       return false;
     }
+    _resumingStreams.set(sessionId, res.headers.get('X-Agent-Run-ID') || '');
 
     const box = document.getElementById('chat-history');
     if (!box) {
@@ -4785,7 +4820,7 @@ import {
         const origHTML = btn.innerHTML;
         const isCompact = !!btn.closest('pre.pre-compact');
         if (!isCompact) {
-          btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+          btn.innerHTML = uiIcon("check", 14, {"role":"success"});
         }
         btn.classList.add('copied');
         btn.dataset.state = 'copied';
@@ -4826,7 +4861,7 @@ import {
         const runBtn = pre.querySelector('.run-code');
         if (runBtn) runBtn.setAttribute('data-code', newCode);
         // Swap icon back to pencil
-        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+        btn.innerHTML = uiIcon("edit", 14);
         btn.title = 'Edit';
         btn.classList.remove('active');
       } else {
@@ -4844,7 +4879,7 @@ import {
         // scroll triggered by clicking Edit".
         try { codeEl.focus({ preventScroll: true }); } catch (_) { codeEl.focus(); }
         // Swap icon to checkmark
-        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        btn.innerHTML = uiIcon("check", 14, {"role":"success"});
         btn.title = 'Done editing';
         btn.classList.add('active');
       }
@@ -6045,7 +6080,7 @@ import {
     }
   }
 
-  // Open a chat attachment in the right place: images → Gallery editor; PDFs &
+  // Open a chat attachment in the right place: images → Imps; PDFs &
   // text/code/markdown → Documents viewer; anything else → raw file. A given
   // upload's imported document is reused (cached by upload id) so clicking it
   // again re-opens the same doc instead of making duplicates.
@@ -6065,12 +6100,12 @@ import {
     const id = att.id, name = att.name || '', mime = att.mime || '';
     const url = `${API_BASE}/api/upload/${id}`;
 
-    // Images → Gallery editor.
+    // Images → Imps.
     if (isImage) {
       try {
-        const gx = await import('./galleryEditor.js');
+        const gx = await import('./imps.js');
         if (gx.openEditor) { gx.openEditor(url, id, null, name); return; }
-      } catch (e) { console.warn('gallery open failed', e); }
+      } catch (e) { console.warn('imps open failed', e); }
       window.open(url, '_blank');
       return;
     }

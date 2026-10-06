@@ -1223,16 +1223,25 @@ def setup_provider_v1_routes(
 
     async def _expire_oauth_flows() -> None:
         for flow in oauth_flows.expired():
-            flow.status = "expired"
-            flow.error_code = "oauth_expired"
+            with _OAUTH_COMPLETION_LOCKS_GUARD:
+                lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
+            acquired = await asyncio.to_thread(lock.acquire)
             try:
-                await flow.engine.call(
-                    "_openclank/provider-control/v1/oauth/cancel",
-                    flow.completion_payload(),
-                )
-            except Exception:
-                pass
-            await _release_terminal_flow(flow, successful=False)
+                if flow.status in {"complete", "failed", "cancelled", "expired"}:
+                    continue
+                flow.status = "expired"
+                flow.error_code = "oauth_expired"
+                try:
+                    await flow.engine.call(
+                        "_openclank/provider-control/v1/oauth/cancel",
+                        flow.completion_payload(),
+                    )
+                except Exception:
+                    pass
+                await _release_terminal_flow(flow, successful=False)
+            finally:
+                if acquired:
+                    lock.release()
 
     def _validate_engine_flow_result(
         flow: OAuthHostFlow,
@@ -1260,9 +1269,7 @@ def setup_provider_v1_routes(
             lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
         acquired = await asyncio.to_thread(lock.acquire)
         try:
-            if flow.status == "complete" and flow.account_public is not None:
-                return flow.public()
-            if flow.status == "failed" and flow.error_code:
+            if flow.status in {"complete", "failed", "cancelled", "expired"}:
                 return flow.public()
             return await _persist_oauth_result_locked(flow, result)
         finally:
@@ -1295,6 +1302,8 @@ def setup_provider_v1_routes(
         flow: OAuthHostFlow,
         result: Mapping[str, Any],
     ) -> dict[str, Any]:
+        if flow.status in {"complete", "failed", "cancelled", "expired"}:
+            return flow.public()
         _validate_engine_flow_result(flow, result)
         status = str(result.get("status") or "failed")
         if status in {"pending", "running"}:
@@ -1456,6 +1465,16 @@ def setup_provider_v1_routes(
                 raise HTTPException(502, "Managed provider OAuth flow ID changed")
             safe_start = dict(start)
             safe_start["url"] = _safe_authorization_url(start.get("url"))
+            flow.public_start = {
+                "url": safe_start["url"],
+                "method": safe_start["method"],
+                "instructions": safe_start.get("instructions", ""),
+                **(
+                    {"userCode": safe_start["userCode"]}
+                    if isinstance(safe_start.get("userCode"), str)
+                    else {}
+                ),
+            }
             return flow, safe_start, flow.public(start=safe_start)
         except Exception:
             if "flow" in locals():
@@ -2267,15 +2286,22 @@ def setup_provider_v1_routes(
         await _expire_oauth_flows()
         try:
             flow = oauth_flows.get(flow_id, owner=owner)
-            if flow.status not in {"complete", "failed", "cancelled", "expired"}:
-                await flow.engine.call(
-                    "_openclank/provider-control/v1/oauth/cancel",
-                    flow.completion_payload(),
-                )
-            flow.status = "cancelled"
-            flow.error_code = "oauth_cancelled"
-            await _release_terminal_flow(flow, successful=False, remove=True)
-            return {"flow_id": flow.flow_id, "status": "cancelled"}
+            with _OAUTH_COMPLETION_LOCKS_GUARD:
+                lock = _OAUTH_COMPLETION_LOCKS.setdefault(flow.flow_id, threading.Lock())
+            acquired = await asyncio.to_thread(lock.acquire)
+            try:
+                if flow.status not in {"complete", "failed", "cancelled", "expired"}:
+                    await flow.engine.call(
+                        "_openclank/provider-control/v1/oauth/cancel",
+                        flow.completion_payload(),
+                    )
+                    flow.status = "cancelled"
+                    flow.error_code = "oauth_cancelled"
+                    await _release_terminal_flow(flow, successful=False)
+                return flow.public()
+            finally:
+                if acquired:
+                    lock.release()
         except Exception as exc:
             _raise_engine_error(exc)
 

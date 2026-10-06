@@ -37,9 +37,9 @@ class ProviderFamilyCatalogError(RuntimeError):
 _CATALOG_SCHEMA_VERSION = 1
 _FAMILY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MODEL_CATALOG_SHA256 = "33f836f532fd8ada58f255f11030ff5500d45b0cf7e63587772221050ffb1f48"
-_ENGINE_SOURCE_SHA256 = "996946fcafd8e9c5e17659c27ec21131bbedd885e54816a12efdaf4e1ddd5942"
+_ENGINE_SOURCE_SHA256 = "455738be3eb522acb6362c7fe26b9f3051a65f2ed250773d3d0728462a533831"
 _MANAGED_SCHEMA_VERSION = 2
-_MANAGED_SCHEMA_SHA256 = "611c378cc61719f6290cd28e9c383b5a9f398fc174785c7c84b5269f366073ca"
+_MANAGED_SCHEMA_SHA256 = "bcac868d6f2bd61ee7a62b8a35afc43f068590fe9a496f279774936cde4b3e31"
 _MANAGED_ADAPTERS = {
     "@ai-sdk/openai-compatible": "models-dev-openai-compatible",
     "@ai-sdk/anthropic": "models-dev-anthropic",

@@ -66,7 +66,7 @@ export function wireKeyboardShortcuts(deps) {
   } = deps;
 
   document.addEventListener('keydown', (e) => {
-    if (!state.editorOpen) return;
+    if (!state.editorOpen || !state.container?.getClientRects().length) return;
     // `?` toggles the cheatsheet. Don't fire while typing in a text
     // field — the user might be typing a prompt with a `?`.
     if (e.key === '?' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {

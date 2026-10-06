@@ -161,15 +161,15 @@ def _u(num: int, key: str, title: str, kind: str, families: Sequence[str], summa
 
 
 CATALOG: tuple[AchievementDefinition, ...] = (
-    _n(1, "oc.first-light", "First Light", KIND_UI, (EventFamily.SHELL_READY,),
-       "Mount the shell for this account."),
+    _n(1, "oc.first-light", "open your clanker", KIND_UI, (EventFamily.SHELL_READY,),
+       "Use Open Clank for the first time."),
     _n(2, "oc.in-good-company", "In Good Company", KIND_RECEIPT, (EventFamily.CONVERSATION_TURN_COMPLETED,),
        "Finish an owner-initiated chat turn."),
     _n(3, "oc.on-the-clock", "On the Clock", KIND_RECEIPT, (EventFamily.SCHEDULED_TASK_RUN_COMPLETED,),
        "Run a scheduled task you created to success."),
     _n(4, "oc.proof-of-work", "Proof of Work", KIND_RECEIPT, (EventFamily.GOAL_VERIFIED_COMPLETED,),
        "Verify a durable goal complete with its evidence."),
-    _n(5, "oc.selective-menmery", "Selective Menmery", KIND_RECEIPT, (EventFamily.MEMORY_CANDIDATE_ACCEPTED,),
+    _n(5, "oc.selective-menmery", "Selective Memery", KIND_RECEIPT, (EventFamily.MEMORY_CANDIDATE_ACCEPTED,),
        "Accept a pending memory candidate."),
     _n(6, "oc.total-recall", "Total Recall", "mixed", (EventFamily.MEMORY_SEARCH_COMPLETED, EventFamily.MEMORY_RECORD_OPENED),
        "Find a memory by scoped search and open that record."),
@@ -945,30 +945,24 @@ def _check_n27(state: PredicateState, event: ActivityEvent) -> Qualification | N
 
 
 def _check_n28(state: PredicateState, event: ActivityEvent) -> Qualification | None:
+    facts = _f(event)
+    class_id = _ident(facts, "classId")
+    revision = facts.get("catalogueRevision")
+    if not class_id or type(revision) is not int or revision < 0:
+        return None
+    if not _truth(facts, "authoredByOwner") or _truth(facts, "seededOfficial") or int(facts.get("lessonCount") or 0) < 1:
+        return None
+    key = json.dumps([event.workspace_id or "", class_id, revision], separators=(",", ":"))
     if event.event_family == EventFamily.CLASS_PREVIEWED:
-        facts = _f(event)
-        class_id = _ident(facts, "classId")
-        if not class_id or not _truth(facts, "previewedAsLearner"):
-            return None
-        if _truth(facts, "seededOfficial"):
-            return None
-        state.add("N28:previewed", class_id)
+        if _truth(facts, "previewedAsLearner"):
+            state.remember("N28:preview:" + key, {"sourceEventId": event.source_event_id})
         return None
     if event.event_family == EventFamily.CLASS_PUBLISHED:
-        facts = _f(event)
-        class_id = _ident(facts, "classId")
-        if class_id not in state.members("N28:previewed"):
-            return None
-        if not _truth(facts, "authoredByOwner"):
-            return None
-        if _truth(facts, "seededOfficial"):
-            return None
-        if int(facts.get("lessonCount") or 0) < 1:
-            return None
-        if state.flag("N28"):
+        preview = state.recall("N28:preview:" + key)
+        if not preview or state.flag("N28"):
             return None
         state.set_flag("N28", True)
-        return Qualification("N28", (event.source_event_id,), {"classId": class_id})
+        return Qualification("N28", (preview["sourceEventId"], event.source_event_id), {"classId": class_id})
     return None
 
 
@@ -1076,20 +1070,21 @@ def _check_s03(state: PredicateState, event: ActivityEvent) -> Qualification | N
     if not (document_id and revision and source_hash):
         return None
     key = f"S03:{document_id}"
+    cycle = _ident(facts, "cycleOccurrenceId")
     if sequence == "rich":
         # Returning to rich while a source phase is open completes the cycle
         # (handled by the S03-close checker).  Do not clobber that phase here.
         current = state.recall(key)
-        if current.get("phase") == "source" and current.get("revision") == revision and current.get("hash") == source_hash:
+        if current.get("phase") == "source" and current.get("revision") == revision and current.get("hash") == source_hash and current.get("cycle", "") == cycle:
             return None
-        state.remember(key, {"phase": "rich-open", "revision": revision, "hash": source_hash})
+        state.remember(key, {"phase": "rich-open", "revision": revision, "hash": source_hash, "cycle": cycle})
         return None
     opened = state.recall(key)
     if not opened or opened.get("phase") != "rich-open":
         return None
-    if opened.get("revision") != revision or opened.get("hash") != source_hash:
+    if opened.get("revision") != revision or opened.get("hash") != source_hash or opened.get("cycle", "") != cycle:
         return None
-    state.remember(key, {"phase": "source", "revision": revision, "hash": source_hash})
+    state.remember(key, {"phase": "source", "revision": revision, "hash": source_hash, "cycle": cycle})
     return None
 
 
@@ -1106,10 +1101,11 @@ def _check_s03_close(state: PredicateState, event: ActivityEvent) -> Qualificati
     revision = _ident(facts, "sourceRevisionId")
     source_hash = _ident(facts, "sourceHash")
     key = f"S03:{document_id}"
+    cycle = _ident(facts, "cycleOccurrenceId")
     opened = state.recall(key)
     if not opened or opened.get("phase") != "source":
         return None
-    if opened.get("revision") != revision or opened.get("hash") != source_hash:
+    if opened.get("revision") != revision or opened.get("hash") != source_hash or opened.get("cycle", "") != cycle:
         return None
     if state.flag("S03"):
         return None
@@ -1280,7 +1276,13 @@ class TreeHouseAchievementEngine:
 
     # -- live / backfill ingestion -----------------------------------------
 
-    def ingest(
+    def ingest(self, account_id, events, *, via="live"):
+        # Keep receipt, predicate, award and outbox writes together with reset.
+        transaction = getattr(self.repository, "achievement_transaction", None)
+        with transaction() if transaction else self.repository._lock:
+            return self._ingest_locked(account_id, events, via=via)
+
+    def _ingest_locked(
         self,
         account_id: str,
         events: Sequence[ActivityEvent | Mapping[str, Any]],
@@ -1432,7 +1434,11 @@ class TreeHouseAchievementEngine:
 
     # -- backfill ----------------------------------------------------------
 
-    def backfill(
+    def backfill(self, account_id, source_family, records, *, cursor=None):
+        with self.repository._lock:
+            return self._backfill_locked(account_id, source_family, records, cursor=cursor)
+
+    def _backfill_locked(
         self,
         account_id: str,
         source_family: str,

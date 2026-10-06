@@ -1,7 +1,7 @@
 """Canonical transactional authority for Open Clank file locations/workspaces.
 
-This module is the durable policy model that the legacy JSON root registry and
-permission-grant table can project into during cutover.  A physical Location is
+This module is the sole writable permission store. Legacy APIs are adapters
+and Rust consumes a derived read-only snapshot.  A physical Location is
 identity only; People bindings govern app visibility, Agent bindings narrow
 agent activity, and Operation bindings approve a risky action without ever
 minting path authority.
@@ -24,6 +24,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from src.constants import APP_DB
 from src.secret_storage import decrypt, encrypt
+from src.openclank.file_policy_compat import CanonicalCompatibility, COMPAT_SCHEMA
 
 
 SCHEMA_VERSION = 1
@@ -34,6 +35,7 @@ SUBJECT_KINDS = frozenset({"user", "group"})
 LIFETIMES = frozenset({"once", "chat", "workspace", "always"})
 ORIGINS = frozenset({"app", "agent"})
 RESET_SCOPES = frozenset({"chat", "workspace", "location", "all_agent"})
+_UNSET = object()
 
 
 class FilePolicyError(ValueError):
@@ -364,28 +366,37 @@ ON file_operations(owner_subject_id, created_unix_ms DESC);
 """
 
 
-class FilePolicyRepository:
+class FilePolicyRepository(CanonicalCompatibility):
     """SQLite repository and monotonic resolver for canonical file authority."""
 
     def __init__(self, db_path: str | os.PathLike[str] | None = None) -> None:
-        self.db_path = str(db_path or APP_DB)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = str(db_path or os.environ.get("OPEN_CLANK_AUTHORITY_DB_PATH") or APP_DB)
+        path = Path(self.db_path).expanduser().resolve()
+        existing = False
+        # Admission is read-only: even switching SQLite journal mode is a
+        # mutation and must wait until the store passes the current contract.
+        if path.is_file() and path.stat().st_size:
+            with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as admission:
+                existing = bool(admission.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_policy_meta'").fetchone())
+                if not existing and admission.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='permission_grants'").fetchone():
+                    raise FilePolicyError("Files permission store does not match this release. Stop writers and keep a complete backup; restore the matching release or prepare an offline conversion.", code="policy_store_unavailable")
+                if existing:
+                    required = {'file_policy_meta': ['singleton', 'schema_version', 'generation'], 'file_policy_locations': ['id', 'kind', 'canonical_path', 'canonical_key', 'display_path', 'capabilities_json', 'platform_identity_json', 'availability', 'enabled', 'generation', 'revision', 'created_by_subject_id', 'created_unix_ms', 'updated_unix_ms', 'migration_source', 'migration_key'], 'file_policy_workspaces': ['id', 'owner_subject_id', 'name', 'location_id', 'relative_folder', 'archived', 'generation', 'revision', 'created_unix_ms', 'updated_unix_ms', 'migration_source', 'migration_key'], 'file_policy_bindings': ['id', 'binding_class', 'subject_kind', 'subject_id', 'location_id', 'workspace_id', 'chat_id', 'resource_ref', 'operation', 'capabilities_json', 'lifetime', 'status', 'remaining_uses', 'expires_unix_ms', 'created_by_subject_id', 'generation', 'revision', 'created_unix_ms', 'updated_unix_ms', 'migration_source', 'migration_key'], 'file_policy_audit': ['id', 'generation', 'event', 'actor_subject_id', 'target_type', 'target_id', 'reason_code', 'details_json', 'created_unix_ms'], 'sqlite_sequence': ['name', 'seq'], 'file_places': ['id', 'owner_subject_id', 'provider', 'stable_resource_id', 'origin_ciphertext', 'kind', 'display_name', 'created_unix_ms', 'updated_unix_ms'], 'file_recents': ['id', 'owner_subject_id', 'provider', 'stable_resource_id', 'origin_ciphertext', 'kind', 'display_name', 'accessed_unix_ms'], 'file_saved_searches': ['id', 'owner_subject_id', 'name', 'provider_scope', 'query', 'sort_json', 'created_unix_ms', 'updated_unix_ms'], 'file_operations': ['owner_subject_id', 'operation_id', 'request_digest', 'generation', 'receipt_ciphertext', 'created_unix_ms', 'lifecycle_phase'], 'file_policy_subject_aliases': ['username', 'subject_id', 'is_admin'], 'file_policy_legacy_aliases': ['kind', 'legacy_id', 'target_id'], 'file_policy_import_sources': ['id', 'source_hash', 'source_ciphertext', 'complete', 'created_unix_ms'], 'file_policy_import_items': ['id', 'kind', 'legacy_id', 'subject_id', 'owner_username', 'source_json', 'status', 'reason', 'canonical_id'], 'file_policy_approval_details': ['binding_id', 'permission_type', 'pattern', 'resource']}
+                    for table, names in required.items():
+                        found = {row[1] for row in admission.execute(f"PRAGMA table_info({table})")}
+                        if not set(names).issubset(found):
+                            raise FilePolicyError("Files store schema does not match this release. Stop writers and keep a complete backup; restore the matching release or prepare an offline conversion.", code="policy_store_unavailable")
+                    columns = {row[1] for row in admission.execute("PRAGMA table_info(file_operations)")}
+                    version = admission.execute("SELECT schema_version FROM file_policy_meta WHERE singleton=1").fetchone()
+                    if "lifecycle_phase" not in columns or not version or int(version[0]) != SCHEMA_VERSION:
+                        raise FilePolicyError("Files store schema does not match this release. Stop writers and keep a complete backup; restore the matching release or prepare an offline conversion.", code="policy_store_unavailable")
+        path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.executescript(_SCHEMA)
-            # ``file_operations`` predates the typed attachment lifecycle.
-            # Keep existing encrypted receipts readable while adding a small
-            # queryable phase column so terminal rows cannot starve pending
-            # recovery markers during bounded reaping.
-            columns = {
-                str(row["name"])
-                for row in connection.execute("PRAGMA table_info(file_operations)").fetchall()
-            }
-            if "lifecycle_phase" not in columns:
-                connection.execute("ALTER TABLE file_operations ADD COLUMN lifecycle_phase TEXT")
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS ix_file_operations_lifecycle "
-                "ON file_operations(owner_subject_id, lifecycle_phase, created_unix_ms ASC)"
-            )
+            if not existing:
+                connection.executescript(_SCHEMA)
+                connection.executescript(COMPAT_SCHEMA)
+                connection.execute("CREATE INDEX IF NOT EXISTS ix_file_operations_lifecycle ON file_operations(owner_subject_id,lifecycle_phase,created_unix_ms ASC)")
+            connection.execute("SELECT lifecycle_phase FROM file_operations LIMIT 0")
             version = int(connection.execute(
                 "SELECT schema_version FROM file_policy_meta WHERE singleton=1"
             ).fetchone()[0])
@@ -652,6 +663,7 @@ class FilePolicyRepository:
         )
 
     def generation(self) -> int:
+        self.expire_bindings()
         with self._connect() as connection:
             return self._generation(connection)
 
@@ -930,7 +942,7 @@ class FilePolicyRepository:
         label = str(name or "").strip()[:200]
         provider = str(provider_scope or "").strip().lower()
         needle = str(query or "").strip()[:512]
-        if not owner or not label or provider not in {"all", "host", "copal", "gallery", "library"} or not needle:
+        if not owner or not label or provider not in {"all", "host", "copal", "files", "library"} or not needle:
             raise FilePolicyError("saved search is incomplete", code="invalid_saved_search")
         normalized_sort = dict(sort or {})
         now = _now_ms()
@@ -1485,7 +1497,7 @@ class FilePolicyRepository:
         if lifetime not in LIFETIMES:
             raise FilePolicyError("unsupported policy lifetime", code="invalid_lifetime")
         caps = _capabilities(capabilities)
-        if not location_id:
+        if not location_id and (binding_class != "operation" or set(caps) != {"execute"}):
             raise FilePolicyError("every binding requires a location", code="location_required")
         if binding_class == "operation" and (not resource_ref or not operation):
             raise FilePolicyError("operation bindings require a resource and operation", code="operation_required")
@@ -1515,12 +1527,15 @@ class FilePolicyRepository:
                     raise FilePolicyError("binding exceeds location capabilities", code="capability_escalation")
             if workspace_id:
                 workspace = connection.execute(
-                    "SELECT location_id FROM file_policy_workspaces WHERE id=? AND archived=0",
+                    "SELECT location_id,owner_subject_id FROM file_policy_workspaces WHERE id=? AND archived=0",
                     (str(workspace_id),),
                 ).fetchone()
                 if not workspace:
                     connection.rollback()
                     raise FilePolicyError("binding workspace was not found", code="workspace_not_found")
+                if subject_kind != "user" or workspace["owner_subject_id"] != subject:
+                    connection.rollback()
+                    raise FilePolicyError("workspace belongs to another subject", code="workspace_owner_mismatch")
                 if location_id and workspace["location_id"] != str(location_id):
                     connection.rollback()
                     raise FilePolicyError("workspace does not belong to location", code="workspace_location_mismatch")
@@ -1597,6 +1612,7 @@ class FilePolicyRepository:
         binding_class: str | None = None,
         include_inactive: bool = False,
     ) -> list[PolicyBinding]:
+        self.expire_bindings()
         clauses: list[str] = []
         params: list[Any] = []
         if subject_id is not None:
@@ -1620,7 +1636,7 @@ class FilePolicyRepository:
         *,
         actor_subject_id: str,
         capabilities: Iterable[str] | None = None,
-        expires_unix_ms: int | None = None,
+        expires_unix_ms: Any = _UNSET,
         enabled: bool | None = None,
     ) -> PolicyBinding:
         """Narrow/change one binding and advance the shared policy generation."""
@@ -1645,6 +1661,17 @@ class FilePolicyRepository:
                     connection.rollback()
                     raise FilePolicyError("binding exceeds location capabilities", code="capability_escalation")
             status = row["status"]
+            if enabled is True:
+                if row["lifetime"] == "once" and row["remaining_uses"] != 1:
+                    raise FilePolicyError("Consumed approvals cannot be reactivated", code="once_consumed")
+                if row["location_id"]:
+                    location = connection.execute("SELECT enabled,availability FROM file_policy_locations WHERE id=?", (row["location_id"],)).fetchone()
+                    if not location or not location["enabled"] or location["availability"] != "available":
+                        raise FilePolicyError("Location is unavailable", code="location_not_found")
+                if row["workspace_id"]:
+                    workspace = connection.execute("SELECT archived,owner_subject_id FROM file_policy_workspaces WHERE id=?", (row["workspace_id"],)).fetchone()
+                    if not workspace or workspace["archived"] or workspace["owner_subject_id"] != row["subject_id"]:
+                        raise FilePolicyError("Workspace is unavailable", code="workspace_not_found")
             if enabled is not None:
                 status = "active" if enabled else "revoked"
             generation = self._bump(connection)
@@ -1657,7 +1684,7 @@ class FilePolicyRepository:
                 """,
                 (
                     _json(new_capabilities),
-                    int(expires_unix_ms) if expires_unix_ms is not None else row["expires_unix_ms"],
+                    row["expires_unix_ms"] if expires_unix_ms is _UNSET else int(expires_unix_ms) if expires_unix_ms is not None else None,
                     status,
                     generation,
                     _now_ms(),
@@ -1758,6 +1785,7 @@ class FilePolicyRepository:
         if capability not in CAPABILITIES:
             raise FilePolicyError("unsupported capability", code="invalid_capability")
         relative = _relative_folder(relative_resource)
+        self.expire_bindings()
         now = _now_ms()
         with self._connect() as connection:
             self._begin(connection)
@@ -1811,11 +1839,12 @@ class FilePolicyRepository:
                     chat_id=chat_id,
                     now_ms=now,
                 )
-                app_caps = {
-                    value
-                    for row in people
-                    for value in _parse_json(row["capabilities_json"], [])
-                } & location_caps
+                app_caps = self.people_capabilities(subject, location_id, workspace_id=workspace_id,
+                    chat_id=chat_id, connection=connection) & location_caps
+                # Authenticated group membership still uses the same-location
+                # resolver; migration never invents group membership.
+                app_caps |= {value for row in people if row["subject_kind"] == "group"
+                    for value in _parse_json(row["capabilities_json"], [])} & location_caps
             if capability not in app_caps:
                 return denied("app_visibility_denied")
 
@@ -1831,11 +1860,10 @@ class FilePolicyRepository:
                     chat_id=chat_id,
                     now_ms=now,
                 )
-                agent_caps = {
-                    value
-                    for row in agents
-                    for value in _parse_json(row["capabilities_json"], [])
-                } & location_caps
+                agent_caps = self.people_capabilities(subject, location_id, workspace_id=workspace_id,
+                    chat_id=chat_id, connection=connection, binding_class="agent") & location_caps
+                agent_caps |= {value for row in agents if row["subject_kind"] == "group"
+                    for value in _parse_json(row["capabilities_json"], [])} & location_caps
                 effective &= agent_caps
                 if capability not in effective:
                     return denied("agent_binding_denied")
@@ -1911,11 +1939,11 @@ class FilePolicyRepository:
         workspace_id: str | None = None,
         chat_id: str | None = None,
     ) -> bool:
-        """Read-only check for one active OperationApproval.
+        """Check one active canonical approval, consuming Once atomically.
 
         This is the canonical consent-ledger lookup used by the interactive
         approval lanes after the authority door has already resolved People /
-        Agent ceilings; it never consumes a Once binding and never broadens
+        Agent ceilings; it consumes a Once binding and never broadens
         beyond the recorded lifetime dimensions.
         """
         subject = str(subject_id or "").strip()
@@ -1925,25 +1953,24 @@ class FilePolicyRepository:
         capability = str(capability or "").strip().lower()
         if not subject or not location or not operation or not refs or not capability:
             return False
+        self.expire_bindings()
         with self._connect() as connection:
-            rows = self._matching_bindings(
-                connection,
-                binding_class="operation",
-                subject_id=subject,
-                group_ids=(),
-                location_id=location,
-                workspace_id=workspace_id,
-                chat_id=chat_id,
-                operation=operation,
-                now_ms=_now_ms(),
-            )
-        for row in rows:
-            if row["resource_ref"] not in refs:
-                continue
-            if capability not in set(_parse_json(row["capabilities_json"], [])):
-                continue
+            self._begin(connection)
+            rows = self._matching_bindings(connection, binding_class="operation", subject_id=subject,
+                group_ids=(), location_id=location, workspace_id=workspace_id, chat_id=chat_id,
+                operation=operation, now_ms=_now_ms())
+            rows = [row for row in rows if row["resource_ref"] in refs and capability in set(_parse_json(row["capabilities_json"], []))]
+            if not rows:
+                connection.rollback()
+                return False
+            row = next((candidate for candidate in rows if candidate["lifetime"] != "once"), rows[0])
+            if row["lifetime"] == "once":
+                generation = self._bump(connection)
+                connection.execute("UPDATE file_policy_bindings SET status='consumed',remaining_uses=0,generation=?,revision=revision+1,updated_unix_ms=? WHERE id=? AND remaining_uses=1", (generation, _now_ms(), row["id"]))
+                self._audit(connection, generation=generation, event="consume", actor_subject_id=subject,
+                    target_type="binding", target_id=row["id"], reason_code="once_consumed")
+            connection.commit()
             return True
-        return False
 
     def revoke_binding(
         self,
@@ -2174,6 +2201,8 @@ class FilePolicyRepository:
             raise FilePolicyError("subject is required", code="subject_required")
         with self._connect() as connection:
             self._begin(connection)
+            identities = int(connection.execute("DELETE FROM file_policy_subject_aliases WHERE subject_id=?", (subject,)).rowcount or 0)
+            migration_items = int(connection.execute("UPDATE file_policy_import_items SET status='revoked',reason='account_deleted' WHERE subject_id=? AND status!='revoked'", (subject,)).rowcount or 0)
             bindings = int(connection.execute(
                 "DELETE FROM file_policy_bindings WHERE subject_id=?", (subject,)
             ).rowcount or 0)
@@ -2189,7 +2218,7 @@ class FilePolicyRepository:
             saved_searches = int(connection.execute(
                 "DELETE FROM file_saved_searches WHERE owner_subject_id=?", (subject,)
             ).rowcount or 0)
-            if not bindings and not workspaces and not places and not recents and not saved_searches:
+            if not bindings and not workspaces and not places and not recents and not saved_searches and not identities and not migration_items:
                 connection.rollback()
                 return {
                     "bindings": 0,

@@ -663,7 +663,7 @@ def test_import_rejects_foreign_bundle_and_preserves_unknown_keys(tmp_path):
         "schema_version": 99,
         "name": "Future",
         "state": {"v": 2, "layers": [], "futureKey": {"x": 1}},
-        "image": {"provider": "gallery", "resource_id": "r", "revision": "rev"},
+        "image": {"provider": "files", "resource_id": "r", "revision": "rev"},
     }
     restored = repo.import_project(owner="alice", image_identity=IDENTITY, bundle=bundle)
     assert restored.state["futureKey"] == {"x": 1}

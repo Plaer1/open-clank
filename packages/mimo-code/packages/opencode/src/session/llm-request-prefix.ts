@@ -37,6 +37,8 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
    * order. Caller is responsible for the ordering and content.
    */
   additions: string[]
+  /** Main rebuild requests compact an already-rendered checkpoint tail. */
+  collapseCheckpointTail?: boolean
 }) {
   const llm = yield* LLM.Service
   const toolRegistry = yield* ToolRegistry.Service
@@ -44,7 +46,9 @@ export const buildLLMRequestPrefix = Effect.fn("Session.buildLLMRequestPrefix")(
   // Always use full msgs — slicing is a fork-capture concern that lives at the
   // caller (ForkContext.watermarkMsgID is a boundary marker, not a slice arg).
   // See spec changelog at docs/superpowers/specs/2026-05-26-fork-agent-prefix-cache-design.md
-  const inheritedMessages = yield* MessageV2.toModelMessagesEffect(input.msgs, input.model)
+  const inheritedMessages = yield* MessageV2.toModelMessagesEffect(input.msgs, input.model, {
+    collapseCheckpointTail: input.collapseCheckpointTail,
+  })
 
   // Find the last user message; required for system "user.system" pass-through
   const lastUserMsg = input.msgs.findLast((m) => m.info.role === "user")

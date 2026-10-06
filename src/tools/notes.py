@@ -206,6 +206,7 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
                 content_raw,
                 args.get("color"),
                 items_json,
+                db=db,
             )
             if missing_id:
                 return {
@@ -256,6 +257,7 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
                 args.get("color"),
                 args.get("checklist_items"),
                 args.get("items"),
+                db=db,
             )
             if missing_id:
                 return {

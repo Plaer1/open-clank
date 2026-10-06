@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, GalleryImage, ManagedImageProject
+from core.database import Base, FilesImageResource, ManagedImageProject
 import src.generated_images as generated_images
 import routes.image_project_routes as ipr
 from src.openclank import image_projects as image_projects_module
@@ -40,7 +40,7 @@ def client(monkeypatch, tmp_path):
 
 def _create(client, resource_id="image-1", **overrides):
     body = {
-        "provider": "gallery",
+        "provider": "files",
         "resource_id": resource_id,
         "name": "Sunset",
         "width": 100,
@@ -56,7 +56,7 @@ def _create(client, resource_id="image-1", **overrides):
 
 def test_create_get_and_owner_isolation(client):
     created = _create(client)
-    assert created["image"] == {"provider": "gallery", "resource_id": "image-1"}
+    assert created["image"] == {"provider": "files", "resource_id": "image-1"}
     assert created["expected_image_revision"] == "rev-a"
     assert created["project_revision"] == 1
 
@@ -98,7 +98,7 @@ def test_save_rebinds_image_revision_and_reports_refresh_receipt(client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["allocated"] is False
-    assert body["image"] == {"provider": "gallery", "resource_id": "image-1"}
+    assert body["image"] == {"provider": "files", "resource_id": "image-1"}
     assert body["refresh_receipt"]["image_revision"] == "rev-b"
     assert body["refresh_receipt"]["project_revision"] == 2
 
@@ -144,7 +144,7 @@ def test_save_endpoint_writes_gallery_bytes_and_compensates_commit_failure(monke
     path.write_bytes(original)
     original_revision = "sha256:" + hashlib.sha256(original).hexdigest()
     db = factory()
-    db.add(GalleryImage(id="image-1", filename="image-1.png", owner="local-installation", is_active=True, file_hash=hashlib.sha256(original).hexdigest(), file_size=len(original)))
+    db.add(FilesImageResource(id="image-1", owner="local-installation", kind="image", display_name="image-1.png", locator="image-1.png", is_active=True, digest=hashlib.sha256(original).hexdigest(), size=len(original), mime_type="image/png"))
     db.commit(); db.close()
     app = FastAPI(); app.include_router(ipr.setup_image_project_routes()); http = TestClient(app, raise_server_exceptions=False)
     created = _create(http, expected_image_revision=original_revision)
@@ -173,9 +173,9 @@ def test_save_endpoint_writes_gallery_bytes_and_compensates_commit_failure(monke
         "new_image_revision": "ignored", "image_bytes": base64.b64encode(updated).decode(),
     })
     assert success.status_code == 200, success.text
-    check = factory(); gallery = check.get(GalleryImage, "image-1"); check.close()
-    assert gallery.file_hash == hashlib.sha256(updated).hexdigest()
-    assert gallery.file_size == len(updated)
+    check = factory(); image = check.get(FilesImageResource, "image-1"); check.close()
+    assert image.digest == hashlib.sha256(updated).hexdigest()
+    assert image.size == len(updated)
 
 
 def test_save_refuses_when_lore_capture_fails(monkeypatch, client):
@@ -234,7 +234,7 @@ def test_save_copy_allocates_separate_resource(client):
     resp = client.post(
         f"/api/imps/projects/{created['id']}/save-copy",
         json={
-            "provider": "gallery",
+            "provider": "files",
             "resource_id": "image-2",
             "expected_image_revision": "rev-copy",
         },
@@ -255,7 +255,7 @@ def test_save_copy_files_identity_replays_without_gallery_row(client):
     """Save-copy binds one Files-owned identity and replays the same project."""
     created = _create(client)
     request = {
-        "provider": "gallery",
+        "provider": "files",
         "resource_id": "image:files-owned-copy-1",
         "expected_image_revision": "sha256:files-copy-revision",
         "operation_key": "imps-copy-files-owned-1",
@@ -265,7 +265,7 @@ def test_save_copy_files_identity_replays_without_gallery_row(client):
     assert first.status_code == 200, first.text
     first_body = first.json()
     assert first_body["allocated"] is True
-    assert first_body["image"] == {"provider": "gallery", "resource_id": "image:files-owned-copy-1"}
+    assert first_body["image"] == {"provider": "files", "resource_id": "image:files-owned-copy-1"}
 
     replay = client.post(f"/api/imps/projects/{created['id']}/save-copy", json=request)
     assert replay.status_code == 200, replay.text
@@ -276,7 +276,7 @@ def test_save_copy_files_identity_replays_without_gallery_row(client):
 
     db = ipr.SessionLocal()
     try:
-        assert db.query(GalleryImage).filter(GalleryImage.id == "files-owned-copy-1").one_or_none() is None
+        assert db.query(FilesImageResource).filter(FilesImageResource.id == "files-owned-copy-1").one_or_none() is None
         projects = db.query(ManagedImageProject).filter(ManagedImageProject.owner == "local-installation").all()
         assert len([row for row in projects if row.id == first_body["project_id"]]) == 1
     finally:
@@ -302,7 +302,7 @@ def test_export_import_round_trips_editable_state(client):
     imported = client.post(
         "/api/imps/projects/import",
         json={
-            "provider": "gallery",
+            "provider": "files",
             "resource_id": "image-restored",
             "bundle": exported,
         },
@@ -323,7 +323,7 @@ def test_blank_canvas_project_round_trips(client):
     assert exported["state"]["layers"] == []
     imported = client.post(
         "/api/imps/projects/import",
-        json={"provider": "gallery", "resource_id": "draft-2", "bundle": exported},
+        json={"provider": "files", "resource_id": "draft-2", "bundle": exported},
     ).json()
     assert imported["state"]["layers"] == []
 

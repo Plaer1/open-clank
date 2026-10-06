@@ -15,11 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.openclank.copal_treehouse import (
     TreeHouseError,
-    apply_legacy_migration,
     apply_treehouse_command,
     compute_treehouse_projections,
     new_treehouse_state,
-    plan_legacy_migration,
     public_treehouse_snapshot,
     state_fingerprint,
     validate_treehouse_state,
@@ -30,11 +28,11 @@ from src.openclank.treehouse_field_guide import (
     FIELD_GUIDE_TEMPLATE_KEY,
     FIELD_GUIDE_TEMPLATE_VERSION,
     instantiate_field_guide,
-    upgrade_field_guide,
 )
 from src.openclank.file_policy import FilePolicyRepository
 from src.constants import DATA_DIR
 from src.auth_helpers import require_user
+from src.openclank.achievement_producers import record_account_activity, record_journal_activity, reset_account_activity
 
 
 Call = Callable[[Request, str, dict[str, Any]], Awaitable[Any]]
@@ -54,10 +52,6 @@ class TreeHouseCommand(_Strict):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class TreeHouseMigration(_Strict):
-    command_id: str = Field(alias="commandId", min_length=1, max_length=128)
-    actor_id: str = Field(alias="actorId", default="owner", min_length=1, max_length=128)
-    expected_revision: int | None = Field(alias="expectedRevision", default=None, ge=0)
 
 
 def setup_treehouse_routes(
@@ -81,9 +75,10 @@ def setup_treehouse_routes(
         unauthenticated local fixture mode, where there is no account boundary
         to forge and legacy profile tests still exercise role filtering.
         """
-        if scope.get("account_id") == "local-installation" and os.environ.get("AUTH_ENABLED", "true").lower() in {"0", "false", "no", "off"} and scope.get("owner") == "local":
-            return str(requested or "owner")
-        return str(scope.get("account_id") or requested or "local-installation")
+        account_id = str(scope.get("account_id") or "")
+        if not account_id or account_id == "local-installation":
+            raise HTTPException(401, "Authenticated account required")
+        return account_id
 
     def repository(request: Request) -> TreeHouseRepository:
         current = getattr(request.app.state, "treehouse_repository", None)
@@ -119,18 +114,6 @@ def setup_treehouse_routes(
 
     def account_scope(request: Request, scope: dict[str, str]) -> dict[str, str]:
         username = require_user(request)
-        if not username:
-            auth_enabled = os.environ.get("AUTH_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
-            if auth_enabled:
-                # ``require_user`` permits loopback first-run traffic so the
-                # setup screen can load.  TreeHouse is account-owned data,
-                # though, and must fail closed until the configured identity
-                # store can resolve a real immutable subject.
-                manager = getattr(request.app.state, "auth_manager", None)
-                if manager is None or not getattr(manager, "is_configured", False):
-                    raise HTTPException(503, detail={"code": "authentication_unavailable", "message": "TreeHouse requires a configured authentication identity store"})
-                raise HTTPException(401, detail={"code": "not_authenticated", "message": "TreeHouse requires an authenticated account"})
-            return {**scope, "account_id": "local-installation"}
         manager = getattr(request.app.state, "auth_manager", None)
         account_id = manager.account_id(username) if manager is not None and hasattr(manager, "account_id") else None
         if not account_id:
@@ -183,14 +166,7 @@ def setup_treehouse_routes(
         return options
 
     def ensure_account_catalogue(repo: TreeHouseRepository, account_id: str, workspace: str) -> tuple[dict[str, Any], int]:
-        """Create or version-upgrade one private Field Guide catalogue.
-
-        The repository CAS makes this safe when two windows first open
-        TreeHouse at the same time; the template itself is idempotent and
-        authored state is preserved on later reads/upgrades.  A stale installed
-        template revision is upgraded in place — the previous same-key early
-        return froze old content forever.
-        """
+        """Create a fresh private Field Guide or validate its current version."""
         state, revision = repo.get_catalogue(account_id, workspace)
         if state is not None:
             installed = state.get("fieldGuide") or {}
@@ -198,9 +174,7 @@ def setup_treehouse_routes(
                 installed.get("templateKey") == FIELD_GUIDE_TEMPLATE_KEY
                 and installed.get("templateVersion") != FIELD_GUIDE_TEMPLATE_VERSION
             ):
-                upgraded = upgrade_field_guide(state, account_id)[0]
-                new_revision = repo.put_catalogue(account_id, workspace, upgraded, expected_revision=revision)
-                return upgraded, new_revision
+                raise HTTPException(409, detail={"code": "manual_migration_required", "message": "Legacy Field Guide requires .clanker/tools/migrations/python/secondary.py copal-field-guide"})
             return state, revision
         candidate = instantiate_field_guide(new_treehouse_state(account_id), account_id)
         winner, winner_revision, _created = repo.create_catalogue_if_absent(account_id, workspace, candidate)
@@ -450,6 +424,59 @@ def setup_treehouse_routes(
             detail = exc.payload() if isinstance(exc, TreeHouseError) else {"code": "corrupt_state", "message": "TreeHouse state is not valid JSON"}
             raise HTTPException(409, detail=detail) from exc
         return doc, state
+
+    def resume_class_publications(request: Request, scope: dict[str, str]) -> None:
+        repo = repository(request)
+        state, _ = repo.get_catalogue(scope["account_id"], scope["workspace_id"])
+        for event in (state or {}).get("events", []):
+            facts = event.get("data", {}).get("publicationReceipt")
+            if event.get("type") != "course.published" or event.get("actorId") != scope["account_id"] or not isinstance(facts, dict):
+                continue
+            try:
+                record_journal_activity(scope["account_id"], "class.published", str(event["id"]), facts,
+                                        occurred_at=str(event["at"]), workspace_id=scope["workspace_id"], repository=repo)
+            except Exception:
+                # The committed catalogue journal remains resumable on the
+                # next real load. A delivery error cannot undo publication.
+                break
+
+    def owner_draft_preview(request: Request, scope: dict[str, str], course_id: str):
+        state, revision = repository(request).get_catalogue(scope["account_id"], scope["workspace_id"])
+        course = (state or {}).get("courses", {}).get(course_id)
+        if not course or course.get("deletedAt") or course.get("ownerId") != scope["account_id"]:
+            raise HTTPException(403, detail={"code": "preview_owner_required", "message": "Preview requires your own draft"})
+        if course.get("status") != "draft" or course.get("fieldGuideKey"):
+            raise HTTPException(409, detail={"code": "preview_draft_required", "message": "Preview requires a personal draft"})
+        lessons = [activity for module_id in course.get("moduleIds", [])
+                   for activity_id in (state.get("modules", {}).get(module_id) or {}).get("activityIds", [])
+                   if (activity := state.get("activities", {}).get(activity_id)) and not activity.get("deletedAt")
+                   and activity.get("status") == "published" and str(activity.get("content") or "").strip()]
+        if not lessons:
+            raise HTTPException(409, detail={"code": "preview_empty", "message": "Add a populated lesson before previewing"})
+        return state, course, revision, len(lessons)
+
+    @router.get("/courses/{course_id}/learner-preview")
+    async def learner_preview(course_id: str, request: Request, workspace: str | None = None):
+        scope = account_scope(request, scope_for(request, workspace))
+        state, course, revision, count = owner_draft_preview(request, scope, course_id)
+        snapshot = public_treehouse_snapshot(state, scope["account_id"])
+        return {**snapshot, "accountId": scope["account_id"], "workspace": scope["workspace_id"],
+                "preview": {"courseId": course_id, "revision": revision, "lessonCount": count}}
+
+    @router.post("/courses/{course_id}/learner-preview")
+    async def acknowledge_learner_preview(course_id: str, request: Request, workspace: str | None = None):
+        scope = account_scope(request, scope_for(request, workspace))
+        body = await request.json()
+        state, course, revision, count = owner_draft_preview(request, scope, course_id)
+        if not isinstance(body, dict) or body.get("visible") is not True or type(body.get("revision")) is not int or body["revision"] != revision:
+            raise HTTPException(409, detail={"code": "stale_preview", "message": "Reopen the current draft preview"})
+        if body.get("accountId") != scope["account_id"]:
+            raise HTTPException(409, detail={"code": "stale_account", "message": "The signed-in account changed"})
+        record_account_activity(scope["account_id"], "class.previewed", f"preview:{course_id}:{revision}",
+                                {"classId": course_id, "catalogueRevision": revision, "previewedAsLearner": True,
+                                 "authoredByOwner": True, "seededOfficial": False, "lessonCount": count},
+                                workspace_id=scope["workspace_id"], repository=repository(request))
+        return {"ok": True, "courseId": course_id, "revision": revision}
 
     @router.get("/courses/{course_id}/export")
     async def export_course_package(course_id: str, request: Request, workspace: str | None = None):
@@ -760,6 +787,7 @@ def setup_treehouse_routes(
                 owner_id = repository(request).owner_for_course(scope["account_id"], scope["workspace_id"], course_id)
                 if not owner_id or not repository(request).access(scope["account_id"], scope["workspace_id"], owner_id, course_id, "learn"):
                     raise HTTPException(404, "TreeHouse course not found")
+            resume_class_publications(request, scope)
             state = aggregate_visible_state(repository(request), scope["account_id"], scope["workspace_id"])
             snapshot = public_treehouse_snapshot(state, actor_id)
             return {**snapshot, "recipientOptions": recipient_options(request, scope["account_id"]), "document": {"id": None, "head": str(state.get("revision", 0))}, "workspace": scope["workspace_id"], "fingerprint": state_fingerprint(state), "accountId": scope["account_id"]}
@@ -1023,6 +1051,8 @@ def setup_treehouse_routes(
             snapshot = public_treehouse_snapshot(next_state, actor_id)
         except TreeHouseError as exc:
             raise fail(exc) from exc
+        if changed and command.type == "course.publish":
+            resume_class_publications(request, scope)
         # S30: a committed Field Guide lesson completion is the N29 lesson-key
         # producer.  Achievement ingestion is best-effort and never fails the
         # learner's completion; the durable record is the domain event above.
@@ -1044,34 +1074,6 @@ def setup_treehouse_routes(
                 pass
         return {"ok": True, "changed": changed, "result": result, **snapshot, "accountId": scope.get("account_id"), "workspace": scope.get("workspace_id")}
 
-    @router.post("/migrate")
-    async def migrate_treehouse(
-        migration: TreeHouseMigration,
-        request: Request,
-        workspace: str | None = None,
-        dry_run: bool = Query(True),
-    ):
-        scope = account_scope(request, scope_for(request, workspace))
-        actor_id = actor_for(request, scope, migration.actor_id)
-        doc, state = await load_state(request, scope, initialize=True)
-        indexed = await call(request, "index", scope)
-        plan = plan_legacy_migration(indexed.get("docs", []), state)
-        if dry_run:
-            return {"ok": True, "dryRun": True, "plan": plan, "revision": state["revision"], "accountId": scope.get("account_id"), "workspace": scope.get("workspace_id")}
-        try:
-            next_state, result, changed = apply_legacy_migration(
-                state,
-                plan,
-                actor_id=actor_id,
-                command_id=migration.command_id,
-                expected_revision=migration.expected_revision,
-            )
-            if changed:
-                await write_state(request, scope, doc, next_state)
-            snapshot = public_treehouse_snapshot(next_state, actor_id)
-        except TreeHouseError as exc:
-            raise fail(exc) from exc
-        return {"ok": True, "dryRun": False, "changed": changed, "result": result, "plan": plan, **snapshot, "accountId": scope.get("account_id"), "workspace": scope.get("workspace_id")}
 
     @router.get("/integrity")
     async def treehouse_integrity(request: Request, workspace: str | None = None):
@@ -1107,9 +1109,22 @@ def setup_treehouse_routes(
     ):
         scope = account_scope(request, scope_for(request, workspace))
         account_id = _require_account(request, scope)
+        resume_class_publications(request, scope)
         engine = achievement_engine(request)
         presentation = engine.presentation(account_id, admin=admin)
         return {**presentation, "accountId": account_id, "workspace": scope["workspace_id"]}
+
+    @router.post("/achievements/reset")
+    async def reset_achievements(request: Request, workspace: str | None = None):
+        scope = account_scope(request, scope_for(request, workspace))
+        account_id = _require_account(request, scope)
+        body = await request.json()
+        if not isinstance(body, dict) or body.get("confirm") != "reset-achievements":
+            raise HTTPException(400, detail={"code": "confirmation_required", "message": "Confirm achievement reset"})
+        if body.get("accountId") and body["accountId"] != account_id:
+            raise HTTPException(409, detail={"code": "stale_account", "message": "The signed-in account changed"})
+        counts = reset_account_activity(account_id, repository=repository(request))
+        return {"ok": True, "accountId": account_id, "cleared": counts}
 
     @router.post("/achievements/events")
     async def ingest_achievement_events(
@@ -1129,11 +1144,15 @@ def setup_treehouse_routes(
             body = await request.json()
         except Exception:
             raise HTTPException(400, detail={"code": "invalid_json", "message": "Expected a JSON body"})
+        if isinstance(body, dict) and body.get("accountId") and body["accountId"] != account_id:
+            raise HTTPException(409, detail={"code": "stale_account", "message": "The signed-in account changed"})
         events = body.get("events") if isinstance(body, dict) else None
         if not isinstance(events, list) or not events:
             raise HTTPException(400, detail={"code": "missing_events", "message": "Expected a non-empty events list"})
         if len(events) > 200:
             raise HTTPException(413, detail={"code": "events_too_many", "message": "Ingest at most 200 events per request"})
+        if any(isinstance(event, dict) and (event.get("event_family") or event.get("eventFamily")) in {"goal.verified.completed", "class.previewed", "class.published"} for event in events):
+            raise HTTPException(403, detail={"code": "trusted_receipt_required", "message": "This receipt must come from its committed workflow"})
         result = achievement_engine(request).ingest(account_id, events, via="live")
         return {"ok": True, "accountId": account_id, **result}
 
@@ -1160,6 +1179,8 @@ def setup_treehouse_routes(
             raise HTTPException(400, detail={"code": "bad_backfill", "message": "Expected sourceFamily and records"})
         if len(records) > 500:
             raise HTTPException(413, detail={"code": "backfill_too_large", "message": "Backfill at most 500 records per request"})
+        if any(isinstance(record, dict) and (record.get("event_family") or record.get("eventFamily")) in {"goal.verified.completed", "class.previewed", "class.published"} for record in records):
+            raise HTTPException(403, detail={"code": "trusted_receipt_required", "message": "Resume the authoritative workflow journal to deliver this receipt"})
         cursor = body.get("cursor") if isinstance(body.get("cursor"), dict) else {}
         result = achievement_engine(request).backfill(account_id, source_family, records, cursor=cursor)
         return {"ok": True, "accountId": account_id, "sourceFamily": source_family, **result}
@@ -1201,14 +1222,19 @@ def setup_treehouse_routes(
             })
         return {"notifications": items, "accountId": account_id}
 
+    @router.post("/achievements/notifications/{outbox_id}/claim")
+    async def claim_achievement_notification(outbox_id: str, request: Request, workspace: str | None = None):
+        scope = account_scope(request, scope_for(request, workspace))
+        account_id = _require_account(request, scope)
+        return {"claimed": repository(request).claim_notification(account_id, outbox_id), "accountId": account_id}
+
     @router.post("/achievements/notifications/{outbox_id}/delivered")
     async def mark_achievement_notification_delivered(outbox_id: str, request: Request, workspace: str | None = None):
         scope = account_scope(request, scope_for(request, workspace))
         account_id = _require_account(request, scope)
         repo = repository(request)
-        for row in repo.list_pending_notifications(account_id, limit=50):
-            if row["outbox_id"] == outbox_id:
-                return {"ok": True, **repo.mark_notification_delivered(outbox_id)}
+        if repo.owns_notification(account_id, outbox_id):
+            return {"ok": True, **repo.mark_notification_delivered(outbox_id)}
         raise HTTPException(404, detail={"code": "notification_not_found", "message": "No pending notification with that id"})
 
     @router.post("/achievements/notifications/{outbox_id}/failed")
@@ -1217,9 +1243,8 @@ def setup_treehouse_routes(
         scope = account_scope(request, scope_for(request, workspace))
         account_id = _require_account(request, scope)
         repo = repository(request)
-        for row in repo.list_pending_notifications(account_id, limit=50):
-            if row["outbox_id"] == outbox_id:
-                return {"ok": True, **repo.mark_notification_failed(outbox_id)}
+        if repo.owns_notification(account_id, outbox_id):
+            return {"ok": True, **repo.mark_notification_failed(outbox_id)}
         raise HTTPException(404, detail={"code": "notification_not_found", "message": "No pending notification with that id"})
 
     return router

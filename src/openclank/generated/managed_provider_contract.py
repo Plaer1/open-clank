@@ -2,7 +2,7 @@
 
 SCHEMA_ID = 'https://openclank.dev/contracts/managed-provider/v2'
 SCHEMA_VERSION = 2
-SCHEMA_SHA256 = '611c378cc61719f6290cd28e9c383b5a9f398fc174785c7c84b5269f366073ca'
+SCHEMA_SHA256 = 'bcac868d6f2bd61ee7a62b8a35afc43f068590fe9a496f279774936cde4b3e31'
 PROTOCOL_VERSION = 1
 PROVIDER_STORE_VERSION = 1
 OPERATION_ROUTER_VERSION = 1
@@ -35,6 +35,12 @@ OPERATION_METHODS = (    '_openclank/operations/v1/journal/cas',
 SESSION_METHODS = (    '_openclank/session/v1/cwd/change',
     '_openclank/session/v1/binding/read',
     '_openclank/session/v1/settings/effective',
+    '_openclank/history/v1/query',
+    '_openclank/history/v1/mutate',
+    '_openclank/session/v1/goal/completed',
+)
+LOGGING_METHODS = (    '_openclank/logging/v1/admit',
+    '_openclank/logging/v1/events',
 )
 MANAGED_METHODS = frozenset((    '_openclank/provider-store/v1/account/bind',
     '_openclank/provider-store/v1/account/commit',
@@ -61,6 +67,11 @@ MANAGED_METHODS = frozenset((    '_openclank/provider-store/v1/account/bind',
     '_openclank/session/v1/cwd/change',
     '_openclank/session/v1/binding/read',
     '_openclank/session/v1/settings/effective',
+    '_openclank/history/v1/query',
+    '_openclank/history/v1/mutate',
+    '_openclank/logging/v1/admit',
+    '_openclank/logging/v1/events',
+    '_openclank/session/v1/goal/completed',
 ))
 ENGINE_METHODS = frozenset((    '_openclank/provider-control/v1/catalog',
     '_openclank/provider-control/v1/connection/validate',
@@ -88,6 +99,11 @@ HOST_CALLBACK_METHODS = frozenset((    '_openclank/provider-store/v1/account/bin
     '_openclank/operations/v1/executor/invoke',
     '_openclank/session/v1/cwd/change',
     '_openclank/session/v1/binding/read',
+    '_openclank/history/v1/query',
+    '_openclank/history/v1/mutate',
+    '_openclank/logging/v1/admit',
+    '_openclank/logging/v1/events',
+    '_openclank/session/v1/goal/completed',
 ))
 MODEL_OPERATIONS = frozenset((    'chat.stream',
     'chat.complete',
@@ -131,9 +147,16 @@ METHOD_DIRECTIONS = {
     '_openclank/operations/v1/cancel': 'host_to_engine',
     '_openclank/session/v1/cwd/change': 'engine_to_host',
     '_openclank/session/v1/binding/read': 'engine_to_host',
-    '_openclank/session/v1/settings/effective': 'host_to_engine'
+    '_openclank/session/v1/settings/effective': 'host_to_engine',
+    '_openclank/history/v1/query': 'engine_to_host',
+    '_openclank/history/v1/mutate': 'engine_to_host',
+    '_openclank/logging/v1/admit': 'engine_to_host',
+    '_openclank/logging/v1/events': 'engine_to_host',
+    '_openclank/session/v1/goal/completed': 'engine_to_host'
 }
 METHOD_WIRE_MAPPINGS = {
+    '_openclank/history/v1/mutate': ('#/$defs/historyMutationRequest', '#/$defs/historyMutationResult'),
+    '_openclank/history/v1/query': ('#/$defs/historyQueryRequest', '#/$defs/historyQueryResult'),
     '_openclank/provider-control/v1/catalog': ('empty object', '#/$defs/familyCatalogResult'),
     '_openclank/provider-control/v1/connection/validate': ('#/$defs/connectionValidationRequest', '#/$defs/connectionValidationResult'),
     '_openclank/provider-control/v1/account/validate': ('#/$defs/accountValidationRequest', '#/$defs/accountValidationResult'),
@@ -158,5 +181,8 @@ METHOD_WIRE_MAPPINGS = {
     '_openclank/operations/v1/cancel': ('#/$defs/operationCancelRequest', '#/$defs/operationCancelResult'),
     '_openclank/session/v1/cwd/change': ('#/$defs/sessionCwdChangeRequest', '#/$defs/sessionCwdChangeResult'),
     '_openclank/session/v1/binding/read': ('#/$defs/sessionBindingReadRequest', '#/$defs/sessionBindingReadResult'),
-    '_openclank/session/v1/settings/effective': ('#/$defs/sessionSettingsEffectiveRequest', '#/$defs/sessionSettingsEffectiveResult')
+    '_openclank/session/v1/goal/completed': ('#/$defs/goalCompletionRequest', '#/$defs/goalCompletionResult'),
+    '_openclank/session/v1/settings/effective': ('#/$defs/sessionSettingsEffectiveRequest', '#/$defs/sessionSettingsEffectiveResult'),
+    '_openclank/logging/v1/admit': ('#/$defs/loggingAdmissionRequest', '#/$defs/loggingAdmissionResult'),
+    '_openclank/logging/v1/events': ('#/$defs/loggingEventRequest', '#/$defs/loggingEventResult')
 }

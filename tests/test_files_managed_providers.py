@@ -14,18 +14,17 @@ from core.database import (
     ChatMessage,
     Document,
     EditorDraft,
-    GalleryAlbum,
-    GalleryImage,
+    FilesImageResource,
     PublishedFile,
     Session as DbSession,
 )
 from src.openclank.copal_loose import LooseCopalBridge
-from src.openclank.copal_bridge import CopalBridge, CopalBridgeError
+from src.openclank.copal_errors import CopalBridgeError
 from src.openclank.files_facade import FilesFacade, FilesFacadeError, ProviderContent, ProviderContext, ProviderResource
 from src.openclank.resource_refs import issue_resource_ref
 from src.openclank.files_managed_providers import (
     CopalFilesProvider,
-    GalleryFilesProvider,
+    FilesImagesProvider,
     LibraryFilesProvider,
 )
 from src.openclank.files_host_provider import HostFilesProvider, _origin
@@ -214,36 +213,36 @@ async def test_copal_files_actions_keep_opaque_identity_and_return_receipts(tmp_
 
 
 @pytest.mark.asyncio
-async def test_copal_files_facade_uses_rust_history_for_lifecycle_receipts(tmp_path):
-    """The Files facade must read back the Rust version after every action.
+async def test_copal_files_facade_uses_files_history_for_lifecycle_receipts(tmp_path):
+    """The Files facade must read back the persisted version after every action.
 
-    This runs without the optional history worker: Copal's append-only Rust
+    This runs without the optional history worker: Copal's append-only Files
     operation log remains the durable receipt authority for Files actions.
     """
-    bridge = CopalBridge(data_dir=tmp_path / "copal-rust")
+    bridge = LooseCopalBridge(tmp_path / "copal-files")
     await bridge.start()
     scope = {"owner": "alice", "workspace_id": "default"}
-    created = await bridge.call("create", {**scope, "name": "Rust-lifecycle.md", "kind": "note", "content": "body"})
+    created = await bridge.call("create", {**scope, "name": "Files-lifecycle.md", "kind": "note", "content": "body"})
     facade = FilesFacade([CopalFilesProvider(bridge)])
     context = _context()
     root = (await facade.roots(context))["entries"][0]
     folders = await facade.children(context, parent_ref=root["ref"])
     documents = next(row for row in folders["entries"] if row["name"] == "Documents")
-    row = next(row for row in (await facade.children(context, parent_ref=documents["ref"]))["entries"] if row["name"] == "Rust-lifecycle.md")
-    for action, args in (("rename", {"name": "Rust-moved.md"}), ("move", {"name": "Rust-moved-again.md"})):
-        result = await facade.action(context, resource_ref=row["ref"], action=action, args=args, action_id=f"rust-{action}")
+    row = next(row for row in (await facade.children(context, parent_ref=documents["ref"]))["entries"] if row["name"] == "Files-lifecycle.md")
+    for action, args in (("rename", {"name": "Files-moved.md"}), ("move", {"name": "Files-moved-again.md"})):
+        result = await facade.action(context, resource_ref=row["ref"], action=action, args=args, action_id=f"files-{action}")
         receipt = result["history"]["receipt"]
         assert result["history"]["status"] == "complete"
         assert result["history"]["durable"] is True
-        assert receipt["action_id"] == f"rust-{action}"
+        assert receipt["action_id"] == f"files-{action}"
         assert receipt["revision"]
         assert created["doc"]["id"] not in json.dumps(result)
         row = result["resource"]
-    trashed = await facade.action(context, resource_ref=row["ref"], action="trash", args={}, action_id="rust-trash")
+    trashed = await facade.action(context, resource_ref=row["ref"], action="trash", args={}, action_id="files-trash")
     assert "restore" in trashed["resource"]["capabilities"]
     assert trashed["history"]["receipt"]["revision"]
-    restored = await facade.action(context, resource_ref=trashed["resource"]["ref"], action="restore", args={}, action_id="rust-restore")
-    assert restored["resource"]["name"] == "Rust-moved-again.md"
+    restored = await facade.action(context, resource_ref=trashed["resource"]["ref"], action="restore", args={}, action_id="files-restore")
+    assert restored["resource"]["name"] == "Files-moved-again.md"
     assert restored["history"]["receipt"]["revision"]
     await bridge.stop()
 
@@ -580,18 +579,18 @@ async def test_gallery_provider_pages_all_owned_sections_without_cross_owner_row
     factory = _gallery_session_factory(tmp_path)
     db = factory()
     try:
-        album = GalleryAlbum(id="album-a", name="Alice album", owner="alice")
+        album = _files_image(id="album-a", name="Alice album", owner="alice")
         db.add(album)
         db.add_all([
-            GalleryImage(id="alice-image", filename="alice.png", owner="alice", prompt="", is_active=True, favorite=True, album_id="album-a", file_size=12),
-            GalleryImage(id="bob-image", filename="bob.png", owner="bob", prompt="", is_active=True, favorite=True, file_size=13),
+            _files_image(id="alice-image", filename="alice.png", owner="alice", prompt="", is_active=True, favorite=True, album_id="album-a", file_size=12),
+            _files_image(id="bob-image", filename="bob.png", owner="bob", prompt="", is_active=True, favorite=True, file_size=13),
             EditorDraft(id="draft-a", owner="alice", name="Alice project", payload="{}", is_active=True),
         ])
         db.commit()
     finally:
         db.close()
 
-    facade = FilesFacade([GalleryFilesProvider(factory)])
+    facade = FilesFacade([FilesImagesProvider(factory)])
     root = (await facade.roots(_context()))["entries"][0]
     folders = await facade.children(_context(), parent_ref=root["ref"])
     by_name = {row["name"]: row for row in folders["entries"]}
@@ -612,14 +611,14 @@ async def test_gallery_favorite_action_is_idempotent_owner_scoped_and_refreshes_
     db = factory()
     try:
         db.add_all([
-            GalleryImage(id="alice-image", filename="alice.png", owner="alice", prompt="", is_active=True, favorite=False),
-            GalleryImage(id="bob-image", filename="bob.png", owner="bob", prompt="", is_active=True, favorite=False),
+            _files_image(id="alice-image", filename="alice.png", owner="alice", prompt="", is_active=True, favorite=False),
+            _files_image(id="bob-image", filename="bob.png", owner="bob", prompt="", is_active=True, favorite=False),
         ])
         db.commit()
     finally:
         db.close()
 
-    facade = FilesFacade([GalleryFilesProvider(factory)])
+    facade = FilesFacade([FilesImagesProvider(factory)])
     root = (await facade.roots(_context()))["entries"][0]
     photos = next(
         row for row in (await facade.children(_context(), parent_ref=root["ref"]))["entries"]
@@ -642,8 +641,8 @@ async def test_gallery_favorite_action_is_idempotent_owner_scoped_and_refreshes_
 
     db = factory()
     try:
-        assert db.query(GalleryImage.favorite).filter(GalleryImage.id == "alice-image").scalar() is True
-        assert db.query(GalleryImage.favorite).filter(GalleryImage.id == "bob-image").scalar() is False
+        assert db.query(FilesImageResource.favorite).filter(FilesImageResource.id == "alice-image").scalar() is True
+        assert db.query(FilesImageResource.favorite).filter(FilesImageResource.id == "bob-image").scalar() is False
     finally:
         db.close()
     with pytest.raises(FilesFacadeError) as denied:
@@ -669,7 +668,7 @@ async def test_gallery_draft_sort_contract_honors_modified(tmp_path):
     finally:
         db.close()
 
-    facade = FilesFacade([GalleryFilesProvider(factory)])
+    facade = FilesFacade([FilesImagesProvider(factory)])
     root = (await facade.roots(_context()))["entries"][0]
     folders = {
         row["name"]: row
@@ -691,11 +690,11 @@ async def test_gallery_advertises_only_truthful_sorts_and_pages_every_mode(tmp_p
     db = factory()
     try:
         db.add_all([
-            GalleryImage(id="media-audio", filename="a-audio.mp3", owner="alice", prompt="", is_active=True, file_size=30, updated_at=newest),
-            GalleryImage(id="media-video", filename="m-video.mov", owner="alice", prompt="", is_active=True, file_size=20, updated_at=middle),
-            GalleryImage(id="media-image", filename="z-image.png", owner="alice", prompt="", is_active=True, file_size=10, updated_at=oldest),
-            GalleryAlbum(id="album-a", name="A album", owner="alice", updated_at=newest),
-            GalleryAlbum(id="album-z", name="Z album", owner="alice", updated_at=oldest),
+            _files_image(id="media-audio", filename="a-audio.mp3", owner="alice", prompt="", is_active=True, file_size=30, updated_at=newest),
+            _files_image(id="media-video", filename="m-video.mov", owner="alice", prompt="", is_active=True, file_size=20, updated_at=middle),
+            _files_image(id="media-image", filename="z-image.png", owner="alice", prompt="", is_active=True, file_size=10, updated_at=oldest),
+            _files_image(id="album-a", name="A album", owner="alice", updated_at=newest),
+            _files_image(id="album-z", name="Z album", owner="alice", updated_at=oldest),
             EditorDraft(id="draft-a", owner="alice", name="A draft", payload="{}", is_active=True, updated_at=newest),
             EditorDraft(id="draft-z", owner="alice", name="Z draft", payload="{}", is_active=True, updated_at=oldest),
         ])
@@ -703,7 +702,7 @@ async def test_gallery_advertises_only_truthful_sorts_and_pages_every_mode(tmp_p
     finally:
         db.close()
 
-    facade = FilesFacade([GalleryFilesProvider(factory)])
+    facade = FilesFacade([FilesImagesProvider(factory)])
     root = (await facade.roots(_context()))["entries"][0]
     await _assert_advertised_folder_sorts(facade, root, ("name",))
     folders = {
@@ -728,7 +727,7 @@ async def test_gallery_video_is_downloadable_but_not_mislabeled_as_image(tmp_pat
     factory = _gallery_session_factory(tmp_path)
     db = factory()
     try:
-        db.add(GalleryImage(
+        db.add(_files_image(
             id="video-a",
             filename="legacy_video.mov",
             owner="alice",
@@ -739,7 +738,7 @@ async def test_gallery_video_is_downloadable_but_not_mislabeled_as_image(tmp_pat
         db.commit()
     finally:
         db.close()
-    facade = FilesFacade([GalleryFilesProvider(factory)])
+    facade = FilesFacade([FilesImagesProvider(factory)])
     root = (await facade.roots(_context()))["entries"][0]
     photos = next(
         row for row in (await facade.children(_context(), parent_ref=root["ref"]))["entries"]
@@ -757,7 +756,7 @@ async def test_gallery_unsafe_legacy_filename_is_sanitized_and_not_downloadable(
     factory = _gallery_session_factory(tmp_path)
     db = factory()
     try:
-        db.add(GalleryImage(
+        db.add(_files_image(
             id="unsafe-legacy",
             filename="../../private/outside.mov",
             owner="alice",
@@ -769,7 +768,7 @@ async def test_gallery_unsafe_legacy_filename_is_sanitized_and_not_downloadable(
     finally:
         db.close()
     resolver_calls = []
-    provider = GalleryFilesProvider(factory, image_resolver=lambda filename: resolver_calls.append(filename))
+    provider = FilesImagesProvider(factory, image_resolver=lambda filename: resolver_calls.append(filename))
     facade = FilesFacade([provider])
     root = (await facade.roots(_context()))["entries"][0]
     photos = next(
@@ -795,17 +794,17 @@ async def test_gallery_cursor_rejects_mutation_between_pages(tmp_path):
     db = factory()
     try:
         for index in range(3):
-            db.add(GalleryImage(id=f"image-{index}", filename=f"{index}.png", owner="alice", prompt="", is_active=True, file_size=index))
+            db.add(_files_image(id=f"image-{index}", filename=f"{index}.png", owner="alice", prompt="", is_active=True, file_size=index))
         db.commit()
     finally:
         db.close()
-    facade = FilesFacade([GalleryFilesProvider(factory)])
+    facade = FilesFacade([FilesImagesProvider(factory)])
     root = (await facade.roots(_context()))["entries"][0]
     photos = next(row for row in (await facade.children(_context(), parent_ref=root["ref"]))["entries"] if row["name"] == "Photos")
     first = await facade.children(_context(), parent_ref=photos["ref"], limit=1)
     db = factory()
     try:
-        db.add(GalleryImage(id="image-new", filename="new.png", owner="alice", prompt="", is_active=True, file_size=5))
+        db.add(_files_image(id="image-new", filename="new.png", owner="alice", prompt="", is_active=True, file_size=5))
         db.commit()
     finally:
         db.close()
@@ -822,13 +821,13 @@ async def test_gallery_content_is_owner_scoped_and_uses_private_file_descriptor(
     db = factory()
     try:
         db.add_all([
-            GalleryImage(id="alice-image", filename="image.png", owner="alice", prompt="", is_active=True, file_size=image_path.stat().st_size),
-            GalleryImage(id="bob-image", filename="bob.png", owner="bob", prompt="", is_active=True, file_size=1),
+            _files_image(id="alice-image", filename="image.png", owner="alice", prompt="", is_active=True, file_size=image_path.stat().st_size),
+            _files_image(id="bob-image", filename="bob.png", owner="bob", prompt="", is_active=True, file_size=1),
         ])
         db.commit()
     finally:
         db.close()
-    provider = GalleryFilesProvider(factory, image_resolver=lambda filename: image_path if filename == "image.png" else tmp_path / "missing")
+    provider = FilesImagesProvider(factory, image_resolver=lambda filename: image_path if filename == "image.png" else tmp_path / "missing")
     content = await provider.content(_context(), origin_id="image:alice-image")
     assert content.path == image_path.resolve()
     assert content.expected_identity is not None
@@ -850,14 +849,14 @@ async def test_gallery_retires_albums_and_resolves_legacy_album_links(tmp_path):
     db = factory()
     try:
         db.add_all([
-            GalleryAlbum(id="album-a", name="Alice album", owner="alice"),
-            GalleryImage(id="alice-image", filename="alice.png", owner="alice", prompt="", is_active=True, album_id="album-a", file_size=12),
+            _files_image(id="album-a", name="Alice album", owner="alice"),
+            _files_image(id="alice-image", filename="alice.png", owner="alice", prompt="", is_active=True, album_id="album-a", file_size=12),
         ])
         db.commit()
     finally:
         db.close()
 
-    facade = FilesFacade([GalleryFilesProvider(factory)])
+    facade = FilesFacade([FilesImagesProvider(factory)])
     root = (await facade.roots(_context()))["entries"][0]
     folders = await facade.children(_context(), parent_ref=root["ref"])
     names = {row["name"] for row in folders["entries"]}
@@ -870,7 +869,7 @@ async def test_gallery_retires_albums_and_resolves_legacy_album_links(tmp_path):
     assert opened["target"] == {"app": "imps"}
 
     # A legacy album origin resolves to the Photos folder (its images' owner).
-    provider = GalleryFilesProvider(factory)
+    provider = FilesImagesProvider(factory)
     resolved = await provider.stat(_context(), origin_id="album:album-a")
     assert resolved.origin_id == "photos"
     assert resolved.provenance.get("retired_alias") == "album"
@@ -896,7 +895,7 @@ async def test_gallery_exact_open_exposes_managed_identity_and_owner_scope(tmp_p
     db = factory()
     try:
         db.add_all([
-            GalleryImage(
+            _files_image(
                 id="alice-exact-origin",
                 filename="exact.png",
                 owner="alice",
@@ -911,7 +910,7 @@ async def test_gallery_exact_open_exposes_managed_identity_and_owner_scope(tmp_p
                 height=480,
                 file_size=image_path.stat().st_size,
             ),
-            GalleryImage(
+            _files_image(
                 id="bob-exact-origin",
                 filename="bob.png",
                 owner="bob",
@@ -923,7 +922,7 @@ async def test_gallery_exact_open_exposes_managed_identity_and_owner_scope(tmp_p
     finally:
         db.close()
 
-    provider = GalleryFilesProvider(
+    provider = FilesImagesProvider(
         factory,
         image_resolver=lambda filename: image_path if filename == "exact.png" else tmp_path / "missing",
     )
@@ -1631,3 +1630,26 @@ async def test_copal_files_after_commit_history_transport_failure_keeps_result(m
     assert history["status"] == "failed"
     assert history["phase"] == "after"
     assert calls == ["get", "rename"]
+
+
+def _files_image(**values):
+    """Build a Files-owned resource from legacy fixture metadata."""
+    filename = values.pop("filename", values.pop("name", "image"))
+    parent_id = values.pop("album_id", values.pop("parent_id", None))
+    prompt = values.pop("prompt", None)
+    model = values.pop("model", None)
+    file_hash = values.pop("file_hash", values.pop("digest", None))
+    size = values.pop("file_size", values.pop("size", 0))
+    provenance = dict(values.pop("provenance", {}) or {})
+    for key, value in (("prompt", prompt), ("model", model)):
+        if value is not None:
+            provenance[key] = value
+    is_folder = not filename or ("name" in values and parent_id is None)
+    return FilesImageResource(
+        id=values.pop("id"), owner=values.pop("owner", "alice"),
+        kind="folder" if is_folder else "image", parent_id=parent_id,
+        display_name=filename, locator=values.pop("locator", filename),
+        digest=file_hash, size=size, mime_type=values.pop("mime_type", None),
+        favorite=values.pop("favorite", False), is_active=values.pop("is_active", True),
+        provenance=provenance or None, **values,
+    )

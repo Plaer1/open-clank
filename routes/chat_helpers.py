@@ -178,6 +178,7 @@ class ChatContext:
     # Uploads attached to this user turn, resolved and owner-checked for the
     # agent's private context. This is not emitted to the browser.
     uploaded_files: list = field(default_factory=list)
+    general_hex_snapshot: dict = field(default_factory=dict)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────── #
@@ -546,6 +547,8 @@ async def build_chat_context(
     root_operation_id: Optional[str] = None,
     provider_grant_id: Optional[str] = None,
     has_persistent_engine: bool = False,
+    hex_workspace: str = "",
+    hex_workspace_id: str = "",
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -741,6 +744,31 @@ async def build_chat_context(
     _after_trim_tokens = estimate_tokens(messages)
     _context_trimmed = _after_trim_messages < _before_trim_messages or _after_trim_tokens < _before_trim_tokens
 
+    # Pin saved defaults once per trusted operation. ACP adds this same
+    # snapshot at its instruction seam, avoiding a second demoted rendering.
+    general_hex_snapshot = {}
+    if root_operation_id:
+        from src.general_hex_runtime import turn_hex_snapshot
+        from src.general_hex_composition import defaults_instruction
+        from src.owner_identity import LOCAL_INSTALLATION_OWNER
+        try:
+            provider = getattr(request.app.state, "memory_provider", None)
+            available_chars = max(0, (context_length - estimate_tokens(messages) - 1024) * 2)
+            general_hex_snapshot = await asyncio.to_thread(
+                turn_hex_snapshot, provider, owner_id=str(user or getattr(sess, "owner", "") or LOCAL_INSTALLATION_OWNER),
+                boundary_id=root_operation_id, workspace=hex_workspace or None,
+                workspace_id=hex_workspace_id or None, task_id=session_id,
+                budget_chars=min(24000, available_chars), persist=not incognito,
+            )
+            if not has_persistent_engine:
+                defaults = defaults_instruction(general_hex_snapshot)
+                if defaults:
+                    messages.insert(0, {"role": "system", "content": defaults,
+                                        "metadata": {"general_hex_snapshot": general_hex_snapshot["snapshot_hash"]}})
+        except (ValueError, OSError) as exc:
+            general_hex_snapshot = {"state": "unavailable", "reason": str(exc)}
+            logger.info("General Hex defaults unavailable for this boundary: %s", exc)
+
     return ChatContext(
         preface=preface,
         rag_sources=rag_sources,
@@ -760,6 +788,7 @@ async def build_chat_context(
         context_tokens_after_trim=_after_trim_tokens,
         auto_opened_docs=auto_opened_docs,
         uploaded_files=uploaded_files,
+        general_hex_snapshot=general_hex_snapshot,
     )
 
 

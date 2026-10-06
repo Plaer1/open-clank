@@ -23,7 +23,7 @@ let _browserContext = {
 };
 
 export function getWorkspace() {
-  return Storage.get(KEYS.WORKSPACE, '') || '';
+  return getWorkspaceId() ? (Storage.get(KEYS.WORKSPACE, '') || '') : '';
 }
 
 export function getWorkspaceId() {
@@ -346,7 +346,7 @@ export async function initWorkspace() {
   // account validate a stale path against the server projection before showing
   // it; this also prevents an administrator's prior browser session from
   // leaking an unassigned path through the workspace pill.
-  const saved = getWorkspace();
+  const saved = Storage.get(KEYS.WORKSPACE, '') || '';
   const savedId = getWorkspaceId();
   syncWorkspaceIndicator('');
   if (savedId) {
@@ -357,10 +357,8 @@ export async function initWorkspace() {
       await clearWorkspace({ persist: false });
     }
   } else if (saved) {
-    // One-time migration of the old raw browser preference. The server only
-    // issues an ID when the folder is already inside effective Agent access.
-    const checked = await vetAndSetWorkspace(saved);
-    if (!checked.ok) await clearWorkspace({ persist: false });
+    console.info('Saved folder preference is preserved. Choose its folder again to select a current Workspace ID.');
+    if (uiModule?.showError) uiModule.showError('Your saved folder needs a Workspace selection. Choose the folder again; the saved preference is preserved.');
   } else {
     syncWorkspaceIndicator('');
   }

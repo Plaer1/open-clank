@@ -1,0 +1,14 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 0,
+  "workspaces": {
+    "": {
+      "devDependencies": {
+        "@antithesishq/bombadil": "^0.6.1",
+      },
+    },
+  },
+  "packages": {
+    "@antithesishq/bombadil": ["@antithesishq/bombadil@0.6.1", "", { "bin": { "bombadil": "bin/bombadil.js" } }, "sha512-d1iufG3MI7gSMSiSmMeNdcMW+qR0yQXL2zdkVynC3n3DYgFJYlYXKUQzygmqU12m4RWlR5iOdQU1hsx5UT6+IA=="],
+  }
+}

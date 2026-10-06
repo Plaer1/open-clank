@@ -140,7 +140,7 @@ function showPastePreview(target, preview, state, apply, execute = (operation) =
       if (mode === 'rebase') reviewedConflict = false;
       showFailures(result.failures); cancel.disabled = false; applyButton.disabled = typeof result.retry !== 'function'; applyButton.textContent = result.retry ? 'Retry failed' : 'Close'; return;
     }
-    if (!result || !['applied', 'unchanged'].includes(result.outcome)) {
+    if (!result || !['applied', 'unchanged', 'queued'].includes(result.outcome)) {
       if (mode === 'rebase') reviewedConflict = false;
       showFailures([{ message:result?.message || 'The paste could not be saved.', outcome:result?.outcome || 'failed', remote:result?.remote, reviewConflict:result?.reviewConflict }]); cancel.disabled = false; applyButton.disabled = typeof result?.retry !== 'function'; applyButton.textContent = result?.retry ? 'Retry failed' : 'Close'; return;
     }
@@ -308,7 +308,7 @@ export function mountSheet(target, controller, options = {}) {
     return gridOperation;
   };
   const refreshAfterMutation = async (result) => {
-    const applied = result === true || ['applied', 'unchanged', 'partial'].includes(result?.outcome);
+    const applied = result === true || ['applied', 'unchanged', 'partial', 'queued'].includes(result?.outcome);
     if (!applied) return result;
     const refreshed = await controller.refresh('cell-edit');
     if (refreshed?.outcome === 'failed') {
@@ -401,7 +401,7 @@ export function mountSheet(target, controller, options = {}) {
       committed = true;
       const result = await controller.editCell(row, column, next);
       if (editing !== session) return result;
-      if (!result || !['applied', 'unchanged'].includes(result.outcome)) { committed = false; suppressBlur = false; input.setAttribute('aria-invalid', 'true'); options.onValidationError?.({ row, column, outcome:result?.outcome || 'failed', message:result?.message || (result?.outcome === 'conflict' ? 'The source changed. Compare the saved version and retry.' : 'Value could not be saved.') }); return; }
+      if (!result || !['applied', 'unchanged', 'queued'].includes(result.outcome)) { committed = false; suppressBlur = false; input.setAttribute('aria-invalid', 'true'); options.onValidationError?.({ row, column, outcome:result?.outcome || 'failed', message:result?.message || (result?.outcome === 'conflict' ? 'The source changed. Compare the saved version and retry.' : 'Value could not be saved.') }); return; }
       stopEdit(session); render(controller.getState(), { focus:true });
       if (rowDelta || columnDelta) moveAfter(rowDelta, columnDelta);
     };

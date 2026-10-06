@@ -162,7 +162,7 @@ def native_capacity_envelope(provider_id: str, payload: Mapping[str, Any], *,
     revision = payload.get("adapterRevision")
     if revision is not None and (not isinstance(revision, str) or not revision or len(revision) > 80 or any(ord(char) < 32 for char in revision)):
         raise QuotaError("terminal capacity has invalid adapter revision")
-    if set(payload) - {"transport", "adapterRevision", "requests", "tokens"}:
+    if set(payload) - {"transport", "adapterRevision", "requests", "tokens", "inputTokens", "outputTokens"}:
         raise QuotaError("terminal capacity contains unsupported fields")
     adapter = adapt_openai_capacity if provider_id == "openai" else adapt_anthropic_capacity
     adapter_payload = {key: payload[key] for key in ("transport", "requests", "tokens", "inputTokens", "outputTokens") if key in payload}

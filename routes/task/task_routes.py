@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from core.database import SessionLocal, ScheduledTask, TaskRun
 from core.constants import internal_api_base
-from src.auth_helpers import effective_user, get_current_user
+from src.auth_helpers import effective_user, require_user
 from src.constants import DATA_DIR, EMAIL_URGENCY_CACHE_DIR
 from src.openclank.file_policy import FilePolicyRepository
 from src.openclank.workspace_policy_service import (
@@ -326,12 +326,13 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
     def _owner(request: Request):
-        # Internal-tool requests carry the human owner separately. API tokens
-        # remain the sandboxed ``api`` pseudo-user because this CRUD surface is
-        # not a scope-aware token API.
-        if bool(getattr(getattr(request, "state", None), "api_token", False)):
-            return get_current_user(request)
-        return effective_user(request) or get_current_user(request)
+        # This CRUD surface has no delegated token scope gate. Internal
+        # capabilities must forward the authenticated human account owner.
+        require_user(request)
+        owner = str(effective_user(request) or "").strip().lower()
+        if not owner:
+            raise HTTPException(401, "Authenticated task owner is required")
+        return owner
 
     def _task_agent_contract(
         db,
@@ -473,6 +474,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         unavailable = set(allowed_tools) & unavailable_strict_agent_tools(
             owner,
             effective_workspace or None,
+            workspace_id=workspace_id,
         )
         if unavailable:
             raise HTTPException(

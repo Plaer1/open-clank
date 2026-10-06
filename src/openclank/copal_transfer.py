@@ -9,6 +9,7 @@ No server path is returned to a model or stored in a tool result.
 from __future__ import annotations
 
 import hashlib
+import logging
 import asyncio
 import json
 import secrets
@@ -16,6 +17,7 @@ import tempfile
 import time
 import zipfile
 import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -206,16 +208,17 @@ def _export_name(doc: dict[str, Any]) -> str:
 
 
 def _export_docs(snapshot: dict[str, Any], options: dict[str, Any]) -> list[dict[str, Any]]:
+    from routes.copal_routes import _note_view
     docs = [
-        doc for doc in snapshot.get("docs") or []
+        _note_view(doc) for doc in snapshot.get("docs") or []
         if isinstance(doc, dict)
-        and not doc.get("readOnly")
+        and (not doc.get("readOnly") or doc.get("kind") in {"asset", "compatibility"})
         and doc.get("kind") != "copal-operation"
     ]
     if options.get("includeWiki") is False:
         docs = [doc for doc in docs if doc.get("corpus") != "wiki"]
     if options.get("includeAssets") is False:
-        docs = [doc for doc in docs if doc.get("kind") != "asset"]
+        docs = [doc for doc in docs if doc.get("kind") not in {"asset", "compatibility"}]
     return docs
 
 
@@ -236,13 +239,42 @@ def preview_export(snapshot: dict[str, Any], options: dict[str, Any]) -> dict[st
     return {"documents": len(docs), "assets": assets, "estimatedBytes": estimated, "omissions": omissions[:100], "sourceHash": source_hash, "options": options}
 
 
-async def create_export(bridge: Any, *, snapshot: dict[str, Any], owner: str, workspace: str, options: dict[str, Any]) -> dict[str, Any]:
+def verify_export_archive(path: Path, *, manifest: dict[str, Any], documents: list[dict[str, Any]], workspace: str) -> dict[str, Any]:
+    """Reopen completed bytes and reconcile scope, paths and every payload."""
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            names = archive.namelist()
+            normalized = [unicodedata.normalize("NFC", name).casefold() for name in names]
+            if len(names) != len(set(normalized)):
+                raise ValueError("duplicate portable archive paths")
+            actual = json.loads(archive.read(".copal/export-manifest.json"))
+            if actual != manifest or actual.get("workspace") != workspace:
+                raise ValueError("manifest scope changed")
+            entries = actual["documents"]
+            expected_ids = [(str(doc.get("corpus") or "system"), str(doc.get("id") or "")) for doc in documents]
+            actual_ids = [(str(entry["corpus"]), str(entry["id"])) for entry in entries]
+            if any(not identity for _, identity in expected_ids) or len(set(expected_ids)) != len(expected_ids) or actual_ids != expected_ids:
+                raise ValueError("selected document identities disagree")
+            expected_paths = [entry["path"] for entry in entries] + [".copal/export-manifest.json"]
+            if names != expected_paths:
+                raise ValueError("archive payload set disagrees")
+            for entry in entries:
+                data = archive.read(entry["path"])
+                if len(data) != entry["size"] or hashlib.sha256(data).hexdigest() != entry["sha256"]:
+                    raise ValueError("archive payload digest disagrees")
+        return {"manifestValid": True, "finished": True, "filenameOnly": False,
+                "documents": len(entries), "scope": actual.get("scope") or {}}
+    except Exception as exc:
+        raise CopalTransferError("completed ZIP failed scope or payload verification", code="export_integrity") from exc
+
+
+async def create_export(bridge: Any, *, snapshot: dict[str, Any], owner: str, workspace: str, options: dict[str, Any], on_completed=None) -> dict[str, Any]:
     docs = _export_docs(snapshot, options)
     canonical = bool(next((doc for doc in docs if doc.get("kind") == "copal-tracks"), None))
     root = _root(bridge)
     token = secrets.token_urlsafe(32)
     zip_path = root / f"{token}.zip"
-    manifest = {"format": "copal-obsidian-export-v1", "exported_at": datetime.now(timezone.utc).isoformat(), "workspace": workspace, "documents": []}
+    manifest = {"format": "copal-obsidian-export-v1", "exported_at": datetime.now(timezone.utc).isoformat(), "workspace": workspace, "scope": {"includeWiki": options.get("includeWiki") is not False, "includeAssets": options.get("includeAssets") is not False}, "documents": []}
     assets_root = (Path(getattr(bridge, "data_dir", DATA_DIR)) / "assets").resolve()
     try:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -254,24 +286,37 @@ async def create_export(bridge: Any, *, snapshot: dict[str, Any], owner: str, wo
                     export_name = f".copal/wiki/{export_name}"
                 if canonical and doc.get("kind") == "planning":
                     export_name = ".copal/planning.legacy.json"
-                if doc.get("kind") == "asset":
-                    asset = await bridge.call("asset_path", {"owner": owner, "workspace_id": workspace, "id": doc.get("id")}, timeout=60)
+                if doc.get("kind") in {"asset", "compatibility"}:
+                    arguments = {"owner": owner, "workspace_id": workspace, "id": doc.get("id")}
+                    if doc.get("corpus") == "wiki":
+                        arguments["corpus"] = "wiki"
+                    asset = await bridge.call("asset_path", arguments, timeout=60)
                     path = Path(str(asset.get("path") or "")).resolve()
-                    if path.parent != assets_root or not path.is_file():
-                        raise CopalTransferError("export asset bytes are unavailable", code="export_integrity")
-                    archive.write(path, export_name)
+                    vault_for = getattr(bridge, "_vault", None)
+                    vault = Path(vault_for(owner, workspace)).resolve() if callable(vault_for) else None
+                    if not path.is_file() or not (path.parent == assets_root or (vault is not None and path.is_relative_to(vault))):
+                        raise CopalTransferError("export asset bytes are unavailable in this scope", code="export_integrity")
                     content_bytes = path.read_bytes()
+                    archive.writestr(export_name, content_bytes)
                 else:
                     from routes.copal_routes import _note_markdown
                     content_bytes = (_note_markdown(doc) if doc.get("kind") in {"note", "wiki"} else str(doc.get("text") or "")).encode("utf-8")
                     archive.writestr(export_name, content_bytes)
                 manifest["documents"].append({"id": doc.get("id"), "corpus": doc.get("corpus") or "system", "kind": doc.get("kind"), "path": export_name, "size": len(content_bytes), "sha256": hashlib.sha256(content_bytes).hexdigest()})
             archive.writestr(".copal/export-manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+        verification = verify_export_archive(zip_path, manifest=manifest, documents=docs, workspace=workspace)
         digest = _fingerprint(zip_path)
         expires = time.time() + TRANSFER_TTL_SECONDS
         metadata = {"schemaVersion": 1, "downloadId": token, "owner": owner, "workspace": workspace, "expires": expires, "sha256": digest, "size": zip_path.stat().st_size, "filename": "copal-obsidian-export.zip"}
         (root / f"{token}.json").write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")), encoding="utf-8")
-        return {"downloadId": token, "downloadUrl": f"/api/copal/export/download/{token}", "expiresAt": expires, "size": metadata["size"], "sha256": digest, "workspace": workspace}
+        if on_completed:
+            try:
+                on_completed(digest, {**verification, "exportId": digest})
+            except Exception:
+                # The completed export remains usable if achievement delivery
+                # fails; do not convert a committed artifact into a retry.
+                logging.getLogger(__name__).warning("Export achievement delivery unavailable")
+        return {"verification": verification, "downloadId": token, "downloadUrl": f"/api/copal/export/download/{token}", "expiresAt": expires, "size": metadata["size"], "sha256": digest, "workspace": workspace}
     except Exception:
         for candidate in (zip_path, root / f"{token}.json"):
             try:

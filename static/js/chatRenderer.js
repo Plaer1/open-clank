@@ -1,3 +1,5 @@
+import { uiIcon } from './uiIcons.js';
+import { fileIcon } from './langIcons.js';
 // static/js/chatRenderer.js
 // Extracted from chat.js — message rendering, sources, images, metrics
 
@@ -12,12 +14,12 @@ import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
 import { normalizeAssistantTranscript } from './chatTranscript.js';
 
-const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
-const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
-const CHAT_ABOUT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-const COPY_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-const CHECK_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-const PAPERCLIP_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
+const SEARCH_ICON = uiIcon("search", 14);
+const REPORT_ICON = uiIcon("document", 14);
+const CHAT_ABOUT_ICON = uiIcon("chat", 14);
+const COPY_ICON = uiIcon("copy", 12);
+const CHECK_ICON = uiIcon("check", 12, {"role":"success"});
+const PAPERCLIP_ICON = uiIcon("attachment", 12);
 
 /** Sanitize a URL for use in href — only allow http(s) and protocol-relative. */
 function _safeHref(url) {
@@ -64,15 +66,9 @@ function _makeActionBtn(className, title, text, handler) {
 
 // Attachment card helpers
 function _attachIcon(mimeOrName) {
-  const s = (mimeOrName || '').toLowerCase();
-  if (s.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(s))
-    return '<svg class="attach-card-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
-  if (s.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|webm)$/i.test(s))
-    return '<svg class="attach-card-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
-  if (s === 'application/pdf' || /\.pdf$/i.test(s))
-    return '<svg class="attach-card-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
-  // Default: generic document
-  return '<svg class="attach-card-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+  const value = String(mimeOrName || '');
+  const mime = /^(?:application|audio|font|image|text|video)\//i.test(value) ? value : '';
+  return fileIcon({ name: mime ? '' : value, mimeType: mime }, 16, { className: 'attach-card-icon' });
 }
 function _formatSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -165,7 +161,7 @@ export function buildAttachCards(attachments) {
           ocrBtn.type = 'button';
           ocrBtn.className = 'attach-ocr-btn';
           ocrBtn.title = 'View / edit OCR text';
-          ocrBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg><span class="attach-ocr-label">Caption</span>';
+          ocrBtn.innerHTML = uiIcon("edit", 12) + "<span class=\"attach-ocr-label\">Caption</span>";
           ocrBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             _openVisionEditor(att, ocrBtn.closest('.msg'));
@@ -304,7 +300,7 @@ function _openVisionEditor(att, userMsgEl) {
   title.className = 'vision-editor-title';
   // Eye icon matches the one in Settings → Vision so users recognise where
   // this text originates.
-  title.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7;flex-shrink:0"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span>Vision text</span>';
+  title.innerHTML = uiIcon("eye", 14, {"style":"opacity:0.7;flex-shrink:0"}) + "<span>Vision text</span>";
   panel.appendChild(title);
   const desc = document.createElement('div');
   desc.className = 'vision-editor-desc';
@@ -356,7 +352,7 @@ function _openVisionEditor(att, userMsgEl) {
   regenBtn.type = 'button';
   regenBtn.className = 'vision-editor-btn vision-editor-btn-primary';
   regenBtn.title = 'Save and regenerate the message';
-  regenBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.74 9.74 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span class="vision-btn-label">Regenerate message</span>';
+  regenBtn.innerHTML = uiIcon("refresh", 12) + "<span class=\"vision-btn-label\">Regenerate message</span>";
   regenBtn.disabled = true;
   regenBtn.addEventListener('click', async () => {
     regenBtn.disabled = true;
@@ -1023,7 +1019,7 @@ export function buildFindingsBox(findings, expanded) {
       + '<div class="finding-summary">' + summary + '</div>'
       + '</div>';
   }
-  var FINDINGS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
+  var FINDINGS_ICON = uiIcon("document", 14);
   var arrow = expanded ? 'down' : 'right';
   var expandedClass = expanded ? ' expanded' : '';
   return '<div class="sources-section">'
@@ -1047,7 +1043,7 @@ function _appendContinuePrompt(container) {
   wrap.className = 'continue-research-wrap';
   wrap.innerHTML =
     '<div class="continue-research-hint">'
-    + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>'
+    + uiIcon("search", 13)
     + '<span>Dig deeper? Activate Research again and type a follow-up question to continue this research.</span>'
     + '</div>';
   container.appendChild(wrap);
@@ -1216,21 +1212,10 @@ document.addEventListener('click', function(e) {
       } catch (_) {}
     }).catch(() => {});
   } else if (kind === 'image') {
-    // Legacy image rich-links resolve to Imps after the Gallery retirement.
-    import('./galleryEditor.js').then(async (mod) => {
-      let url = null;
-      let label = 'Image';
-      try {
-        const res = await fetch(`/api/gallery/${encodeURIComponent(id)}`, { credentials: 'same-origin' });
-        if (res.ok) {
-          const data = await res.json();
-          const img = data.image || data;
-          url = img.url || (img.filename ? `/api/generated-image/${encodeURIComponent(img.filename)}` : null);
-          label = (img.prompt || '').trim().slice(0, 60) || img.filename || 'Image';
-        }
-      } catch {}
+    import('./imps.js').then((mod) => {
       const open = mod.openEditor || (mod.default && mod.default.openEditor);
-      if (open) open(url, id || null, null, label);
+      if (open) open(null, null, { w: 1024, h: 1024 }, 'Image');
+      uiModule.showToast?.('Open the image from Files to edit its original');
     }).catch(() => {});
   } else if (kind === 'email') {
     import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
@@ -1386,13 +1371,12 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   editBtn.className = 'footer-copy-btn';
   editBtn.type = 'button';
   editBtn.title = 'Edit in image editor';
-  editBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+  editBtn.innerHTML = uiIcon("edit", 12);
   editBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     try {
-      // Imps owns image open after the Gallery retirement — mount the
-      // editor directly. No Gallery modal is involved.
-      const editorMod = await import('./galleryEditor.js');
+      // Imps owns image open, so mount the editor directly.
+      const editorMod = await import('./imps.js');
       const label = (prompt || '').trim().slice(0, 60) || 'Generated image';
       editorMod.openEditor(imageUrl, imageId || null, null, label);
     } catch (err) {
@@ -1402,29 +1386,29 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   actions.appendChild(editBtn);
 
   if (imageId) {
-    const galleryBtn = document.createElement('button');
-    galleryBtn.className = 'footer-copy-btn footer-open-gallery-btn';
-    galleryBtn.type = 'button';
-    galleryBtn.title = 'Open in Imps';
-    galleryBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg><span>Open in Imps</span>';
-    galleryBtn.addEventListener('click', async (e) => {
+    const impsBtn = document.createElement('button');
+    impsBtn.className = 'footer-copy-btn footer-open-imps-btn';
+    impsBtn.type = 'button';
+    impsBtn.title = 'Open in Imps';
+    impsBtn.innerHTML = uiIcon("image", 12) + "<span>Open in Imps</span>";
+    impsBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
-        // Legacy "open in gallery" resolves to Imps after the retirement.
-        const editorMod = await import('./galleryEditor.js');
+        // Open this image in Imps.
+        const editorMod = await import('./imps.js');
         editorMod.openEditor(imageUrl, imageId || null, null, (prompt || '').trim().slice(0, 60) || 'Generated image');
       } catch (err) {
         console.error('[chat] open in Imps failed', err);
       }
     });
-    actions.appendChild(galleryBtn);
+    actions.appendChild(impsBtn);
   }
 
   const delBtn = document.createElement('button');
   delBtn.className = 'footer-copy-btn footer-delete-btn';
   delBtn.type = 'button';
   delBtn.title = 'Delete image';
-  delBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
+  delBtn.innerHTML = uiIcon("trash", 12);
   delBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     const ok = await uiModule.styledConfirm('Delete this image?', {
@@ -1433,23 +1417,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
       danger: true,
     });
     if (!ok) return;
-    // If we have a gallery id, delete server-side; otherwise just remove
-    // the bubble from chat (e.g. external DALL-E url that wasn't saved).
-    if (imageId) {
-      try {
-        const res = await fetch(`/api/gallery/${encodeURIComponent(imageId)}`, {
-          method: 'DELETE', credentials: 'same-origin',
-        });
-        if (!res.ok && res.status !== 404) {
-          uiModule.showToast?.('Delete failed', 4000);
-          return;
-        }
-        window.dispatchEvent(new CustomEvent('gallery-refresh'));
-      } catch (_) {
-        uiModule.showToast?.('Delete failed', 4000);
-        return;
-      }
-    }
+    if (imageId) uiModule.showToast?.('The image remains in Files; remove it there.');
     wrap.remove();
   });
   actions.appendChild(delBtn);
@@ -1674,7 +1642,7 @@ export function createMsgFooter(msgElement) {
     const parts = [];
     if (pinnedCount) parts.push(`${pinnedCount} pinned`);
     if (recalledCount) parts.push(`${recalledCount} recalled`);
-    pill.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px"><path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.8-3.5 6-.3.2-.5.5-.5.9V18h-6v-2.1c0-.4-.2-.7-.5-.9C6.3 13.8 5 11.5 5 9a7 7 0 0 1 7-7z"/><path d="M9 18h6v1a3 3 0 0 1-6 0v-1z"/><path d="M12 2v7"/><path d="M8.5 6.5L12 9l3.5-2.5"/></svg><span class="memory-used-pill-text">${parts.join(', ')}</span>`;
+    pill.innerHTML = `${uiIcon("memory", 12, {"style":"vertical-align:-2px;margin-right:3px"})}<span class="memory-used-pill-text">${parts.join(', ')}</span>`;
     pill.title = mems.map(m => `[${m.type}] ${m.text}`).join('\n');
 
     pill.addEventListener('click', (e) => {
@@ -2193,7 +2161,7 @@ function _renderMimoQuestionCard(aq, renderOptions) {
   close.type = 'button';
   close.className = 'modal-close ask-user-close';
   close.setAttribute('aria-label', 'Reject question');
-  close.textContent = '×';
+  close.innerHTML = uiIcon('close', 16); close.setAttribute('aria-label', close.getAttribute('aria-label') || close.title || 'Close');
   close.addEventListener('click', async () => {
     close.disabled = true;
     try { await send({ rejected: true }); }
@@ -2305,7 +2273,7 @@ export function renderAskUserCard(payload, options) {
   closeBtn.type = 'button';
   closeBtn.className = 'modal-close ask-user-close';
   closeBtn.setAttribute('aria-label', 'Dismiss question');
-  closeBtn.textContent = '×';
+  closeBtn.innerHTML = uiIcon('close', 16); closeBtn.setAttribute('aria-label', closeBtn.getAttribute('aria-label') || closeBtn.title || 'Close');
   closeBtn.addEventListener('click', () => {
     card.remove();
     const input = uiModule.el('message');

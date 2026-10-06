@@ -27,12 +27,12 @@ curl -sf --max-time 4 "$BASE_URL/api/export/ai" | grep -q '"schema": "copal.ai-e
   --headless=new \
   --disable-gpu \
   --no-sandbox \
-  --user-data-dir=/tmp/copal-chromium-wiki-mobile-smoke \
+  --user-data-dir=/tmp/copal-chromium-editor-mobile-smoke \
   --window-size=390,844 \
   --virtual-time-budget=5000 \
-  --screenshot="$OUT_DIR/copal-wiki-390x844.png" \
-  "$BASE_URL/#tab=wiki" >/dev/null
+  --screenshot="$OUT_DIR/copal-editor-390x844.png" \
+  "$BASE_URL/#tab=notes" >/dev/null
 
 echo "browser_smoke=ok"
 echo "notes_screenshot=$OUT_DIR/copal-notes-1280x900.png"
-echo "wiki_mobile_screenshot=$OUT_DIR/copal-wiki-390x844.png"
+echo "editor_mobile_screenshot=$OUT_DIR/copal-editor-390x844.png"

@@ -36,7 +36,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="openclank hex", description="Open Clank project contract")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    check = commands.add_parser("check", help="validate a project against its .hex contract")
+    initialize = commands.add_parser("init", help="add default Hexes to an unconfigured workspace")
+    initialize.add_argument("path", nargs="?", default=".")
+
+    check = commands.add_parser("check", help="validate a project against its Hexes contract")
     check.add_argument("path", nargs="?", default=".")
     check.add_argument("--config")
     check.add_argument("--stage", choices=("check", "pre-commit", "pre-push"), default="check")
@@ -47,7 +50,7 @@ def _parser() -> argparse.ArgumentParser:
     explain.add_argument("--config")
     explain.add_argument("--json", action="store_true")
 
-    sync = commands.add_parser("sync", help="sync the active Hex contract into AGENTS.md")
+    sync = commands.add_parser("sync", help="sync the selected Hex contract into AGENTS.md")
     sync.add_argument("--config")
     sync.add_argument("--agents", default="AGENTS.md")
 
@@ -84,7 +87,7 @@ def _config(value: Optional[str], start: Path) -> Path:
         return (path if path.is_absolute() else Path.cwd() / path).resolve(strict=True)
     found = find_contract(start)
     if found is None:
-        raise HexContractError("no .hex contract found")
+        raise HexContractError("no Hexes contract found")
     return found.resolve(strict=True)
 
 
@@ -351,6 +354,11 @@ def _hook(args: argparse.Namespace) -> int:
 def main(argv: Optional[list[str]] = None) -> int:
     try:
         args = _parser().parse_args(argv)
+        if args.command == "init":
+            from src.hex_defaults import initialize_defaults
+            path, created = initialize_defaults(args.path)
+            print(f"Hexes: {'created defaults at' if created else 'preserved existing contract at'} {path}")
+            return 0
         if args.command == "check":
             return _check(args)
         if args.command == "explain":

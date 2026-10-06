@@ -28,10 +28,15 @@ from typing import Any, BinaryIO, Iterator, Mapping, Optional
 
 import yaml
 from src.clanker_paths import (
+    CLANKER_ARCHIVE_DIR,
     CLANKER_FUTURES_DIR,
-    CLANKERS_HEXES_DIR,
-    CLANKERS_ROBONOTES_DIR,
+    CLANKER_HEXES_DIR,
+    CLANKER_ROBONOTES_DIR,
+    CLANKER_REFERENCES_DIR,
+    CLANKER_TOOLS_DIR,
     GLOBAL_HEX_CONTRACT,
+    GLOBAL_HEX_CONTRACT_PATHS,
+    is_reference_path,
 )
 
 
@@ -73,16 +78,18 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def ensure_policy_schema(db_path: str) -> None:
-    """Install the additive project-policy tables used by Python and Rust.
-
-    Frankenmemory remains the single SQLite authority.  This function is
-    idempotent so a web route can safely run against a database created by an
-    older v2 engine before the Rust process has reopened it.
-    """
+    """Initialize a fresh policy store or validate current schema without upgrades."""
+    expected = {'fm_v2_projects': ['owner_id', 'project_id', 'workspace_id', 'created_at', 'updated_at'], 'fm_v2_project_locators': ['owner_id', 'project_id', 'locator_revision', 'canonical_root', 'root_identity', 'git_identity', 'worktree_identity', 'active', 'authorized_at'], 'fm_v2_policy_projections': ['owner_id', 'project_id', 'contract_path', 'contract_hash', 'engine_version', 'summary_json', 'source_revision', 'state', 'updated_at', 'workspace_id', 'canonical_root', 'root_identity', 'git_identity', 'worktree_identity', 'activation_revision', 'activated_by', 'activated_at'], 'fm_v2_spells': ['owner_id', 'spell_id', 'project_id', 'title', 'suggestion_json', 'source_evidence_json', 'status', 'created_at', 'updated_at', 'workspace_id', 'path_scope', 'revision', 'review_state', 'lifecycle', 'reviewed_by', 'reviewed_at', 'expires_at', 'rationale', 'confidence', 'promoted_contract_hash', 'promoted_transition_id'], 'fm_v2_policy_transitions': ['owner_id', 'transition_id', 'project_id', 'phase', 'contract_hash', 'actor_id', 'payload_hash', 'created_at', 'contract_path', 'old_contract_hash', 'new_contract_hash', 'old_bytes', 'new_bytes', 'spell_id', 'spell_revision', 'payload_json', 'updated_at', 'operation_id', 'sequence', 'state', 'previous_transition_id', 'previous_event_hash', 'event_hash', 'old_bytes_ref', 'new_bytes_ref', 'error_json'], 'fm_v2_policy_trust': ['owner_id', 'project_id', 'canonical_root', 'worktree_identity', 'branch', 'contract_hash', 'engine_version', 'manifest_hash', 'capability_hash', 'expires_at', 'revoked_at', 'created_at', 'trust_id', 'created_by', 'reason', 'revoked_by', 'revocation_reason'], 'fm_v2_policy_trust_events': ['owner_id', 'event_id', 'project_id', 'action', 'binding_hash', 'payload_json', 'previous_event_hash', 'event_hash', 'created_at']}
     with sqlite3.connect(db_path, timeout=30) as conn:
+        present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if present.intersection(expected):
+            for table, columns in expected.items():
+                found = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if not set(columns).issubset(found):
+                    raise HexResolutionError("Legacy Hex schema requires .clanker/tools/migrations/python/secondary.py project-hex-schema")
+            return
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE IF NOT EXISTS fm_v2_projects (
                 owner_id TEXT NOT NULL,
                 project_id TEXT NOT NULL,
@@ -124,6 +131,14 @@ def ensure_policy_schema(db_path: str) -> None:
                 source_revision INTEGER NOT NULL,
                 state TEXT NOT NULL DEFAULT 'never_activated',
                 updated_at TEXT NOT NULL,
+                workspace_id TEXT NOT NULL DEFAULT 'global',
+                canonical_root TEXT NOT NULL DEFAULT '',
+                root_identity TEXT NOT NULL DEFAULT '',
+                git_identity TEXT NOT NULL DEFAULT '',
+                worktree_identity TEXT NOT NULL DEFAULT '',
+                activation_revision INTEGER NOT NULL DEFAULT 0,
+                activated_by TEXT,
+                activated_at TEXT,
                 PRIMARY KEY (owner_id, project_id),
                 CHECK (state IN ('never_activated','active','drifted','deactivated'))
             );
@@ -137,6 +152,18 @@ def ensure_policy_schema(db_path: str) -> None:
                 status TEXT NOT NULL DEFAULT 'proposed',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                workspace_id TEXT NOT NULL DEFAULT 'global',
+                path_scope TEXT NOT NULL DEFAULT '**/*',
+                revision INTEGER NOT NULL DEFAULT 1,
+                review_state TEXT NOT NULL DEFAULT 'proposed',
+                lifecycle TEXT NOT NULL DEFAULT 'proposed',
+                reviewed_by TEXT,
+                reviewed_at TEXT,
+                expires_at TEXT,
+                rationale TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0.5,
+                promoted_contract_hash TEXT,
+                promoted_transition_id TEXT,
                 PRIMARY KEY (owner_id, spell_id),
                 CHECK (status IN ('proposed','dismissed','expired','edited','promoted'))
             );
@@ -149,6 +176,24 @@ def ensure_policy_schema(db_path: str) -> None:
                 actor_id TEXT NOT NULL,
                 payload_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                contract_path TEXT,
+                old_contract_hash TEXT,
+                new_contract_hash TEXT,
+                old_bytes BLOB,
+                new_bytes BLOB,
+                spell_id TEXT,
+                spell_revision INTEGER,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT,
+                operation_id TEXT,
+                sequence INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'pending',
+                previous_transition_id TEXT,
+                previous_event_hash TEXT,
+                event_hash TEXT,
+                old_bytes_ref TEXT,
+                new_bytes_ref TEXT,
+                error_json TEXT,
                 PRIMARY KEY (owner_id, transition_id),
                 CHECK (phase IN ('prepared','blessing_consumed','file_published','activation_advanced','validated','projection_enqueued','spell_linked','committed','rollback_required','rolled_back'))
             );
@@ -165,6 +210,11 @@ def ensure_policy_schema(db_path: str) -> None:
                 expires_at TEXT NOT NULL,
                 revoked_at TEXT,
                 created_at TEXT NOT NULL,
+                trust_id TEXT,
+                created_by TEXT,
+                reason TEXT NOT NULL DEFAULT '',
+                revoked_by TEXT,
+                revocation_reason TEXT,
                 PRIMARY KEY (
                     owner_id,project_id,canonical_root,worktree_identity,branch,
                     contract_hash,engine_version,manifest_hash,capability_hash
@@ -183,73 +233,10 @@ def ensure_policy_schema(db_path: str) -> None:
                 PRIMARY KEY (owner_id,event_id),
                 CHECK (action IN ('grant','revoke'))
             );
-            """
-        )
-        additions = {
-            "fm_v2_policy_projections": {
-                "workspace_id": "TEXT NOT NULL DEFAULT 'global'",
-                "canonical_root": "TEXT NOT NULL DEFAULT ''",
-                "root_identity": "TEXT NOT NULL DEFAULT ''",
-                "git_identity": "TEXT NOT NULL DEFAULT ''",
-                "worktree_identity": "TEXT NOT NULL DEFAULT ''",
-                "activation_revision": "INTEGER NOT NULL DEFAULT 0",
-                "activated_by": "TEXT",
-                "activated_at": "TEXT",
-            },
-            "fm_v2_spells": {
-                "workspace_id": "TEXT NOT NULL DEFAULT 'global'",
-                "path_scope": "TEXT NOT NULL DEFAULT '**/*'",
-                "revision": "INTEGER NOT NULL DEFAULT 1",
-                "review_state": "TEXT NOT NULL DEFAULT 'proposed'",
-                "lifecycle": "TEXT NOT NULL DEFAULT 'proposed'",
-                "reviewed_by": "TEXT",
-                "reviewed_at": "TEXT",
-                "expires_at": "TEXT",
-                "rationale": "TEXT NOT NULL DEFAULT ''",
-                "confidence": "REAL NOT NULL DEFAULT 0.5",
-                "promoted_contract_hash": "TEXT",
-                "promoted_transition_id": "TEXT",
-            },
-            "fm_v2_policy_transitions": {
-                "contract_path": "TEXT",
-                "old_contract_hash": "TEXT",
-                "new_contract_hash": "TEXT",
-                "old_bytes": "BLOB",
-                "new_bytes": "BLOB",
-                "spell_id": "TEXT",
-                "spell_revision": "INTEGER",
-                "payload_json": "TEXT NOT NULL DEFAULT '{}'",
-                "updated_at": "TEXT",
-                "operation_id": "TEXT",
-                "sequence": "INTEGER NOT NULL DEFAULT 0",
-                "state": "TEXT NOT NULL DEFAULT 'pending'",
-                "previous_transition_id": "TEXT",
-                "previous_event_hash": "TEXT",
-                "event_hash": "TEXT",
-                "old_bytes_ref": "TEXT",
-                "new_bytes_ref": "TEXT",
-                "error_json": "TEXT",
-            },
-            "fm_v2_policy_trust": {
-                "trust_id": "TEXT",
-                "created_by": "TEXT",
-                "reason": "TEXT NOT NULL DEFAULT ''",
-                "revoked_by": "TEXT",
-                "revocation_reason": "TEXT",
-            },
-        }
-        for table, columns in additions.items():
-            present = _table_columns(conn, table)
-            for column, definition in columns.items():
-                if column not in present:
-                    conn.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-                    )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_fm_v2_policy_transition_sequence "
-            "ON fm_v2_policy_transitions(owner_id,operation_id,sequence) "
-            "WHERE operation_id IS NOT NULL"
-        )
+            
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fm_v2_policy_transition_sequence ON fm_v2_policy_transitions(owner_id,operation_id,sequence) WHERE operation_id IS NOT NULL;
+        """)
+
 
 
 def _canonical_project_root(root: str | os.PathLike[str]) -> Path:
@@ -417,6 +404,8 @@ def register_project(
     if existing:
         if project_id and existing["project_id"] != str(project_id).strip():
             raise HexResolutionError("project root already belongs to another project identity")
+        if existing["workspace_id"] != workspace_id:
+            raise HexResolutionError("project root is already bound to a different Workspace identity")
         return existing
     project_id = str(project_id or "").strip() or "project_" + uuid.uuid4().hex
     root_identity, git_identity, worktree_identity = _project_identities(canonical)
@@ -629,7 +618,7 @@ def _policy_file_list(root: Path) -> list[str]:
             paths = [
                 value.decode("utf-8", errors="surrogateescape")
                 for value in completed.stdout.split(b"\0")
-                if value
+                if value and not is_reference_path(value.decode("utf-8", errors="surrogateescape"))
             ]
             if len(paths) > MAX_POLICY_FILES:
                 raise HexResolutionError("project policy file set exceeds the 100,000-file limit")
@@ -640,7 +629,8 @@ def _policy_file_list(root: Path) -> list[str]:
     }
     paths: list[str] = []
     for directory, names, files in os.walk(root, followlinks=False):
-        names[:] = [name for name in names if name not in skipped]
+        names[:] = [name for name in names if name not in skipped
+                    and not is_reference_path((Path(directory) / name).relative_to(root))]
         base = Path(directory)
         for name in files:
             paths.append((base / name).relative_to(root).as_posix())
@@ -699,12 +689,44 @@ def validate_project_file_candidates(
     normalized: dict[str, Optional[bytes]] = {}
     for raw_path, payload in candidates.items():
         relative = _candidate_relative(root, raw_path)
-        if Path(relative).name in CONTRACT_NAMES:
+        if Path(relative).name in CONTRACT_NAMES or any(
+            relative == contract or relative.endswith("/" + contract)
+            for contract in GLOBAL_HEX_CONTRACT_PATHS
+        ):
             raise HexResolutionError(
                 "project contract bytes may change only through the policy transition journal"
             )
         normalized[relative] = None if payload is None else bytes(payload)
     source_files = _policy_file_list(root)
+    if os.name == "nt":
+        from src.openclank.hex_windows import validate_windows_candidates
+
+        def verify_native_authority() -> None:
+            fresh = require_hex_activation(
+                root, owner=owner, project_id=project_id, db_path=db_path,
+                workspace_root=root,
+            )
+            if fresh.contract_path != resolution.contract_path or fresh.contract_hash != resolution.contract_hash:
+                raise HexResolutionError("project policy changed during native candidate validation")
+            require_executable_trust(
+                fresh, owner=owner, project_id=project_id, db_path=db_path
+            )
+            if _policy_file_list(root) != source_files:
+                raise HexResolutionError("project file set changed during native candidate validation")
+
+        executable_manifest = policy_executable_manifest(resolution)
+        native_source_files = sorted(set(source_files) | {contract_relative} | {
+            Path(item["path"]).as_posix() for item in executable_manifest["files"]
+        })
+        try:
+            return validate_windows_candidates(
+                root, contract_relative=contract_relative, source_files=native_source_files,
+                candidates=normalized, stage=stage, verify_authority=verify_native_authority,
+            )
+        except HexResolutionError:
+            raise
+        except Exception as exc:
+            raise HexResolutionError(f"native project policy validation failed: {exc}") from exc
     source_state: dict[str, tuple[int, int, int, int]] = {}
     with tempfile.TemporaryDirectory(prefix="open-clank-policy-candidate-") as temporary:
         shadow = Path(temporary).resolve()
@@ -862,61 +884,34 @@ def validate_project_file_candidates(
 
 def policy_executable_manifest(resolution: HexResolution) -> dict[str, Any]:
     """Hash every project-controlled executable policy input without loading it."""
+    from src.hex_contract import HexContractError, custom_check_references, load_contract
+
     if not resolution.contract_path or resolution.contract is None:
         raise HexResolutionError("a parsed project contract is required")
     root = Path(resolution.project_root).resolve()
-    contract_root = Path(resolution.contract_path).resolve().parent
-    refs: list[str] = []
-    imports = resolution.contract.get("imports")
-    if imports is not None:
-        imports = imports if isinstance(imports, list) else [imports]
-        refs.extend(str(value).strip() for value in imports if str(value).strip())
+    contract_path = Path(resolution.contract_path)
+    payload = _read_contract_bytes(contract_path)
+    if payload is None or hashlib.sha256(payload).hexdigest() != resolution.contract_hash:
+        raise HexResolutionError("project contract changed before executable manifest")
+    try:
+        refs = custom_check_references(load_contract(contract_path), root)
+    except (HexContractError, OSError, ValueError) as exc:
+        raise HexResolutionError(f"executable policy discovery failed: {exc}") from exc
     uses_hexes = "hexes" in resolution.contract
-    checks_name = "hexes_checks.py" if uses_hexes else "henxels_checks.py"
-    if (contract_root / checks_name).is_file():
-        refs.append(checks_name)
-    # Canonical v2 Hexes projects auto-load the first-party checks directory
-    # from the project root (see ``hex_contract.apply_imports``).  The
-    # executable-policy trust binding must cover the exact same inputs; an
-    # omitted check here would let a trusted manifest survive a policy-code
-    # change.  Keep this restricted to top-level Python modules and ignore
-    # private helpers, matching the loader's deterministic discovery rules.
-    if uses_hexes:
-        canonical_checks = root / ".clankers" / "hexes" / "checks"
-        if canonical_checks.is_dir():
-            refs.extend(
-                str(path.relative_to(contract_root))
-                for path in sorted(canonical_checks.glob("*.py"))
-                if not path.name.startswith("_")
-            )
-    local_dir = contract_root / (".hexes" if uses_hexes else ".henxels")
-    if local_dir.is_dir():
-        refs.extend(
-            str(path.relative_to(contract_root))
-            for path in sorted(local_dir.glob("*.py"))
-            if not path.name.startswith("_")
-        )
 
     files: list[dict[str, str]] = []
     unresolved_modules: list[str] = []
     for ref in sorted(set(refs)):
         if not (ref.endswith(".py") or "/" in ref or "\\" in ref):
-            module_path = Path(*ref.split("."))
-            module_candidates = (
-                contract_root / module_path.with_suffix(".py"),
-                contract_root / module_path / "__init__.py",
-            )
-            existing = [candidate for candidate in module_candidates if candidate.is_file()]
-            if len(existing) != 1:
-                unresolved_modules.append(ref)
-                continue
-            candidate = existing[0].resolve(strict=True)
-        else:
-            candidate = (contract_root / ref).resolve(strict=False)
+            unresolved_modules.append(ref)
+            continue
+        candidate = (root / ref).resolve(strict=False)
         try:
             candidate.relative_to(root)
         except ValueError as exc:
             raise HexResolutionError("executable policy import escapes the project") from exc
+        if candidate.suffix != ".py":
+            raise HexResolutionError(f"executable policy import must be a Python file: {ref}")
         payload = _read_contract_bytes(candidate)
         if payload is None:
             raise HexResolutionError(f"executable policy import is missing: {ref}")
@@ -2096,6 +2091,7 @@ def publish_contract_update(
     actor_id: Optional[str] = None,
     spell_id: Optional[str] = None,
     spell_revision: Optional[int] = None,
+    general_hex_source: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     owner = str(owner or "").strip()
     project_id = str(project_id or "").strip()
@@ -2134,6 +2130,7 @@ def publish_contract_update(
                 "new_hash": new_hash,
                 "spell_id": spell_id,
                 "spell_revision": spell_revision,
+                "general_hex_source": general_hex_source,
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -2146,6 +2143,13 @@ def publish_contract_update(
         ).fetchone()
         if not projection or projection[0] != expected_contract_hash or projection[1] != "active":
             raise HexResolutionError("project activation changed before publication")
+        if general_hex_source:
+            general_head = conn.execute(
+                "SELECT revision,deleted FROM fm_general_hex_heads WHERE owner_id=? AND hex_id=?",
+                (owner, str(general_hex_source.get("hex_id") or "")),
+            ).fetchone()
+            if not general_head or general_head[1] or general_head[0] != general_hex_source.get("revision"):
+                raise HexResolutionError("General Hex changed before publication")
         if spell_id:
             spell = conn.execute(
                 "SELECT revision,review_state,lifecycle FROM fm_v2_spells WHERE owner_id=? AND spell_id=? AND project_id=?",
@@ -2171,7 +2175,7 @@ def publish_contract_update(
                 "spell_id": spell_id,
                 "spell_revision": spell_revision,
                 "payload_json": json.dumps(
-                    {"project": project, "engine_version": ENGINE_VERSION},
+                    {"project": project, "engine_version": ENGINE_VERSION, "general_hex_source": general_hex_source},
                     sort_keys=True,
                 ),
             },
@@ -2509,6 +2513,14 @@ def activate_hex(
         )
     if project["canonical_root"] != str(Path(resolution.project_root).resolve()):
         raise HexResolutionError("project contract does not belong to the registered project root")
+    current = resolve_hex(
+        project["canonical_root"],
+        workspace_root=project["canonical_root"],
+    )
+    if (current.contract_path != resolution.contract_path
+            or current.contract_hash != resolution.contract_hash
+            or current.contract is None):
+        raise HexResolutionError("project contract changed after review; inspect it again before activation")
     identities = _project_identities(Path(project["canonical_root"]))
     if identities != (
         project["root_identity"],
@@ -2950,9 +2962,12 @@ def global_policy_context(
             "engine_version": resolution.engine_version if resolution else None,
         },
         "canonical_paths": {
+            "archive": f"{CLANKER_ARCHIVE_DIR}/",
             "plans": f"{CLANKER_FUTURES_DIR}/",
-            "hexes": f"{CLANKERS_HEXES_DIR}/",
-            "robonotes": f"{CLANKERS_ROBONOTES_DIR}/",
+            "hexes": f"{CLANKER_HEXES_DIR}/",
+            "robonotes": f"{CLANKER_ROBONOTES_DIR}/",
+            "tools": f"{CLANKER_TOOLS_DIR}/",
+            "references": f"{CLANKER_REFERENCES_DIR}/",
         },
         "explain": (
             f"scripts/openclank hex explain {contract_relative or GLOBAL_HEX_CONTRACT} --json"
@@ -3132,8 +3147,11 @@ def resolve_hex(target: str | os.PathLike[str], *, workspace_root: str | os.Path
         raise HexResolutionError("target is outside project root") from exc
     current = path
     while True:
-        canonical = current / GLOBAL_HEX_CONTRACT
-        canonical_raw = _read_contract_bytes(canonical)
+        canonical_payloads = {
+            current / name: raw
+            for name in GLOBAL_HEX_CONTRACT_PATHS
+            if (raw := _read_contract_bytes(current / name)) is not None
+        }
         primary = current / ".hex"
         primary_raw = _read_contract_bytes(primary)
         legacy_payloads = {
@@ -3141,14 +3159,16 @@ def resolve_hex(target: str | os.PathLike[str], *, workspace_root: str | os.Path
             for name in CONTRACT_NAMES[1:]
             if (raw := _read_contract_bytes(current / name)) is not None
         }
-        if canonical_raw is not None:
+        if canonical_payloads:
+            canonical, canonical_raw = next(iter(canonical_payloads.items()))
             value = _safe_yaml(canonical_raw)
             compatibility_payloads = {
+                **{path: raw for path, raw in canonical_payloads.items() if path != canonical},
                 primary: primary_raw,
                 **legacy_payloads,
             }
             diagnostics = tuple(
-                f"ignored legacy contract after canonical v2 discovery: {path.name}"
+                f"ignored legacy contract after canonical v2 discovery: {path.relative_to(current)}"
                 for path, raw in sorted(compatibility_payloads.items(), key=lambda item: str(item[0]))
                 if raw is not None
             )

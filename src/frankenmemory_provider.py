@@ -44,16 +44,24 @@ BROKER_MEMORY_TOOLS = frozenset(
         "delete_memory",
         "digest",
         "get_memory",
+        "handler_display_label",
         "graph_walk",
         "ingest_authored",
         "list_candidates",
         "list_memories",
         "list_quarantine",
+        "mark_conversation_source_removed",
         "memory_explain",
         "memory_export",
         "memory_forget",
         "memory_quality",
         "memory_retention",
+        "recall",
+        "versioned_detail",
+        "versioned_transition",
+        "assign_trust",
+        "get_trust",
+        "resolve_question",
         "record_memory_access",
         "reopen_memory",
         "resolve_memory",
@@ -238,7 +246,7 @@ class FrankenmemoryProvider(MemoryProvider):
         could touch a different database than the broker serves. Direct
         v2 sqlite reads/writes must be skipped when this returns None.
         """
-        if self._broker_url and "FM_DB_PATH" not in self._env:
+        if self._broker_url and not str(self._env.get("FM_DB_PATH") or "").strip():
             return None
         return self._fm_db_path
 
@@ -415,9 +423,79 @@ class FrankenmemoryProvider(MemoryProvider):
         self, name: str, arguments: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Internal typed transport boundary shared by app, lifetools, and MiMo."""
+        from src.memory_versioned import VersionedMemoryError
+        from src.frankenmemory_v2 import V2OperationError
+        try:
+            return await self._invoke_scoped_tool(name, arguments)
+        except (VersionedMemoryError, V2OperationError) as exc:
+            # Admission and optimistic-concurrency rejections are definite,
+            # not transport failures that might encourage a blind retry.
+            raise MemoryRequestRejectedError(str(exc)) from exc
+
+    async def _invoke_scoped_tool(
+        self, name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if name in {"handler_display_label", "mark_conversation_source_removed", "capture", "versioned_detail", "versioned_transition", "assign_trust", "get_trust", "resolve_question"}:
+            # Python-owned current revisions/trust must execute at the broker's
+            # pinned authority, never at an unpinned agent's default SQLite.
+            from copy import copy
+            scoped = copy(self)
+            scoped._workspace_id = str(arguments.get("workspace_id") or self._workspace_id)
+            owner = arguments.get("owner")
+            if name == "handler_display_label":
+                return {"label": await scoped.handler_display_label(owner=owner)}
+            if name == "mark_conversation_source_removed":
+                return await scoped.mark_conversation_source_removed(owner=owner, session_id=str(arguments.get("session_id") or ""))
+            if name == "capture":
+                return await scoped.capture(
+                    str(arguments.get("user_text") or ""), str(arguments.get("assistant_text") or ""),
+                    owner=owner, session_id=arguments.get("session_id"),
+                    capture_mode=str(arguments.get("capture_mode") or "candidate"),
+                    source=str(arguments.get("source") or "odysseus"),
+                )
+            if name == "versioned_detail":
+                return await scoped.versioned_detail(str(arguments.get("memory_id") or ""), owner=owner)
+            if name == "versioned_transition":
+                changes = {key: arguments[key] for key in (
+                    "value", "value_type", "expected_value_type", "kind", "tags",
+                    "target_revision", "reason",
+                ) if key in arguments}
+                return await scoped.versioned_transition(
+                    str(arguments.get("memory_id") or ""), str(arguments.get("action") or ""),
+                    expected_revision=arguments["expected_revision"], owner=owner, **changes,
+                )
+            if name == "resolve_question":
+                return {"resolved": await scoped.resolve_question(
+                    str(arguments.get("memory_id") or ""), owner=owner,
+                    resolved_by=arguments.get("resolved_by"), answer=arguments.get("answer"),
+                    expected_revision=arguments.get("expected_revision"),
+                )}
+            trust_args = {key: arguments[key] for key in (
+                "subject_kind", "subject_id", "subject_revision", "project_id",
+            ) if key in arguments}
+            trust_args.update(owner=owner, workspace_id=scoped._workspace_id)
+            if name == "assign_trust":
+                trust_args.update({key: arguments[key] for key in (
+                    "trust", "state", "reason_code", "rationale", "evidence_ids", "expected_assignment_id",
+                ) if key in arguments})
+                return await scoped.assign_trust(**trust_args)
+            return await scoped.get_trust(**trust_args)
         return await self._call_tool(name, arguments)
 
     async def _call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        from src.openclank.attachment_admission import admit_references, settle_references
+        admitted = []
+        if name in {"capture", "update_memory", "versioned_transition", "review_candidate", "resolve_memory", "resolve_question"}:
+            admitted = admit_references(arguments.get("owner") or self._env.get("FM_OWNER"), "memery", arguments)
+        result = await self._call_tool_transport(name, arguments)
+        settle_references(admitted)
+        if name == "owner_lifecycle" and arguments.get("action") in {"purge", "reset_commit"} and self._local_db_path():
+            from src.openclank.attachment_admission import refresh_domain_references
+            from src.openclank.attachment_inventory import memery_inventory
+            await asyncio.to_thread(refresh_domain_references, "memery", lambda: memery_inventory(self._local_db_path()))
+        return result
+
+    async def _call_tool_transport(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if self._broker_url:
             if not self._broker_ready:
                 await self.initialize()
@@ -606,6 +684,9 @@ class FrankenmemoryProvider(MemoryProvider):
         # Keep the v2 job envelope in the same install.  The legacy engine
         # still owns admission during compatibility rollout, but automatic
         # capture must not disappear from the versioned pipeline.
+        local_db = self._local_db_path()
+        if local_db is None:
+            return result
         try:
             from src.frankenmemory_v2 import mirror_capture_job
             mirror_capture_job(
@@ -614,7 +695,7 @@ class FrankenmemoryProvider(MemoryProvider):
                 user_text=user_text,
                 assistant_text=assistant_text,
                 workspace_id=scope.workspace_id,
-                db_path=self._fm_db_path,
+                db_path=local_db,
             )
             # Auto-capture may admit one or more curated records.  Refresh the
             # exact legacy rows before mirroring so a preferred v2 read can
@@ -628,7 +709,7 @@ class FrankenmemoryProvider(MemoryProvider):
                             current,
                             owner=scope.owner,
                             workspace_id=scope.workspace_id,
-                            db_path=self._fm_db_path,
+                            db_path=local_db,
                         )
         except Exception:
             logger.debug("v2 capture mirror unavailable", exc_info=True)
@@ -761,7 +842,7 @@ class FrankenmemoryProvider(MemoryProvider):
                 query,
                 owner=scope.owner,
                 workspace_id=scope.workspace_id,
-                top_k=top_k,
+                top_k=max(1, int(top_k)) * (2 if v2_read_mode == "preferred" else 1),
                 require_legacy_presence=True,
                 db_path=local_db,
                 )
@@ -800,34 +881,23 @@ class FrankenmemoryProvider(MemoryProvider):
                     "workspace_id": scope.workspace_id,
                     "owner": scope.owner,
                 })
-                for mem in legacy_result.get("memories", []):
+                ranks = {str(hit.memory.id): 1.0 / (60 + rank)
+                         for rank, hit in enumerate(hits, 1)}
+                seen_legacy: set[str] = set()
+                for rank, mem in enumerate(legacy_result.get("memories", []), 1):
                     record = self._record(mem)
                     record_id = str(record.id)
-                    # Legacy scores arrive over the wire; a malformed value
-                    # degrades to "unscored" instead of raising.
-                    legacy_score = mem.get("score")
-                    try:
-                        legacy_score = float(legacy_score) if legacy_score is not None else None
-                    except (TypeError, ValueError):
-                        legacy_score = None
-                    if record_id in by_id:
-                        current = by_id[record_id]
-                        if legacy_score is not None and (
-                            current.score is None or legacy_score > float(current.score)
-                        ):
-                            current.score = legacy_score
+                    if record_id in seen_legacy:
                         continue
-                    hit = MemorySearchHit(
-                        memory=record,
-                        provider_id=self.provider_id,
-                        score=legacy_score,
-                    )
-                    hits.append(hit)
-                    by_id[record_id] = hit
-                hits.sort(key=lambda hit: (
-                    -(float(hit.score) if hit.score is not None else 0.0),
-                    str(hit.memory.id),
-                ))
+                    seen_legacy.add(record_id)
+                    ranks[record_id] = ranks.get(record_id, 0.0) + 1.0 / (60 + rank)
+                    if record_id not in by_id:
+                        hit = MemorySearchHit(memory=record, provider_id=self.provider_id)
+                        hits.append(hit)
+                        by_id[record_id] = hit
+                for hit in hits:
+                    hit.score = ranks[str(hit.memory.id)]
+                hits.sort(key=lambda hit: (-hit.score, str(hit.memory.id)))
                 return hits[:merged_top_k]
         args: Dict[str, Any] = {
             "query": query,
@@ -1053,16 +1123,7 @@ class FrankenmemoryProvider(MemoryProvider):
         if not (isinstance(result, dict) and "counts" in result):
             return None
         try:
-            from services.memory.principal_context import (
-                render_identity_template,
-                resolve_handler_display_label,
-            )
-
-            label = (
-                resolve_handler_display_label(scope.owner, db_path=local_db)
-                if local_db is not None
-                else resolve_handler_display_label(scope.owner)
-            )
+            label = await self.handler_display_label(owner=scope.owner)
             _render_digest_identity(result, label)
         except Exception:
             logger.debug("digest identity rendering unavailable", exc_info=True)
@@ -1296,6 +1357,43 @@ class FrankenmemoryProvider(MemoryProvider):
             raise MemoryRequestRejectedError("pending candidate edit was rejected")
         return candidate
 
+    async def handler_display_label(self, *, owner: Optional[str] = None) -> str:
+        scope = self._scope(owner)
+        local_db = self._local_db_path()
+        if local_db is None:
+            result = await self._call_tool("handler_display_label", {
+                "owner": scope.owner, "workspace_id": scope.workspace_id,
+            })
+            return str(result.get("label") or "Handler")
+        from services.memory.principal_context import resolve_handler_display_label
+        return await asyncio.to_thread(resolve_handler_display_label, scope.owner,
+                                       workspace_id=scope.workspace_id, db_path=local_db)
+
+    async def mark_conversation_source_removed(self, *, owner: str, session_id: str) -> Dict[str, Any]:
+        """Detach one erased chat's provenance without erasing independent content."""
+        scope = self._scope(owner)
+        local_db = self._local_db_path()
+        if local_db is None:
+            return await self._call_tool("mark_conversation_source_removed", {
+                "owner": scope.owner, "session_id": session_id,
+                "workspace_id": scope.workspace_id,
+            })
+        from src.frankenmemory_v2 import mark_conversation_source_removed, conversation_source_workspaces
+        bindings = await asyncio.to_thread(conversation_source_workspaces,
+            owner=scope.owner, session_id=session_id, db_path=local_db)
+        receipts = []
+        for workspace in bindings:
+            receipts.append(await asyncio.to_thread(mark_conversation_source_removed,
+                owner=scope.owner, session_id=session_id, workspace_id=workspace, db_path=local_db))
+        return {
+            "complete": all(receipt.get("complete") is True for receipt in receipts),
+            "owner": scope.owner, "session_id": session_id,
+            "workspace_bindings": bindings, "receipts": receipts,
+            "detached": {key: sum(int(receipt.get("detached", {}).get(key, 0)) for receipt in receipts) for key in ("curated", "raw", "candidates")},
+            "independent_content_retained": True,
+            "already_applied": bool(receipts) and all(receipt.get("already_applied") for receipt in receipts),
+        }
+
     async def versioned_detail(
         self,
         memory_id: str,
@@ -1303,6 +1401,8 @@ class FrankenmemoryProvider(MemoryProvider):
         owner: Optional[str] = None,
     ) -> Dict[str, Any]:
         scope = self._scope(owner)
+        if self._local_db_path() is None:
+            return await self._call_tool("versioned_detail", {"memory_id": memory_id, "owner": scope.owner, "workspace_id": scope.workspace_id})
         from src.memory_versioned import get_knowledge
 
         return await asyncio.to_thread(
@@ -1370,6 +1470,8 @@ class FrankenmemoryProvider(MemoryProvider):
         **changes: Any,
     ) -> Dict[str, Any]:
         scope = self._scope(owner)
+        if self._local_db_path() is None:
+            return await self._call_tool("versioned_transition", {"memory_id": memory_id, "action": action, "expected_revision": expected_revision, **changes, "owner": scope.owner, "workspace_id": scope.workspace_id})
         from src.memory_versioned import transition_knowledge
 
         return await asyncio.to_thread(
@@ -1400,6 +1502,9 @@ class FrankenmemoryProvider(MemoryProvider):
         expected_assignment_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Append an owner-relative Trust assignment in the v2 authority."""
+        scope = self._scope(owner)
+        if self._local_db_path() is None:
+            return await self._call_tool("assign_trust", {"subject_kind": subject_kind, "subject_id": subject_id, "subject_revision": subject_revision, "project_id": project_id, "trust": trust, "state": state, "reason_code": reason_code, "rationale": rationale, "evidence_ids": evidence_ids, "expected_assignment_id": expected_assignment_id, "owner": scope.owner, "workspace_id": workspace_id or scope.workspace_id})
         from src.frankenmemory_v2 import V2Repository
 
         return await asyncio.to_thread(
@@ -1431,6 +1536,9 @@ class FrankenmemoryProvider(MemoryProvider):
         project_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Read the current owner-relative Trust assignment."""
+        scope = self._scope(owner)
+        if self._local_db_path() is None:
+            return await self._call_tool("get_trust", {"subject_kind": subject_kind, "subject_id": subject_id, "subject_revision": subject_revision, "project_id": project_id, "owner": scope.owner, "workspace_id": workspace_id or scope.workspace_id})
         from src.frankenmemory_v2 import V2Repository
 
         return await asyncio.to_thread(
@@ -1576,6 +1684,13 @@ class FrankenmemoryProvider(MemoryProvider):
         owner: Optional[str] = None,
     ) -> bool:
         scope = self._scope(owner)
+        if self._local_db_path() is None:
+            result = await self._call_tool("resolve_question", {
+                "memory_id": memory_id, "resolved_by": resolved_by, "answer": answer,
+                "expected_revision": expected_revision, "owner": scope.owner,
+                "workspace_id": scope.workspace_id,
+            })
+            return bool(result.get("resolved"))
         prior = await self._get_legacy_current(memory_id, owner=owner)
         if prior is None:
             return False
@@ -1778,7 +1893,9 @@ class FrankenmemoryProvider(MemoryProvider):
         delete closure cannot know it. Left behind, a stale binding would
         resurrect references to entities the reset just erased.
         """
-        db_path = self._fm_db_path
+        db_path = self._local_db_path()
+        if db_path is None:
+            return
 
         def _delete() -> None:
             import sqlite3

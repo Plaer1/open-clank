@@ -1,3 +1,4 @@
+import { recordPresentation, achievementOwner, visiblePresentation, queueReceipt } from '../achievementProducer.js';
 /**
  * Shared full-document Markdown renderer.
  *
@@ -7,7 +8,7 @@
  * query blocks stay inert and app links go through a typed destination
  * registry, never the chat-command interpreter.
  */
-import { findReferenceToken, createReferenceRenderer, extractReferenceSection } from './markdownResources.js';
+import { findReferenceToken, createReferenceRenderer, extractReferenceSection, createReferenceSourceLocator } from './markdownResources.js';
 
 // ---------------------------------------------------------------------------
 // App destination registry (clank://<screen>/<panel-or-item>)
@@ -34,7 +35,8 @@ export function listAppDestinations() {
  * Resolve and open a clank:// destination. Unknown targets produce a useful
  * error; they never execute an arbitrary route or chat command.
  */
-export function openAppDestination(destination, event = null) {
+export async function openAppDestination(destination, event = null, { sourceKind = 'editor', workspaceId = null } = {}) {
+  const accountId = achievementOwner();
   const raw = String(destination || '').replace(/^clank:\/\//i, '').replace(/\/+$/, '');
   if (!raw) return { ok:false, error:'Empty app destination.' };
   const [screen, ...rest] = raw.split('/');
@@ -45,8 +47,12 @@ export function openAppDestination(destination, event = null) {
   }
   const panel = rest.filter(Boolean).join('/') || null;
   try {
-    handler({ screen:key, panel, destination:raw, event });
-    return { ok:true, destination:raw };
+    const resolved = await handler({ screen:key, panel, destination:raw, event });
+    if (!resolved?.element || resolved.destinationExists !== true || !await visiblePresentation(resolved.element)) {
+      return { ok:false, error:`App destination did not resolve: ${raw}`, destination:raw };
+    }
+    await recordPresentation('surface.visited', { surface:key, sourceKind, appLinkResolved:true, destinationExists:true }, { accountId, workspaceId });
+    return { ok:true, destination:raw, documentId:resolved.documentId || null };
   } catch (error) {
     return { ok:false, error:error?.message || `App destination failed: ${raw}`, destination:raw };
   }
@@ -72,19 +78,40 @@ export function createMarkdownRenderer({
   documents,
   findByName = null,
   assetUrl = () => null,
+  resolveAsset = null,
   openTarget,
   openAppDestination: appOpen = openAppDestination,
   onConvertPluginBlock = null,
 }) {
   const resolveName = (name) => (typeof findByName === 'function' ? findByName(name) : (documents() || []).find((doc) => doc.name === name) || null);
 
+  async function navigateReference(target, fragment, event, context = {}) {
+    const source = context.origin;
+    const accountId = achievementOwner();
+    let link = null;
+    if (source?.id && source?.head && Number.isInteger(context.reference?.sourceStart)) {
+      try {
+        const response = await fetch(`/api/copal/documents/${encodeURIComponent(source.id)}/link-occurrences?workspace=${encodeURIComponent(source.resource?.key?.workspaceId || source.workspaceId || 'default')}`, { credentials:'same-origin' });
+        const proof = response.ok ? await response.json() : null;
+        if (String(proof?.revisionId) === String(context.sourceRevision || source.head)) link = proof.links.find(item => item.start === context.reference.sourceStart && item.targetDocumentId === target.id);
+      } catch (_) { /* Navigation remains available without qualification. */ }
+    }
+    const destination = await openTarget(target, fragment, event);
+    if (link && destination?.documentId === target.id && await visiblePresentation(destination.element)) {
+      const occurrenceId = crypto.randomUUID();
+      await queueReceipt(`link:${occurrenceId}`, { linkId:link.linkId, targetDocumentId:target.id, sourceRevisionId:link.sourceRevisionId, occurrenceId },
+        { accountId, url:`/api/copal/documents/${encodeURIComponent(source.id)}/link-navigation?workspace=${encodeURIComponent(source.resource?.key?.workspaceId || source.workspaceId || 'default')}` });
+    }
+    return destination;
+  }
   const renderReference = createReferenceRenderer({
     h,
     documents:() => documents() || [],
     assetUrl,
-    openTarget,
-    openAppDestination:(destination, event) => {
-      const result = appOpen(destination, event);
+    resolveAsset,
+    openTarget:navigateReference,
+    openAppDestination:async (destination, event) => {
+      const result = await appOpen(destination, event);
       if (result && result.ok === false && result.error && typeof openTarget === 'function') {
         // Surface a useful error without executing anything else.
         openTarget({ kind:'app-destination-error', name:result.error, id:null }, null, event);
@@ -107,7 +134,9 @@ export function createMarkdownRenderer({
       const reference = findReferenceToken(rest);
       if (reference && (!match || reference.index <= match.index)) {
         appendText(rest.slice(0, reference.index));
-        parent.append(renderReference(reference, context));
+        const exact = rest.slice(reference.index, reference.index + reference.length);
+        const sourceStart = context.locateReference?.(exact);
+        parent.append(renderReference({ ...reference, sourceStart }, context));
         rest = rest.slice(reference.index + reference.length); continue;
       }
       if (!match) { appendText(rest); return; }
@@ -124,7 +153,7 @@ export function createMarkdownRenderer({
         const isExternal = /^https?:\/\//i.test(match[10]);
         const isApp = /^clank:\/\//i.test(match[10]);
         if (isExternal) parent.append(h('a', { href:match[10], target:'_blank', rel:'noopener noreferrer', text:match[9] }));
-        else if (isApp) parent.append(h('button', { class:'copal-chip copal-app-link', type:'button', 'data-app-destination':match[10].replace(/^clank:\/\//i, ''), text:match[9], onclick:(event) => { const result = appOpen(match[10], event); if (result && result.ok === false) openTarget({ kind:'app-destination-error', name:result.error, id:null }, null, event); } }));
+        else if (isApp) parent.append(h('button', { class:'copal-chip copal-app-link', type:'button', 'data-app-destination':match[10].replace(/^clank:\/\//i, ''), text:match[9], onclick:async (event) => { const result = await appOpen(match[10], event); if (result && result.ok === false) openTarget({ kind:'app-destination-error', name:result.error, id:null }, null, event); } }));
         else {
           const target = resolveName(match[10]);
           parent.append(h('button', { class:`copal-chip${target ? '' : ' unresolved'}`, type:'button', disabled:!target, text:match[9], onclick:(event) => openFromEvent(target, event) }));
@@ -138,7 +167,10 @@ export function createMarkdownRenderer({
 
   function renderMarkdown(text, seen = new Set(), origin = null) {
     const root = h('div');
-    const inline = (parent, value) => appendMarkdownInline(parent, value, { origin, seen });
+    const acceptedSource = String(text || '');
+    const sourceRevision = origin?.head;
+    const locateReference = createReferenceSourceLocator(acceptedSource);
+    const inline = (parent, value) => appendMarkdownInline(parent, value, { origin, seen, locateReference, sourceRevision });
     const lines = String(text || '').split('\n');
     let lineOffset = 0;
     if (lines[0]?.trim() === '---') {
@@ -156,7 +188,26 @@ export function createMarkdownRenderer({
       }
       return node;
     };
-    const appendBlock = (node, start, end) => root.append(stamp(node, start, end));
+    const appendBlock = (node, start, end) => {
+      const code = node.querySelector?.('pre.copal-markdown-code code');
+      if (code?.dataset.language) {
+        const syntax = h('span', { role:'status', 'aria-live':'polite', class:'copal-code-syntax-status', text:'Loading syntax…' });
+        node.insertBefore(syntax, code.parentNode);
+        const prepare = globalThis.odysseusHighlight?.prepareElement;
+        if (prepare) {
+          const paint = () => {
+            syntax.hidden = false; syntax.textContent = 'Loading syntax…';
+            void prepare(code, code.dataset.language).then(ready => {
+              syntax.hidden = ready; syntax.textContent = ready ? '' : 'Plain source; syntax unavailable for this block ';
+              if (!ready) syntax.append(h('button', { type:'button', class:'copal-btn', text:'Retry highlighting', onclick:paint }));
+            });
+          };
+          paint();
+        }
+        else syntax.textContent = 'Plain source; syntax highlighter unavailable';
+      }
+      root.append(stamp(node, start, end));
+    };
     let codeBlock = null;
     for (let index = 0; index < lines.length; index += 1) {
       const blockStart = index;
@@ -239,12 +290,20 @@ export function createMarkdownRenderer({
     return root;
   }
 
-  function renderPreview(source) {
+  function renderPreview(source, origin = null) {
     const reference = findReferenceToken(String(source || ''));
-    return reference ? renderReference(reference, { origin:null, seen:new Set() }) : null;
+    return reference ? renderReference(reference, { origin, seen:new Set(origin?.id ? [origin.id] : []) }) : null;
   }
 
-  return { renderMarkdown, renderPreview, renderReference, appendMarkdownInline, extractReferenceSection };
+  // Comment regions contain complete prose, code samples and multiple references.
+  // Standalone embed widgets deliberately retain their smaller renderPreview path.
+  function renderComment(source, origin = null) {
+    const node = renderMarkdown(String(source || ''), new Set(origin?.id ? [origin.id] : []), origin);
+    node.classList.add('cm-rich-comment-prose');
+    return node;
+  }
+
+  return { renderMarkdown, renderPreview, renderComment, renderReference, appendMarkdownInline, extractReferenceSection };
 }
 
 export { extractReferenceSection, findReferenceToken };

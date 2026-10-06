@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, Document, GalleryImage
+from core.database import Base, Document, FilesImageResource
 from src.openclank.copal_loose import LooseCopalBridge
 from src.openclank.file_policy import FilePolicyRepository
 from src.openclank.filesystem_registry import FilesystemRootRegistry
@@ -1103,7 +1103,7 @@ def test_idempotent_managed_actions_are_strict_opaque_and_owner_bound(tmp_path):
     db = sessions()
     try:
         db.add_all([
-            GalleryImage(
+            _files_image(
                 id="favorite-action-image",
                 filename="Favorite me.png",
                 owner="alice",
@@ -1465,3 +1465,26 @@ def test_multipart_import_validation_returns_typed_client_errors(tmp_path):
             )
             assert response.status_code == 400, response.text
             assert response.json()["detail"]["code"] == "invalid_resource_request"
+
+
+def _files_image(**values):
+    """Build a Files-owned resource from legacy fixture metadata."""
+    filename = values.pop("filename", values.pop("name", "image"))
+    parent_id = values.pop("album_id", values.pop("parent_id", None))
+    prompt = values.pop("prompt", None)
+    model = values.pop("model", None)
+    file_hash = values.pop("file_hash", values.pop("digest", None))
+    size = values.pop("file_size", values.pop("size", 0))
+    provenance = dict(values.pop("provenance", {}) or {})
+    for key, value in (("prompt", prompt), ("model", model)):
+        if value is not None:
+            provenance[key] = value
+    is_folder = not filename or ("name" in values and parent_id is None)
+    return FilesImageResource(
+        id=values.pop("id"), owner=values.pop("owner", "alice"),
+        kind="folder" if is_folder else "image", parent_id=parent_id,
+        display_name=filename, locator=values.pop("locator", filename),
+        digest=file_hash, size=size, mime_type=values.pop("mime_type", None),
+        favorite=values.pop("favorite", False), is_active=values.pop("is_active", True),
+        provenance=provenance or None, **values,
+    )

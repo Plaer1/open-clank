@@ -5,7 +5,7 @@
  *
  * Owns its own begin/drag/end handlers and reads/writes shared state.
  * The factory takes a small dependency bag for things still living in
- * galleryEditor.js — `composite` redraws the canvas, `showCropApply`
+ * imps.js — `composite` redraws the canvas, `showCropApply`
  * mounts the floating W×H + Apply panel after the user finishes
  * dragging.
  *

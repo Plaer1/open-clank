@@ -9,6 +9,8 @@ Agent read scope.  Selecting a Workspace therefore only narrows existing access.
 from __future__ import annotations
 
 import os
+import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -57,6 +59,7 @@ def resolve_owned_workspace(
             code="workspace_unavailable",
         )
     try:
+        identifier = repository.legacy_target("workspace", str(subject_id) + ":" + identifier, fallback=identifier)
         workspace = repository.get_workspace(identifier)
     except FilePolicyError as error:
         raise WorkspacePolicyServiceError(
@@ -77,11 +80,40 @@ def resolve_owned_workspace(
     )
 
 
+def _windows_comparison_path(value: str) -> Path:
+    # Fold only standard namespace aliases, retaining verbatim component
+    # semantics for I/O and the original registered Location spelling.
+    if re.match(r"^[A-Za-z]:\\", value):
+        value = "\\\\?\\" + value
+    elif value.startswith("\\\\") and not value.startswith(("\\\\?\\", "\\\\.\\")):
+        value = "\\\\?\\UNC\\" + value[2:]
+    return Path(value)
+
+
 def _relative_folder(location_path: str, target: Path) -> str | None:
     try:
         relative = target.relative_to(Path(location_path))
     except (ValueError, OSError):
-        return None
+        if os.name != "nt":
+            return None
+        try:
+            relative = _windows_comparison_path(str(target)).relative_to(
+                _windows_comparison_path(location_path)
+            )
+            # The alias is a comparison aid, never new authority. Confirm the
+            # original Location-relative spelling names the same directory,
+            # with a stable target identity across that lookup.
+            original = target.stat()
+            candidate = Path(location_path).joinpath(relative).stat()
+            after = target.stat()
+            fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+            identity = lambda metadata: tuple(getattr(metadata, field) for field in fields)
+            if not original.st_ino or not stat.S_ISDIR(original.st_mode):
+                return None
+            if identity(original) != identity(candidate) or identity(original) != identity(after):
+                return None
+        except (ValueError, OSError):
+            return None
     return "" if str(relative) == "." else relative.as_posix()
 
 

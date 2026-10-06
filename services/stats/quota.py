@@ -380,8 +380,10 @@ def quota_snapshot(db, *, owner, account_id=None, session_id=None, period="30d",
             StatsEvent.event_time >= now - timedelta(hours=24),
         ).order_by(StatsEvent.event_time.desc(), StatsEvent.id.desc()).limit(1001).all()
         token_volume_truncated = len(event_rows) > 1000
+        event_rows = event_rows[:1000]
         event_rows.reverse()
-        for event in event_rows[:1000]:
+        from services.stats.ledger import project_admitted_events
+        for event in project_admitted_events(event_rows[:1000]).events:
             if event.input_tokens is None and event.output_tokens is None:
                 continue
             token_volume.append({"observed_at": event.event_time.isoformat() + "Z",

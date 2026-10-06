@@ -67,14 +67,6 @@ HISTORICAL_DEFAULT_ASSISTANT_TOOLS = (
 COPAL_DEFAULT_ASSISTANT_TOOLS = ("read_copal", "manage_copal")
 
 
-def migrate_copal_default_tools(current_tools: object) -> object:
-    """Append Copal tools only to the untouched historical default seed."""
-    if (
-        isinstance(current_tools, list)
-        and current_tools == list(HISTORICAL_DEFAULT_ASSISTANT_TOOLS)
-    ):
-        return [*current_tools, *COPAL_DEFAULT_ASSISTANT_TOOLS]
-    return current_tools
 
 
 # Mechanical operating rules for the personal assistant's scheduled work.
@@ -228,7 +220,9 @@ async def _cached(
             pending = fut
             owner = True
     if not owner:
-        value = await pending
+        # A cancelled waiter must not cancel the shared Future that belongs to
+        # the fetch owner and any other concurrent scheduled task.
+        value = await asyncio.shield(pending)
         if not _cache_admitted(admit):
             raise RuntimeError("scheduler cache owner is fenced")
         return value
@@ -399,7 +393,6 @@ def _resolve_task_timezone(db, task) -> str | None:
 # "cron" uses cron_expression.
 HOUSEKEEPING_DEFAULTS = {
     "tidy_sessions":        {"name": "Chat Sessions Tidy",       "trigger_type": "event", "trigger_event": "session_created", "trigger_count": 5, "schedule": None, "scheduled_time": None, "cron_expression": None, "legacy_names": ["Tidy Chat Sessions"]},
-    "tidy_documents":       {"name": "Documents Tidy",           "trigger_type": "event", "trigger_event": "document_created", "trigger_count": 5, "schedule": None, "scheduled_time": None, "cron_expression": None, "legacy_names": ["Tidy Documents"]},
     "consolidate_memory":   {"name": "Memory Tidy",              "trigger_type": "event", "trigger_event": "memory_added", "trigger_count": 5, "schedule": None, "scheduled_time": None, "cron_expression": None, "legacy_names": ["Tidy Memory"]},
     "tidy_research":        {"name": "Research Tidy",            "trigger_type": "event", "trigger_event": "research_completed", "trigger_count": 5, "schedule": None, "scheduled_time": None, "cron_expression": None, "legacy_names": ["Tidy Research"]},
     "summarize_emails":     {"name": "Email (Summary)",          "schedule": "cron",  "scheduled_time": None,    "cron_expression": "0 */2 * * *", "ship_paused": True, "legacy_names": ["Tidy Email (Summary)"]},
@@ -415,7 +408,13 @@ RETIRED_HOUSEKEEPING_ACTIONS = frozenset({
     "tidy_calendar",
     "tidy_email_inbox",
     "mark_email_boundaries",
+    "tidy_documents",
 })
+
+RETIRED_HOUSEKEEPING_NAMES = {
+    "Documents Tidy": "tidy_documents",
+    "Tidy Documents": "tidy_documents",
+}
 
 
 def _digest_windows(now):
@@ -2245,6 +2244,12 @@ class TaskScheduler:
                 task.next_run = None
 
             db.commit()
+            if run.status == "success" and task.owner and (task.trigger_type or "schedule") == "schedule":
+                from src.openclank.achievement_producers import record_worker_activity
+                record_worker_activity(self._auth_manager, task.owner, "scheduled.task.run.completed", str(run_id), {
+                    "createdByOwner": True, "scheduled": True, "runStatus": "success", "taskId": str(task_id),
+                    "sessionId": getattr(task, "session_id", None),
+                }, workspace_id=getattr(task, "workspace_id", None))
             logger.info(f"Task '{task.name}' completed (run {run_id})")
             output = task.output_target or "session"
             # Per-task notification gate. Default True (notifications_enabled
@@ -2395,7 +2400,6 @@ class TaskScheduler:
         "extract_email_events",
         "classify_events",
         "tidy_sessions",
-        "tidy_documents",
         "consolidate_memory",
         "tidy_research",
         "test_skills",
@@ -3222,7 +3226,8 @@ class TaskScheduler:
         # immediately before spawn; route-time validation alone is not enough.
         from src.tool_security import unavailable_strict_agent_tools
         unavailable = allowed_tools & unavailable_strict_agent_tools(
-            task.owner, workspace_path
+            task.owner, workspace_path,
+            workspace_id=str(getattr(task, "workspace_id", None) or ""), chat_id=session_id,
         )
         if unavailable:
             raise RuntimeError(
@@ -3250,7 +3255,8 @@ class TaskScheduler:
         # There are no awaits between this resolution and stream invocation.
         workspace_path = self._resolve_task_workspace(task)
         unavailable = allowed_tools & unavailable_strict_agent_tools(
-            task.owner, workspace_path
+            task.owner, workspace_path,
+            workspace_id=str(getattr(task, "workspace_id", None) or ""), chat_id=session_id,
         )
         if unavailable:
             raise RuntimeError(
@@ -3618,7 +3624,7 @@ class TaskScheduler:
         recipient = None
         try:
             from routes.email_helpers import _get_email_config
-            cfg = _get_email_config() or {}
+            cfg = _get_email_config(owner=str(task.owner or "").strip()) or {}
             recipient = cfg.get("from_address") or None
         except Exception as _e:
             logger.debug(f"_deliver_via_mcp: email config lookup failed: {_e}")
@@ -3817,6 +3823,18 @@ class TaskScheduler:
         if normalized_scope == "workspace" and not normalized_workspace:
             raise ValueError("Workspace task reset requires a Workspace ID")
 
+        from src.openclank.file_policy import FilePolicyRepository
+        policy = FilePolicyRepository()
+        subject = policy.subject_for_username(normalized_owner)
+        workspace_aliases = {}
+        if subject:
+            with policy._connect() as connection:
+                workspace_aliases = {row['legacy_id'][len(subject)+1:]: row['target_id']
+                    for row in connection.execute("SELECT legacy_id,target_id FROM file_policy_legacy_aliases WHERE kind='workspace'")
+                    if row['legacy_id'].startswith(subject + ':')}
+        normalized_workspace = workspace_aliases.get(normalized_workspace, normalized_workspace)
+        normalized_location_workspaces = frozenset(workspace_aliases.get(value, value) for value in normalized_location_workspaces)
+
         selected_ids: list[str] = []
         paused_ids: set[str] = set()
         aborted_run_ids: set[str] = set()
@@ -3825,6 +3843,7 @@ class TaskScheduler:
 
         def _matches(task) -> bool:
             stable_id = str(getattr(task, "workspace_id", None) or "").strip()
+            stable_id = workspace_aliases.get(stable_id, stable_id)
             if normalized_scope == "workspace":
                 return stable_id == normalized_workspace
             if normalized_scope == "location":
@@ -3989,153 +4008,12 @@ class TaskScheduler:
 
         db = SessionLocal()
         try:
-            # Normalize old built-ins that were created before `task_type` /
-            # `action` were reliable. Match by current or legacy name so stale
-            # rows cannot keep running as scheduled LLM tasks forever.
-            name_to_action = {}
-            for action, defs in HOUSEKEEPING_DEFAULTS.items():
-                name_to_action[defs["name"]] = action
-                for legacy in defs.get("legacy_names") or []:
-                    name_to_action[legacy] = action
-            possible_names = list(name_to_action.keys())
-            legacy_named = db.query(ScheduledTask).filter(
-                ScheduledTask.owner == owner,
-                ScheduledTask.name.in_(possible_names),
-            ).all()
-            for task in legacy_named:
-                action = name_to_action.get(task.name)
-                if not action:
-                    continue
-                task.task_type = "action"
-                task.action = action
-
-            from core.database import TaskRun
-            retired_ids = [
-                row[0] for row in db.query(ScheduledTask.id).filter(
-                    ScheduledTask.owner == owner,
-                    ScheduledTask.task_type == "action",
-                    ScheduledTask.action.in_(list(RETIRED_HOUSEKEEPING_ACTIONS)),
-                ).all()
-            ]
-            if retired_ids:
-                db.query(TaskRun).filter(TaskRun.task_id.in_(retired_ids)).delete(synchronize_session=False)
-            retired_count = db.query(ScheduledTask).filter(
-                ScheduledTask.owner == owner,
-                ScheduledTask.task_type == "action",
-                ScheduledTask.action.in_(list(RETIRED_HOUSEKEEPING_ACTIONS)),
-            ).delete(synchronize_session=False)
-            # Sweep orphan TaskRun rows (parent task deleted previously) so
-            # retired actions stop showing in Activity. Only runs when at least
-            # one live task exists — avoids wiping run history on a fresh DB.
-            try:
-                live_ids = {row[0] for row in db.query(ScheduledTask.id).all()}
-                if live_ids:
-                    db.query(TaskRun).filter(~TaskRun.task_id.in_(list(live_ids))).delete(synchronize_session=False)
-            except Exception:
-                pass
             existing_actions = {
                 row[0] for row in db.query(ScheduledTask.action).filter(
                     ScheduledTask.owner == owner,
                     ScheduledTask.task_type == "action",
                 ).all() if row[0]
             }
-            renamed = []
-            builtin_tasks = db.query(ScheduledTask).filter(
-                ScheduledTask.owner == owner,
-                ScheduledTask.task_type == "action",
-                ScheduledTask.action.in_(list(HOUSEKEEPING_DEFAULTS.keys())),
-            ).all()
-            by_action = {}
-            for task in builtin_tasks:
-                by_action.setdefault(task.action, []).append(task)
-            removed_dupes = []
-            kept_ids = set()
-            for action, tasks in by_action.items():
-                defs = HOUSEKEEPING_DEFAULTS.get(action)
-                if not defs:
-                    continue
-                desired_trigger = defs.get("trigger_type", "schedule")
-
-                def _score(candidate):
-                    matches_default = (
-                        (candidate.trigger_type or "schedule") == desired_trigger
-                        and (candidate.trigger_event or None) == defs.get("trigger_event")
-                        and (candidate.trigger_count or 1) == (defs.get("trigger_count") or 1)
-                        and (candidate.schedule or None) == defs.get("schedule")
-                        and (candidate.scheduled_time or None) == defs.get("scheduled_time")
-                        and (candidate.cron_expression or None) == defs.get("cron_expression")
-                    )
-                    created = candidate.created_at or datetime.min
-                    created_key = (created.toordinal(), created.hour, created.minute, created.second, created.microsecond)
-                    return (1 if matches_default else 0, 1 if candidate.status == "active" else 0, created_key)
-
-                keep = sorted(tasks, key=_score, reverse=True)[0]
-                kept_ids.add(keep.id)
-                for dupe in tasks:
-                    if dupe.id == keep.id:
-                        continue
-                    db.delete(dupe)
-                    removed_dupes.append(action)
-
-            for task in [t for t in builtin_tasks if t.id in kept_ids]:
-                defs = HOUSEKEEPING_DEFAULTS.get(task.action)
-                if not defs:
-                    continue
-                legacy_names = set(defs.get("legacy_names") or [])
-                if (task.name or "") in legacy_names:
-                    task.name = defs["name"]
-                    renamed.append(task.action)
-                normalized = False
-                desired_trigger = defs.get("trigger_type", "schedule")
-                if task.action == "check_email_urgency":
-                    old_crons = set(defs.get("old_cron_expressions") or [])
-                    if task.schedule == "cron" and (task.cron_expression or "") in old_crons:
-                        task.cron_expression = defs["cron_expression"]
-                        task.next_run = compute_next_run(
-                            defs["schedule"], defs["scheduled_time"], None, None,
-                            after=_utcnow(), cron_expression=defs["cron_expression"],
-                            tz_name=_resolve_task_timezone(db, task),
-                        )
-                        normalized = True
-                if desired_trigger == "event" and (
-                    (task.trigger_type or "schedule") != "event"
-                    or task.trigger_event != defs.get("trigger_event")
-                    or (task.trigger_count or 1) != (defs.get("trigger_count") or 1)
-                    or task.schedule is not None
-                    or task.scheduled_time is not None
-                    or task.scheduled_date is not None
-                    or task.cron_expression is not None
-                ):
-                    task.trigger_type = "event"
-                    task.trigger_event = defs.get("trigger_event")
-                    task.trigger_count = defs.get("trigger_count") or 1
-                    task.trigger_counter = 0
-                    task.schedule = defs.get("schedule")
-                    task.scheduled_time = defs.get("scheduled_time")
-                    task.scheduled_day = None
-                    task.scheduled_date = None
-                    task.cron_expression = defs.get("cron_expression")
-                    normalized = True
-                if normalized:
-                    renamed.append(task.action)
-                ships_paused = bool(defs.get("ship_paused"))
-                if not tasks_enabled and not tasks_opened:
-                    if ships_paused and task.status == "active":
-                        task.status = "paused"
-                    elif not ships_paused and task.status == "paused":
-                        task.status = "active"
-                        if (task.trigger_type or "schedule") == "schedule":
-                            task.next_run = compute_next_run(
-                                task.schedule, task.scheduled_time,
-                                task.scheduled_day, task.scheduled_date,
-                                after=_utcnow(), cron_expression=task.cron_expression,
-                                tz_name=_resolve_task_timezone(db, task),
-                            )
-                # Built-in housekeeping/action jobs should not create browser
-                # task notifications; user AI/research tasks still can.
-                task.notifications_enabled = False
-                if (task.output_target or "session") == "session":
-                    task.output_target = defs.get("output_target", "none")
             seeded = []
             for action, defs in HOUSEKEEPING_DEFAULTS.items():
                 if action in existing_actions:
@@ -4171,13 +4049,6 @@ class TaskScheduler:
                 )
                 db.add(task)
                 seeded.append(action)
-            if seeded or renamed or removed_dupes or retired_count:
-                logger.info(
-                    "Housekeeping defaults for %s: seeded=%s renamed=%s deduped=%s retired=%s",
-                    owner, seeded, sorted(set(renamed)), sorted(set(removed_dupes)), retired_count,
-                )
-            # Always commit — the orphan-run sweep above may have produced
-            # pending deletes even when no defaults changed.
             db.commit()
         except Exception as e:
             logger.warning(f"Failed to create default tasks: {e}")
@@ -4211,19 +4082,6 @@ class TaskScheduler:
                 CrewMember.is_default_assistant == True,  # noqa: E712
             ).first()
             if existing:
-                # Guarded v1 default-tool migration: only the exact historical
-                # product seed is eligible; customized tool order/content is
-                # never overwritten. The marker is encoded in the resulting
-                # list so reruns are naturally idempotent.
-                try:
-                    current_tools = json.loads(existing.enabled_tools or "[]")
-                    migrated_tools = migrate_copal_default_tools(current_tools)
-                    if migrated_tools != current_tools:
-                        existing.enabled_tools = json.dumps(migrated_tools)
-                        db.commit()
-                        logger.info("Migrated Copal default tools for owner=%s", owner)
-                except (TypeError, ValueError):
-                    db.rollback()
                 return  # already seeded
 
             # Resolve a default model/endpoint from any existing session so the

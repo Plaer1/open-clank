@@ -16,6 +16,8 @@ import logging
 import os
 import pathlib
 import re
+import shlex
+import subprocess
 import sys
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
@@ -29,9 +31,570 @@ from src.tool_security import (
     is_public_blocked_tool,
     owner_is_admin_or_single_user,
 )
-from src.tool_policy import ToolPolicy
+from src.tool_policy import ToolPolicy, known_tool_names
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
 from src.tool_utils import _truncate, get_mcp_manager
+
+# The dispatcher owns every result envelope sent back to a model. Keep result
+# integrity, preview, and shell notices at this seam instead of adding a second
+# policy or approval authority to individual tools.
+TOOL_RESULT_PREVIEW_MAX_LINES = 2_000
+TOOL_RESULT_PREVIEW_MAX_BYTES = 50 * 1024
+
+_TOOL_CAPABILITY_REGISTRY = {
+    "shell_execution": frozenset({"bash", "python"}),
+    "local_read": frozenset({"read_file", "grep", "glob", "ls", "get_workspace"}),
+    "local_mutation": frozenset({"write_file", "apply_patch", "todowrite", "manage_files"}),
+}
+_RAW_TOOL_RESULT_FIELDS = frozenset({"output", "stdout", "stderr"})
+_DISPATCHER_ONLY_TOOL_NAMES = frozenset({
+    "adopt_served_model", "app_api", "apply_patch", "cancel_download",
+    "create_document", "create_session", "download_model", "edit_document",
+    "edit_file", "edit_image", "generate_image", "list_cached_models",
+    "list_cookbook_servers", "list_downloads", "list_serve_presets",
+    "list_served_models", "list_sessions", "manage_bg_jobs", "manage_calendar",
+    "manage_copal", "manage_endpoints", "manage_mcp", "manage_memory",
+    "manage_notes", "manage_research", "manage_session", "manage_settings",
+    "manage_skills", "manage_tasks", "manage_tokens", "manage_webhooks",
+    "pipeline", "publish_file", "read_copal", "recall_memory", "resolve_contact",
+    "search_chats", "search_hf_models", "send_to_session", "serve_model",
+    "serve_preset", "stop_served_model", "suggest_document", "tail_serve_output",
+    "todowrite", "trigger_research", "ui_control", "update_document", "vault_get",
+    "vault_search", "vault_unlock",
+    "json", "xml",
+})
+
+
+def _split_shell_argv(command: str) -> list[list[str]]:
+    """Split literal shell words into command argv groups without evaluating them."""
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token and all(char in ";&|\n" for char in token):
+            if current:
+                groups.append(current)
+                current = []
+        else:
+            current.append(token)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _command_start_index(argv: list[str]) -> int:
+    """Skip literal command wrappers without interpreting a shell command."""
+    index = 0
+    while index < len(argv) and (argv[index] == "command" or ("=" in argv[index] and not argv[index].startswith("-"))):
+        index += 1
+    if index < len(argv) and argv[index] == "env":
+        index += 1
+        while index < len(argv) and (argv[index].startswith("-") or ("=" in argv[index] and not argv[index].startswith("-"))):
+            index += 1
+    if index < len(argv) and os.path.basename(argv[index]) == "sudo":
+        index += 1
+        options_with_value = {"-C", "-D", "-g", "-h", "-p", "-r", "-t", "-u", "--chdir", "--close-from", "--group", "--host", "--prompt", "--role", "--type", "--user"}
+        while index < len(argv) and argv[index].startswith("-"):
+            option = argv[index]
+            index += 2 if option in options_with_value else 1
+    return index
+
+
+def _git_command_parts(argv: list[str]) -> tuple[Optional[str], list[str]]:
+    """Return a direct Git subcommand and its arguments from a tokenized argv."""
+    index = _command_start_index(argv)
+    if index >= len(argv) or os.path.basename(argv[index]) != "git":
+        return None, []
+    index += 1
+    options_with_value = {
+        "-C", "-c", "--git-dir", "--work-tree", "--namespace",
+        "--exec-path", "--config-env", "--super-prefix",
+    }
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            return None, []
+        if token in options_with_value:
+            index += 2
+            continue
+        if token.startswith("--git-dir=") or token.startswith("--work-tree="):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token, argv[index + 1:]
+    return None, []
+
+
+def _shell_command_substitutions(command: str) -> list[str]:
+    """Extract executable ``$(...)`` bodies while respecting literal quotes."""
+    bodies: list[str] = []
+    quote: Optional[str] = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            quote = None if quote == char else (char if quote is None else quote)
+            index += 1
+            continue
+        if quote != "'" and command.startswith("$(", index):
+            depth, start = 1, index + 2
+            cursor, nested_quote = start, None
+            while cursor < len(command) and depth:
+                nested = command[cursor]
+                if nested == "\\" and nested_quote != "'":
+                    cursor += 2
+                    continue
+                if nested in {"'", '"'}:
+                    nested_quote = None if nested_quote == nested else (nested if nested_quote is None else nested_quote)
+                elif nested_quote != "'" and nested == "(":
+                    depth += 1
+                elif nested_quote != "'" and nested == ")":
+                    depth -= 1
+                cursor += 1
+            if depth == 0:
+                bodies.append(command[start:cursor - 1])
+                index = cursor
+                continue
+        index += 1
+    return bodies
+
+
+def _shell_backtick_substitutions(command: str) -> list[str]:
+    """Extract legacy backtick command substitutions outside single quotes."""
+    bodies: list[str] = []
+    quote: Optional[str] = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if char == "'":
+            if quote is None:
+                quote = "'"
+            elif quote == "'":
+                quote = None
+            index += 1
+            continue
+        if char == '"':
+            if quote is None:
+                quote = '"'
+            elif quote == '"':
+                quote = None
+            index += 1
+            continue
+        if char == "`" and quote != "'":
+            cursor = index + 1
+            while cursor < len(command):
+                if command[cursor] == "\\":
+                    cursor += 2
+                    continue
+                if command[cursor] == "`":
+                    bodies.append(command[index + 1:cursor])
+                    index = cursor + 1
+                    break
+                cursor += 1
+            else:
+                index += 1
+            continue
+        index += 1
+    return bodies
+
+
+def _nested_shell_block_reason(command: str, context: Dict) -> Optional[str]:
+    """Inspect literal shell syntax for a blocked Git mutation without running it."""
+    for argv in _split_shell_argv(command):
+        # Shell grouping punctuation is a syntactic wrapper, not a command.
+        while argv and argv[0] in {"(", "{"}:
+            argv = argv[1:]
+        while argv and argv[-1] in {")", "}"}:
+            argv = argv[:-1]
+        if not argv:
+            continue
+        reason = _isolated_git_command_block_reason(argv, context)
+        if reason:
+            return reason
+        start = _command_start_index(argv)
+        if start < len(argv) and os.path.basename(argv[start]) in {"bash", "sh", "zsh"}:
+            try:
+                script_index = argv.index("-c", start + 1) + 1
+            except ValueError:
+                script_index = -1
+            if 0 <= script_index < len(argv):
+                nested_reason = _nested_shell_block_reason(argv[script_index], context)
+                if nested_reason:
+                    return nested_reason
+    for body in [*_shell_command_substitutions(command), *_shell_backtick_substitutions(command)]:
+        nested_reason = _nested_shell_block_reason(body, context)
+        if nested_reason:
+            return nested_reason
+    return None
+
+
+def _git_text(workspace: str, *args: str) -> Optional[str]:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", workspace, *args],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def _isolated_worktree_context(workspace: object) -> Optional[Dict]:
+    root = os.path.realpath(str(workspace or ""))
+    registered = _git_text(root, "worktree", "list", "--porcelain")
+    if not registered:
+        return None
+    registered_paths = {
+        os.path.realpath(line[9:])
+        for line in registered.splitlines()
+        if line.startswith("worktree ")
+    }
+    if root not in registered_paths or len(registered_paths) < 2:
+        return None
+    git_dir = _git_text(root, "rev-parse", "--git-dir")
+    if not git_dir:
+        return None
+    git_dir = git_dir.strip()
+    if not os.path.isabs(git_dir):
+        git_dir = os.path.realpath(os.path.join(root, git_dir))
+    # Linked worktrees have a per-worktree Git directory, while the primary
+    # checkout points at the common .git directory.
+    if "/worktrees/" not in git_dir.replace("\\", "/"):
+        return None
+    branch = _git_text(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    return {"root": root, "git_dir": git_dir, "branch": (branch or "").strip()}
+
+
+def _has_force_or_delete(arguments: list[str]) -> bool:
+    return any(
+        argument in {"-f", "-D", "-d", "--force", "--delete", "--force-with-lease"}
+        or argument.startswith("--force-with-lease=")
+        or (argument.startswith("-") and not argument.startswith("--") and "f" in argument[1:])
+        for argument in arguments
+    )
+
+
+_GIT_RECOVERY_FLAGS = frozenset({
+    "--abort", "--continue", "--skip", "--quit", "--edit-todo",
+    "--show-current-patch",
+})
+
+
+def _git_positionals(arguments: list[str]) -> list[str]:
+    """Return simple positional arguments from an already-tokenized Git argv."""
+    values: list[str] = []
+    after_separator = False
+    for argument in arguments:
+        if after_separator:
+            values.append(argument)
+        elif argument == "--":
+            after_separator = True
+        elif argument == "-" or not argument.startswith("-"):
+            values.append(argument)
+    return values
+
+
+def _git_flag_value(arguments: list[str], flags: frozenset[str]) -> Optional[str]:
+    for index, argument in enumerate(arguments):
+        for flag in flags:
+            if argument == flag:
+                return arguments[index + 1] if index + 1 < len(arguments) else ""
+            if argument.startswith(flag + "="):
+                return argument[len(flag) + 1:]
+    return None
+
+
+def _owned_git_ref(name: str, branch: str) -> bool:
+    normalized = name.removeprefix("refs/heads/")
+    return bool(branch) and normalized in {branch, "HEAD"}
+
+
+def _git_checkout_target_is_ref(context: Dict, target: str) -> bool:
+    """Whether Git resolves a checkout target as an object or ref, not a path."""
+    root = str(context.get("root") or "")
+    return _git_text(root, "rev-parse", "--verify", "--quiet", f"{target}^{{commit}}") is not None
+
+
+def _push_target(refspec: str) -> str:
+    spec = refspec.removeprefix("+")
+    target = spec.rsplit(":", 1)[-1]
+    return target.removeprefix("refs/heads/")
+
+
+def _isolated_git_command_block_reason(argv: list[str], context: Dict) -> Optional[str]:
+    subcommand, arguments = _git_command_parts(argv)
+    if not subcommand:
+        return None
+    subcommand = subcommand.lower()
+    branch = str(context.get("branch") or "")
+    if subcommand in {"replace", "pack-refs"}:
+        return "direct Git ref mutation"
+    if subcommand == "worktree":
+        if not arguments or arguments[0] != "list":
+            return "shared Git worktree registry mutation"
+        return None
+    if subcommand in {"merge", "rebase"}:
+        if set(arguments).intersection(_GIT_RECOVERY_FLAGS):
+            return None
+        return f"Git {subcommand}"
+    if subcommand == "branch":
+        mutates = _has_force_or_delete(arguments) or bool(
+            set(arguments).intersection({"-m", "-M", "--move", "--copy"})
+        )
+        if not mutates:
+            return None
+        positionals = _git_positionals(arguments)
+        if positionals and all(_owned_git_ref(name, branch) for name in positionals):
+            return None
+        if mutates:
+            return "forced, deleted, or renamed Git branch"
+        return None
+    if subcommand == "tag":
+        if _has_force_or_delete(arguments):
+            return "forced or deleted Git tag"
+        return None
+    if subcommand == "push":
+        positionals = _git_positionals(arguments)
+        refspecs = positionals[1:]
+        mutates = _has_force_or_delete(arguments) or any(
+            spec.startswith(":") or spec.startswith("+") for spec in refspecs
+        )
+        if not mutates or not refspecs:
+            return None
+        if all(_owned_git_ref(_push_target(spec), branch) for spec in refspecs):
+            return None
+        return "forced or deleted Git push to a foreign ref"
+    if subcommand == "update-ref":
+        positionals = _git_positionals(arguments)
+        if positionals and _owned_git_ref(positionals[0], branch):
+            return None
+        return "direct Git ref mutation"
+    if subcommand == "symbolic-ref":
+        positionals = _git_positionals(arguments)
+        if len(positionals) < 2 and not set(arguments).intersection({"--delete", "-d"}):
+            return None
+        return "direct Git symbolic-ref mutation"
+    if subcommand in {"checkout", "switch"}:
+        if "--" in arguments:
+            return None
+        created = _git_flag_value(arguments, frozenset({"-b", "-c", "--orphan"}))
+        if created is not None:
+            return None
+        forced = _git_flag_value(arguments, frozenset({"-B", "-C"}))
+        if forced is not None:
+            return None if _owned_git_ref(forced, branch) else "force-created foreign Git branch"
+        positionals = _git_positionals(arguments)
+        if len(positionals) >= 2:
+            return None
+        if not positionals:
+            return "detached Git checkout" if "--detach" in arguments else None
+        target = positionals[0]
+        target_path = target if os.path.isabs(target) else os.path.join(str(context.get("root") or ""), target)
+        if _owned_git_ref(target, branch):
+            return None
+        # A same-named path must not allow checkout of a foreign branch. Git
+        # resolves refs before paths, so allow the path form only when it does
+        # not resolve as a Git object or ref.
+        if os.path.exists(target_path) and not _git_checkout_target_is_ref(context, target):
+            return None
+        return "foreign Git checkout" if subcommand == "checkout" else "foreign Git switch"
+    return None
+
+
+def isolated_worktree_ref_mutation_guard(command: object, workspace: object) -> Optional[str]:
+    """Bound Git ref/worktree mutations only for registered linked children."""
+    if not isinstance(command, str):
+        return None
+    context = _isolated_worktree_context(workspace)
+    if not context:
+        return None
+    reason = _nested_shell_block_reason(command, context)
+    if reason:
+        return (
+            f"{reason} is blocked in an isolated child worktree; "
+            "use that worktree's own branch or a nonisolated session"
+        )
+    return None
+
+
+def _tool_result_source(result: Dict) -> str:
+    """Build a stable digest input without altering raw tool-result fields."""
+    envelope_fields = {
+        "preview", "preview_truncated", "preview_mode", "tail_digest",
+        "result_integrity", "merge_conflict", "output_capture",
+    }
+    chunks = []
+    for key in sorted(key for key in result if key not in envelope_fields):
+        value = result[key]
+        if isinstance(value, str):
+            rendered = value
+        else:
+            try:
+                rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+            except (TypeError, ValueError):
+                rendered = repr(value)
+        chunks.append(f"[{key}]\n{rendered}")
+    return "\n".join(chunks)
+
+
+def _limit_preview_bytes(value: str, *, tail: bool) -> tuple[str, bool]:
+    raw = value.encode("utf-8", errors="replace")
+    if len(raw) <= TOOL_RESULT_PREVIEW_MAX_BYTES:
+        return value, False
+    selected = raw[-TOOL_RESULT_PREVIEW_MAX_BYTES:] if tail else raw[:TOOL_RESULT_PREVIEW_MAX_BYTES]
+    return selected.decode("utf-8", errors="ignore"), True
+
+
+def _tool_result_preview(result: Dict) -> Dict:
+    """Bound model-visible output while preserving every raw result field."""
+    source = _tool_result_source(result)
+    lines = source.splitlines()
+    failed = result.get("exit_code") not in (None, 0) or bool(result.get("error"))
+    if len(lines) > TOOL_RESULT_PREVIEW_MAX_LINES:
+        selected = lines[-TOOL_RESULT_PREVIEW_MAX_LINES:] if failed else lines[:TOOL_RESULT_PREVIEW_MAX_LINES]
+        line_truncated = True
+    else:
+        selected = lines
+        line_truncated = False
+    preview, byte_truncated = _limit_preview_bytes("\n".join(selected), tail=failed)
+    encoded_source = source.encode("utf-8", errors="replace")
+    return {
+        "preview": preview,
+        "preview_truncated": line_truncated or byte_truncated,
+        "preview_mode": "error-tail" if failed else "head",
+        "tail_digest": {
+            "algorithm": "sha256",
+            "value": hashlib.sha256(encoded_source).hexdigest(),
+            "source_lines": len(lines),
+            "source_bytes": len(encoded_source),
+            "max_lines": TOOL_RESULT_PREVIEW_MAX_LINES,
+            "max_bytes": TOOL_RESULT_PREVIEW_MAX_BYTES,
+        },
+    }
+
+
+def _workspace_git_conflict_state(workspace: object) -> Optional[Dict]:
+    """Read Git's index and operation files; terminal text is never evidence."""
+    context = _isolated_worktree_context(workspace)
+    root = context["root"] if context else os.path.realpath(str(workspace or ""))
+    git_dir = _git_text(root, "rev-parse", "--git-dir")
+    if not git_dir:
+        return None
+    git_dir = git_dir.strip()
+    if not os.path.isabs(git_dir):
+        git_dir = os.path.realpath(os.path.join(root, git_dir))
+    unmerged = _git_text(root, "ls-files", "--unmerged", "-z") or ""
+    paths = sorted({entry.rsplit("\t", 1)[-1] for entry in unmerged.split("\0") if "\t" in entry})
+    operations = []
+    for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+        if os.path.exists(os.path.join(git_dir, name)):
+            operations.append(name.removesuffix("_HEAD").lower())
+    if os.path.isdir(os.path.join(git_dir, "rebase-merge")):
+        operations.append("rebase")
+    if os.path.isdir(os.path.join(git_dir, "rebase-apply")):
+        operations.append("rebase-or-am")
+    if not paths and not operations:
+        return None
+    return {
+        "detected": bool(paths),
+        "state": "conflicted" if paths else "operation_in_progress",
+        "unmerged_paths": paths,
+        "in_progress_operations": operations,
+        "resolution": "manual_required",
+    }
+
+
+def _declared_tool_capability(tool: object, dynamic_handlers: Optional[Dict] = None) -> Optional[Dict]:
+    """Resolve every dispatcher effect through its one existing authority."""
+    if not isinstance(tool, str) or not tool:
+        return None
+    for effect, names in _TOOL_CAPABILITY_REGISTRY.items():
+        if tool in names:
+            return {"effect": effect, "capability": effect}
+    if tool in _MCP_TOOL_MAP:
+        return {"effect": "external_tool_execution", "capability": "mcp_tool"}
+    if tool in BUILTIN_EMAIL_TOOLS:
+        return {"effect": "external_tool_execution", "capability": "email_tool"}
+    if dynamic_handlers and tool in dynamic_handlers:
+        return {"effect": "registered_tool_execution", "capability": "registered_tool"}
+    if tool in _ADMIN_TOOLS or tool in {"publish_file"}:
+        return {"effect": "privileged_tool_execution", "capability": "privileged_tool"}
+    if tool in _DISPATCHER_ONLY_TOOL_NAMES or tool in known_tool_names() or tool.startswith("mcp__"):
+        return {"effect": "declared_tool_execution", "capability": "tool_policy_registered"}
+    return None
+
+
+def _validate_untrusted_tool_result(result: object) -> Optional[str]:
+    """Reject malformed result content before it reaches the model formatter."""
+    if not isinstance(result, dict):
+        return "tool handler returned a non-object result"
+    for field in _RAW_TOOL_RESULT_FIELDS:
+        if field in result and not isinstance(result[field], str):
+            return f"tool result field '{field}' is not text"
+    if "exit_code" in result and result["exit_code"] is not None and not isinstance(result["exit_code"], int):
+        return "tool result exit_code is not an integer"
+    return None
+
+
+def finalize_tool_result(
+    tool: str,
+    result: Dict,
+    *,
+    capability: Optional[Dict] = None,
+    workspace: Optional[str] = None,
+) -> Dict:
+    """Apply the dispatcher's capability and untrusted-result integrity gate."""
+    capability = capability or _declared_tool_capability(tool)
+    issue = _validate_untrusted_tool_result(result)
+    if issue:
+        return {
+            "error": f"tool result rejected by integrity gate: {issue}",
+            "exit_code": 1,
+            "blocked": True,
+            "result_integrity": {
+                "trusted": False,
+                "source": "tool-result",
+                "validated": False,
+                "authority": "tool_dispatcher",
+            },
+        }
+    preview = _tool_result_preview(result)
+    capture = result.get("output_capture")
+    if capture:
+        # A subprocess may retain only bounded inline text. Its streaming
+        # metadata is the authority for a complete observed-stream digest.
+        preview["tail_digest"]["scope"] = "inline_result"
+        preview["tail_digest"]["source_complete"] = False
+    result.update(preview)
+    result["result_integrity"] = {
+        "trusted": False,
+        "source": "tool-result",
+        "validated": True,
+        "capability": (capability or {}).get("capability", "tool_execution"),
+        "effect": (capability or {}).get("effect", "tool_execution"),
+        "authority": "tool_dispatcher",
+    }
+    conflict = _workspace_git_conflict_state(workspace) if tool in {"bash", "python"} and workspace else None
+    if conflict:
+        result["merge_conflict"] = conflict
+    return result
 
 # Persistent working directory for agent subprocesses.
 # Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
@@ -360,16 +923,11 @@ def _read_only_auth_snapshot(auth_path: str):
 def _copal_account_id(owner: Optional[str]) -> tuple[str, Optional[str], Optional[str]]:
     """Resolve a tool username to the immutable TreeHouse account subject."""
     username = str(owner or "").strip()
-    if not username or username.lower() == "local":
-        return username, None, None
+    if not username:
+        return username, None, "authenticated tool owner is required"
     from src.constants import AUTH_FILE
     auth_path = str(os.environ.get("OPEN_CLANK_AUTHORITY_AUTH_PATH") or AUTH_FILE).strip()
     if not os.path.isfile(auth_path):
-        from src.auth_helpers import _auth_disabled
-        if _auth_disabled():
-            # Explicit single-user mode retains the local compatibility
-            # namespace because no authenticated account identity exists.
-            return username, username, None
         return username, None, "authentication identity store is unavailable"
     try:
         account_id = _read_only_auth_snapshot(auth_path).account_id(username)
@@ -671,6 +1229,18 @@ def _split_bg_marker(content: str):
     return False, content
 
 
+def _authenticated_run_id(session_id: Optional[str]) -> Optional[str]:
+    """Return the current run identity when the session authority has one."""
+    if not session_id:
+        return None
+    try:
+        from src import agent_runs
+        value = agent_runs.get_run_id(str(session_id))
+    except Exception:
+        return None
+    return str(value).strip() or None if value else None
+
+
 async def _direct_fallback(
     tool: str,
     content: str,
@@ -679,10 +1249,14 @@ async def _direct_fallback(
     owner: Optional[str] = None,
     authority_workspace_id: Optional[str] = None,
     files_importer: Optional[Callable[..., Any]] = None,
+    run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
 ) -> Optional[Dict]:
     from src.shell_policy import minimal_shell_env
 
     _subproc_env = minimal_shell_env(cwd=agent_cwd())
+    authenticated_run_id = str(run_id).strip() if run_id else _authenticated_run_id(session_id)
+    authenticated_task_id = str(task_id).strip() if task_id else None
 
     try:
         history_context = None
@@ -696,6 +1270,10 @@ async def _direct_fallback(
                         account_id=str(account_id),
                         workspace_id=str(authority_workspace_id or agent_cwd()),
                         workspace_root=agent_cwd(),
+                        session_id=str(session_id or ""),
+                        run_id=authenticated_run_id or "",
+                        task_id=authenticated_task_id or "",
+                        tool_id=str(tool or "filesystem"),
                     )
             except Exception:
                 # History is best-effort; normal live tool dispatch continues.
@@ -708,6 +1286,8 @@ async def _direct_fallback(
             "workspace": agent_cwd(),
             "authority_workspace_id": str(authority_workspace_id or ""),
             "history_context": history_context,
+            "run_id": authenticated_run_id,
+            "task_id": authenticated_task_id,
             "files_importer": files_importer,
         }
 
@@ -743,6 +1323,26 @@ async def _document_tool_dispatch(
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+def _finalize_dispatch_return(
+    tool: str,
+    description: str,
+    result: Dict,
+    *,
+    workspace: Optional[str],
+) -> Tuple[str, Dict]:
+    """Apply one result envelope to every public dispatcher return path."""
+    try:
+        agent_tools_mod = __import__("src.agent_tools", fromlist=["TOOL_HANDLERS"])
+        dynamic_handlers = getattr(agent_tools_mod, "TOOL_HANDLERS", {})
+    except ImportError:
+        dynamic_handlers = {}
+    return description, finalize_tool_result(
+        tool,
+        result,
+        capability=_declared_tool_capability(tool, dynamic_handlers),
+        workspace=workspace,
+    )
+
 async def execute_tool_block(
     block: Any,
     session_id: Optional[str] = None,
@@ -764,6 +1364,24 @@ async def execute_tool_block(
     caller is vetted here; route-level validation is not a security boundary.
     Reset on the way out so the binding never leaks to the next tool call.
     """
+    owner = str(owner or "").strip()
+    if not owner:
+        tool = str(getattr(block, "tool_type", "") or "tool")
+        return tool + ": BLOCKED", {
+            "error": "Authenticated tool owner is required.",
+            "code": "owner_required", "exit_code": 1, "blocked": True,
+        }
+    try:
+        owner, account_id, identity_error = _copal_account_id(owner)
+    except Exception:
+        account_id = None
+        identity_error = "Authentication identity authority is unavailable."
+    if identity_error or not account_id:
+        tool = str(getattr(block, "tool_type", "") or "tool")
+        return tool + ": BLOCKED", {
+            "error": identity_error or "Authenticated tool account is required.",
+            "code": "identity_unavailable", "exit_code": 1, "blocked": True,
+        }
     requested_workspace = str(workspace or "").strip()
     stable_workspace_id = str(authority_workspace_id or "").strip()
     if stable_workspace_id:
@@ -776,15 +1394,17 @@ async def execute_tool_block(
         bound_workspace = (
             vet_workspace(requested_workspace) if requested_workspace else None
         )
+    tool = str(getattr(block, "tool_type", "") or "tool")
     if (requested_workspace or stable_workspace_id) and not bound_workspace:
-        tool = str(getattr(block, "tool_type", "") or "tool")
-        return (
+        return _finalize_dispatch_return(
+            tool,
             f"{tool}: BLOCKED",
             {
                 "error": "The requested workspace was rejected by the containment policy.",
                 "exit_code": 1,
                 "blocked": True,
             },
+            workspace=None,
         )
     token = _active_workspace.set(bound_workspace)
     try:
@@ -801,7 +1421,13 @@ async def execute_tool_block(
             provider_grant_id=provider_grant_id,
             files_importer=files_importer,
         )
-        return output
+        description, result = output
+        return _finalize_dispatch_return(
+            tool,
+            description,
+            result,
+            workspace=bound_workspace,
+        )
     finally:
         _active_workspace.reset(token)
 
@@ -858,6 +1484,29 @@ async def _execute_tool_block_impl(
 
     tool = block.tool_type
     content = block.content
+    capability = _declared_tool_capability(tool, dynamic_handlers)
+    if capability is None:
+        return (
+            f"{tool}: BLOCKED",
+            {
+                "error": f"Tool '{tool}' has no declared dispatcher capability.",
+                "code": "undeclared_tool_capability",
+                "exit_code": 1,
+                "blocked": True,
+            },
+        )
+    if tool == "bash":
+        git_guard = isolated_worktree_ref_mutation_guard(content, agent_cwd())
+        if git_guard:
+            return (
+                "bash: BLOCKED",
+                {
+                    "error": git_guard,
+                    "code": "isolated_worktree_ref_mutation",
+                    "exit_code": 1,
+                    "blocked": True,
+                },
+            )
     if tool in {"read_copal", "manage_copal"} and copal_workspace is not None:
         try:
             arguments = json.loads(content) if content.strip() else {}
@@ -998,6 +1647,23 @@ async def _execute_tool_block_impl(
                     containment=containment,
                     network=network_mode,
                 )
+                history_context = None
+                run_id = _authenticated_run_id(session_id)
+                task_id = None
+                try:
+                    from src.openclank.history_capture import trusted_tool_context
+                    _storage_owner, account_id, _identity_error = _copal_account_id(owner)
+                    if account_id:
+                        history_context = trusted_tool_context(
+                            actor_id=str(owner), account_id=str(account_id),
+                            workspace_id=str(authority_workspace_id or workspace),
+                            workspace_root=workspace, session_id=str(session_id),
+                            run_id=run_id or "",
+                            task_id="",
+                            tool_id="bash",
+                        )
+                except Exception:
+                    history_context = None
                 rec = bg_jobs.launch(
                     _bg_cmd,
                     session_id=session_id,
@@ -1006,6 +1672,10 @@ async def _execute_tool_block_impl(
                     cwd=workspace,
                     network=network_mode,
                     approval_binding=approval_binding,
+                    history_context=bg_jobs.history_context_mapping(history_context),
+                    run_id=run_id,
+                    task_id=task_id,
+                    tool_id="bash",
                 )
             except (ShellApprovalError, ShellContainmentError, ValueError) as exc:
                 return (
@@ -1165,7 +1835,7 @@ async def _execute_tool_block_impl(
                 account_id=account_id,
                 # Trusted tool context selects the concrete agent actor; the
                 # model cannot forge this binding in its JSON arguments.
-                actor_id=f"agent:{storage_owner or 'local-installation'}",
+                actor_id=f"agent:{storage_owner}",
             )
         except CopalManageError as exc:
             result = {"error": str(exc), "code": exc.code, **exc.detail, "exit_code": 1}
@@ -1383,66 +2053,26 @@ _FORMATTER_HANDLED_KEYS = {
     "stdout", "stderr", "exit_code", "content", "size",
     "response", "results", "session_id", "name", "model", "session_name",
     "success", "path", "action", "title", "doc_id", "version", "applied",
-    "error", "output",
+    "error", "output", "preview", "preview_truncated", "preview_mode",
+    "tail_digest", "result_integrity", "merge_conflict",
 }
 
 
 def format_tool_result(description: str, result: Dict) -> str:
-    """Format a tool result into text for feeding back to the LLM."""
+    """Format only the bounded result envelope for feeding back to the LLM."""
     parts = [f"### {description}"]
+    envelope = _tool_result_preview(result)
+    preview = envelope["preview"]
+    if preview:
+        parts.append(
+            f"**result preview ({envelope['preview_mode']}):**\n```\n{preview}\n```"
+        )
+    else:
+        parts.append("**result:** (empty)")
+    if isinstance(result.get("exit_code"), int) and result["exit_code"] not in (0,):
+        parts.append(f"**exit_code:** {result['exit_code']}")
 
-    if "stdout" in result:
-        if result["stdout"]:
-            parts.append(f"**stdout:**\n```\n{result['stdout']}\n```")
-        if result["stderr"]:
-            parts.append(f"**stderr:**\n```\n{result['stderr']}\n```")
-        parts.append(f"**exit_code:** {result.get('exit_code', 'unknown')}")
-    elif "output" in result:
-        # bash / python canonical result shape: {"output": ..., "exit_code": ...}
-        parts.append(f"```\n{result['output']}\n```")
-        if result.get("exit_code") not in (0, None):
-            parts.append(f"**exit_code:** {result['exit_code']}")
-    elif "content" in result:
-        parts.append(f"**content ({result.get('size', '?')} chars):**\n```\n{result['content']}\n```")
-    elif "response" in result:
-        model = result.get("model", result.get("session_name", ""))
-        if model:
-            parts.append(f"**{model} responded:**\n{result['response']}")
-        else:
-            parts.append(result["response"])
-    elif "results" in result:
-        parts.append(result["results"])
-    elif "session_id" in result and "name" in result:
-        parts.append(f"Session created: **{result['name']}** (id: `{result['session_id']}`, model: {result.get('model', 'unknown')})")
-    elif "success" in result:
-        if result["success"]:
-            parts.append(f"File written: {result['path']} ({result['size']} bytes)")
-        else:
-            parts.append(f"Error: {result.get('error', 'unknown')}")
-    elif "action" in result:
-        action = result["action"]
-        if action == "create":
-            parts.append(f"Document created: \"{result.get('title', '')}\" (id: {result['doc_id']}, v{result['version']})")
-        elif action == "update":
-            parts.append(f"Document updated: \"{result.get('title', '')}\" (v{result['version']})")
-        elif action == "edit":
-            parts.append(f'Document edited: "{result.get("title", "")}" (v{result.get("version", "?")}, {result.get("applied", 0)} edit(s) applied)')
-    elif "error" in result:
-        parts.append(f"**Error:** {result['error']}")
-
-    # Surface any additional structured payload (events, tasks, notes, calendars,
-    # documents, attachments, etc.) that the dedicated branches above don't show.
-    # Without this, tools that return {"response": "...", "events": [...]} would
-    # silently drop the events list and the model would only see the summary line.
-    extra = {k: v for k, v in result.items() if k not in _FORMATTER_HANDLED_KEYS}
-    if extra:
-        try:
-            extra_json = json.dumps(extra, indent=2, default=str, ensure_ascii=False)
-            # Cap to avoid blowing the context window on huge payloads.
-            if len(extra_json) > 8000:
-                extra_json = extra_json[:8000] + f"\n... (truncated, {len(extra_json)} chars total)"
-            parts.append(f"**data:**\n```json\n{extra_json}\n```")
-        except (TypeError, ValueError):
-            pass
+    if result.get("merge_conflict", {}).get("detected"):
+        parts.append("**merge conflict:** detected; manual resolution is required.")
 
     return "\n".join(parts)

@@ -1,3 +1,5 @@
+import { recordPresentation, achievementOwner, activityDigest, visiblePresentation } from './achievementProducer.js';
+import { LANGUAGE_REGISTRY } from './editor/languageRegistry.js';
 import { filesFacadeClient } from './filesFacadeClient.js';
 import { createOpenClankWindow } from './copal/windows.js';
 import { appletPath } from './appletRoutes.js';
@@ -5,7 +7,7 @@ import workspaceModule from './workspace.js';
 import { styledConfirm, styledPrompt } from './ui.js';
 import { createResizablePane } from './editor/resizablePane.js';
 import { createExplorerTree } from './editor/explorerTree.js';
-import { createResourcePicker } from './copal/resourcePicker.js';
+import { createResourcePicker, normalizeAuthorizedResource } from './copal/resourcePicker.js';
 import { createMarkdownRenderer } from './copal/markdownRenderer.js';
 import { languageForPath as sharedLanguageForPath, languageDialectForPath as sharedLanguageDialectForPath, sortEntries as sortEntryList, isDirectory as entryIsDirectory } from './editor/entryModel.js';
 import { fileIcon, glyphIcon } from './langIcons.js';
@@ -14,6 +16,9 @@ import { initCustomContextMenu, registerAdapter, createCodeMirrorContextAdapter 
 const CODE_WORKSPACE_KEY = 'odysseus-code-workspace';
 const CODE_WORKSPACE_ID_KEY = 'odysseus-code-workspace-id';
 const CODE_RICH_COMMENTS_KEY = 'odysseus-editor-rich-comments';
+const hydratedCodeTreeContextEvents = new WeakSet();
+const codeTreeContextHydration = new WeakMap();
+let codeTreeContextRequestSequence = 0;
 
 // Code Editor is also mounted directly by the Copal launcher, so initialize
 // the shared menu at the first component boundary instead of relying only on
@@ -42,6 +47,7 @@ const state = {
   rootTreeController: null,
   resourceOpenController: null,
   bufferReconcileController: null,
+  workspacePicker: null,
   pane: null,
   editorFactory: null,
   richCommentLanguageQualified: () => false,
@@ -716,6 +722,8 @@ function retainOrphanedTrashBuffers(source) {
 
 function discardBufferChanges(buffer) {
   if (!buffer) return;
+  for(const edit of buffer.pendingSourceEdits?.values?.() || [])edit.discard?.();
+  buffer.pendingSourceEdits?.clear?.();
   const original = String(buffer.originalText ?? '');
   buffer.editor?.setValue?.(original);
   buffer.text = original;
@@ -808,17 +816,19 @@ function detachBuffers(paths, { remember = true } = {}) {
     state.buffers.delete(path);
   }
   state.activePath = successor && state.buffers.has(successor) ? successor : null;
+  state.fileActivationSequence += 1;
   updateReopenClosedAction();
 }
 
-async function resolveDirtyBuffers(paths, context = 'close') {
+async function resolveDirtyBuffers(paths, context = 'close', isCurrent = () => true) {
+  if (!isCurrent()) return false;
   const workspaceEpoch = state.workspaceEpoch;
   const dirtyEntries = [...new Set(paths)]
     .map(path => [path, state.buffers.get(path)])
     .filter(([, buffer]) => buffer?.dirty);
   if (!dirtyEntries.length) return true;
   const dirty = dirtyEntries.map(([path]) => path);
-  const stillCurrent = () => workspaceEpoch === state.workspaceEpoch
+  const stillCurrent = () => isCurrent() && workspaceEpoch === state.workspaceEpoch
     && dirtyEntries.every(([path, buffer]) => state.buffers.get(path) === buffer);
   const choice = await styledConfirm(
     `${context}: ${dirty.map(displayName).join(', ')}`,
@@ -918,7 +928,7 @@ async function resolveEditorRelativeResource(relativePath) {
   throw new Error('The Editor resource could not be resolved.');
 }
 
-async function listCodeDirectory(path, { cursor = null, signal = null } = {}) {
+async function listCodeDirectory(path, { cursor = null, signal = null, directory = null } = {}) {
   const requested = String(path || '').trim();
   // `state.root` is a display label/path retained for tabs and breadcrumbs.
   // Once Files has issued a sealed root ref, it is the only authority for
@@ -935,117 +945,278 @@ async function listCodeDirectory(path, { cursor = null, signal = null } = {}) {
     signal,
   });
   return {
-    items: (response?.entries || []).map(entry => codeExplorerEntry(entry, String(state.root || path || 'Workspace'), parentRef)),
+    items: (response?.entries || []).map(entry => codeExplorerEntry(entry, String(directory ?? (state.root || path || 'Workspace')), parentRef)),
     nextCursor: response?.next_cursor || null,
   };
 }
 
-async function loadInitialCodeRoot(path, generation) {
+async function loadInitialCodeRoot(path, generation, { signal = null, directory = null } = {}) {
+  if (signal?.aborted) return null;
   state.rootTreeController?.abort();
   const controller = new AbortController();
   state.rootTreeController = controller;
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort, { once:true });
   try {
-    const page = await listCodeDirectory(path, { signal: controller.signal });
+    const page = await listCodeDirectory(path, { signal: controller.signal, directory });
     if (generation !== state.requestGeneration || controller.signal.aborted) return null;
     return page;
   } finally {
+    signal?.removeEventListener('abort', abort);
     if (state.rootTreeController === controller) state.rootTreeController = null;
   }
 }
 
-async function handleCodeTreeContextMenu(event, entry) {
-  // Turning off the app-owned menu restores the browser's ordinary context
-  // menu for the Explorer too. Do this before preventDefault so the setting
-  // has one predictable meaning across Editor, Files, and Copal objects.
-  if (window.openClankContextMenu?.enabled && !window.openClankContextMenu.enabled()) return;
-  event.preventDefault();
-  const child = entry.path;
-  const resourceRef = String(entry.resource_ref || entry.resourceRef || '').trim();
-  if (!resourceRef) {
-    setStatus('Refresh the authorized Editor folder before changing this file.', true);
-    return;
+function codeTreeHasCapability(resource, name) {
+  return resource?.capabilities?.[name] === true;
+}
+
+function codeTreeCanCopy(resource) {
+  return ['read', 'download', 'open', 'copy'].some((name) => codeTreeHasCapability(resource, name));
+}
+
+function codeTreeCanMove(entry, resource) {
+  return entryIsDirectory(entry) ? codeTreeHasCapability(resource, 'write') : codeTreeHasCapability(resource, 'move');
+}
+
+function codeTreeCanCreate(resource) {
+  return codeTreeHasCapability(resource, 'write') || codeTreeHasCapability(resource, 'create');
+}
+
+function codeTreeIsFolderResource(resource) {
+  return resource?.kind === 'folder' || codeTreeHasCapability(resource, 'children');
+}
+
+function codeTreeIdentityStillCurrent(identity) {
+  if (!identity?.row?.isConnected || state.workspaceOwner !== identity.owner || state.workspaceEpoch !== identity.workspaceEpoch
+    || state.fileGeneration !== identity.fileGeneration || state.requestGeneration !== identity.requestGeneration
+    || state.rootResourceRef !== identity.rootResourceRef) return false;
+  const node = state.explorerTree?.getNode(identity.treeId);
+  return node?.data === identity.entry;
+}
+
+function normalizeCodeTreeResource(raw, parentRef = '') {
+  return normalizeAuthorizedResource(raw, {
+    purpose:'file', generation:Number(state.fileGeneration) || 0,
+    accountScope:String(state.workspaceOwner || ''), parentRef:String(parentRef || '') || null,
+  });
+}
+
+async function refreshCodeTreeResource(identity, { includeDestination = false } = {}) {
+  if (!codeTreeIdentityStillCurrent(identity)) throw new Error('This Editor item changed. Reopen its menu and try again.');
+  const sourceResponse = await filesFacadeClient.stat(identity.resource.ref);
+  if (!codeTreeIdentityStillCurrent(identity)) throw new Error('Editor access changed. Reopen the item menu and try again.');
+  const source = normalizeCodeTreeResource(sourceResponse?.resource || sourceResponse, identity.entry.parent_resource_ref);
+  if (source.resourceKey !== identity.resource.resourceKey
+    || entryIsDirectory(identity.entry) !== (source.kind === 'folder')) {
+    throw new Error('Files returned a different Editor resource. Refresh the folder and try again.');
   }
-  const action = await styledPrompt('File action: rename, copy, move, or trash', { title: 'File action', defaultValue: 'rename', confirmText: 'Continue', maxLength: 16 });
-  if (!action) return;
-  const normalized = action.trim().toLowerCase();
-  if (!['rename', 'copy', 'move', 'trash'].includes(normalized)) { setStatus('Unknown file action', true); return; }
-  if (normalized === 'trash') {
+  let destination = null;
+  if (includeDestination) {
+    const destinationRef = String(identity.entry.parent_resource_ref || identity.rootResourceRef || '').trim();
+    if (!destinationRef) throw new Error('Authorized destination folder is unavailable.');
+    const destinationResponse = await filesFacadeClient.stat(destinationRef);
+    if (!codeTreeIdentityStillCurrent(identity)) throw new Error('Editor access changed. Reopen the item menu and try again.');
+    destination = normalizeAuthorizedResource(destinationResponse?.resource || destinationResponse, {
+      purpose:'folder', generation:Number(state.fileGeneration) || 0,
+      accountScope:String(state.workspaceOwner || ''),
+    });
+    if (!codeTreeIsFolderResource(destination) || !codeTreeCanCreate(destination)) throw new Error('Files did not authorize the destination folder for copying.');
+    if (identity.destinationResourceKey && destination.resourceKey !== identity.destinationResourceKey) {
+      throw new Error('The destination folder changed. Reopen the menu and try again.');
+    }
+  }
+  return { source, destination };
+}
+
+function codeTreeCommands(identity) {
+  const resource = identity.resource;
+  const commands = [];
+  if (entryIsDirectory(identity.entry) && codeTreeHasCapability(resource, 'children')) commands.push({ id:'code-tree-open-folder', label:'Open folder' });
+  else if (!entryIsDirectory(identity.entry) && codeTreeHasCapability(resource, 'open') && codeTreeHasCapability(resource, 'read')) commands.push({ id:'code-tree-open-file', label:'Open file' });
+  if (codeTreeHasCapability(resource, 'rename')) commands.push({ id:'code-tree-rename', label:'Rename' });
+  if (codeTreeCanMove(identity.entry, resource)) commands.push({ id:'code-tree-move', label:'Move' });
+  if (codeTreeCanCopy(resource) && codeTreeIsFolderResource(identity.destination) && codeTreeCanCreate(identity.destination)) commands.push({ id:'code-tree-copy', label:'Copy' });
+  if (codeTreeHasCapability(resource, 'trash')) commands.push({ id:'code-tree-trash', label:'Move to Trash' });
+  return commands.length ? commands : [{ id:'code-tree-no-actions', label:'No supported actions', disabled:true }];
+}
+
+async function executeCodeTreeAction(action, identity, treeContext) {
+  if (!codeTreeIdentityStillCurrent(identity)) throw new Error('This Editor item changed. Reopen its menu and try again.');
+  const entry = identity.entry;
+  const child = identity.path;
+  if (action === 'open-folder') {
+    if (!entryIsDirectory(entry) || !codeTreeHasCapability(identity.resource, 'children')) throw new Error('Files did not authorize this folder for browsing.');
+    state.activeDirectory = child;
+    state.activeDirectoryRef = identity.resource.ref;
+    await treeContext.expand();
+    return true;
+  }
+  if (action === 'open-file') {
+    if (entryIsDirectory(entry) || !codeTreeHasCapability(identity.resource, 'open') || !codeTreeHasCapability(identity.resource, 'read')) throw new Error('Files did not authorize this file for opening.');
+    await openFile(child, null, identity.resource.ref);
+    return true;
+  }
+  if (!['rename', 'copy', 'move', 'trash'].includes(action)) return false;
+  if (action === 'trash') {
     const affected = subtreeBufferEntries(child).map(([path]) => path);
-    if (!(await resolveDirtyBuffers(affected, `Trash ${displayName(child)}`))) return;
-    if (!await styledConfirm(`Move ${entry.name} to recoverable trash?`, { title: 'Move to Trash', confirmText: 'Move to Trash', danger: true })) return;
-    // Reserve the entire subtree, not just the tabs that happened to be open
-    // before the request. A second file can be opened or edited while the host
-    // Trash operation is in flight; recomputing from this reservation keeps it
-    // recoverable instead of silently detaching a late buffer.
+    if (!(await resolveDirtyBuffers(affected, `Trash ${displayName(child)}`))) return true;
+    if (!await styledConfirm(`Move ${entry.name} to recoverable trash?`, { title:'Move to Trash', confirmText:'Move to Trash', danger:true })) return true;
+    if (!codeTreeIdentityStillCurrent(identity)) throw new Error('This Editor item changed. Reopen its menu and try again.');
+    const { source } = await refreshCodeTreeResource(identity);
+    if (!codeTreeHasCapability(source, 'trash')) throw new Error('Files did not authorize this Editor item for Trash.');
     const reservation = beginTreeMutation('trash', child);
     try {
-      const trashed = await filesFacadeClient.action(resourceRef, 'trash', {}, { actionId: operationId('editor-trash') });
+      const trashed = await filesFacadeClient.action(source.ref, 'trash', {}, { actionId:operationId('editor-trash') });
       const changedDuringTrash = treeMutationBuffersChanged(reservation);
       if (changedDuringTrash) {
         const trashEntry = trashed?.resource || null;
         if (trashEntry) {
           try {
-            await filesFacadeClient.action(String(trashEntry.ref || resourceRef), 'restore', {}, { actionId: operationId('editor-restore') });
+            await filesFacadeClient.action(String(trashEntry.ref || source.ref), 'restore', {}, { actionId:operationId('editor-restore') });
             await refreshExplorer();
             setStatus(`Kept ${entry.name}; it changed while Trash was running`, true);
-            return;
+            return true;
           } catch (_) { /* retain the in-memory buffers below */ }
         }
         const retained = retainOrphanedTrashBuffers(child);
         if (retained.length) renderEditor();
         await refreshExplorer();
         setStatus(`Newer edits to ${entry.name} were retained after Trash`, true);
-        return;
+        return true;
       }
       const currentAffected = subtreeBufferEntries(child).map(([path]) => path);
-      detachBuffers(currentAffected, { remember: false });
+      detachBuffers(currentAffected, { remember:false });
       if (currentAffected.length) renderEditor();
       await refreshExplorer();
       setStatus(`Moved ${entry.name} to recoverable trash`);
     } catch (error) { setStatus(error.message || 'Trash failed', true); }
     finally { finishTreeMutation(reservation); }
-    return;
+    return true;
   }
-  const destinationName = validChildName(await styledPrompt(`${normalized} as (name only)`, { title: `${normalized[0].toUpperCase()}${normalized.slice(1)} file`, defaultValue: entry.name, confirmText: 'Continue', maxLength: 240 }));
-  if (!destinationName) { setStatus('A simple file name is required', true); return; }
-  const destination = childPath(parentPath(child), destinationName);
-  const affected = normalized === 'rename' || normalized === 'move'
+
+  const destinationName = validChildName(await styledPrompt(`${action} as (name only)`, {
+    title:`${action[0].toUpperCase()}${action.slice(1)} ${entryIsDirectory(entry) ? 'folder' : 'file'}`,
+    defaultValue:entry.name, confirmText:'Continue', maxLength:240,
+  }));
+  if (!destinationName) return true;
+  const destinationPath = childPath(parentPath(child), destinationName);
+  const affected = action === 'rename' || action === 'move'
     ? subtreeBufferEntries(child).map(([path]) => path)
     : [];
-  if (!(await resolveDirtyBuffers(affected, `${normalized[0].toUpperCase()}${normalized.slice(1)} ${displayName(child)}`))) return;
-  const reservation = normalized === 'rename' || normalized === 'move'
-    ? beginTreeMutation(normalized, child, destination)
+  if (!(await resolveDirtyBuffers(affected, `${action[0].toUpperCase()}${action.slice(1)} ${displayName(child)}`))) return true;
+  if (!codeTreeIdentityStillCurrent(identity)) throw new Error('This Editor item changed. Reopen its menu and try again.');
+  const reservation = action === 'rename' || action === 'move'
+    ? beginTreeMutation(action, child, destinationPath)
     : null;
   try {
-    if (resourceRef) {
-      if (normalized === 'copy') {
-        const destinationRef = String(entry.parent_resource_ref || state.rootResourceRef || '').trim();
-        if (!destinationRef) throw new Error('Authorized destination folder is unavailable');
-        await filesFacadeClient.transferResources({
-          operationId: operationId('editor-copy'), generation: Number(state.fileGeneration), kind: 'copy',
-          sources: [{ itemId: operationId('editor-item'), resourceRef, expectedRevision: entry.revision || undefined }],
-          destinationRef, collision: 'fail',
-        });
-      } else {
-        const result = await filesFacadeClient.action(resourceRef, normalized, { name: destinationName }, { actionId: operationId(`editor-${normalized}`) });
-        const rotatedRef = String(result?.resource?.ref || '').trim();
-        if (rotatedRef) {
-          for (const [, buffer] of state.buffers) {
-            if (buffer.resourceRef === resourceRef) buffer.resourceRef = rotatedRef;
-          }
+    const { source, destination } = await refreshCodeTreeResource(identity, { includeDestination:action === 'copy' });
+    if (action === 'rename' && !codeTreeHasCapability(source, 'rename')) throw new Error('Files did not authorize this Editor item for Rename.');
+    if (action === 'move' && !codeTreeCanMove(entry, source)) throw new Error('Files did not authorize this Editor item for Move.');
+    if (action === 'copy' && (!codeTreeCanCopy(source) || !codeTreeIsFolderResource(destination) || !codeTreeCanCreate(destination))) throw new Error('Files did not authorize this Editor item for Copy.');
+    if (action === 'copy') {
+      await filesFacadeClient.transferResources({
+        operationId:operationId('editor-copy'), generation:Number(identity.fileGeneration), kind:'copy',
+        sources:[{ itemId:operationId('editor-item'), resourceRef:source.ref, expectedRevision:source.revision?.value || entry.revision || undefined }],
+        destinationRef:destination.ref, collision:'fail',
+      });
+    } else {
+      const result = await filesFacadeClient.action(source.ref, action, { name:destinationName }, { actionId:operationId(`editor-${action}`) });
+      const rotatedRef = String(result?.resource?.ref || '').trim();
+      if (rotatedRef) {
+        for (const [, buffer] of state.buffers) {
+          if (buffer.resourceRef === source.ref || buffer.resourceRef === identity.resource.ref) buffer.resourceRef = rotatedRef;
         }
       }
-    } else {
-      throw new Error('Files did not authorize this Editor mutation. Refresh the folder and try again.');
     }
     if (reservation) {
       const rekeyed = rekeyTreeMutationBuffers(reservation);
       if (rekeyed.length) renderEditor();
     }
     await refreshExplorer();
-    setStatus(`${normalized[0].toUpperCase()}${normalized.slice(1)}d ${displayName(destination)}`);
-  } catch (error) { setStatus(error.message || `${normalized} failed`, true); }
+    setStatus(`${action[0].toUpperCase()}${action.slice(1)}d ${displayName(destinationPath)}`);
+  } catch (error) { setStatus(error.message || `${action} failed`, true); }
   finally { if (reservation) finishTreeMutation(reservation); }
+  return true;
+}
+
+async function handleCodeTreeContextMenu(event, entry, treeContext) {
+  const contextMenu = window.openClankContextMenu;
+  if (!contextMenu?.enabled?.() || typeof contextMenu.registerAdapter !== 'function') return;
+  const row = event.currentTarget;
+  if (hydratedCodeTreeContextEvents.has(event)) {
+    hydratedCodeTreeContextEvents.delete(event);
+    const identity = codeTreeContextHydration.get(row);
+    if (!identity || !codeTreeIdentityStillCurrent(identity)) return;
+    registerAdapter(row, {
+      capture:() => identity,
+      commands:() => codeTreeCommands(identity),
+      execute:async (command, request) => {
+        const captured = request?.adapterContext;
+        if (captured !== identity || !codeTreeIdentityStillCurrent(identity)) throw new Error('This Editor item changed. Reopen its menu and try again.');
+        const action = {
+          'code-tree-open-folder':'open-folder', 'code-tree-open-file':'open-file',
+          'code-tree-rename':'rename', 'code-tree-move':'move', 'code-tree-copy':'copy', 'code-tree-trash':'trash',
+        }[command];
+        if (!action) return command === 'code-tree-no-actions';
+        return executeCodeTreeAction(action, identity, treeContext);
+      },
+    });
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  const requestId = ++codeTreeContextRequestSequence;
+  const resourceRef = String(entry.resource_ref || entry.resourceRef || '').trim();
+  if (!resourceRef) { setStatus('Refresh the authorized Editor folder before changing this item.', true); return; }
+  const treeId = String(entry.resource_id || entry.resource_ref || entry.path || '');
+  const scope = {
+    row, entry, treeId, path:String(entry.path || ''), owner:state.workspaceOwner,
+    workspaceEpoch:state.workspaceEpoch, fileGeneration:state.fileGeneration,
+    requestGeneration:state.requestGeneration, rootResourceRef:state.rootResourceRef,
+  };
+  if (!codeTreeIdentityStillCurrent(scope)) { setStatus('Refresh the authorized Editor folder before changing this item.', true); return; }
+  try {
+    const listed = normalizeCodeTreeResource(entry, entry.parent_resource_ref);
+    const sourceResponse = await filesFacadeClient.stat(resourceRef);
+    if (requestId !== codeTreeContextRequestSequence || !codeTreeIdentityStillCurrent(scope)) return;
+    const resource = normalizeCodeTreeResource(sourceResponse?.resource || sourceResponse, entry.parent_resource_ref);
+    if (resource.resourceKey !== listed.resourceKey || entryIsDirectory(entry) !== (resource.kind === 'folder')) {
+      throw new Error('Files returned a different Editor resource. Refresh the folder and try again.');
+    }
+    entry.resource_ref = resource.ref;
+    entry.resourceRef = resource.ref;
+    entry.revision = resource.revision || entry.revision;
+    const destinationRef = String(entry.parent_resource_ref || state.rootResourceRef || '').trim();
+    let destination = null;
+    if (destinationRef && codeTreeCanCopy(resource)) {
+      try {
+        const destinationResponse = await filesFacadeClient.stat(destinationRef);
+        if (requestId !== codeTreeContextRequestSequence || !codeTreeIdentityStillCurrent(scope)) return;
+        destination = normalizeAuthorizedResource(destinationResponse?.resource || destinationResponse, {
+          purpose:'folder', generation:Number(state.fileGeneration) || 0,
+          accountScope:String(state.workspaceOwner || ''),
+        });
+      } catch (_) { destination = null; }
+    }
+    if (requestId !== codeTreeContextRequestSequence || !codeTreeIdentityStillCurrent(scope)) return;
+    const identity = Object.freeze({
+      ...scope, resource, destination, destinationResourceKey:destination?.resourceKey || '',
+      destinationRef, resourceRef:resource.ref,
+    });
+    codeTreeContextHydration.set(row, identity);
+    if (!contextMenu.enabled?.() || !event.target?.isConnected) return;
+    const synthetic = new MouseEvent('contextmenu', {
+      bubbles:true, cancelable:true, clientX:event.clientX, clientY:event.clientY,
+      detail:event.detail, shiftKey:event.shiftKey, ctrlKey:event.ctrlKey,
+      metaKey:event.metaKey, altKey:event.altKey,
+    });
+    hydratedCodeTreeContextEvents.add(synthetic);
+    event.target.dispatchEvent(synthetic);
+  } catch (error) {
+    if (requestId === codeTreeContextRequestSequence) setStatus(error.message || 'Files could not authorize this Editor item.', true);
+  }
 }
 
 function mountCodeExplorer(entries = [], nextCursor = null, rootPath = state.root) {
@@ -1156,11 +1327,13 @@ async function reconcileOpenBuffers(generation = state.requestGeneration) {
   }
 }
 
-async function prepareWorkspaceChange(nextRoot) {
+async function prepareWorkspaceChange(nextRoot, { isCurrent = () => true, onPrepared = null } = {}) {
+  if (!isCurrent()) return false;
   if (!state.root || state.root === nextRoot) return true;
   const dirty = [...state.buffers.keys()].filter(path => state.buffers.get(path)?.dirty);
-  if (!(await resolveDirtyBuffers(dirty, `Switching workspace to ${displayName(nextRoot)}`))) return false;
+  if (!(await resolveDirtyBuffers(dirty, `Switching workspace to ${displayName(nextRoot)}`, isCurrent)) || !isCurrent()) return false;
   state.workspaceEpoch += 1;
+  onPrepared?.();
   for (const buffer of state.buffers.values()) {
     buffer.saveController?.abort?.();
     buffer.reloadController?.abort?.();
@@ -1177,8 +1350,12 @@ async function prepareWorkspaceChange(nextRoot) {
   return true;
 }
 
-async function displayWorkspaceRoot(root, generation = ++state.requestGeneration) {
-  if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
+async function displayWorkspaceRoot(root, generation = ++state.requestGeneration, {
+  resourceRef = null, signal = null, isCurrent = () => true, onPrepared = null, throwOnError = false,
+} = {}) {
+  const stillCurrent = () => generation === state.requestGeneration && !!state.nativeWindow?.visible
+    && !signal?.aborted && isCurrent();
+  if (!stillCurrent()) return false;
   const tree = state.shell?.querySelector('[data-code-tree]');
   if (!tree) return false;
   setStatus(`Opening ${displayName(root)}…`);
@@ -1186,12 +1363,18 @@ async function displayWorkspaceRoot(root, generation = ++state.requestGeneration
     // Fetch the candidate page while the current root/buffers/tree remain
     // visible. A denied or stale folder therefore cannot replace a usable
     // Editor view with an empty/error root.
-    const page = root ? await loadInitialCodeRoot(state.rootResourceRef || state.activeDirectoryRef || root, generation) : { items:[], nextCursor:null };
-    if (!page || generation !== state.requestGeneration || !state.nativeWindow.visible) return false;
-    if (!(await prepareWorkspaceChange(root))) return false;
-    if (generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
+    const page = root ? await loadInitialCodeRoot(resourceRef ?? (state.rootResourceRef || state.activeDirectoryRef || root), generation, {
+      signal, directory:resourceRef === null ? null : root,
+    }) : { items:[], nextCursor:null };
+    if (!page || !stillCurrent()) return false;
+    if (!(await prepareWorkspaceChange(root, { isCurrent:stillCurrent, onPrepared }))) {
+      if (throwOnError && stillCurrent()) throw new Error('The workspace switch was canceled or its unsaved files could not be saved.');
+      return false;
+    }
+    if (!stillCurrent()) return false;
     state.fileGeneration += 1;
     abortPendingFileReads();
+    if (resourceRef !== null) state.rootResourceRef = resourceRef;
     state.root = root;
     state.activeDirectory = root;
     state.activeDirectoryRef = state.rootResourceRef || '';
@@ -1204,8 +1387,9 @@ async function displayWorkspaceRoot(root, generation = ++state.requestGeneration
     setStatus(root || 'No assigned folder', !root);
     return true;
   } catch (error) {
-    if (error?.name === 'AbortError' || generation !== state.requestGeneration) return false;
+    if (error?.name === 'AbortError' || signal?.aborted || generation !== state.requestGeneration || !state.nativeWindow?.visible) return false;
     setStatus(error.message || 'Folder unavailable', true);
+    if (throwOnError) throw error;
     return false;
   }
 }
@@ -1225,32 +1409,72 @@ function openWorkspaceFolder() {
   // modal remains an explicit compatibility route only when the facade is
   // genuinely absent (for embedded deployments that do not ship Files-v1).
   if (typeof filesFacadeClient.roots === 'function') {
-    const picker = createResourcePicker({
+    state.workspacePicker?.destroy();
+    const origin = {
+      window:state.nativeWindow, shell:state.shell, pane:state.pane, owner:state.workspaceOwner,
+      resourceRef:state.rootResourceRef, fileGeneration:state.fileGeneration,
+      path:state.activePath, editor:state.buffers.get(state.activePath)?.editor,
+    };
+    let epoch = state.workspaceEpoch;
+    let requestGeneration = state.requestGeneration;
+    let picker;
+    const originAvailable = () => state.workspacePicker === picker && state.nativeWindow === origin.window
+      && state.shell === origin.shell && state.pane === origin.pane && origin.window?.visible
+      && origin.window.root?.isConnected && state.workspaceOwner === origin.owner;
+    const originCurrent = () => originAvailable() && state.workspaceEpoch === epoch
+      && state.fileGeneration === origin.fileGeneration && state.rootResourceRef === origin.resourceRef
+      && state.requestGeneration === requestGeneration;
+    picker = createResourcePicker({
       client:filesFacadeClient,
       purpose:'folder',
       rootLabel:'Authorized Editor folders',
+      originWindow:origin.window,
       getGeneration:() => state.fileGeneration,
       getAccountScope:() => state.workspaceOwner,
-      onSelect:(resource) => {
-        const owner = state.workspaceOwner; const epoch = state.workspaceEpoch; const generation = state.fileGeneration;
-        void (async () => {
-          try {
-            const response = await filesFacadeClient.workspace(resource.ref, 'app_folder');
-            if (owner !== state.workspaceOwner || epoch !== state.workspaceEpoch || generation !== state.fileGeneration) throw new Error('Editor access changed; choose the folder again.');
-            const workspaceId = String(response?.workspace?.id || '').trim();
-            if (!workspaceId) throw new Error('Files did not issue an Editor workspace.');
-            const workspace = await workspaceModule.resolveWorkspaceId(workspaceId, 'app_folder');
-            if (owner !== state.workspaceOwner || epoch !== state.workspaceEpoch || generation !== state.fileGeneration) throw new Error('Editor access changed; choose the folder again.');
-            state.rootResourceRef = resource.ref;
-            const loaded = await displayWorkspaceRoot(workspace.path, ++state.requestGeneration);
-            if (!loaded) throw new Error('The authorized folder could not be loaded.');
-            if (owner !== state.workspaceOwner || epoch !== state.workspaceEpoch || generation + 1 !== state.fileGeneration) throw new Error('Editor access changed; choose the folder again.');
-            saveWorkspaceRoot(workspace.path, state.workspaceOwner, workspace.id);
-            setStatus(`Opened ${resource.name}`);
-          } catch (error) { setStatus(error.message || 'Folder could not be opened', true); }
-        })();
+      getWorkspaceScope:() => state.rootResourceRef,
+      isOriginCurrent:originCurrent,
+      onSelect:async (resource, { signal, isCurrent }) => {
+        const assertCurrent = () => {
+          if (signal.aborted || !originCurrent() || !isCurrent()) throw new Error('The original Editor folder or access changed; reopen the picker.');
+        };
+        assertCurrent();
+        const response = await filesFacadeClient.workspace(resource.ref, 'app_folder', { signal });
+        assertCurrent();
+        const workspaceId = String(response?.workspace?.id || '').trim();
+        if (!workspaceId) throw new Error('Files did not issue an Editor workspace.');
+        const workspace = await workspaceModule.resolveWorkspaceId(workspaceId, 'app_folder');
+        assertCurrent();
+        // Registration can advance Files authority. Load using a fresh bound
+        // ref, keeping the current tree/ref paired until the candidate succeeds.
+        const target = await filesFacadeClient.workspaceResource(workspaceId, '', { signal });
+        assertCurrent();
+        const rootRef = String(target?.resource?.ref || target?.parent?.ref || '').trim();
+        const rootKind = String(target?.resource?.kind || target?.parent?.kind || '').toLowerCase();
+        if (!rootRef || !['folder', 'provider_root', 'virtual_folder'].includes(rootKind)) throw new Error('Files did not return an authorized Workspace folder.');
+        requestGeneration = ++state.requestGeneration;
+        const loaded = await displayWorkspaceRoot(workspace.path, requestGeneration, {
+          resourceRef:rootRef, signal, isCurrent:() => originCurrent() && isCurrent(),
+          // Only the synchronous, guarded switch may advance this captured epoch.
+          onPrepared:() => { epoch += 1; }, throwOnError:true,
+        });
+        if (!loaded) throw new Error('The authorized folder could not be loaded.');
+        // A successful publication deliberately advances the folder generation.
+        if (signal.aborted || !originAvailable() || state.workspaceEpoch !== epoch
+          || state.fileGeneration !== origin.fileGeneration + 1 || state.requestGeneration !== requestGeneration
+          || state.root !== workspace.path || state.rootResourceRef !== rootRef) throw new Error('Editor access changed; choose the folder again.');
+        saveWorkspaceRoot(workspace.path, origin.owner, workspace.id);
+        setStatus(`Opened ${resource.name}`);
+        return true;
+      },
+      onClose:() => {
+        if (state.workspacePicker === picker) state.workspacePicker = null;
+        if (state.nativeWindow !== origin.window || state.shell !== origin.shell || state.pane !== origin.pane
+          || state.workspaceOwner !== origin.owner || !origin.window?.visible || !origin.window.root?.isConnected) return;
+        if (state.buffers.get(origin.path)?.editor === origin.editor && origin.editor?.view?.dom?.isConnected) origin.editor.focus();
+        else origin.window.focus();
       },
     });
+    state.workspacePicker = picker;
     void picker.open();
     return;
   }
@@ -1373,12 +1597,13 @@ async function openFile(path, viewState = null, resourceRef = '') {
   state.pendingFileReads.set(path, entry);
   entry.promise = (async () => {
     try {
-      const response = await filesFacadeClient.openResource(entry.resourceRef, { signal: controller.signal });
+      const [response, editorFactory] = await Promise.all([
+        filesFacadeClient.openResource(entry.resourceRef, { signal:controller.signal }), loadEditorFactory(),
+      ]);
       if (!ownsCompletion()) return false;
       const payload = response?.payload || {};
       const resource = payload?.resource || response?.resource || {};
       const text = String(payload.text ?? payload.content ?? '');
-      const editorFactory = await loadEditorFactory();
       if (!ownsCompletion()) return false;
       Object.assign(buffer, {
         text,
@@ -1386,6 +1611,7 @@ async function openFile(path, viewState = null, resourceRef = '') {
         fingerprint: resource.revision?.value || payload.fingerprint?.value || null,
         expectedRevision: resource.revision || null,
         resourceRef: String(resource.ref || entry.resourceRef || ''),
+        resourceIdentity:resource.resourceKey || resource.key || null,
         encoding: payload.encoding || resource.metadata?.encoding || 'utf-8',
         newline: payload.newline || resource.metadata?.newline || '\n',
         dirty: false,
@@ -1483,6 +1709,37 @@ function markBufferDirty(buffer) {
   main.querySelector('.code-editor-save-error')?.remove();
 }
 
+async function quickOpen() {
+    const owner = state.workspaceOwner, root = state.root, epoch = state.workspaceEpoch;
+    const current = () => owner === state.workspaceOwner && root === state.root && epoch === state.workspaceEpoch;
+    const query = await styledPrompt('Enter a path relative to the current folder.', { title: 'Quick Open', confirmText: 'Open', maxLength: 2048 });
+    if (!query || !current()) return;
+    const relative = String(query).replace(/\\/g, '/').trim();
+    if (state.rootResourceRef) {
+      try {
+        const resolved = await resolveEditorRelativeResource(relative);
+        if (!current()) return;
+        await openFile(childPath(root, relative), null, resolved.resourceRef);
+      } catch (error) {
+        setStatus(error.message || 'The Editor resource could not be opened', true);
+      }
+      return;
+    }
+    setStatus('Choose an authorized Editor folder before using Quick Open.', true);
+}
+
+export function runCommand(name) {
+  const editor = state.buffers.get(state.activePath)?.editor;
+  if (name === 'save') { void saveActive(); return Boolean(state.activePath); }
+  if (name === 'palette' && typeof window.__openClankWorkbench?.openPalette === 'function') { window.__openClankWorkbench.openPalette(); return true; }
+  if (name === 'quick-open' || name === 'palette') { void quickOpen(); return true; }
+  if (name === 'search') return false;
+  if (name === 'retry-syntax') { void editor?.retrySyntax?.(); return Boolean(editor); }
+  return editor?.runCommand?.(name) || false;
+}
+
+export function getEditorStatus() { return state.buffers.get(state.activePath)?.editor?.getStatus?.() || null; }
+
 function renderEditor() {
   const main = state.shell?.querySelector('[data-code-editor-main]');
   if (!main) return;
@@ -1499,7 +1756,7 @@ function renderEditor() {
     const tabWrap = el('div', { class: `code-editor-tab-wrap ${path === state.activePath ? 'active' : ''}` });
     const tab = el('button', { class: `code-editor-tab ${path === state.activePath ? 'active' : ''}`, type: 'button', role: 'tab', 'aria-selected': path === state.activePath ? 'true' : 'false', title: path });
     tab.append(el('span', { class: 'code-editor-tab-dot', text: item.dirty ? '●' : '·' }), el('span', { text: displayName(path) }));
-    tab.addEventListener('click', () => { state.activePath = path; renderEditor(); });
+    tab.addEventListener('click', () => { state.fileActivationSequence += 1; state.activePath = path; renderEditor(); });
     const close = el('button', { class: 'code-editor-tab-close', type: 'button', title: `Close ${displayName(path)}`, 'aria-label': `Close ${displayName(path)}` });
     close.innerHTML = '<span aria-hidden="true">×</span>';
     close.addEventListener('click', (event) => { event.stopPropagation(); void closeBuffer(path); });
@@ -1530,7 +1787,7 @@ function renderEditor() {
   const showInFiles = toolButton('Show in Files', 'folder-open', () => { void showActiveInFiles(); });
   showInFiles.classList.add('code-editor-show-in-files');
   const save = el('button', { class: 'code-editor-save', type: 'button', text: buffer.dirty ? 'Save' : 'Saved', onclick: saveActive });
-  const editorHost = el('div', { class: 'code-editor-codemirror', 'aria-label': `Edit ${displayName(state.activePath)}` });
+  const editorHost = buffer.editorHost || (buffer.editorHost = el('div', { class:'code-editor-codemirror', 'aria-label':`Edit ${displayName(buffer.path)}` }));
   if (!buffer.editor) {
     if (!state.editorFactory) {
       editorHost.append(el('div', { class: 'code-editor-loading', text: state.editorLoadError ? 'Source editor unavailable.' : 'Loading source editor…' }));
@@ -1550,28 +1807,44 @@ function renderEditor() {
       languageDialect: languageDialectForPath(state.activePath),
       languagePath: state.activePath,
       renderPreview: (source) => {
-        // Full shared Markdown renderer, not a one-reference preview callback.
         const renderer = codeEditorMarkdownRenderer();
         try { return renderer.renderPreview(source); } catch (_) { return null; }
       },
+      renderComment:source=>codeEditorMarkdownRenderer().renderComment(source),
+      getLocalRevision:()=>buffer.revision || 0,
+      getPendingSourceEdit:id=>buffer.pendingSourceEdits?.get(id)||null,
+      getPendingSourceEdits:()=>[...(buffer.pendingSourceEdits?.values()||[])],
+      registerPendingSourceEdit:edit=>{buffer.pendingSourceEdits ||= new Map();buffer.pendingSourceEdits.set(edit.id,edit);markBufferDirty(buffer);return true;},
+      removePendingSourceEdit:id=>{const removed=buffer.pendingSourceEdits?.delete(id);buffer.dirty=!!buffer.pendingSourceEdits?.size||buffer.text!==buffer.originalText;return !!removed;},
       onSeeSource: (range) => {
         buffer.editor?.revealCommentSource?.(range.from, range.to);
         setStatus('Showing comment source. Press Escape to keep editing the file.');
       },
+      onSyntaxStatus: status => {
+        if (state.buffers.get(buffer.path) !== buffer || state.activePath !== buffer.path) return;
+        const label = state.shell?.querySelector('[data-code-syntax-status]');
+        if (label) label.textContent = status.message;
+        queueCodeCycle(buffer);
+      },
       onSelection: selection => { buffer.selection = selection; },
       onScroll: scrollTop => { buffer.scrollTop = scrollTop; },
-      onChange: value => { buffer.text = value; buffer.revision = (buffer.revision || 0) + 1; markBufferDirty(buffer); },
+      onChange: value => { buffer.cycleSignature = null; buffer.cycleOccurrenceId = null; buffer.text = value; buffer.revision = (buffer.revision || 0) + 1; markBufferDirty(buffer); },
       // Rename/move rekeys the same buffer and mutates buffer.path. Resolve the
       // destination at command time rather than capturing the original path.
-      onCommand: command => { if (command === 'save') void saveBuffer(buffer.path); },
+      onCommand: command => {
+        if (command === 'save') { void saveBuffer(buffer.path); return true; }
+        if (command === 'quick-open' || command === 'palette') return runCommand(command);
+        return false;
+      },
       });
     }
   } else {
-    editorHost.append(buffer.editor.view.dom);
+    // Reattach the complete stable host, including readiness/loading state.
     buffer.editor.focus();
   }
   if (buffer.editor) bindBufferContextMenu(buffer, editorHost);
-  const mode = el('span', { class: 'code-editor-language', text: languageForPath(state.activePath) });
+  const mode = el('span', { class:'code-editor-language', text:buffer.editor?.getStatus?.().language?.name || languageForPath(state.activePath) });
+  const syntaxStatus = el('span', { 'data-code-syntax-status':'', role:'status', 'aria-live':'polite', text:buffer.editor?.getSyntaxStatus?.().message || 'Loading syntax…' });
   const richCommentQualified = state.richCommentLanguageQualified(languageForPath(state.activePath), { dialect: languageDialectForPath(state.activePath), path: state.activePath });
   const activeRichComments = richCommentQualified && buffer.richComments === true;
   const richComments = el('button', {
@@ -1583,9 +1856,9 @@ function renderEditor() {
       if (!richCommentQualified) return;
       buffer.richComments = !activeRichComments;
       saveRichCommentsDefault(buffer.richComments);
-      buffer.selection = buffer.editor?.getSelection?.() || buffer.selection;
-      buffer.scrollTop = buffer.editor?.getScrollTop?.() ?? buffer.scrollTop;
-      buffer.editor?.destroy?.(); buffer.editor = null; renderEditor();
+      buffer.editor?.setRichComments?.(buffer.richComments);
+      renderEditor();
+      queueCodeCycle(buffer);
       setStatus(buffer.richComments ? 'Rich comments enabled for this file' : 'Raw comments restored');
     },
   });
@@ -1598,8 +1871,9 @@ function renderEditor() {
     reload.addEventListener('click', () => { void reloadBufferFromDisk(state.activePath); });
     errorBanner.append(reload);
   }
-  main.append(el('div', { class: 'code-editor-toolbar' }, tabs, title, mode, richComments, showInFiles, save), ...(errorBanner ? [errorBanner] : []), editorHost);
-  requestAnimationFrame(() => buffer.editor?.focus());
+  main.append(el('div', { class: 'code-editor-toolbar' }, tabs, title, mode, syntaxStatus, richComments, showInFiles, save), ...(errorBanner ? [errorBanner] : []), editorHost);
+  queueCodeCycle(buffer);
+  requestAnimationFrame(() => { if (state.activePath === buffer.path && editorHost.isConnected && (document.activeElement === document.body || main.contains(document.activeElement))) buffer.editor?.focus(); });
 }
 
 async function reloadBufferFromDisk(path) {
@@ -1701,15 +1975,65 @@ async function reopenLastClosedBuffer() {
   return false;
 }
 
+async function recordCodeCycle(buffer) {
+  const accountId = achievementOwner(), workspaceId = savedWorkspaceId();
+  const text = buffer.editor?.getValue?.() ?? buffer.text;
+  const revision = buffer.expectedRevision?.value;
+  const localRevision = buffer.revision;
+  const rich = buffer.richComments === true;
+  const editor = buffer.editor;
+  if (!accountId || !buffer.resourceIdentity || !revision || buffer.dirty || text !== buffer.originalText || !editor?.getCommentSourceMapAsync) return;
+  try {
+    const regions = await editor.getCommentSourceMapAsync();
+    const supported = state.richCommentLanguageQualified(languageForPath(buffer.path), { dialect:languageDialectForPath(buffer.path), path:buffer.path });
+    if (!supported || !regions.some(region => region.markdown?.trim()) || !await visiblePresentation(buffer.editorHost)) return;
+    if (state.buffers.get(buffer.path) !== buffer || state.activePath !== buffer.path || buffer.editor !== editor || buffer.revision !== localRevision || buffer.dirty || buffer.richComments !== rich || editor.getValue() !== text || buffer.expectedRevision?.value !== revision) return;
+    const renderedRich = !!buffer.editorHost.querySelector('.cm-rich-comment-widget');
+    if (rich !== renderedRich) return;
+    const sourceHash = await activityDigest(text);
+    const documentId = await activityDigest(buffer.resourceIdentity);
+    if (!buffer.cycleOccurrenceId) { if (!rich) return; buffer.cycleOccurrenceId = crypto.randomUUID(); }
+    const cycleOccurrenceId = buffer.cycleOccurrenceId;
+    const signature = `${revision}:${sourceHash}:${rich}`;
+    if (buffer.cycleSignature === signature) return;
+    buffer.cycleSignature = signature;
+    await recordPresentation('source.view.cycle', { documentId, sourceRevisionId:String(revision), sourceHash,
+      supportedProgrammingDocument:true, cycleOccurrenceId, cycleSequence:rich ? 'rich' : 'source' }, { accountId, workspaceId });
+  } catch (_) { /* Unavailable/changed syntax cannot prove a visible cycle. */ }
+}
+function queueCodeCycle(buffer) {
+  buffer.cycleDelivery = (buffer.cycleDelivery || Promise.resolve()).then(() => recordCodeCycle(buffer)).catch(() => {});
+}
+async function recordCodeSave(buffer, text, acceptedRevision, accountId, workspaceId) {
+  const editor = buffer.editor;
+  if (!acceptedRevision || !editor?.getCommentSourceMapAsync || editor.getValue() !== text) return;
+  try {
+    const regions = await editor.getCommentSourceMapAsync();
+    const grammarId = editor.getStatus?.()?.language?.id;
+    if (editor.getValue() !== text || !LANGUAGE_REGISTRY.some(entry => entry.id === grammarId)) return;
+    const region = regions.find(item => ['comment','docstring'].includes(item.kind) && item.markdown?.trim());
+    if (region) await recordPresentation('document.rich-region.saved', {
+      documentId:await activityDigest(buffer.resourceIdentity), revisionId:String(acceptedRevision), grammarId,
+      regionKind:region.kind, supportedGrammar:true, markdownNonempty:true,
+    }, { accountId, workspaceId, kind:'R', occurrenceId:`${await activityDigest(buffer.resourceIdentity)}:${acceptedRevision}` });
+  } catch (_) { /* Exact accepted syntax evidence only. */ }
+}
+
 async function saveBuffer(path) {
   if (!path) return false;
   const buffer = bufferFor(path);
+  for(const edit of [...(buffer.pendingSourceEdits?.values()||[])]){
+    const result=edit.flush?.();
+    if(!result||!['queued','unchanged'].includes(result.outcome)){setStatus(result?.message||'Review the pending comment body before saving.',true);return false;}
+    buffer.pendingSourceEdits.delete(edit.id);
+  }
   if (!buffer.dirty) return true;
   if (buffer.savePromise) return buffer.savePromise;
   // Explorer refresh has its own request generation and must not invalidate a
   // successful file save. Bind completion to the exact buffer/workspace owner
   // instead: account or workspace teardown removes/replaces that identity,
   // while an in-place tree refresh leaves it valid.
+  const achievementAccount = achievementOwner(), achievementWorkspace = savedWorkspaceId();
   const saveOwner = state.workspaceOwner;
   const saveRoot = state.root;
   const saveWorkspaceEpoch = state.workspaceEpoch;
@@ -1755,10 +2079,13 @@ async function saveBuffer(path) {
     const result = response?.data || response || {};
     buffer.expectedRevision = result.revision || result.snapshot?.expectedRevision || buffer.expectedRevision;
     buffer.fingerprint = buffer.expectedRevision?.value || result.new_fingerprint?.value || result.Replaced?.fingerprint?.value || result.Created?.fingerprint?.value || result.fingerprint?.value || null;
+    if ((response?.outcome || result.outcome) === 'applied' && buffer.expectedRevision?.value) void recordCodeSave(buffer, text, buffer.expectedRevision.value, achievementAccount, achievementWorkspace);
+    buffer.cycleSignature = null;
+    buffer.cycleOccurrenceId = null;
     buffer.originalText = text;
     buffer.saveError = null;
     buffer.savedRevision = revision;
-    if ((buffer.revision || 0) === revision) buffer.dirty = false;
+    if ((buffer.revision || 0) === revision) buffer.dirty = !!buffer.pendingSourceEdits?.size;
     if (state.activePath === path) renderEditor();
     setStatus(`${buffer.dirty ? 'Saved revision; newer edits remain' : 'Saved'} ${displayName(path)}`);
     return !buffer.dirty;
@@ -1845,23 +2172,12 @@ function createShell() {
   state.shell = shell;
   state.pane = createResizablePane({ container: shell, sidebar: files, main, separator, cssVar: '--code-editor-sidebar-width', storageKey: 'odysseus-code-pane-width', defaultWidth: 240, minWidth: 180, maxWidth: 420, mainMin: 320, getOwner: () => state.workspaceOwner });
   nativeWindow.root.addEventListener('keydown', async (event) => {
+    if (event.defaultPrevented || event.isComposing) return;
     if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 't') { event.preventDefault(); await reopenLastClosedBuffer(); return; }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'w' && state.activePath) { event.preventDefault(); await closeBuffer(state.activePath); return; }
     if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'p') return;
     event.preventDefault();
-    const query = await styledPrompt('Enter a path relative to the current folder.', { title: 'Quick Open', confirmText: 'Open', maxLength: 2048 });
-    if (!query) return;
-    const relative = String(query).replace(/\\/g, '/').trim();
-    if (state.rootResourceRef) {
-      try {
-        const resolved = await resolveEditorRelativeResource(relative);
-        await openFile(childPath(state.root, relative), null, resolved.resourceRef);
-      } catch (error) {
-        setStatus(error.message || 'The Editor resource could not be opened', true);
-      }
-      return;
-    }
-    setStatus('Choose an authorized Editor folder before using Quick Open.', true);
+    await quickOpen();
   });
   document.addEventListener('pointerdown', (event) => {
     if (state.tabMenu && !state.tabMenu.contains(event.target)) closeTabMenu();
@@ -2064,7 +2380,7 @@ export async function openResource(resourceRef) {
 /** Save an authorized Host snapshot through the Files facade CAS boundary. */
 export async function saveResourceSnapshot(snapshot, { resource } = {}) {
   const opaqueRef = resource?.locator?.opaqueRef;
-  if (!opaqueRef) return { outcome:'failed', message:'Host resource reference is unavailable' };
+  if (!opaqueRef) return { outcome:'failed', retryable:false, uncertain:false, message:'Host resource reference is unavailable' };
   try {
     const response = await filesFacadeClient.saveResource(opaqueRef, {
       expectedRevision:snapshot.expectedRevision,
@@ -2072,7 +2388,7 @@ export async function saveResourceSnapshot(snapshot, { resource } = {}) {
     });
     if (response?.outcome === 'conflict') return response;
     if (response?.outcome !== 'applied' || !response.revision) {
-      return { outcome:'failed', message:'Host save did not return an accepted fingerprint' };
+      return { outcome:'failed', uncertain:true, message:'Host save did not return an accepted fingerprint; its outcome needs reconciliation' };
     }
     const accepted = response.snapshot && typeof response.snapshot === 'object' ? response.snapshot : {};
     return {
@@ -2091,7 +2407,8 @@ export async function saveResourceSnapshot(snapshot, { resource } = {}) {
       },
     };
   } catch (error) {
-    return { outcome:'failed', code:error?.code, status:error?.status, message:error.message || 'Host save failed' };
+    const status = Number(error?.status || 0);
+    return { outcome:'failed', code:error?.code, status, uncertain:status === 0 || status >= 500 || [408, 429].includes(status), message:error.message || 'Host save failed' };
   }
 }
 
@@ -2103,6 +2420,8 @@ export async function openPath(path, { directory = false } = {}) {
 }
 
 function handleWindowClosed() {
+  state.workspacePicker?.destroy();
+  state.workspacePicker = null;
   state.requestGeneration += 1;
   state.resourceOpenController?.abort?.();
   state.resourceOpenController = null;
@@ -2135,6 +2454,7 @@ export default {
   open,
   openPath,
   openResource,
+  runCommand, getEditorStatus,
   close,
   toggle: () => (state.nativeWindow?.visible ? close() : open()),
 };

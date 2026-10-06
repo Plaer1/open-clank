@@ -12,7 +12,7 @@
  * Reads/writes shared `state` directly (layers, activeLayerId,
  * layerOffsets, imgWidth, imgHeight, lassoPoints/lassoActive,
  * wandMask, maskCanvas/maskCtx, nextLayerId). Function deps are
- * orchestration callbacks still living in galleryEditor.js.
+ * orchestration callbacks still living in imps.js.
  *
  * Returns `{ render }` so the recursive self-call works via closure
  * over `render` rather than module-state lookup.

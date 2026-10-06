@@ -1447,6 +1447,11 @@ def setup_memory_routes(
         except Exception as exc:
             logger.warning("Candidate review failed: %s", exc)
             raise HTTPException(400, "Candidate could not be reviewed in this scope") from exc
+        if accept and result.get("curated_id"):
+            from src.openclank.achievement_producers import record_activity
+            record_activity(request, "memory.candidate.accepted", str(result["curated_id"]), {
+                "candidateId": candidate_id, "reviewTransaction": "accepted", "pendingCandidate": True,
+            }, workspace_id=workspace_id)
         return result
 
     @router.put("/candidate/{candidate_id}")
@@ -1796,6 +1801,12 @@ def setup_memory_routes(
                 results = [r for r in results if r.get("session_id") == session_id]
             if category:
                 results = [r for r in results if category in r.get("category", "")]
+            from src.openclank.achievement_producers import record_activity
+            from src.memory_scope import chat_workspace
+            import uuid
+            record_activity(request, "memory.search.completed", str(uuid.uuid4()), {
+                "permitted": True, "recordIds": [str(r["id"]) for r in results],
+            }, workspace_id=chat_workspace())
             return {"memories": results, "total": len(results), "query": query}
         except Exception as e:
             logger.warning("Provider search failed: %s", e)

@@ -57,12 +57,12 @@ def main():
                 json.dump(entries, f, ensure_ascii=False, indent=2)
         print(f"  {label}: claimed {count} entries")
 
-    # 2. Database tables (sessions, gallery, comparisons, documents)
+    # 2. Database tables (sessions, Files images, comparisons, documents)
     from core.database import SessionLocal, Session, Document
     try:
-        from core.database import GalleryImage
+        from core.database import FilesImageResource
     except ImportError:
-        GalleryImage = None
+        FilesImageResource = None
     try:
         from core.database import Comparison
     except ImportError:
@@ -81,10 +81,10 @@ def main():
         count = db.query(Document).filter(Document.owner == None).update({"owner": owner})
         print(f"  documents: claimed {count}")
 
-        # Gallery
-        if GalleryImage:
-            count = db.query(GalleryImage).filter(GalleryImage.owner == None).update({"owner": owner})
-            print(f"  gallery: claimed {count}")
+        # Files image rows are owner-scoped just like sessions and documents.
+        if FilesImageResource:
+            count = db.query(FilesImageResource).filter(FilesImageResource.owner == None).update({"owner": owner})
+            print(f"  files images: claimed {count}")
 
         # Comparisons
         if Comparison:

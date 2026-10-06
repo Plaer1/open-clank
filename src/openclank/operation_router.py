@@ -375,6 +375,10 @@ class ManagedOperationResult:
     # it must not be replaced with the host's default when producers already
     # separated cache/reasoning categories.
     normalization_profile: Optional[str] = None
+    metric_coverage: Mapping[str, Any] = field(default_factory=dict)
+    covered_dispatch_ids: tuple[str, ...] = ()
+    loss_reasons: tuple[str, ...] = ()
+    identity_coverage: str = "partial"
     model_fingerprint: Optional[str] = None
     dimension: Optional[int] = None
 
@@ -995,10 +999,13 @@ class ManagedOperationRouter:
                 raise ManagedOperationProtocolError(
                     "operation normalization profile is invalid"
                 )
+        from src.openclank.managed_protocol import validate_managed_method_result
+        validate_managed_method_result("_openclank/operations/v1/execute", raw)
         usage: dict[str, int] = {}
         for key in (
             "inputTokens", "outputTokens", "totalTokens",
             "cacheReadTokens", "cacheWriteTokens", "reasoningTokens",
+            "audioInputTokens", "audioOutputTokens", "imageInputTokens", "imageOutputTokens", "searchRequests",
         ):
             if key in usage_raw:
                 raw_value = usage_raw[key]
@@ -1032,6 +1039,10 @@ class ManagedOperationRouter:
             ),
             usage=usage,
             normalization_profile=normalization_profile,
+            metric_coverage=dict(raw.get("metricCoverage") or {}),
+            covered_dispatch_ids=tuple(raw.get("coveredDispatchIDs") or ()),
+            loss_reasons=tuple(raw.get("lossReasons") or ()),
+            identity_coverage=raw.get("identityCoverage", "partial"),
             model_fingerprint=(
                 str(model_fingerprint) if model_fingerprint is not None else None
             ),

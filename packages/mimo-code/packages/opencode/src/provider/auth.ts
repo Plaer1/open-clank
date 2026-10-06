@@ -54,6 +54,7 @@ export class Authorization extends Schema.Class<Authorization>("ProviderAuthAuth
   url: Schema.String,
   method: Schema.Literals(["auto", "code"]),
   instructions: Schema.String,
+  userCode: Schema.optional(Schema.String),
 }) {
   static readonly zod = zod(this)
 }
@@ -64,6 +65,7 @@ export const AuthorizeInput = Schema.Struct({
   flowID: Schema.optional(Schema.String).annotate({ description: "Caller-owned authorization flow ID" }),
   redirectURI: Schema.optional(Schema.String).annotate({ description: "Public OAuth callback URI" }),
   state: Schema.optional(Schema.String).annotate({ description: "Caller-owned OAuth state" }),
+  expiresAt: Schema.optional(Schema.Number).annotate({ description: "Caller-owned authorization flow expiry" }),
 }).pipe(withStatics((s) => ({ zod: zod(s) })))
 export type AuthorizeInput = Schema.Schema.Type<typeof AuthorizeInput>
 
@@ -106,10 +108,11 @@ const OAUTH_FLOW_TTL_MS = 10 * 60 * 1000
 
 type PendingOAuth = {
   providerID: ProviderID
-  result: AuthOAuthResult
+  result: AuthOAuthResult & { userCode?: string }
   expiresAt: number
   running: boolean
   cancelled: boolean
+  abortController: AbortController
 }
 
 type AuthWriter = Pick<Auth.Interface, "get" | "set" | "remove">
@@ -246,27 +249,37 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       if (input.flowID) hookInputs[OPENCLANK_FLOW_INPUT] = input.flowID
       if (input.redirectURI) hookInputs[OPENCLANK_REDIRECT_INPUT] = input.redirectURI
       if (input.state) hookInputs[OPENCLANK_STATE_INPUT] = input.state
-      const result = yield* Effect.promise(() => method.authorize(hookInputs))
+      const result: AuthOAuthResult & { userCode?: string } = yield* Effect.promise(() => method.authorize(hookInputs))
       const now = Date.now()
       for (const [key, entry] of pending) {
-        if (entry.expiresAt <= now) pending.delete(key)
+        if (entry.expiresAt <= now) {
+          entry.cancelled = true
+          entry.abortController.abort()
+          pending.delete(key)
+        }
       }
       const flowID = input.flowID
       const pendingKey = flowID || input.providerID
+      const expiresAt = input.expiresAt ?? now + OAUTH_FLOW_TTL_MS
+      if (expiresAt <= now || expiresAt > now + OAUTH_FLOW_TTL_MS) {
+        return yield* Effect.fail(new ValidationFailed({ field: "expiresAt", message: "Login flow has expired" }))
+      }
       if (flowID && pending.has(pendingKey)) {
         return yield* Effect.fail(new ValidationFailed({ field: "flowID", message: "Login flow already exists" }))
       }
       pending.set(pendingKey, {
         providerID: input.providerID,
         result,
-        expiresAt: now + OAUTH_FLOW_TTL_MS,
+        expiresAt,
         running: false,
         cancelled: false,
+        abortController: new AbortController(),
       })
       return {
         url: result.url,
         method: result.method,
         instructions: result.instructions,
+        ...(result.userCode === undefined ? {} : { userCode: result.userCode }),
       }
     })
 
@@ -277,25 +290,28 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       const pending = (yield* InstanceState.get(state)).pending
       const pendingKey = input.flowID || input.providerID
       const entry = pending.get(pendingKey)
-      if (
-        !entry ||
-        entry.providerID !== input.providerID ||
-        entry.expiresAt <= Date.now() ||
-        entry.running ||
-        entry.cancelled
-      ) {
+      if (!entry || entry.providerID !== input.providerID) {
         pending.delete(pendingKey)
         return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
       }
+      if (entry.expiresAt <= Date.now() || entry.cancelled) {
+        entry.cancelled = true
+        entry.abortController.abort()
+        pending.delete(pendingKey)
+        return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
+      }
+      if (entry.running) return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
       const match = entry.result
       if (match.method === "code" && !input.code) {
         return yield* Effect.fail(new OauthCodeMissing({ providerID: input.providerID }))
       }
 
       entry.running = true
-      const result = yield* Effect.promise(() =>
-        match.method === "code" ? match.callback(input.code!) : match.callback(input.code),
-      )
+      const invoke = match.callback as (
+        code?: string,
+        signal?: AbortSignal,
+      ) => Promise<Awaited<ReturnType<AuthOAuthResult["callback"]>>>
+      const result = yield* Effect.promise(() => invoke(input.code, entry.abortController.signal))
       if (entry.cancelled || entry.expiresAt <= Date.now()) {
         pending.delete(pendingKey)
         return yield* Effect.fail(new OauthMissing({ providerID: input.providerID }))
@@ -355,6 +371,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
       const entry = pending.get(input.flowID)
       if (entry?.providerID === input.providerID) {
         entry.cancelled = true
+        entry.abortController.abort()
         pending.delete(input.flowID)
       }
     })

@@ -92,11 +92,50 @@ export function spawnPosition(options = {}) {
 }
 
 /**
- * Junction collision response: a small sideways shove along the obstacle edge.
- * Vertical velocity (speed/direction) is preserved so the drop continues its
- * prevailing travel after the visible deflection.
+ * Advance one Junction-style drop in bounded 60 Hz reference steps.
  *
- * @returns {{x:number,y:number,lateral:number,hit:boolean}}
+ * Junction stores ``vx``/``vy`` in glyph-relative frame units: it damps vx,
+ * pulls it toward a lane, then moves by glyph size. Open Clank keeps that
+ * shape but makes gravity direction-aware so the owner's normal downward
+ * control remains downward instead of eventually reversing itself.
+ */
+export function advanceRainDrop(options = {}) {
+  const {
+    x = 0,
+    y = 0,
+    vx = 0,
+    vy = 0,
+    laneX = x,
+    glyphSize = 12,
+    direction = 1,
+    speed = 1,
+    gravity = 1,
+    deltaSeconds = 0,
+  } = options;
+  // One caller step is at most 1/60th of a second. Keeping this conversion
+  // explicit makes the reference's per-frame constants stable at real cadence.
+  const frames = Math.max(0, Math.min(1, Number(deltaSeconds) * 60 || 0));
+  const size = Math.max(1, Number(glyphSize) || 1);
+  const signedDirection = Number(direction) < 0 ? -1 : 1;
+  const liveSpeed = Math.max(.1, Number(speed) || 1);
+  const liveGravity = Math.max(.1, Number(gravity) || 1);
+  const nextVx = Number(vx || 0) * Math.pow(.88, frames)
+    + (Number(laneX) - Number(x)) * .0025 * frames;
+  // Junction's `vy -= .015 * gravity` is adapted to selected direction. It
+  // preserves a normal down/up stream rather than silently flipping it.
+  const nextVy = Number(vy || 0) + signedDirection * .015 * liveGravity * frames;
+  return {
+    x: Number(x) + nextVx * size * frames,
+    y: Number(y) + nextVy * size * .36 * liveSpeed * frames,
+    vx: nextVx,
+    vy: nextVy,
+  };
+}
+
+/**
+ * Junction collision response: a small sideways shove on every confirmed
+ * painted-mask hit. There is deliberately no cooldown or vertical nudge:
+ * continuous lateral motion lets a drop slide over a glyph edge.
  */
 export function resolveCollision(options = {}) {
   const {
@@ -111,57 +150,30 @@ export function resolveCollision(options = {}) {
     random = 0.5,
     minAlpha = COLLISION_ALPHA_THRESHOLD,
     behind = false,
-    lastHitAt = -Infinity,
-    time = 0,
-    hitCooldownMs = 130,
+    confirmedHit = false,
   } = options;
 
-  if (behind || !obstacle) {
-    return { x, y, lateral: 0, hit: false };
-  }
+  if (behind || !obstacle) return { x, y, vxDelta: 0, hit: false };
   if (obstacle.maskAlpha != null && obstacle.maskAlpha <= Math.round(minAlpha * 255)) {
-    return { x, y, lateral: 0, hit: false };
+    return { x, y, vxDelta: 0, hit: false };
   }
-  if (Number.isFinite(lastHitAt) && Number.isFinite(time) && time - lastHitAt <= hitCooldownMs) {
-    return { x, y, lateral: 0, hit: false };
-  }
-  const overlaps = x + radius > obstacle.left && x - radius < obstacle.right
-    && y + radius > obstacle.top && y - radius < obstacle.bottom;
-  if (!overlaps) {
-    return { x, y, lateral: 0, hit: false };
-  }
+  const overlaps = confirmedHit || (x + radius > obstacle.left && x - radius < obstacle.right
+    && y + radius > obstacle.top && y - radius < obstacle.bottom);
+  if (!overlaps) return { x, y, vxDelta: 0, hit: false };
 
-  // Deflect along the nearest edge (axis of least penetration) so the drop
-  // slides along the obstacle rather than reversing vertical travel.
-  const pushLeft = x + radius - obstacle.left;
-  const pushRight = obstacle.right - (x - radius);
-  const pushTop = y + radius - obstacle.top;
-  const pushBottom = obstacle.bottom - (y - radius);
-  const horizontal = Math.min(pushLeft, pushRight);
-  const vertical = Math.min(pushTop, pushBottom);
-
-  // The .04 term is intentional and remains when both sliders are 0.
-  const shove = glyphSize * scale * (
-    0.04 + collisionForce * 0.02 + bounce * (0.03 + Math.max(0, Math.min(1, random)) * 0.05)
+  const centerX = (Number(obstacle.left) + Number(obstacle.right)) / 2;
+  const side = x < centerX ? -1 : 1;
+  const size = Math.max(1, Number(glyphSize) || 1);
+  const shove = size * Math.max(.1, Number(scale) || 1) * (
+    .04 + Math.max(0, Number(collisionForce) || 0) * .02
+      + Math.max(0, Number(bounce) || 0) * (.03 + Math.max(0, Math.min(1, Number(random) || 0)) * .05)
   );
-
-  if (vertical < horizontal) {
-    // Top/bottom edge: still a lateral shove (Junction does not reverse vy);
-    // push out just enough to clear the edge, then resume travel.
-    const side = y < (obstacle.top + obstacle.bottom) / 2 ? -1 : 1;
-    return {
-      x,
-      y: y + side * Math.max(1, vertical),
-      lateral: (x < (obstacle.left + obstacle.right) / 2 ? -1 : 1) * shove * 0.65,
-      hit: true,
-    };
-  }
-
-  const side = x < (obstacle.left + obstacle.right) / 2 ? -1 : 1;
   return {
     x: x + side * shove,
     y,
-    lateral: side * shove * 3,
+    // Junction applies the complete pixel shove to lateral velocity. Keep
+    // that exact magnitude; the caller owns its glyph-coordinate movement.
+    vxDelta: side * shove * .015,
     hit: true,
   };
 }

@@ -53,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
 
     build = subcommands.add_parser("build", help="build, install, and verify the current host engine")
     build.add_argument("--version")
+    build.add_argument("--target", help="explicit verified output target; defaults to Python process target")
     build.add_argument("--bun", default="bun")
     build.add_argument("--no-download-bun", action="store_true")
     build.add_argument("--skip-dependencies", action="store_true")
@@ -106,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
                 install_dependencies=not args.skip_dependencies,
                 force=args.force,
                 acp_smoke=not args.skip_acp,
+                target=args.target,
             )
             report = _verification_json(result)
             print(json.dumps(report, sort_keys=True) if args.json else f"Installed and verified: {result.binary}")

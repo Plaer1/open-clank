@@ -144,35 +144,21 @@ def test_document_owner_filter_applies_owner_clause():
 # gallery._owner_filter
 # ---------------------------------------------------------------------------
 
-def test_gallery_owner_filter_blocks_anonymous(monkeypatch):
+def test_files_image_owner_key_rejects_anonymous(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "true")
-    from routes.gallery_routes import _owner_filter
-    fake_q = MagicMock()
-    out = _owner_filter(fake_q, user=None)
-    fake_q.filter.assert_called_once_with(False)
-    assert out is fake_q.filter.return_value
+    from src.generated_images import gallery_owner_key
+    assert gallery_owner_key(None) is None
 
 
-def test_gallery_owner_filter_allows_single_user_mode(monkeypatch):
+def test_files_image_owner_key_has_stable_single_user_fallback(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    from routes.gallery_routes import _owner_filter
-    fake_q = MagicMock()
-    out = _owner_filter(fake_q, user=None)
-    fake_q.filter.assert_not_called()
-    assert out is fake_q
+    from src.generated_images import gallery_owner_key
+    assert gallery_owner_key(None) == "local-installation"
 
 
-def test_gallery_owner_filter_passes_user():
-    from routes.gallery_routes import _owner_filter
-    fake_q = MagicMock()
-    out = _owner_filter(fake_q, user="alice")
-    # Under the SQLAlchemy MagicMock stubs we can't introspect the
-    # column clause; verifying that filter() was invoked exactly once
-    # (and returned its mocked query) is enough to guard the signature
-    # and stop a regression where the function silently no-ops on
-    # logged-in users.
-    fake_q.filter.assert_called_once()
-    assert out is fake_q.filter.return_value
+def test_files_image_owner_key_preserves_authenticated_owner():
+    from src.generated_images import gallery_owner_key
+    assert gallery_owner_key("alice") == "alice"
 
 
 # ---------------------------------------------------------------------------

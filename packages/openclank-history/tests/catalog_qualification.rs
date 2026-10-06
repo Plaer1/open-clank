@@ -101,7 +101,7 @@ async fn durable_partition_and_action_phases_survive_restart() {
     coordinator
         .record_live(
             &action.action_id,
-            LiveReceipt {
+            LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("live".into()),
@@ -209,7 +209,7 @@ async fn sorted_leases_have_no_ttl_and_reconcile_never_replays_live_effects() {
     assert!(coordinator.complete(&record.action_id).is_err());
     let reconciled = coordinator
         .reconcile(|action| {
-            Ok(LiveReceipt {
+            Ok(LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::Unknown,
                 fingerprint: None,
@@ -234,7 +234,7 @@ async fn sorted_leases_have_no_ttl_and_reconcile_never_replays_live_effects() {
             if action.action_id == unknown.action_id {
                 Err("resolver unavailable".into())
             } else {
-                Ok(LiveReceipt {
+                Ok(LiveReceipt { committed_resources: Vec::new(),
                     action_id: action.action_id.clone(),
                     status: LiveStatus::Unknown,
                     fingerprint: None,
@@ -325,7 +325,7 @@ async fn coordinator_faults_leave_durable_phase_markers_without_replaying_live_w
         .unwrap();
     let recovered = reopened
         .reconcile(|action| {
-            Ok(LiveReceipt {
+            Ok(LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::Unknown,
                 fingerprint: None,
@@ -369,7 +369,7 @@ async fn coordinator_faults_leave_durable_phase_markers_without_replaying_live_w
     reopened
         .record_live(
             &committed.action_id,
-            LiveReceipt {
+            LiveReceipt { committed_resources: Vec::new(),
                 action_id: committed.action_id.clone(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("live".into()),
@@ -415,7 +415,7 @@ async fn coordinator_faults_leave_durable_phase_markers_without_replaying_live_w
     let reconciled = reopened
         .reconcile(|action| {
             resolver_calls += 1;
-            Ok(LiveReceipt {
+            Ok(LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::Unknown,
                 fingerprint: None,
@@ -527,7 +527,7 @@ async fn partial_multi_resource_outcome_releases_union_lease_for_reuse() {
     let partial = coordinator
         .record_live(
             &first.action_id,
-            LiveReceipt {
+            LiveReceipt { committed_resources: Vec::new(),
                 action_id: first.action_id.clone(),
                 status: LiveStatus::Partial,
                 fingerprint: Some("partial".into()),

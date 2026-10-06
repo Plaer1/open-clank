@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,8 @@ class CandidateDiff:
     added: frozenset[str]
     modified: frozenset[str]
     deleted: frozenset[str]
+    git_index_paths: frozenset[str] | None = None
+    git_index_state: str | None = None
 
     @property
     def changed(self) -> frozenset[str]:
@@ -98,16 +101,29 @@ def _finding_payload(finding: Finding) -> dict[str, object]:
     }
 
 
-def main() -> int:
-    spec = json.loads(Path("/input/source").read_text(encoding="utf-8"))
+def main(spec_path: str | None = None) -> int:
+    spec = json.loads(Path(spec_path or "/input/source").read_text(encoding="utf-8"))
     root = Path(spec["candidate_root"])
+    if spec.get("policy_root") is not None:
+        sys.path.insert(0, str(Path(spec["policy_root"])))
     changes = spec.get("changes") or {}
+    if ("git_index_paths" in spec) != ("git_index_state" in spec):
+        raise ValueError("native Git projection fields must be paired")
+    if "git_index_paths" in spec and (
+        spec["git_index_state"] not in {"git", "non-git"}
+        or not isinstance(spec["git_index_paths"], list)
+        or any(not isinstance(path, str) for path in spec["git_index_paths"])
+        or (spec["git_index_state"] == "non-git" and spec["git_index_paths"])
+    ):
+        raise ValueError("malformed native Git index authority")
     diff = CandidateDiff(
         root=root,
         source_root=Path(spec["source_root"]),
         added=frozenset(changes.get("added") or ()),
         modified=frozenset(changes.get("modified") or ()),
         deleted=frozenset(changes.get("deleted") or ()),
+        git_index_paths=frozenset(spec["git_index_paths"]) if "git_index_paths" in spec else None,
+        git_index_state=spec.get("git_index_state"),
     )
     stage = str(spec.get("stage") or "check")
     payload = evaluate_contract(
@@ -117,10 +133,11 @@ def main() -> int:
         diff=diff,
         stage=stage,
         command_root=diff.source_root,
+        policy_root=spec.get("policy_root"),
     )
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1] if len(sys.argv) == 2 else None))

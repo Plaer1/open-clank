@@ -1,5 +1,6 @@
 import { Config } from "effect"
 import { closeSync, readFileSync } from "node:fs"
+import { consumeWindowsServerPassword } from "./worker-auth-windows"
 
 export function consumeInheritedServerPassword(fdValue?: string): string | undefined {
   const envName = "OPEN_CLANK_WORKER_AUTH_FD"
@@ -73,7 +74,7 @@ const copy = process.env["MIMOCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
 // Operator-supplied password (env or inherited worker-auth fd). Captured once:
 // consumeInheritedServerPassword() closes the descriptor.
 const suppliedServerPassword =
-  consumeInheritedServerPassword() ?? process.env["MIMOCODE_SERVER_PASSWORD"]
+  consumeWindowsServerPassword() ?? consumeInheritedServerPassword() ?? process.env["MIMOCODE_SERVER_PASSWORD"]
 
 let generatedServerPassword: string | undefined
 

@@ -47,23 +47,8 @@ _FILE_RESULT_CONTRACT = "open-clank.file-result/v1"
 
 
 def _agent_service_enabled(ctx: dict) -> bool:
-    """Use the Rust agent lane once an owner registry has been provisioned.
-
-    Keeping the empty-registry compatibility path is intentional during the
-    migration: existing installations can still use the legacy handlers until
-    an administrator creates the first workspace permission. As soon as the
-    registry exists, all adapted operations fail closed through Rust.
-    """
-    owner = str(ctx.get("owner") or "").strip()
-    if not owner:
-        return False
-    explicit = os.environ.get("ODYSSEUS_FILES_AGENT_RUNTIME")
-    if explicit is not None:
-        return explicit.strip().lower() in {"1", "true", "yes", "on"}
-    from src.openclank.filesystem_registry import FilesystemRootRegistry
-    registry_path = os.environ.get("ODYSSEUS_FILES_REGISTRY")
-    registry = FilesystemRootRegistry(registry_path) if registry_path else FilesystemRootRegistry()
-    return os.path.exists(registry.rust_snapshot_path())
+    """Canonical Rust enforcement is mandatory, including an empty scope."""
+    return True
 
 
 async def _agent_request(ctx: dict, tool: str, operation: str, path: str, payload: Optional[dict] = None) -> Optional[dict]:
@@ -71,8 +56,12 @@ async def _agent_request(ctx: dict, tool: str, operation: str, path: str, payloa
         return None
     from src.openclank.files_service_client import FilesServiceError, agent_client_for
     from src.tool_execution import get_active_workspace
+    owner = str(ctx.get("owner") or "").strip()
+    if not owner:
+        return {"error": f"{tool}: authenticated owner is required", "exit_code": 1, "blocked": True, "code": "denied"}
     try:
-        response = await agent_client_for(str(ctx["owner"]), get_active_workspace()).request(operation, path, payload)
+        response = await agent_client_for(owner, get_active_workspace(), workspace_id=str(ctx.get("authority_workspace_id") or ""),
+            chat_id=str(ctx.get("session_id") or "")).request(operation, path, payload)
     except FilesServiceError as error:
         return {
             "error": f"{tool}: {error}",
@@ -868,19 +857,6 @@ def file_approval_binding(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _file_approval_grant_store(*, create: bool):
-    from src.constants import DATA_DIR
-    from src.openclank.permission_grants import GrantStore
-
-    data_dir = pathlib.Path(DATA_DIR)
-    db_path = data_dir / "app.db"
-    if not create and not db_path.is_file():
-        return None
-    if create:
-        data_dir.mkdir(parents=True, exist_ok=True)
-    return GrantStore(str(db_path))
-
-
 async def _require_file_approval(
     action: str,
     *,
@@ -897,6 +873,8 @@ async def _require_file_approval(
     authority_workspace_id = str(
         ctx.get("authority_workspace_id") or ""
     ).strip()
+    from src.openclank.operation_approvals import canonical_workspace_id
+    authority_workspace_id = canonical_workspace_id(owner, authority_workspace_id)
     if not session_id:
         raise PermissionError("file mutations require a trusted session")
     binding = file_approval_binding(
@@ -922,20 +900,6 @@ async def _require_file_approval(
             return binding
     except Exception:
         pass
-    try:
-        store = _file_approval_grant_store(create=False)
-        if store and store.match(
-            _FILE_MUTATION_PERMISSION,
-            owner=owner,
-            session_id=session_id,
-            workspace=workspace,
-            workspace_id=authority_workspace_id,
-            resource=binding,
-        ):
-            return binding
-    except Exception:
-        pass
-
     # Owner permission mode (yolo/auto): approve with once semantics — no
     # durable grant is written.
     try:
@@ -1020,15 +984,7 @@ async def _require_file_approval(
                         target_path=workspace,
                     )
                     if not persisted:
-                        _file_approval_grant_store(create=True).add(
-                            _FILE_MUTATION_PERMISSION,
-                            "*",
-                            owner=owner,
-                            session_id=grant_session,
-                            workspace=grant_workspace,
-                            workspace_id=grant_workspace_id,
-                            resource=binding,
-                        )
+                        option_id = "once"
                 else:
                     option_id = "once"
             except Exception as exc:

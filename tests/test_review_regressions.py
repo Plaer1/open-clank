@@ -504,6 +504,42 @@ async def test_app_api_blocks_search_route_before_loopback(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_app_api_marks_loopback_error_bodies_untrusted(monkeypatch):
+    import httpx
+    from src.tool_implementations import do_app_api
+
+    class FakeResponse:
+        status_code = 503
+        text = "<upstream error body>"
+
+        def json(self):
+            raise ValueError("not JSON")
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await do_app_api(
+        json.dumps({"action": "call", "method": "GET", "path": "/api/health"}),
+        owner="admin",
+    )
+
+    assert result["exit_code"] == 1
+    assert result["untrusted_content"] is True
+
+
+@pytest.mark.asyncio
 async def test_app_api_endpoint_discovery_hides_shell_routes(monkeypatch):
     _install_core_middleware_stub(monkeypatch)
     import httpx

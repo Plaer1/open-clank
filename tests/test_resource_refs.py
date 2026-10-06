@@ -24,7 +24,7 @@ def isolated_app_key(tmp_path, monkeypatch):
 def _issue(**overrides):
     values = {
         "owner_subject_id": "account-alice",
-        "provider": "gallery",
+        "provider": "files",
         "origin_id": "image-42",
         "kind": "image",
         "capabilities": ("open", "preview", "download"),
@@ -50,7 +50,7 @@ def test_reference_is_opaque_owner_and_generation_bound():
         now_unix_ms=1_000_001,
     )
     assert resolved.origin_id == "image-42"
-    assert resolved.provider == "gallery"
+    assert resolved.provider == "files"
 
     with pytest.raises(ResourceRefError) as owner_error:
         resolve_resource_ref(

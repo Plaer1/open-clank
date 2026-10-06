@@ -1,101 +1,80 @@
 # Security CI guide
 
-This project runs a set of automated security checks on pull requests and
-selected branch pushes. This page explains what each one does, whether it can
-block a merge, and the few one-time settings you should turn on to get the full
-benefit.
+This is maintainer guidance about the **checked-in workflows**, not deployment
+security or a certification of a release. For running Open Clank securely and
+private vulnerability reporting, see [SECURITY.md](../SECURITY.md).
 
-## What runs, and why
+The public default/contribution branch is `main`. Workflow code and repository
+rules are separate authorities: a failed job blocks merging only if the actual
+branch/ruleset requires it. This document does not claim branch-protection
+settings or recent workflow outcomes have been inspected.
 
-Most checks live in files under `.github/workflows/`. CodeQL uses the
-checked-in advanced configuration in `.github/workflows/codeql.yml`. They run
-automatically; you do not start them.
+## Configured checks
 
-| Check | What it protects against | Blocks a merge? |
-|---|---|---|
-| **Secret scan** (gitleaks) | An API key, token, or password being committed by mistake or on purpose | Yes |
-| **Workflow security** (actionlint + zizmor) | A broken or insecure automation file that could leak the repo's access token | Yes |
-| **Dependency review** | A pull request that adds a software library with a known security hole | Yes |
-| **pip-audit** | Known security holes in the Python libraries already used | No (advisory) |
-| **Container scan: hadolint** | Mistakes and insecure patterns in the `Dockerfile` | Yes |
-| **Container scan: Trivy** | Known security holes in the Docker image | No (advisory) |
-| **CodeQL** | Real bugs in the app's own code: injection, auth mistakes, path traversal | No (advisory) |
+| Workflow / job name | Configured behavior | Where to review |
+| --- | --- | --- |
+| `secret-scan.yml` / `gitleaks` | Pull requests, main pushes and manual dispatch; failures are eligible to be required | Check logs; rotate confirmed leaked credentials |
+| `workflow-security.yml` / `actionlint`, `zizmor (Actions SAST)` | Pull requests, main pushes and manual dispatch; syntax/security lint failures | Check logs |
+| `dependency-review.yml` / `dependency-review (PR gate)` | PR-only job; fails for newly introduced moderate-or-worse dependency advisories | PR check/logs |
+| `dependency-review.yml` / `pip-audit (advisory)` | Requirements audit with `continue-on-error: true` | Job output; no SARIF upload is configured here |
+| `container-scan.yml` / `hadolint (Dockerfile lint)` | Pull requests, main pushes and manual dispatch; Dockerfile lint failures | Check logs |
+| `container-trivy.yml` / `Trivy (image scan, advisory)` | Path-filtered PR/manual scan, advisory | Job output |
+| `container-trivy.yml` / `Trivy (image scan + SARIF upload)` | Path-filtered main-push scan, advisory, with SARIF upload | Job output and accepted code-scanning upload |
+| `codeql.yml` / `Analyze (actions)`, `Analyze (javascript-typescript)`, `Analyze (python)` | Pushes to dev/main, PRs targeting dev, weekly schedule | Check logs and accepted code-scanning findings |
+| `ci.yml` / `Python syntax (compileall)`, `JS syntax (node --check)` | Syntax checks; possible required checks when maintainers configure them | Check logs |
+| `ci.yml` / managed engine, History service, Windows portable and pytest jobs | Build/protocol/behavior checks with job-specific conditions; docs-only pytest can be skipped by workflow logic | Actual run details; a build is not OS feature acceptance |
 
-"Blocks a merge" means a red X appears on the pull request and, once you enable
-the setting below, the **Merge** button is disabled until it is fixed.
+**Coverage mismatch for maintainer review:** CodeQL's current PR filter targets
+`dev`, while public contributions target `main`. The normal/main-push scanners
+and CodeQL push/schedule behavior do not make every main PR a CodeQL run. Changing
+this prose does not change workflow filters; any CI policy change needs its own
+review.
 
-"Advisory" means it reports problems into the repository's **Security** tab so
-you can review them on your own schedule, but it never stops a merge. These are
-advisory on purpose: they often flag long-standing issues in other people's
-libraries, not something a given pull request introduced.
+## Results and failures
 
-## Where results appear
+Read the actual PR Checks/run logs first. Security-tab findings depend on a
+scanner's upload path, permissions and GitHub accepting the report. “Advisory”
+does not mean every finding appears there or that it can never be made required.
+`continue-on-error` behavior also differs from repository merge rules.
 
-- **Checks tab of a pull request**: the pass/fail of each check. A green tick is
-  good; a red X needs attention.
-- **Security tab of the repository**: detailed findings from the advisory
-  scanners (Trivy and CodeQL). This is your dashboard.
+- A confirmed secret finding needs credential rotation and source cleanup;
+  removing a visible string or commit alone does not undo disclosure.
+- Dependency review identifies changed dependencies; pip-audit reviews declared
+  current requirements and can flag existing issues. Review the advisory and
+  scope before selecting a patched version.
+- Workflow/hadolint findings should be resolved against the exact failing
+  message. Trivy/CodeQL findings need review of reachability, affected versions
+  and actual deployment behavior.
 
-## If a check fails
+## Maintainer configuration
 
-- **Secret scan failed**: a real credential may have been committed. Treat it as
-  leaked: rotate (regenerate) that key or token immediately, then remove it from
-  the file. Do not just delete the commit; assume it was seen.
-- **Dependency review failed**: the pull request adds a library with a known
-  vulnerability. Ask the contributor to use a patched version, or decline the
-  change.
-- **hadolint / workflow security failed**: the contributor changed the
-  `Dockerfile` or an automation file in a way the linter rejects. Ask them to
-  address the message shown in the failed check.
+Review the current GitHub ruleset/branch protections for **main**. Choose the
+checks that must succeed, using exact names from a completed run; verify that
+required checks report for every applicable PR and do not hang because of branch
+or path filters. Requiring reviews/Code Owners is a maintainer policy decision,
+not an inspected current setting in this guide.
 
-## One-time settings to turn on
+Review dependency graph, Dependabot alerts/security updates and code-scanning
+settings in the repository. CodeQL already uses checked-in advanced setup;
+avoid accidentally enabling a conflicting second setup. The configured
+[Dependabot file](../.github/dependabot.yml) requests weekly pip, npm,
+GitHub Actions and Docker updates. Review actual PRs/results rather than
+assuming every configured update or scan ran successfully.
 
-These two settings unlock the full value. You only do them once.
+[Contributing](../CONTRIBUTING.md) · [Beta 1 limits](known-limits.md)
 
-### 1. Require the blocking checks before merging
+## Exact artifact boundary
 
-This makes the **Merge** button refuse to work until the gating checks pass.
+`scripts/check_release_artifacts.py` checks actual index bytes and the modeled
+Docker context, with scanner output kept value-silent. `--paths-only` verifies
+exclusions; content mode requires the verified Gitleaks executable. An assembled
+package uses `--export-root` so ignore rules cannot hide files already copied
+into it. External/broken export symlinks are refused.
 
-1. Go to the repository on GitHub.
-2. Click **Settings** (top right of the repo).
-3. In the left sidebar, click **Branches**.
-4. Under **Branch protection rules**, click **Add branch ruleset** (or **Add
-   rule**), and set the branch name pattern to `dev` (this is the branch all
-   pull requests target; `main` is fast-forwarded at releases).
-5. Enable **Require status checks to pass before merging**.
-6. In the search box that appears, add these checks by name:
-   - `Python syntax (compileall)`
-   - `JS syntax (node --check)`
-   - `gitleaks`
-   - `actionlint`
-   - `zizmor (Actions SAST)`
-   - `hadolint (Dockerfile lint)`
-   - `dependency-review (PR gate)`
-
-   The first two come from the correctness CI (`ci.yml`); the rest are this
-   security suite. Leave pytest, pip-audit, Trivy, and CodeQL unchecked so they
-   stay advisory.
-7. Also enable **Require a pull request before merging** and **Require review
-   from Code Owners** (this uses the `.github/CODEOWNERS` file so every change
-   needs your sign-off).
-8. Click **Create** / **Save changes**.
-
-Note: a check name only appears in the list after it has run at least once, so
-let the workflows run on one pull request first, then add them here.
-
-### 2. Turn on the Security tab features
-
-1. **Settings -> Code security** (or **Code security and analysis**).
-2. Turn on **Dependency graph** (usually on by default for public repos) -- this
-   powers Dependency review and Dependabot.
-3. Turn on **Dependabot alerts** and **Dependabot security updates**.
-4. Under **Code scanning**, keep **Default setup** disabled. CodeQL is
-   configured by `.github/workflows/codeql.yml`; enabling default setup at the
-   same time causes GitHub to reject uploads from the checked-in workflow.
-
-## Keeping it current
-
-`.github/dependabot.yml` opens small weekly pull requests to update Python and
-npm packages, the Docker base image, and the pinned automation actions
-themselves. Review and merge those like any other pull request; they keep the
-project patched without manual tracking.
+The gate excludes private Clanker trees, runtime History credentials and their
+sidecars, environment secrets and database artifacts. Exact synthetic/UI-label
+classifications are constrained to the relevant rule, source/value and path;
+immutable history fingerprints do not waive a future secret at the same line.
+A clean gate is scoped evidence, not a complete personal-prose/media audit or a
+scan of every local recovery ref. Final release index, ancestry, media and export
+must be reviewed together. No hosted workflow success is claimed here.

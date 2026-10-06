@@ -19,7 +19,9 @@ export function findReferenceToken(source) {
   for (let index = 0; index < value.length; index++) {
     if (value[index] === '\\') { index++; continue; }
     const embed = value[index] === '!';
-    const start = index + (embed ? 1 : 0);
+    // The user's double-bang wiki embed is one token; preserve its source spelling.
+    const bangs = embed && value.slice(index,index + 4) === '!![[' ? 2 : embed ? 1 : 0;
+    const start = index + bangs;
     if (value[start] !== '[') continue;
     if (value[start + 1] === '[') {
       const match = /^\[\[((?:\\.|[^\]])+)\]\]/.exec(value.slice(start));
@@ -28,7 +30,7 @@ export function findReferenceToken(source) {
       const target = unescape(pieces.shift()).trim();
       const label = unescape(pieces.join('|'));
       const size = embed && /^(\d+)(?:x(\d+))?$/.exec(label);
-      return { index, length:match[0].length + (embed ? 1 : 0), embed, syntax:'wiki', target, label:size ? '' : label, width:size ? Number(size[1]) : null, height:size?.[2] ? Number(size[2]) : null };
+      return { index, length:match[0].length + bangs, embed, syntax:'wiki', target, label:size ? '' : label, width:size ? Number(size[1]) : null, height:size?.[2] ? Number(size[2]) : null };
     }
     const labelMatch = /^\[((?:\\.|[^\]\\])*)\]\(/.exec(value.slice(start));
     if (!labelMatch) continue;
@@ -50,8 +52,45 @@ export function findReferenceToken(source) {
   return null;
 }
 
+/** Locate rendered references without adopting lookalikes in source-only spans. */
+export function createReferenceSourceLocator(source) {
+  const text = String(source || '');
+  const excluded = [];
+  let offset = 0, fence = null, frontmatter = text.startsWith('---\n');
+  for (const [lineIndex, line] of text.split('\n').entries()) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (frontmatter) {
+      excluded.push([offset, offset + line.length]);
+      if (lineIndex > 0 && line.trim() === '---') frontmatter = false;
+    } else if (marker) {
+      excluded.push([offset, offset + line.length]);
+      if (!fence) fence = marker[1];
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = null;
+    } else if (fence) excluded.push([offset, offset + line.length]);
+    else {
+      for (const match of line.matchAll(/(`+)([\s\S]*?)\1/g)) excluded.push([offset + match.index, offset + match.index + match[0].length]);
+    }
+    offset += line.length + 1;
+  }
+  let cursor = 0;
+  return raw => {
+    let start = text.indexOf(raw, cursor);
+    while (start >= 0 && excluded.some(([from, to]) => start >= from && start < to)) start = text.indexOf(raw, start + raw.length);
+    if (start >= 0) cursor = start + raw.length;
+    return start;
+  };
+}
+
 export function resolveReference(reference, { documents, origin = null } = {}) {
   const raw = reference.target.trim();
+  // Installed handbook renditions are same-origin static resources, not
+  // owner document names. Keep the authority and path narrow: no encoding,
+  // traversal, query or fragment is accepted by this publication namespace.
+  if (raw.startsWith('/static/docs/media/')) {
+    return /^\/static\/docs\/media\/[a-z0-9-]+\/[a-z0-9][a-z0-9_.-]*\.(?:png|jpe?g|webp|avif|webm|mp4|vtt)$/.test(raw) && !raw.includes('..')
+      ? { status:'external', url:raw, reference }
+      : { status:'unsupported', reference };
+  }
   if (/^(?:https?:\/\/|data:image\/(?:png|jpeg|gif|webp|avif);base64,)/i.test(raw)) return { status:'external', url:raw, reference };
   // App destination links are handled by the shared registry, never by the
   // general chat-command interpreter.
@@ -125,10 +164,10 @@ export function mediaKind(target, url = '') {
   return 'asset';
 }
 
-export function createReferenceRenderer({ h, documents, assetUrl, openTarget, openAppDestination = null, renderDocument, maxDepth = 8 }) {
+export function createReferenceRenderer({ h, documents, assetUrl, resolveAsset = null, openTarget, openAppDestination = null, renderDocument, maxDepth = 8 }) {
   const diagnostic = (status, reference) => h('span', { class:'copal-reference-error', 'data-reference-status':status, text:`${status === 'ambiguous' ? 'Ambiguous' : status === 'unsupported' ? 'Unsupported' : 'Missing'}: ${reference.target}` });
-  return function renderReference(reference, { origin = null, seen = new Set() } = {}) {
-    const resolved = resolveReference(reference, { documents:documents(), origin });
+  return function renderReference(reference, { origin = null, seen = new Set(), sourceRevision = null, authorizedMedia = null } = {}) {
+    const resolved = authorizedMedia ? {status:'external', ...authorizedMedia} : resolveReference(reference, { documents:documents(), origin });
     if (resolved.status === 'app') {
       const invoke = (event) => {
         if (typeof openAppDestination === 'function') openAppDestination(resolved.destination, event);
@@ -136,11 +175,22 @@ export function createReferenceRenderer({ h, documents, assetUrl, openTarget, op
       };
       return h('button', { class:'copal-chip copal-app-link', type:'button', 'data-app-destination':resolved.destination, text:reference.label || reference.target, onclick:invoke });
     }
+    if (resolved.status === 'missing' && reference.embed && origin && typeof resolveAsset === 'function') {
+      const frame = h('span', {class:'copal-media-embed', 'data-reference-status':'loading', text:`Loading: ${reference.target}`});
+      Promise.resolve().then(() => resolveAsset(reference, origin)).then(media => {
+        frame.replaceChildren(media?.url ? renderReference(reference, {origin, seen, sourceRevision, authorizedMedia:media}) : diagnostic('missing',reference));
+        frame.dataset.referenceStatus = media?.url ? 'resolved' : 'missing';
+      }).catch(() => {
+        frame.dataset.referenceStatus = 'error';
+        frame.replaceChildren(h('span', {text:`Could not resolve: ${reference.target}`}), h('button',{type:'button',text:'Retry',onclick:()=>frame.replaceWith(renderReference(reference,{origin,seen,sourceRevision}))}));
+      });
+      return frame;
+    }
     if (!['resolved', 'external'].includes(resolved.status)) return diagnostic(resolved.status, reference);
     const { target, fragment } = resolved;
     if (!reference.embed) return resolved.url
       ? h('a', { href:resolved.url, target:'_blank', rel:'noopener noreferrer', text:reference.label || reference.target })
-      : h('button', { class:'copal-chip', type:'button', text:reference.label || reference.target, onclick:(event) => openTarget(target, fragment, event) });
+      : h('button', { class:'copal-chip', type:'button', text:reference.label || reference.target, onclick:(event) => openTarget(target, fragment, event, { origin, reference, sourceRevision }) });
     if (resolved.url || target?.kind === 'asset') {
       const url = resolved.url || assetUrl(target);
       if (!url) return diagnostic('unsupported', reference);
@@ -165,6 +215,6 @@ export function createReferenceRenderer({ h, documents, assetUrl, openTarget, op
     if (seen.size >= maxDepth) return h('span', { class:'copal-reference-error', 'data-reference-status':'depth', text:`Embed depth limit: ${target.name}` });
     const section = extractReferenceSection(target.text, fragment);
     if (section.status !== 'resolved') return diagnostic(section.status, reference);
-    return h('span', { class:'copal-transclusion', 'data-reference-status':'resolved' }, h('button', { class:'copal-chip', type:'button', text:reference.label || target.name, onclick:(event) => openTarget(target, fragment, event) }), renderDocument(section.text, new Set([...seen, target.id]), target));
+    return h('span', { class:'copal-transclusion', 'data-reference-status':'resolved' }, h('button', { class:'copal-chip', type:'button', text:reference.label || target.name, onclick:(event) => openTarget(target, fragment, event, { origin, reference, sourceRevision }) }), renderDocument(section.text, new Set([...seen, target.id]), target));
   };
 }

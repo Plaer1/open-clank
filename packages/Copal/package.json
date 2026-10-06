@@ -6,7 +6,7 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "typecheck": "tsc --noEmit --pretty false",
-    "build:openclank-editor": "bun build src/openclank-codemirror.ts --outdir=../../static/js/copal --entry-naming=codemirror.js --chunk-naming=codemirror-[name]-[hash].[ext] --format=esm --splitting --minify",
+    "build:openclank-editor": "node ../../scripts/generate-editor-language-associations.mjs && bun build src/openclank-codemirror.ts --outdir=../../static/js/copal --entry-naming=codemirror.js --chunk-naming=codemirror-[name]-[hash].[ext] --format=esm --splitting --minify",
     "start": "python3 app.py",
     "lint": "eslint .",
     "hexes:sync": "../../scripts/openclank hex sync --agents AGENTS.md",
@@ -18,14 +18,15 @@
     "servo:runtime-smoke": "timeout 20s env COPAL_SERVO_SMOKE=1 COPAL_URL=${COPAL_URL:-http://127.0.0.1:${PORT:-8765}} CARGO_TARGET_DIR=/tmp/copal-servo-target cargo run --manifest-path servo-shell/Cargo.toml --no-default-features --features servo-runtime",
     "servo:native-check": "CARGO_TARGET_DIR=/tmp/copal-servo-target cargo check --manifest-path servo-shell/Cargo.toml --no-default-features --features servo-runtime,native-api",
     "servo:native-smoke": "timeout 20s env COPAL_NATIVE_SMOKE=1 CARGO_TARGET_DIR=/tmp/copal-servo-target cargo run --manifest-path servo-shell/Cargo.toml --no-default-features --features servo-runtime,native-api",
-    "build:native-assets": "bun run build",
+    "build:native-assets": "bun run build:public",
     "servo:native-release": "bun run build:native-assets && CARGO_TARGET_DIR=/tmp/copal-servo-target cargo build --manifest-path servo-shell/Cargo.toml --release --no-default-features --features servo-runtime,native-api,embedded-assets",
     "servo:native-release-smoke": "bun run servo:native-release && tmp=$(mktemp -d) && cd \"$tmp\" && timeout 20s env COPAL_NATIVE_SMOKE=1 /tmp/copal-servo-target/release/copal-servo-shell",
     "native:parity": "scripts/copal-native-api-parity.sh",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:reset": "prisma migrate reset"
+    "db:reset": "prisma migrate reset",
+    "build:public": "python ../../scripts/check_copal_public_build.py source && next build && python ../../scripts/check_copal_public_build.py output"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",

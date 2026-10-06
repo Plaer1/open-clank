@@ -33,6 +33,18 @@ function createTestJwt(payload: object): string {
 
 describe("plugin.codex", () => {
   describe("loader", () => {
+    test("returns no adapter when auth or provider is absent", async () => {
+      const hooks = await CodexAuthPlugin(fakeInput)
+
+      await expect(hooks.auth!.loader!(async () => undefined as any, { models: {} } as never)).resolves.toEqual({})
+      await expect(
+        hooks.auth!.loader!(
+          async () => ({ type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
+          undefined as never,
+        ),
+      ).resolves.toEqual({})
+    })
+
     test("clamps gpt context to the Codex cap without raising smaller windows", async () => {
       const hooks = await CodexAuthPlugin(fakeInput)
       const model = (modelID: string, limit: { context: number; input?: number }) =>

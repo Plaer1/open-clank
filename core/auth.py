@@ -110,7 +110,7 @@ def is_reserved_username(username: str | None) -> bool:
 def normalize_known_username(users: Dict[str, Any], username: str | None) -> Optional[str]:
     """Return a normalized username only when it exists in the auth user map."""
     key = str(username or "").strip().lower()
-    if not key or key not in users:
+    if not key or key not in users or is_reserved_username(key):
         return None
     return key
 
@@ -152,11 +152,24 @@ class AuthManager:
         self._setup_lock = threading.Lock()
         self._account_lifecycle_fence = None
         self._load()
+        self._validate_current_auth()
         self._load_sessions()
-        self._migrate_single_user()
-        self._drop_reserved_loaded_users()
-        self._migrate_legacy_admin_role()
-        self._migrate_immutable_account_ids()
+
+    def _validate_current_auth(self) -> None:
+        if not self._config:
+            return
+        users = self._config.get("users")
+        if not isinstance(users, dict):
+            raise RuntimeError("Legacy auth requires .clanker/tools/migrations/python/secondary.py auth")
+        seen = set()
+        for username, user in users.items():
+            if is_reserved_username(username):
+                continue
+            identity = str(user.get("account_id") or "") if isinstance(user, dict) else ""
+            if (not identity.startswith("account-") or identity in seen
+                    or "is_admin" not in user or username != username.strip().lower()):
+                raise RuntimeError("Legacy auth requires .clanker/tools/migrations/python/secondary.py auth")
+            seen.add(identity)
 
     def configure_account_lifecycle_fence(self, checker) -> None:
         """Deny authenticated writes while an immutable account is converging."""
@@ -181,22 +194,13 @@ class AuthManager:
             if os.path.exists(self.auth_path):
                 with open(self.auth_path, "r", encoding="utf-8") as f:
                     self._config = json.load(f)
-                # Normalize all stored usernames to lowercase so they match
-                # the .strip().lower() applied at login/verify time. Fixes
-                # "Invalid credentials" when auth.json was written with
-                # mixed-case keys (e.g. via manual edit or a future migration).
-                if "users" in self._config:
-                    self._config["users"] = {
-                        k.strip().lower(): v
-                        for k, v in self._config["users"].items()
-                    }
                 logger.info("Auth config loaded")
             else:
                 self._config = {}
                 logger.info("No auth config found — first-run setup required")
         except Exception as e:
-            logger.error(f"Failed to load auth config: {e}")
-            self._config = {}
+            logger.error("Existing auth config could not be loaded; authentication is unavailable")
+            raise RuntimeError("Existing auth config is unreadable or malformed; restore or explicitly repair it before startup") from e
 
     def _load_sessions(self):
         """Load persisted session tokens from disk, pruning expired ones."""
@@ -218,12 +222,7 @@ class AuthManager:
                         continue
                     created = raw.get("created")
                     if not isinstance(created, (int, float)):
-                        # Legacy sessions were issued with a fixed TOKEN_TTL;
-                        # derive that issuance boundary once, then enforce the
-                        # absolute cap from the derived creation time.
-                        created = expiry - TOKEN_TTL
-                        raw["created"] = created
-                        changed = True
+                        raise RuntimeError("Legacy auth sessions require .clanker/tools/migrations/python/secondary.py auth-sessions")
                     absolute_expiry = float(created) + SESSION_ABSOLUTE_TTL
                     if expiry <= now or now >= absolute_expiry:
                         changed = True
@@ -236,6 +235,8 @@ class AuthManager:
                 if changed:
                     self._save_sessions()
                 logger.info(f"Loaded {len(self._sessions)} session(s) from disk")
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Failed to load sessions: {e}")
             self._sessions = {}
@@ -249,92 +250,9 @@ class AuthManager:
         except Exception as e:
             logger.error(f"Failed to save sessions: {e}")
 
-    def _migrate_single_user(self):
-        """Migrate old single-user format to multi-user format."""
-        if "password_hash" in self._config and "users" not in self._config:
-            old_user = str(self._config.get("username", "admin") or "admin").strip().lower()
-            if old_user in RESERVED_USERNAMES:
-                logger.warning(
-                    "Migrating legacy single-user reserved username '%s' to 'admin'",
-                    old_user,
-                )
-                old_user = "admin"
-            old_hash = self._config["password_hash"]
-            with self._config_lock:
-                self._config = {
-                    "users": {
-                        old_user: {
-                            "password_hash": old_hash,
-                            "created": time.time(),
-                            "is_admin": True,
-                        }
-                    }
-                }
-                self._save()
-            logger.info(f"Migrated single-user auth to multi-user (admin: {old_user})")
 
-    def _drop_reserved_loaded_users(self):
-        """Fail closed for legacy/manual auth rows that collide with sentinels."""
-        users = self._config.get("users")
-        if not isinstance(users, dict):
-            return
-        normalized = {}
-        removed = []
-        for username, data in users.items():
-            key = str(username or "").strip().lower()
-            if not key:
-                continue
-            # Copal sentinels and namespaced legacy rows stay loadable: they
-            # resolve to safe namespaced owners (see
-            # test_legacy_copal_sentinel_accounts_are_kept_but_resolve_to_safe_owners).
-            kept = key in COPAL_RESERVED_USERNAMES or key.startswith(
-                ("user:", "deleted:")
-            )
-            if not kept and is_reserved_username(key):
-                removed.append(key)
-                continue
-            normalized[key] = data
-        if removed or normalized != users:
-            with self._config_lock:
-                self._config["users"] = normalized
-                self._save()
-        if removed:
-            logger.warning(
-                "Removed reserved username(s) from auth config: %s",
-                ", ".join(sorted(set(removed))),
-            )
 
-    def _migrate_legacy_admin_role(self):
-        """Normalize setup.py's old role='admin' marker to is_admin=True."""
-        changed = False
-        for username, user in self.users.items():
-            if user.get("role") == "admin" and "is_admin" not in user:
-                user["is_admin"] = True
-                changed = True
-                logger.info(f"Migrated legacy admin role for '{username}'")
-        if changed:
-            self._save()
 
-    def _migrate_immutable_account_ids(self) -> None:
-        """Give every account an opaque identity that survives username changes.
-
-        Usernames remain the compatibility/display key for the existing auth
-        surface, but filesystem/workspace policy must not use a mutable username
-        as durable authority.  Legacy rows are upgraded once and persisted; a
-        deleted and later recreated username receives a different identity.
-        """
-        changed = False
-        seen: set[str] = set()
-        with self._config_lock:
-            for user in self.users.values():
-                account_id = str(user.get("account_id") or "").strip()
-                if not account_id.startswith("account-") or account_id in seen:
-                    account_id = f"account-{uuid.uuid4().hex}"
-                    user["account_id"] = account_id
-                    changed = True
-                seen.add(account_id)
-            if changed:
-                self._save()
 
     def _save(self):
         _atomic_write_json(self.auth_path, self._config, indent=2)
@@ -576,11 +494,13 @@ class AuthManager:
         return True
 
     def is_admin(self, username: str) -> bool:
-        return self.users.get(username, {}).get("is_admin", False)
+        key = normalize_known_username(self.users, username)
+        return bool(key and self.users[key].get("is_admin") is True)
 
     def account_id(self, username: str) -> Optional[str]:
         """Return the immutable identity for an existing account."""
-        user = self.users.get(str(username or "").strip().lower())
+        key = normalize_known_username(self.users, username)
+        user = self.users.get(key) if key else None
         if not isinstance(user, dict):
             return None
         value = str(user.get("account_id") or "").strip()
@@ -609,8 +529,11 @@ class AuthManager:
 
     def get_privileges(self, username: str) -> Dict[str, Any]:
         """Get privileges for a user. Admins get all privileges."""
-        user = self.users.get(username, {})
-        if user.get("is_admin"):
+        key = normalize_known_username(self.users, username)
+        if key is None:
+            return {}
+        user = self.users[key]
+        if user.get("is_admin") is True:
             return dict(ADMIN_PRIVILEGES)
         # Merge stored privileges with defaults (in case new privileges were added)
         stored = user.get("privileges", {})
@@ -808,7 +731,7 @@ class AuthManager:
 
     def verify_password(self, username: str, password: str) -> bool:
         username = username.strip().lower()
-        if username not in self.users:
+        if normalize_known_username(self.users, username) is None:
             return False
         return _verify_password(password, self.users[username]["password_hash"])
 
@@ -829,8 +752,8 @@ class AuthManager:
         token = secrets.token_hex(32)
         now = time.time()
         with self._config_lock:
-            if username not in self.users:
-                logger.warning("Refused to issue session for missing user '%s'", username)
+            if normalize_known_username(self.users, username) is None:
+                logger.warning("Refused to issue session for unavailable user '%s'", username)
                 return None
             with self._sessions_lock:
                 self._sessions[token] = {
@@ -879,8 +802,7 @@ class AuthManager:
         try:
             created = session.get("created")
             if not isinstance(created, (int, float)):
-                created = float(session.get("expiry", 0)) - TOKEN_TTL
-                session["created"] = created
+                return None
             return float(created) + SESSION_ABSOLUTE_TTL
         except (TypeError, ValueError):
             return None
@@ -917,6 +839,8 @@ class AuthManager:
                 # deleted them while their cookie was still valid), drop the
                 # session so the next request kicks them out instead of
                 # silently authenticating against a non-existent account.
+                if is_reserved_username(session.get("username")):
+                    return False, False
                 if session.get("username") not in self.users:
                     self._sessions.pop(token, None)
                     deleted_user = True
@@ -956,6 +880,8 @@ class AuthManager:
                 expired = True
             else:
                 _u = session["username"]
+                if is_reserved_username(_u):
+                    return None
                 # SECURITY: orphan check — same rationale as validate_token.
                 if _u not in self.users:
                     self._sessions.pop(token, None)

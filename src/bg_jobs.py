@@ -65,9 +65,13 @@ def history_context_mapping(value: Any) -> Optional[Dict[str, Any]]:
     roots = list(getattr(value, "roots", ()) or ())
     socket_path = str(getattr(value, "socket_path", "") or "")
     token = str(getattr(value, "token", "") or "")
+    session_id = str(getattr(value, "session_id", "") or "")
+    run_id = str(getattr(value, "run_id", "") or "")
+    task_id = str(getattr(value, "task_id", "") or "")
+    tool_id = str(getattr(value, "tool_id", "") or "")
     if not actor_id or not account_id or not workspace_id or not roots:
         return None
-    return {
+    result = {
         "history_capture": True,
         "actor_id": actor_id,
         "account_id": account_id,
@@ -76,6 +80,10 @@ def history_context_mapping(value: Any) -> Optional[Dict[str, Any]]:
         "history_token": token,
         "history_roots": roots,
     }
+    for key, item in (("session_id", session_id), ("run_id", run_id), ("task_id", task_id), ("tool_id", tool_id)):
+        if item:
+            result[key] = item
+    return result
 
 _JOBS_DIR = Path(BG_JOBS_DIR)
 _STORE = Path(BG_JOBS_FILE)
@@ -83,6 +91,13 @@ _STORE = Path(BG_JOBS_FILE)
 # A job that runs longer than this is presumed stuck and reaped (the agent
 # still gets a "timed out" follow-up so nothing hangs forever).
 DEFAULT_MAX_RUNTIME_S = 3600  # 1 hour
+_ACTIVE_STATUSES = frozenset({"running", "reconciling"})
+_TERMINAL_STATUSES = frozenset({"done", "failed"})
+
+
+def is_active(rec: Dict[str, Any]) -> bool:
+    """Whether a job can still own a child or capture reconciliation."""
+    return str(rec.get("status") or "") in _ACTIVE_STATUSES
 # Cap how much captured output we keep / feed back to the model.
 _MAX_OUTPUT_CHARS = 16000
 # How long a finished-and-followed-up job (record + its .sh/.cmd.sh/.log/.exit
@@ -157,6 +172,11 @@ def launch(
     approval_binding: Optional[str] = None,
     extra_env: Optional[Dict[str, str]] = None,
     history_context: Optional[Dict[str, Any]] = None,
+    run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    action_id: Optional[str] = None,
+    writable_roots: Optional[List[str]] = None,
+    tool_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Launch `command` detached. Returns the job record (status='running').
 
@@ -174,6 +194,12 @@ def launch(
 
     _JOBS_DIR.mkdir(parents=True, exist_ok=True)
     job_id = uuid.uuid4().hex[:12]
+    durable_action_id = str(action_id or f"shell:{scope_session}:{job_id}").strip()
+    if not durable_action_id:
+        raise ValueError("background shell commands require a durable action identity")
+    durable_run_id = str(run_id or (history_context or {}).get("run_id") or "").strip() or None
+    durable_task_id = str(task_id or (history_context or {}).get("task_id") or "").strip() or None
+    durable_tool_id = str(tool_id or (history_context or {}).get("tool_id") or "shell").strip()
     log_path = _JOBS_DIR / f"{job_id}.log"
     exit_path = _JOBS_DIR / f"{job_id}.exit"
     child_pid_path = _JOBS_DIR / f"{job_id}.child.pid"
@@ -184,6 +210,9 @@ def launch(
     )
     stdin_ready_path = _JOBS_DIR / f"{job_id}.stdin.ready"
     spec_path = _JOBS_DIR / f"{job_id}.spec.json"
+    capture_state_path = _JOBS_DIR / f"{job_id}.capture.json"
+    native_cancel_path = _JOBS_DIR / f"{job_id}.native-cancel.json"
+    root_journal_path = _JOBS_DIR / f"{job_id}.root-journal.json"
     active_workspace = os.path.realpath(scope_workspace)
     active_cwd = os.path.realpath(cwd or active_workspace)
     shell = (
@@ -217,18 +246,39 @@ def launch(
     except HexResolutionError as exc:
         raise ShellApprovalError(f"active project policy is unavailable: {exc}") from exc
     actions = destructive_actions(command)
-    _, containment = contained_argv(
-        shell_command_argv(shell, "exit 0" if os.name == "nt" else "true"),
-        workspace=active_workspace,
-        cwd=active_cwd,
-        network=network,
-        owner=scope_owner,
-        project_id=project_id,
-        hex_target=active_workspace,
-        hex_db_path=FM_DB_PATH,
-    )
-    if hex_check:
-        containment = "bwrap-overlay"
+    if hex_check and os.name == "nt":
+        from src.project_hex import require_hex_activation
+        from src.openclank.windows_shell_worker import system_shell, CONTAINMENT
+        require_hex_activation(
+            active_workspace, owner=scope_owner, project_id=project_id,
+            db_path=FM_DB_PATH, workspace_root=active_workspace,
+        )
+        try:
+            if os.path.commonpath([active_workspace, active_cwd]) != active_workspace:
+                raise ShellApprovalError("shell cwd must stay inside the active workspace")
+        except ValueError as exc:
+            raise ShellApprovalError("shell cwd must stay inside the active workspace") from exc
+        native_shell = str(system_shell()[0])
+        override = os.getenv("OPEN_CLANK_SHELL")
+        if override and os.path.normcase(override) not in {
+            os.path.normcase(native_shell), "powershell", "powershell.exe"
+        }:
+            raise ShellApprovalError("active native Hex shell supports OS PowerShell only")
+        shell = native_shell
+        containment = CONTAINMENT
+    else:
+        _, containment = contained_argv(
+            shell_command_argv(shell, "exit 0" if os.name == "nt" else "true"),
+            workspace=active_workspace,
+            cwd=active_cwd,
+            network=network,
+            owner=scope_owner,
+            project_id=project_id,
+            hex_target=active_workspace,
+            hex_db_path=FM_DB_PATH,
+        )
+        if hex_check:
+            containment = "bwrap-overlay"
     network_mode = str(
         network or os.getenv("OPEN_CLANK_SHELL_NETWORK", "enabled")
     ).lower()
@@ -247,6 +297,7 @@ def launch(
     if len(command_bytes) > _MAX_COMMAND_BYTES:
         raise ValueError("background shell command exceeds 1 MiB")
     spec = {
+        "job_id": job_id,
         "command_size": len(command_bytes),
         "workspace": active_workspace,
         "cwd": active_cwd,
@@ -259,10 +310,15 @@ def launch(
         "network": network_mode,
         "owner": scope_owner,
         "session_id": scope_session,
+        "run_id": durable_run_id,
+        "task_id": durable_task_id,
+        "action_id": durable_action_id,
+        "tool_id": durable_tool_id,
         "project_id": project_id,
         "hex_target": active_workspace,
         "hex_db_path": FM_DB_PATH,
         "hex_check": hex_check,
+        "native_shell_owner": bool(os.name == "nt" and hex_check),
         "destructive_actions": actions,
         "approval_binding": approval_binding if actions else None,
         # Non-secret transport flag: the worker applies the sudo -A askpass
@@ -270,6 +326,21 @@ def launch(
         # the exact command the owner approved.
         "sudo_askpass": bool(extra_env and extra_env.get("SUDO_ASKPASS")),
         "history_context": dict(history_context) if history_context else None,
+        # The caller supplies the same roots already covered by its external
+        # directory grant.  The worker validates them against that context;
+        # this list never expands authority on its own.
+        "history_roots": list(
+            (history_context or {}).get("history_roots", [])
+            if isinstance(history_context, dict)
+            else []
+        ) + [str(root) for root in (writable_roots or [])],
+        "capture_state_path": str(capture_state_path),
+        "native_cancel_path": str(native_cancel_path),
+        "root_journal_path": str(root_journal_path),
+        # The worker holds the authenticated batch handle through descendant
+        # reconciliation.  This bounds that real continuation at the same
+        # durable job deadline used by refresh().
+        "reconciliation_timeout_s": max(1, int(max_runtime_s)),
     }
     atomic_write_json(str(spec_path), spec)
     if os.name != "nt":
@@ -326,7 +397,7 @@ def launch(
         "destructive_actions": actions,
         "containment": containment,
         "network": network_mode,
-        "status": "running",       # running | done | failed
+        "status": "running",       # running | reconciling | done | failed
         "pid": proc.pid,
         "started_at": time.time(),
         "ended_at": None,
@@ -338,6 +409,15 @@ def launch(
         "child_pid_path": str(child_pid_path),
         "stdin_path": stdin_path,
         "stdin_ready_path": str(stdin_ready_path),
+        "capture_state_path": str(capture_state_path),
+        "native_cancel_path": str(native_cancel_path),
+        "root_journal_path": str(root_journal_path),
+        "action_id": durable_action_id,
+        "run_id": durable_run_id,
+        "task_id": durable_task_id,
+        "tool_id": durable_tool_id,
+        "capture_phase": "not_started",
+        "native_shell_owner": bool(os.name == "nt" and hex_check),
     }
     with _store_lock():
         jobs = _load()
@@ -412,6 +492,54 @@ def _cleanup_orphans(jobs: Dict[str, Dict[str, Any]], now: float) -> None:
             pass
 
 
+def _capture_state(rec: Dict[str, Any]) -> Dict[str, Any]:
+    path = Path(rec.get("capture_state_path", ""))
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _capture_phase(rec: Dict[str, Any]) -> str:
+    state = _capture_state(rec)
+    return str(state.get("phase") or rec.get("capture_phase") or "not_started")
+
+
+def _record_capture_phase(rec: Dict[str, Any]) -> str:
+    phase = _capture_phase(rec)
+    rec["capture_phase"] = phase
+    return phase
+
+
+def _abandon_root_journal(rec: Dict[str, Any], *, reason: str) -> None:
+    """Terminalize an open root journal honestly after worker loss."""
+    path = str(rec.get("root_journal_path") or "")
+    if not path:
+        return
+    from src.openclank.history_capture import RootJournal, RootJournalError, WriterOwner
+
+    journal = RootJournal(path)
+    state = journal.read()
+    if state is None:
+        # root_journal_path is recorded unconditionally; only an actually
+        # opened journal may be abandoned (never mint a phantom terminal).
+        return
+    result = rec.get("capture_result") if isinstance(rec.get("capture_result"), dict) else None
+    try:
+        journal.claim_recovery(WriterOwner(
+            owner_id=str(rec.get("owner") or ""),
+            session_id=str(rec.get("session_id") or ""),
+            action_id=str(rec.get("action_id") or state.get("action_id") or ""),
+            run_id=rec.get("run_id"),
+            task_id=rec.get("task_id"),
+            tool_id=str(rec.get("tool_id") or "shell"),
+        ))
+        journal.abandon(reason, result)
+    except (OSError, ValueError, RootJournalError):
+        pass
+
+
 def refresh() -> Dict[str, Dict[str, Any]]:
     """Reconcile every running job against disk. Marks done/failed (incl.
     timeout). Idempotent — safe to call from a poll loop. Returns the store."""
@@ -420,10 +548,40 @@ def refresh() -> Dict[str, Dict[str, Any]]:
         changed = False
         now = time.time()
         for rec in jobs.values():
-            if rec.get("status") != "running":
+            if not is_active(rec):
                 continue
             exit_path = Path(rec.get("exit_path", ""))
             if exit_path.exists():
+                phase = _record_capture_phase(rec)
+                # A worker that still has descendants or an unstable root
+                # leaves an explicit reconciling state.  Never turn that into
+                # a terminal success merely because its wrapper exited.
+                if phase in {"pending", "reconciling", "running", "prepared"}:
+                    # The worker has already closed its capture handle. There
+                    # is no owner left to resume this action, so preserve the
+                    # durable failure and make the job terminal instead of
+                    # creating an immortal reconciling record.
+                    rec["status"] = "failed"
+                    rec["capture_phase"] = "after_failed"
+                    rec["capture_error"] = (
+                        "capture worker exited before after-state reconciliation completed"
+                    )
+                    state = _capture_state(rec)
+                    if isinstance(state.get("result"), dict):
+                        rec["capture_result"] = dict(state["result"])
+                    _abandon_root_journal(
+                        rec,
+                        reason="capture worker exited before after-state reconciliation completed",
+                    )
+                    rec["ended_at"] = now
+                    try:
+                        code = int(exit_path.read_text(encoding="utf-8", errors="replace").strip() or "1")
+                    except Exception:
+                        code = 1
+                    rec["exit_code"] = code
+                    rec["signal"] = -code if code < 0 else None
+                    changed = True
+                    continue
                 try:
                     code = int(exit_path.read_text(encoding="utf-8", errors="replace").strip() or "1")
                 except Exception:
@@ -435,17 +593,33 @@ def refresh() -> Dict[str, Dict[str, Any]]:
                 changed = True
             elif (now - rec.get("started_at", now)) > rec.get("max_runtime_s", DEFAULT_MAX_RUNTIME_S):
                 _kill_record(rec)
-                rec["status"] = "failed"
+                rec["timed_out"] = True
                 rec["exit_code"] = -1
                 rec["signal"] = signal.SIGTERM if os.name != "nt" else None
-                rec["ended_at"] = now
-                rec["timed_out"] = True
+                if not _pid_alive(rec.get("pid")) and not exit_path.exists():
+                    # Timed-out dead workers take the same honest abandon path
+                    # as vanished workers; never invent success and never leave
+                    # an open journal behind in immortal reconciling.
+                    rec["status"] = "failed"
+                    rec["ended_at"] = now
+                    rec["died"] = True
+                    _abandon_root_journal(
+                        rec,
+                        reason="capture worker timed out before after-state reconciliation completed",
+                    )
+                else:
+                    rec["status"] = "reconciling"
+                    rec["ended_at"] = None
                 changed = True
             elif not _pid_alive(rec.get("pid")) and not exit_path.exists():
                 rec["status"] = "failed"
                 rec["exit_code"] = -1
                 rec["ended_at"] = now
                 rec["died"] = True
+                _abandon_root_journal(
+                    rec,
+                    reason="capture worker died before after-state reconciliation completed",
+                )
                 changed = True
         if _prune(jobs, now):
             changed = True
@@ -460,7 +634,22 @@ def _kill(pid: Optional[int]) -> None:
 
 
 def _kill_record(rec: Dict[str, Any]) -> None:
-    """Terminate both the contained child tree and its detached worker."""
+    """Ask the worker to stop so it can record partial history first."""
+    if os.name == "nt" and rec.get("native_shell_owner"):
+        endpoint = Path(rec.get("native_cancel_path") or "")
+        if not endpoint.is_file():
+            raise ShellApprovalError("native shell cancellation endpoint unavailable; owner identity/cleanup unverified")
+        if endpoint.exists():
+            from src.openclank.windows_shell_cancel import cancel_owner
+            rec["native_cancel_result"] = cancel_owner(
+                endpoint, job_id=str(rec["id"]),
+                action_id=str(rec.get("action_id") or ""),
+                owner=str(rec.get("owner") or ""), worker_pid=int(rec["pid"]),
+            )
+            # Only the durable owner can stop its private Job and reconcile.
+            # A forced owner exit is last-handle-close error recovery, never a
+            # claim that capture/promotion or whole-tree accounting completed.
+            return
     child_pid = None
     try:
         child_pid = int(
@@ -468,9 +657,23 @@ def _kill_record(rec: Dict[str, Any]) -> None:
         )
     except (OSError, TypeError, ValueError):
         pass
-    if child_pid is not None:
+    worker_pid = rec.get("pid")
+    if worker_pid and os.name != "nt":
+        try:
+            os.kill(int(worker_pid), signal.SIGTERM)
+        except (OSError, TypeError, ValueError):
+            pass
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and _pid_alive(worker_pid):
+            time.sleep(0.05)
+    elif worker_pid:
+        _kill(worker_pid)
+    # The worker's signal handler normally kills this group.  This fallback
+    # handles a dead worker and ensures a timeout cannot leave a writer alive.
+    if child_pid is not None and _pid_alive(child_pid):
         _kill(child_pid)
-    _kill(rec.get("pid"))
+    if worker_pid and _pid_alive(worker_pid):
+        _kill(worker_pid)
 
 
 def pending_followups() -> List[Dict[str, Any]]:
@@ -478,7 +681,7 @@ def pending_followups() -> List[Dict[str, Any]]:
     drains these; mark_followed_up() flips the flag only on success."""
     jobs = refresh()
     return [r for r in jobs.values()
-            if r.get("status") in ("done", "failed") and not r.get("followed_up")]
+            if r.get("status") in _TERMINAL_STATUSES and not r.get("followed_up")]
 
 
 def claim_pending_followups(claimant: str) -> List[Dict[str, Any]]:
@@ -489,7 +692,7 @@ def claim_pending_followups(claimant: str) -> List[Dict[str, Any]]:
     with _store_lock():
         jobs = _load()
         for rec in jobs.values():
-            if rec.get("status") not in ("done", "failed") or rec.get("followed_up"):
+            if rec.get("status") not in _TERMINAL_STATUSES or rec.get("followed_up"):
                 continue
             if rec.get("followup_state") == "failed":
                 continue
@@ -738,7 +941,7 @@ def write(
                 owner=owner,
                 workspace=workspace,
             )
-            if rec is None or rec.get("status") != "running":
+            if rec is None or not is_active(rec):
                 return False
             fifo = str(rec.get("stdin_path") or "")
             ready = str(rec.get("stdin_ready_path") or "")
@@ -785,7 +988,7 @@ def wait(job_id: str, *, timeout_s: float = 30.0) -> Optional[Dict[str, Any]]:
     deadline = time.monotonic() + max(0.0, min(float(timeout_s), 30.0))
     while True:
         rec = get(job_id)
-        if rec is None or rec.get("status") != "running" or time.monotonic() >= deadline:
+        if rec is None or not is_active(rec) or time.monotonic() >= deadline:
             return rec
         time.sleep(0.1)
 
@@ -812,14 +1015,18 @@ def kill(
         )
         if rec is None:
             return None
-        if rec.get("status") == "running":
+        if is_active(rec):
             _kill_record(rec)
-            rec["status"] = "failed"
+            # Legacy records created before capture-state persistence can only
+            # report the historical terminal shape. New records stay
+            # reconciling until the worker writes its terminal receipt.
+            rec["status"] = "reconciling" if rec.get("capture_state_path") else "failed"
             rec["exit_code"] = -1
             rec["signal"] = signal.SIGTERM if os.name != "nt" else None
-            rec["ended_at"] = time.time()
+            rec["ended_at"] = None
             rec["killed"] = True
-            rec["followed_up"] = True
+            rec["followed_up"] = not bool(rec.get("capture_state_path"))
+            rec["capture_phase"] = _record_capture_phase(rec)
             _save(jobs)
         return dict(rec)
 
@@ -844,7 +1051,7 @@ def delete(
         if rec is None:
             return False
         jobs.pop(job_id, None)
-        if rec.get("status") == "running":
+        if is_active(rec):
             _kill_record(rec)
         _save(jobs)
     for path in _owned_paths(job_id):
@@ -870,7 +1077,7 @@ def delete_for_session_owner(*, session_id: str, owner: str) -> int:
                 or str(rec.get("owner") or "") != caller_owner
             ):
                 continue
-            if rec.get("status") == "running":
+            if is_active(rec):
                 _kill_record(rec)
             jobs.pop(job_id, None)
             removed.append(job_id)

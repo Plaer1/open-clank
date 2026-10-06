@@ -1,6 +1,6 @@
 # AUDIT VERIFICATION
 
-All claims verified against actual source code at `/home/e/sauce/ai/agents/mimo-code/` and npm registry.
+All claims verified against actual source code at `/path/to/` and npm registry.
 Date: 2026-06-13 00:33 EDT
 
 ---

@@ -77,11 +77,12 @@ def test_service_worker_bypasses_api_before_any_cache_handler():
     assert api_guard < first_cache_handler
 
 
-def test_generated_image_route_uses_confining_resolver():
+def test_generated_image_route_checks_files_owner_before_confining_resolver():
     source = Path("app.py").read_text(encoding="utf-8")
 
     assert 'Path("data/generated_images") / filename' not in source
-    assert "resolve_generated_image_path(filename)" in source
+    assert "owns_locator(owner, filename)" in source
+    assert "resolve_gallery_image_path(filename, require_exists=True)" in source
     assert "headers=GENERATED_IMAGE_HEADERS" in source
 
 
@@ -202,12 +203,12 @@ class _ProvenanceSession:
 
 def test_generated_image_provenance_fails_closed_on_missing_and_store_errors():
     generated_images = _generated_images_module()
-    from core.database import GalleryImage
+    ImageRecord = type("ImageRecord", (), {"id": object(), "filename": object(), "owner": object(), "is_active": object()})
 
     def proof(row, *, close_error=False):
         return generated_images.has_generated_image_provenance(
             lambda: _ProvenanceSession(row, close_error=close_error),
-            GalleryImage,
+            ImageRecord,
             filename="a" * 12 + ".png",
             owner="alice",
         )
@@ -218,7 +219,7 @@ def test_generated_image_provenance_fails_closed_on_missing_and_store_errors():
     assert proof(object(), close_error=True) is False
     assert generated_images.has_generated_image_provenance(
         lambda: _ProvenanceSession(object()),
-        GalleryImage,
+        ImageRecord,
         filename="a" * 12 + ".png",
         owner=None,
     ) is False

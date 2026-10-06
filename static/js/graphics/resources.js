@@ -49,6 +49,10 @@ export function createBoundedCache({ maxEntries = 256 } = {}) {
       return value !== undefined;
     },
     keys() { return [...map.keys()]; },
+    oldest() {
+      const first = map.entries().next();
+      return first.done ? null : { key: first.value[0], value: first.value[1] };
+    },
     clear() {
       for (const value of map.values()) {
         if (value && typeof value.dispose === 'function') {
@@ -91,21 +95,27 @@ export function createGlyphAtlas({ maxEntries = 512, maxPixels = 1024 * 1024 } =
     set(key, entry, entryPixels = 0) {
       const previous = cache.get(key);
       if (previous) pixels = Math.max(0, pixels - (previous.__pixels || 0));
+      // createBoundedCache normally evicts internally at its entry limit. Do
+      // that removal here so pixel accounting observes every eviction without
+      // a full cache scan on each glyph insertion.
+      if (!previous && cache.size >= cache.limit) {
+        const oldest = cache.oldest();
+        if (oldest) {
+          pixels = Math.max(0, pixels - (oldest.value.__pixels || 0));
+          cache.delete(oldest.key);
+        }
+      }
       const wrapped = entry && typeof entry === 'object' ? entry : { value: entry };
       wrapped.__pixels = Math.max(0, Math.floor(entryPixels));
       cache.set(key, wrapped);
       pixels += wrapped.__pixels;
-      // Pixel budget is enforced by evicting the oldest entries until under cap.
+      // Pixel budget is enforced by bounded oldest removals; each decrement is
+      // exact, avoiding the former O(n) recomputation and phantom pixels.
       while (pixels > maxPixels && cache.size > 1) {
-        const oldest = cache.keys()[0];
+        const oldest = cache.oldest();
         if (!oldest) break;
-        cache.delete(oldest);
-        // delete() disposes; recompute pixels conservatively.
-        pixels = 0;
-        for (const k of cache.keys()) {
-          const item = cache.get(k);
-          pixels += (item && item.__pixels) || 0;
-        }
+        pixels = Math.max(0, pixels - (oldest.value.__pixels || 0));
+        cache.delete(oldest.key);
       }
       return wrapped;
     },

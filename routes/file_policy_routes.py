@@ -9,13 +9,12 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.auth_helpers import get_current_user
 from src.openclank.file_policy import FilePolicyError, FilePolicyRepository
+from src.openclank.files_principal import files_principal
 from src.openclank.files_service_client import close_all_clients
 from src.openclank.filesystem_registry import FilesystemRegistryError, FilesystemRootRegistry
 from src.openclank.media_attachment_targets import adopt_loose_media_for_workspace
 from src.openclank.history_capture import trusted_tool_context
-from src.openclank.permission_grants import GrantStore
 from src.openclank.workspace_policy_service import (
     WorkspacePolicyServiceError,
     bind_workspace_path,
@@ -69,6 +68,19 @@ class WorkspacePathRequest(_StrictModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class UpdateOperationApprovalRequest(_StrictModel):
+    enabled: bool | None = None
+    expires_unix_ms: int | None = Field(default=None, ge=0)
+
+
+class UpdateWorkspaceRequest(_StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    archived: bool | None = None
+    expected_revision: int | None = Field(default=None, ge=1)
+
+
+
+
 def setup_file_policy_routes(
     *,
     repository: FilePolicyRepository | None = None,
@@ -76,18 +88,10 @@ def setup_file_policy_routes(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/file-policy", tags=["file-policy"])
     policy = repository or FilePolicyRepository()
-    legacy_registry = filesystem_registry or FilesystemRootRegistry()
-    visibility_projection_owner = "__openclank_app_visibility__"
+    # Kept as a constructor argument for legacy callers; state is SQLite only.
 
     def principal(request: Request) -> tuple[str, str, bool]:
-        username = str(get_current_user(request) or "").strip().lower()
-        if not username:
-            raise HTTPException(401, "Authentication required")
-        auth_manager = getattr(getattr(request.app, "state", None), "auth_manager", None)
-        subject_id = auth_manager.account_id(username) if auth_manager and hasattr(auth_manager, "account_id") else None
-        if not subject_id:
-            raise HTTPException(503, "Immutable account identity is unavailable")
-        return str(subject_id), username, bool(auth_manager and auth_manager.is_admin(username))
+        return files_principal(request, repository=policy)
 
     def location_view(location) -> dict:
         return {
@@ -108,6 +112,8 @@ def setup_file_policy_routes(
             "binding_class": binding.binding_class,
             "subject_kind": binding.subject_kind,
             "subject_id": binding.subject_id,
+            "subject_username": policy.username_for_subject(binding.subject_id),
+            "approval": policy.approval_details(binding.id) if binding.binding_class == "operation" else None,
             "location_id": binding.location_id,
             "workspace_id": binding.workspace_id,
             "chat_id": binding.chat_id,
@@ -121,6 +127,20 @@ def setup_file_policy_routes(
             "revision": binding.revision,
             "imported": bool(binding.migration_source),
         }
+
+    def effective_scope(subject_id, is_admin):
+        rows = []
+        for location in policy.list_locations():
+            app_caps = []
+            agent_caps = []
+            for capability in location.capabilities:
+                if policy.resolve(subject_id=subject_id, is_admin=is_admin, origin="app", location_id=location.id, capability=capability).allowed:
+                    app_caps.append(capability)
+                if policy.resolve(subject_id=subject_id, is_admin=is_admin, origin="agent", location_id=location.id, capability=capability).allowed:
+                    agent_caps.append(capability)
+            if app_caps or agent_caps:
+                rows.append({"location_id": location.id, "app_capabilities": app_caps, "agent_capabilities": agent_caps})
+        return {"host": is_admin, "generation": policy.generation(), "locations": rows}
 
     @router.get("/state")
     async def state(request: Request, include_inactive: bool = False):
@@ -155,16 +175,21 @@ def setup_file_policy_routes(
             "workspaces": [
                 {
                     "id": workspace.id,
+                    "owner_subject_id": workspace.owner_subject_id,
                     "name": workspace.name,
                     "location_id": workspace.location_id,
                     "relative_folder": workspace.relative_folder,
                     "archived": workspace.archived,
+                    "can_update": is_admin or workspace.owner_subject_id == subject_id,
+                    "can_reset": workspace.owner_subject_id == subject_id,
                     "generation": workspace.generation,
                     "revision": workspace.revision,
                 }
                 for workspace in workspaces
             ],
             "bindings": [binding_view(binding) for binding in bindings],
+            "operation_approvals": [binding_view(binding) for binding in bindings if binding.binding_class == "operation"],
+            "effective_scope": effective_scope(subject_id, is_admin),
         }
 
     @router.get("/location-presets")
@@ -208,83 +233,15 @@ def setup_file_policy_routes(
             "location_id": body.location_id,
         }
 
-    def compatibility_grant_store(request: Request, username: str) -> GrantStore:
-        supervisor = getattr(
-            getattr(request.app, "state", None), "mimo_supervisor", None
-        )
-        store = (
-            supervisor.grant_store_for(username)
-            if supervisor and hasattr(supervisor, "grant_store_for")
-            else None
-        )
-        return store or GrantStore(str(policy.db_path))
-
-    def compatibility_reset_args(
-        body: ResetRequest,
-        *,
-        subject_id: str,
-        username: str,
-        is_admin: bool,
-    ) -> dict:
-        result = {
-            "owner": username,
-            "scope": body.scope,
-            "chat_id": str(body.chat_id or ""),
-            "workspace_id": str(body.workspace_id or ""),
-            "legacy_workspace": "",
-            "location_workspace_ids": (),
-            "legacy_location_path": "",
-        }
+    def reset_workspace_ids(body: ResetRequest, subject_id: str):
         if body.scope == "workspace":
-            try:
-                workspace = policy.get_workspace(str(body.workspace_id or ""))
-            except FilePolicyError as error:
-                raise_policy(error)
+            workspace = policy.get_workspace(str(body.workspace_id or ""))
             if workspace.owner_subject_id != subject_id:
-                raise HTTPException(404, detail={
-                    "code": "workspace_not_found",
-                    "message": "Workspace was not found",
-                })
-            try:
-                location = policy.get_location(workspace.location_id)
-            except FilePolicyError:
-                # Stable revocation remains valid after Location removal; the
-                # old raw-path compatibility dimension simply has no mapping.
-                return result
-            result["legacy_workspace"] = os.path.join(
-                location.canonical_path,
-                *(
-                    workspace.relative_folder.split("/")
-                    if workspace.relative_folder
-                    else ()
-                ),
-            )
-        elif body.scope == "location":
-            try:
-                location = policy.get_location(str(body.location_id or ""))
-            except FilePolicyError as error:
-                raise_policy(error)
-            if not is_admin and not any(
-                binding.location_id == location.id
-                for binding in policy.list_bindings(
-                    subject_id=subject_id,
-                    include_inactive=True,
-                )
-            ):
-                raise HTTPException(404, detail={
-                    "code": "location_not_found",
-                    "message": "Location was not found",
-                })
-            result["legacy_location_path"] = location.canonical_path
-            result["location_workspace_ids"] = tuple(
-                workspace.id
-                for workspace in policy.list_workspaces(
-                    owner_subject_id=subject_id,
-                    include_archived=True,
-                )
-                if workspace.location_id == location.id
-            )
-        return result
+                raise HTTPException(404, "Workspace was not found")
+            return (workspace.id,)
+        if body.scope == "location":
+            return tuple(workspace.id for workspace in policy.list_workspaces(owner_subject_id=subject_id, include_archived=True) if workspace.location_id == body.location_id)
+        return ()
 
     def raise_policy(error: FilePolicyError) -> None:
         status = 404 if error.code.endswith("_not_found") else 400
@@ -302,283 +259,17 @@ def setup_file_policy_routes(
             detail={"code": error.code, "message": str(error)},
         ) from error
 
-    def find_projection_root(location):
-        legacy_kind = "exact_file" if location.kind == "exact_file" else "recursive_directory"
-        return next((
-            item for item in legacy_registry.list(visibility_projection_owner)
-            if item.get("kind") == legacy_kind and item.get("canonical_path") == location.canonical_path
-        ), None)
+    def update_people_binding_safely(*, actor_id, binding, subject_username, capabilities, enabled):
+        return policy.update_binding(binding.id, actor_subject_id=actor_id, capabilities=capabilities, enabled=enabled)
 
-    def projection_root(location):
-        legacy_kind = "exact_file" if location.kind == "exact_file" else "recursive_directory"
-        root = find_projection_root(location)
-        try:
-            if root is None:
-                return legacy_registry.add(
-                    visibility_projection_owner,
-                    location.canonical_path,
-                    legacy_kind,
-                    list(location.capabilities),
-                    display_path=location.display_path,
-                )
-            return legacy_registry.update(
-                visibility_projection_owner,
-                str(root["id"]),
-                enabled=True,
-                capabilities=list(location.capabilities),
-            )
-        except FilesystemRegistryError as error:
-            raise HTTPException(
-                503,
-                detail={"code": "compatibility_projection_failed", "message": "People access was saved, but the current Rust projection could not be refreshed"},
-            ) from error
-
-    def projection_assignment(subject_username: str, root_id: str):
-        return next((
-            item for item in legacy_registry.list_visibility()
-            if item.get("subject_kind") == "user"
-            and item.get("subject_id") == subject_username
-            and item.get("root_id") == root_id
-        ), None)
-
-    def project_people_state(
-        *,
-        location_id: str,
-        subject_username: str,
-        capabilities: list[str] | tuple[str, ...],
-        active: bool,
-    ):
-        location = policy.get_location(str(location_id))
-        root = projection_root(location)
-        assignment = projection_assignment(subject_username, str(root["id"]))
-        try:
-            if assignment is None:
-                if not active:
-                    return None
-                return legacy_registry.assign_visibility(
-                    visibility_projection_owner,
-                    subject_username,
-                    str(root["id"]),
-                    list(capabilities),
-                )
-            return legacy_registry.update_visibility(
-                visibility_projection_owner,
-                str(assignment["id"]),
-                enabled=active,
-                capabilities=list(capabilities),
-            )
-        except FilesystemRegistryError as error:
-            raise HTTPException(
-                503,
-                detail={"code": "compatibility_projection_failed", "message": "People access was saved, but the current Rust assignment could not be refreshed"},
-            ) from error
-
-    def project_people_binding(binding, subject_username: str):
-        return project_people_state(
-            location_id=str(binding.location_id),
-            subject_username=subject_username,
-            capabilities=list(binding.capabilities),
-            active=binding.status == "active",
-        )
-
-    def update_people_binding_safely(
-        *,
-        actor_id: str,
-        binding,
-        subject_username: str,
-        capabilities: list[str] | tuple[str, ...] | None,
-        enabled: bool | None,
-    ):
-        """Update two stores without ever leaving runtime broader than policy."""
-        current_caps = set(binding.capabilities)
-        desired_caps = set(capabilities) if capabilities is not None else set(current_caps)
-        current_active = binding.status == "active"
-        desired_active = bool(enabled) if enabled is not None else current_active
-        desired_list = sorted(desired_caps)
-
-        if not desired_active:
-            # Revoke the live projection before canonical authority.
-            project_people_state(
-                location_id=str(binding.location_id),
-                subject_username=subject_username,
-                capabilities=desired_list,
-                active=False,
-            )
-            return policy.update_binding(
-                binding.id,
-                actor_subject_id=actor_id,
-                capabilities=desired_list,
-                enabled=False,
-            )
-
-        if not current_active or current_caps.issubset(desired_caps):
-            # A widening first becomes canonical; projection failure stays narrow.
-            updated = policy.update_binding(
-                binding.id,
-                actor_subject_id=actor_id,
-                capabilities=desired_list,
-                enabled=True,
-            )
-            project_people_binding(updated, subject_username)
-            return updated
-
-        if desired_caps.issubset(current_caps):
-            # A narrowing reaches the runtime before canonical authority.
-            project_people_state(
-                location_id=str(binding.location_id),
-                subject_username=subject_username,
-                capabilities=desired_list,
-                active=True,
-            )
-            return policy.update_binding(
-                binding.id,
-                actor_subject_id=actor_id,
-                capabilities=desired_list,
-                enabled=True,
-            )
-
-        # Incomparable capability sets are transitioned through disabled so a
-        # failure cannot leave either the old or new live projection too broad.
-        project_people_state(
-            location_id=str(binding.location_id),
-            subject_username=subject_username,
-            capabilities=sorted(current_caps),
-            active=False,
-        )
-        updated = policy.update_binding(
-            binding.id,
-            actor_subject_id=actor_id,
-            capabilities=desired_list,
-            enabled=True,
-        )
-        project_people_binding(updated, subject_username)
-        return updated
-
-    def find_agent_projection(subject_username: str, location):
-        legacy_kind = "exact_file" if location.kind == "exact_file" else "recursive_directory"
-        return next((
-            item for item in legacy_registry.list(subject_username)
-            if item.get("kind") == legacy_kind
-            and item.get("canonical_path") == location.canonical_path
-        ), None)
-
-    def project_agent_state(
-        *,
-        location_id: str,
-        subject_username: str,
-        capabilities: list[str] | tuple[str, ...],
-        active: bool,
-    ):
-        location = policy.get_location(str(location_id))
-        legacy_kind = "exact_file" if location.kind == "exact_file" else "recursive_directory"
-        root = find_agent_projection(subject_username, location)
-        try:
-            if root is None:
-                if not active:
-                    return None
-                return legacy_registry.add(
-                    subject_username,
-                    location.canonical_path,
-                    legacy_kind,
-                    list(capabilities),
-                    display_path=location.display_path,
-                )
-            return legacy_registry.update(
-                subject_username,
-                str(root["id"]),
-                enabled=active,
-                capabilities=list(capabilities),
-            )
-        except FilesystemRegistryError as error:
-            raise HTTPException(
-                503,
-                detail={
-                    "code": "compatibility_projection_failed",
-                    "message": "Agent access was saved, but the current Rust projection could not be refreshed",
-                },
-            ) from error
-
-    def project_agent_binding(binding, subject_username: str):
-        return project_agent_state(
-            location_id=str(binding.location_id),
-            subject_username=subject_username,
-            capabilities=list(binding.capabilities),
-            active=binding.status == "active",
-        )
-
-    def update_agent_binding_safely(
-        *,
-        actor_id: str,
-        binding,
-        subject_username: str,
-        capabilities: list[str] | tuple[str, ...] | None,
-        enabled: bool | None,
-    ):
-        current_caps = set(binding.capabilities)
-        desired_caps = set(capabilities) if capabilities is not None else set(current_caps)
-        current_active = binding.status == "active"
-        desired_active = bool(enabled) if enabled is not None else current_active
-        desired_list = sorted(desired_caps)
-
-        if not desired_active:
-            project_agent_state(
-                location_id=str(binding.location_id),
-                subject_username=subject_username,
-                capabilities=desired_list,
-                active=False,
-            )
-            return policy.update_binding(
-                binding.id,
-                actor_subject_id=actor_id,
-                capabilities=desired_list,
-                enabled=False,
-            )
-        if not current_active or current_caps.issubset(desired_caps):
-            updated = policy.update_binding(
-                binding.id,
-                actor_subject_id=actor_id,
-                capabilities=desired_list,
-                enabled=True,
-            )
-            project_agent_binding(updated, subject_username)
-            return updated
-        if desired_caps.issubset(current_caps):
-            project_agent_state(
-                location_id=str(binding.location_id),
-                subject_username=subject_username,
-                capabilities=desired_list,
-                active=True,
-            )
-            return policy.update_binding(
-                binding.id,
-                actor_subject_id=actor_id,
-                capabilities=desired_list,
-                enabled=True,
-            )
-        project_agent_state(
-            location_id=str(binding.location_id),
-            subject_username=subject_username,
-            capabilities=sorted(current_caps),
-            active=False,
-        )
-        updated = policy.update_binding(
-            binding.id,
-            actor_subject_id=actor_id,
-            capabilities=desired_list,
-            enabled=True,
-        )
-        project_agent_binding(updated, subject_username)
-        return updated
+    def update_agent_binding_safely(*, actor_id, binding, subject_username, capabilities, enabled):
+        return policy.update_binding(binding.id, actor_subject_id=actor_id, capabilities=capabilities, enabled=enabled)
 
     def validate_agent_ceiling(subject_id: str, is_admin: bool, location_id: str, capabilities: set[str]):
         location = policy.get_location(location_id)
         ceiling = set(location.capabilities)
         if not is_admin:
-            people = [
-                binding for binding in policy.list_bindings(subject_id=subject_id, binding_class="people")
-                if binding.location_id == location.id and binding.status == "active"
-            ]
-            ceiling &= set().union(*(set(binding.capabilities) for binding in people)) if people else set()
+            ceiling &= policy.people_capabilities(subject_id, location.id)
         if not capabilities or not capabilities.issubset(ceiling):
             raise HTTPException(
                 403,
@@ -653,39 +344,6 @@ def setup_file_policy_routes(
                 except FilePolicyError as error:
                     raise_policy(error)
 
-            # The legacy root is a derived compatibility projection only after
-            # the canonical Agent binding exists. Failure leaves the effective
-            # runtime narrower than policy; it can never create an unrecorded
-            # broad legacy grant.
-            legacy_kind = "exact_file" if body.kind == "exact_file" else "recursive_directory"
-            legacy_root = next((
-                root for root in legacy_registry.list(username)
-                if root.get("kind") == legacy_kind and root.get("canonical_path") == str(canonical)
-            ), None)
-            try:
-                if legacy_root is None:
-                    legacy_root = legacy_registry.add(
-                        username,
-                        str(canonical),
-                        legacy_kind,
-                        list(capabilities),
-                        display_path=body.path,
-                    )
-                else:
-                    legacy_root = legacy_registry.update(
-                        username,
-                        str(legacy_root["id"]),
-                        enabled=True,
-                        capabilities=list(capabilities),
-                    )
-            except FilesystemRegistryError as error:
-                raise HTTPException(
-                    503,
-                    detail={
-                        "code": "compatibility_projection_failed",
-                        "message": "The Location was saved, but its current Rust projection could not be refreshed",
-                    },
-                ) from error
             close_all_clients()
 
         return {
@@ -693,7 +351,7 @@ def setup_file_policy_routes(
             "generation": policy.generation(),
             "location": location_view(location),
             "agent_binding_id": binding.id if binding else None,
-            "compatibility_projected": bool(legacy_root),
+            "compatibility_projected": True,
             "os_managed": body.kind == "whole_root",
         }
 
@@ -707,19 +365,6 @@ def setup_file_policy_routes(
         except FilePolicyError as error:
             raise_policy(error)
 
-        # Revoke the currently consumed JSON/Rust projection before canonical
-        # policy. If canonical persistence then fails, runtime remains narrower
-        # rather than retaining an unrecorded grant.
-        try:
-            projected = legacy_registry.disable_projection(location.canonical_path, location.kind)
-        except FilesystemRegistryError as error:
-            raise HTTPException(
-                503,
-                detail={
-                    "code": "compatibility_projection_failed",
-                    "message": "The current Rust projection could not be revoked",
-                },
-            ) from error
         try:
             result = policy.disable_location(
                 location.id,
@@ -734,7 +379,7 @@ def setup_file_policy_routes(
             "generation": result["generation"],
             "bindings_revoked": result["bindings_revoked"],
             "workspaces_archived": result["workspaces_archived"],
-            "compatibility": projected,
+            "compatibility": {"derived": True},
         }
 
     @router.post("/workspaces/from-path")
@@ -829,8 +474,6 @@ def setup_file_policy_routes(
             )
         except FilePolicyError as error:
             raise_policy(error)
-        if not existing:
-            project_people_binding(binding, subject_username)
         close_all_clients()
         return {"version": 1, "generation": policy.generation(), "binding": binding_view(binding)}
 
@@ -865,7 +508,6 @@ def setup_file_policy_routes(
                     capabilities=tuple(sorted(capabilities)),
                     lifetime="always",
                 )
-                project_agent_binding(binding, username)
         except FilePolicyError as error:
             raise_policy(error)
         close_all_clients()
@@ -902,12 +544,6 @@ def setup_file_policy_routes(
     @router.delete("/agent-access/{binding_id}")
     async def remove_agent_access(binding_id: str, request: Request):
         subject_id, username, _is_admin, binding = own_agent_binding(binding_id, request)
-        project_agent_state(
-            location_id=str(binding.location_id),
-            subject_username=username,
-            capabilities=list(binding.capabilities),
-            active=False,
-        )
         try:
             policy.revoke_binding(
                 binding.id,
@@ -958,17 +594,6 @@ def setup_file_policy_routes(
         subject_username = auth_manager.username_for_account_id(binding.subject_id) if auth_manager and hasattr(auth_manager, "username_for_account_id") else None
         if not subject_username:
             raise HTTPException(404, "Account was not found")
-        location = policy.get_location(str(binding.location_id))
-        root = find_projection_root(location)
-        assignment = projection_assignment(subject_username, str(root["id"])) if root else None
-        if assignment:
-            try:
-                legacy_registry.remove_visibility(visibility_projection_owner, str(assignment["id"]))
-            except FilesystemRegistryError as error:
-                raise HTTPException(
-                    503,
-                    detail={"code": "compatibility_projection_failed", "message": "People access could not be removed from the current Rust projection"},
-                ) from error
         policy.revoke_binding(binding.id, actor_subject_id=actor_id, reason_code="people_access_removed")
         close_all_clients()
         return {"ok": True, "generation": policy.generation()}
@@ -983,33 +608,13 @@ def setup_file_policy_routes(
             )
         except FilePolicyError as error:
             raise_policy(error)
-        compatibility = compatibility_grant_store(
-            request, username
-        ).preview_agent_reset(**compatibility_reset_args(
-            body,
-            subject_id=subject_id,
-            username=username,
-            is_admin=is_admin,
-        ))
-        result["compatibility_matched"] = compatibility
-        result["total_matched"] = int(result["matched"]) + compatibility
+        result["total_matched"] = int(result["matched"])
         return result
 
     @router.post("/resets")
     async def reset(body: ResetRequest, request: Request):
         subject_id, username, is_admin = principal(request)
-        compatibility_args = compatibility_reset_args(
-            body,
-            subject_id=subject_id,
-            username=username,
-            is_admin=is_admin,
-        )
-        # Compatibility approval revocation happens first. If the canonical
-        # mutation subsequently fails, the only possible partial state is
-        # narrower authority; retrying this endpoint is idempotent.
-        compatibility_revoked = compatibility_grant_store(
-            request, username
-        ).reset_agent_permissions(**compatibility_args)
+        location_workspace_ids = reset_workspace_ids(body, subject_id)
         try:
             result = policy.reset_agent_permissions(
                 actor_subject_id=subject_id,
@@ -1018,8 +623,7 @@ def setup_file_policy_routes(
             )
         except FilePolicyError as error:
             raise_policy(error)
-        result["compatibility_revoked"] = compatibility_revoked
-        result["total_revoked"] = int(result["matched"]) + compatibility_revoked
+        result["total_revoked"] = int(result["matched"])
         task_cascade = {
             "selected": 0,
             "paused": 0,
@@ -1039,12 +643,10 @@ def setup_file_policy_routes(
                 workspace_id=body.workspace_id,
                 # Derived above from owned canonical Workspace records. Never
                 # pass the compatibility raw Location path into task authority.
-                location_workspace_ids=tuple(
-                    compatibility_args["location_workspace_ids"]
-                ),
+                location_workspace_ids=location_workspace_ids,
             )
         result["task_cascade"] = task_cascade
-        if result["matched"] or compatibility_revoked:
+        if result["matched"]:
             # Compatibility Rust clients carry a generation-stamped scope and
             # must not survive a reset while the canonical projection lands.
             close_all_clients()
@@ -1093,7 +695,6 @@ def setup_file_policy_routes(
         runtime_invalidated = False
         if (
             result["matched"]
-            or compatibility_revoked
             or pending_rejected
             or task_cascade["paused"]
             or task_cascade["executions_cancelled"]
@@ -1105,6 +706,85 @@ def setup_file_policy_routes(
             runtime_invalidated = True
         result["runtime_invalidated"] = runtime_invalidated
         return result
+
+    @router.patch("/workspaces/{workspace_id}")
+    async def update_workspace(workspace_id: str, body: UpdateWorkspaceRequest, request: Request):
+        actor_id, _username, is_admin = principal(request)
+        try:
+            workspace = policy.get_workspace(workspace_id)
+            if workspace.owner_subject_id != actor_id and not is_admin:
+                raise HTTPException(404, "Workspace was not found")
+            updated = policy.update_workspace(workspace.id, actor_subject_id=actor_id, name=body.name,
+                archived=body.archived, expected_revision=body.expected_revision)
+        except FilePolicyError as error:
+            status = 409 if error.code == "revision_conflict" else 404 if error.code.endswith("_not_found") else 400
+            raise HTTPException(status, detail={"code": error.code, "message": str(error)}) from error
+        close_all_clients()
+        owner = policy.username_for_subject(workspace.owner_subject_id)
+        supervisor = getattr(getattr(request.app, "state", None), "mimo_supervisor", None)
+        if updated.archived and owner:
+            scheduler = getattr(getattr(request.app, "state", None), "task_scheduler", None)
+            if scheduler and hasattr(scheduler, "reset_file_authority"):
+                await scheduler.reset_file_authority(owner, scope="workspace", workspace_id=workspace.id)
+            handler = supervisor.permission_handler_for(owner) if supervisor and hasattr(supervisor, "permission_handler_for") else None
+            if handler and hasattr(handler, "reject_scope"):
+                handler.reject_scope(authority_workspace_id=workspace.id)
+            from src.agent_tools.filesystem_tools import reject_file_approval_scope
+            from src.shell_policy import reject_shell_approval_scope
+            reject_file_approval_scope(owner=owner, authority_workspace_id=workspace.id)
+            reject_shell_approval_scope(owner=owner, authority_workspace_id=workspace.id)
+            if supervisor and hasattr(supervisor, "invalidate_owner_projection"):
+                await supervisor.invalidate_owner_projection(owner)
+        return {"ok": True, "generation": policy.generation(), "workspace": {
+            "id": updated.id, "owner_subject_id": updated.owner_subject_id, "name": updated.name,
+            "location_id": updated.location_id, "relative_folder": updated.relative_folder,
+            "archived": updated.archived, "generation": updated.generation, "revision": updated.revision}}
+
+    def own_operation(binding_id, request):
+        subject_id, _username, is_admin = principal(request)
+        try:
+            binding = policy.get_binding(binding_id)
+        except FilePolicyError as error:
+            raise_policy(error)
+        if binding.binding_class != "operation" or (binding.subject_id != subject_id and not is_admin):
+            raise HTTPException(404, "Operation approval was not found")
+        return subject_id, binding
+
+    @router.patch("/operation-approvals/{binding_id}")
+    async def update_operation_approval(binding_id: str, body: UpdateOperationApprovalRequest, request: Request):
+        actor_id, binding = own_operation(binding_id, request)
+        if body.enabled:
+            if binding.lifetime == "once" and binding.remaining_uses != 1:
+                raise HTTPException(409, detail={"code": "once_consumed", "message": "Consumed approvals cannot be reused"})
+            if binding.location_id:
+                location = policy.get_location(binding.location_id)
+                if not location.enabled or location.availability != "available":
+                    raise HTTPException(409, detail={"code": "location_unavailable", "message": "Restore the Location before enabling this approval"})
+            if binding.workspace_id:
+                workspace = policy.get_workspace(binding.workspace_id)
+                if workspace.archived or workspace.owner_subject_id != binding.subject_id:
+                    raise HTTPException(409, detail={"code": "workspace_unavailable", "message": "The approval's Workspace is unavailable"})
+        try:
+            changes = {"enabled": body.enabled}
+            if "expires_unix_ms" in body.model_fields_set:
+                changes["expires_unix_ms"] = body.expires_unix_ms
+            updated = policy.update_binding(binding.id, actor_subject_id=actor_id, **changes)
+        except FilePolicyError as error:
+            raise_policy(error)
+        close_all_clients()
+        return {"ok": True, "generation": policy.generation(), "binding": binding_view(updated)}
+
+    @router.delete("/operation-approvals/{binding_id}")
+    async def remove_operation_approval(binding_id: str, request: Request):
+        actor_id, binding = own_operation(binding_id, request)
+        policy.revoke_binding(binding.id, actor_subject_id=actor_id, reason_code="approval_removed")
+        close_all_clients()
+        return {"ok": True, "generation": policy.generation()}
+
+
+
+
+
 
     return router
 

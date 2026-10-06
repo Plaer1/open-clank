@@ -171,42 +171,13 @@ async def _cookbook_env_for_host(host: str) -> Dict[str, Any]:
     if not isinstance(env_root, dict):
         return {}
 
-    # Per-host entry takes precedence over top-level.
-    per_host: Dict[str, Any] = {}
-    for s in (env_root.get("servers") or []):
-        if isinstance(s, dict) and (s.get("host") or "") == (host or ""):
-            per_host = s
-            break
-
-    env_kind = per_host.get("env") or env_root.get("env") or "none"
-    env_path = per_host.get("envPath") or env_root.get("envPath") or ""
-    platform = per_host.get("platform") or env_root.get("platform") or "linux"
-    ssh_port = per_host.get("sshPort") or env_root.get("sshPort") or ""
-
-    env_prefix = ""
-    if env_kind == "venv" and env_path:
-        if platform == "windows":
-            activate = env_path if env_path.endswith("\\Scripts\\Activate.ps1") else env_path.rstrip("\\") + "\\Scripts\\Activate.ps1"
-            env_prefix = f"& {activate}"
-        else:
-            activate = env_path if env_path.endswith("/bin/activate") else env_path.rstrip("/") + "/bin/activate"
-            env_prefix = f"source {activate}"
-    elif env_kind == "conda" and env_path:
-        if platform == "windows":
-            env_prefix = f"conda activate {env_path}"
-        else:
-            env_prefix = f'eval "$(conda shell.bash hook)" && conda activate {env_path}'
-
+    from src.openclank.cookbook_execution import cookbook_launch_environment
     from routes.cookbook_helpers import load_stored_hf_token
-    return {
-        "env_prefix": env_prefix,
-        "env_type": env_kind,
-        "env_path": env_path,
-        "gpus": env_root.get("gpus") or "",
-        "platform": platform,
-        "hf_token": load_stored_hf_token(),
-        "ssh_port": ssh_port,
-    }
+
+    resolved = cookbook_launch_environment(env_root, host)
+    resolved.pop("remote_host", None)
+    resolved["hf_token"] = load_stored_hf_token()
+    return resolved
 
 
 def _infer_serve_port(cmd: str) -> int:

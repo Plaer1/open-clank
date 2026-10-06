@@ -17,7 +17,7 @@ from core.database import (
     CalendarEvent,
     Document,
     DocumentVersion,
-    GalleryImage,
+    FilesImageResource,
     Note,
     Session as DbSession,
 )
@@ -103,7 +103,7 @@ def _manual_cleanup_endpoint(handler: UploadHandler, monkeypatch):
     }["manual_cleanup"]
 
 
-def _reference_database(monkeypatch, *, upload_id: str, gallery_hash: str = None):
+def _reference_database(monkeypatch, *, upload_id: str, image_digest: str = None):
     from routes import upload_routes
 
     SessionLocal, engine, tmpfile = make_temp_sqlite(Base.metadata)
@@ -130,13 +130,13 @@ def _reference_database(monkeypatch, *, upload_id: str, gallery_hash: str = None
                 }]
             }),
         ))
-        if gallery_hash:
-            db.add(GalleryImage(
+        if image_digest:
+            db.add(_files_image(
                 id="gallery-cleanup-reference",
                 filename="abcdef123456.png",
                 prompt="Chat upload",
                 owner="alice",
-                file_hash=gallery_hash,
+                file_hash=image_digest,
             ))
         db.commit()
     finally:
@@ -153,8 +153,8 @@ def test_admin_cleanup_preserves_referenced_upload_and_reconciles_deleted_row(
     handler = _make_handler(tmp_path)
     referenced_id = "a" * 32 + ".png"
     unreferenced_id = "b" * 32 + ".txt"
-    gallery_id = "7" * 32 + ".png"
-    gallery_hash = "7" * 64
+    image_id = "7" * 32 + ".png"
+    image_digest = "7" * 64
     paths = _seed_old_uploads(handler, [
         {
             "id": referenced_id,
@@ -167,15 +167,15 @@ def test_admin_cleanup_preserves_referenced_upload_and_reconciles_deleted_row(
             "mime": "text/plain",
         },
         {
-            "id": gallery_id,
-            "hash": gallery_hash,
+            "id": image_id,
+            "hash": image_digest,
             "mime": "image/png",
         },
     ])
     engine, tmpfile = _reference_database(
         monkeypatch,
         upload_id=referenced_id,
-        gallery_hash=gallery_hash,
+        image_digest=image_digest,
     )
 
     try:
@@ -195,8 +195,8 @@ def test_admin_cleanup_preserves_referenced_upload_and_reconciles_deleted_row(
     referenced_info = handler.get_upload_info(referenced_id)
     assert referenced_info is not None
     assert handler.resolve_upload(referenced_id, owner="alice") is not None
-    assert paths[gallery_id].is_file()
-    assert handler.get_upload_info(gallery_id) is not None
+    assert paths[image_id].is_file()
+    assert handler.get_upload_info(image_id) is not None
 
     assert not paths[unreferenced_id].exists()
     assert handler.get_upload_info(unreferenced_id) is None
@@ -207,14 +207,14 @@ def test_admin_cleanup_preserves_referenced_upload_and_reconciles_deleted_row(
     )
     assert {info["id"] for info in live_index.values()} == {
         referenced_id,
-        gallery_id,
+        image_id,
     }
     backup_index = json.loads(
         Path(handler.upload_dir, "uploads.json.bak").read_text(encoding="utf-8")
     )
     assert {info["id"] for info in backup_index.values()} == {
         referenced_id,
-        gallery_id,
+        image_id,
     }
 
     # Recovery must not resurrect the deliberately deleted row.
@@ -481,7 +481,7 @@ def test_reference_discovery_covers_all_durable_upload_stores(
     event_upload_id = "5" * 32 + ".png"
     event_description_id = "7" * 32 + ".txt"
     event_location_id = "8" * 32 + ".png"
-    gallery_hash = "6" * 64
+    image_digest = "6" * 64
     SessionLocal, engine, tmpfile = make_temp_sqlite(Base.metadata)
     db = SessionLocal()
     try:
@@ -505,14 +505,14 @@ def test_reference_discovery_covers_all_durable_upload_stores(
             version_number=1,
             content=f'<!-- pdf_form_source upload_id="{version_id}" fields="1" -->',
         ))
-        db.add(GalleryImage(
+        db.add(_files_image(
             id="gallery-1",
             # Gallery filenames are normally generated 12-hex names, so this
             # record proves retention comes from its stored content hash.
             filename="abcdef123456.png",
             prompt="Chat upload",
             owner="alice",
-            file_hash=gallery_hash,
+            file_hash=image_digest,
         ))
         db.add(Note(
             id="note-1",
@@ -564,7 +564,7 @@ def test_reference_discovery_covers_all_durable_upload_stores(
         event_description_id,
         event_location_id,
     } <= referenced_ids
-    assert gallery_hash in referenced_hashes
+    assert image_digest in referenced_hashes
 
 
 def test_write_reservation_extracts_only_explicit_internal_references():
@@ -830,3 +830,26 @@ def test_note_calendar_and_document_routes_reserve_before_database_writes(monkey
     assert document_handler.calls == [
         (upload_id, {"owner": "alice", "allow_admin": False})
     ]
+
+
+def _files_image(**values):
+    """Build a Files-owned resource from legacy fixture metadata."""
+    filename = values.pop("filename", values.pop("name", "image"))
+    parent_id = values.pop("album_id", values.pop("parent_id", None))
+    prompt = values.pop("prompt", None)
+    model = values.pop("model", None)
+    file_hash = values.pop("file_hash", values.pop("digest", None))
+    size = values.pop("file_size", values.pop("size", 0))
+    provenance = dict(values.pop("provenance", {}) or {})
+    for key, value in (("prompt", prompt), ("model", model)):
+        if value is not None:
+            provenance[key] = value
+    is_folder = not filename or ("name" in values and parent_id is None)
+    return FilesImageResource(
+        id=values.pop("id"), owner=values.pop("owner", "alice"),
+        kind="folder" if is_folder else "image", parent_id=parent_id,
+        display_name=filename, locator=values.pop("locator", filename),
+        digest=file_hash, size=size, mime_type=values.pop("mime_type", None),
+        favorite=values.pop("favorite", False), is_active=values.pop("is_active", True),
+        provenance=provenance or None, **values,
+    )

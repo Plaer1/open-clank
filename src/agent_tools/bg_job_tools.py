@@ -187,6 +187,9 @@ class ManageBgJobsTool:
                     network=network,
                     approval_binding=approval_binding,
                     history_context=bg_jobs.history_context_mapping(ctx.get("history_context")),
+                    run_id=str(ctx.get("run_id") or ""),
+                    task_id=str(ctx.get("task_id") or ""),
+                    tool_id="manage_bg_jobs",
                 )
             except Exception as exc:
                 return {"error": f"manage_bg_jobs: {exc}", "exit_code": 1}
@@ -204,7 +207,7 @@ class ManageBgJobsTool:
                 return {"error": f"manage_bg_jobs: no shell session '{job_id}' in this scope.", "exit_code": 1}
 
             if action in _KILL_ACTIONS:
-                if rec.get("status") != "running":
+                if not bg_jobs.is_active(rec):
                     return {"output": f"Job `{job_id}` already {_status_label(rec)}; nothing to kill.", "exit_code": 0}
                 killed = bg_jobs.kill(job_id, **scope)
                 if killed is None:
@@ -234,7 +237,7 @@ class ManageBgJobsTool:
                 except (TypeError, ValueError):
                     timeout_s = 30.0
                 deadline = time.monotonic() + timeout_s
-                while rec.get("status") == "running":
+                while bg_jobs.is_active(rec):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
@@ -247,7 +250,7 @@ class ManageBgJobsTool:
                     "output": f"Job `{job_id}` is {_status_label(rec or {})}.",
                     "exit_code": 0,
                     "session": _public_session(rec or {}),
-                    "timed_out": bool(rec and rec.get("status") == "running"),
+                    "timed_out": bool(rec and bg_jobs.is_active(rec)),
                 }
 
             if action in _POLL_ACTIONS:

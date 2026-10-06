@@ -109,21 +109,8 @@ class OwnerSessionMap:
                     "revision": revision,
                 }
             return out
-        # The original v1 format was a flat chat -> engine object.  An empty
-        # object is therefore a valid empty v1 map and must be upgraded on the
-        # first mutation just like a non-empty legacy map.
         if isinstance(raw, dict) and "version" not in raw:
-            out = self._empty()
-            for chat, current in raw.items():
-                if not isinstance(chat, str) or not chat or chat != chat.strip() or not isinstance(current, str) or not current or current != current.strip():
-                    raise SessionMapCorrupt("legacy managed session map contains a malformed entry")
-                out["chats"][chat] = {
-                    "owner": self.owner,
-                    "current": current,
-                    "aliases": [],
-                    "revision": 0,
-                }
-            return out
+            raise SessionMapCorrupt("Session map does not match this release. Stop writers and keep a complete backup; restore the matching release or prepare an offline conversion.")
         if raw is None:
             return self._empty()
         raise SessionMapCorrupt("managed session map has an invalid envelope")

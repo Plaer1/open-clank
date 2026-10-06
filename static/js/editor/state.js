@@ -1,8 +1,8 @@
 /**
- * Editor state store — a single mutable object that the gallery editor
+ * Editor state store — a single mutable object that Imps
  * and its tool modules read and write directly.
  *
- * Migration: galleryEditor.js used to own ~110 module-scope `let`
+ * Migration: imps.js used to own ~110 module-scope `let`
  * declarations and capture them via closure. Tool modules can't import
  * a `let` binding's mutations across module boundaries, so we move the
  * state into a single exported OBJECT whose properties are freely
@@ -10,9 +10,9 @@
  * exactly the way the old code wrote `_transformW`.
  *
  * Slices land here one tool at a time; this file grows as more state
- * migrates out of galleryEditor.js. Defaults match the legacy
+ * migrates out of imps.js. Defaults match the legacy
  * module-scope initializers verbatim — every `state.foo = …` reset
- * site in galleryEditor.js still works unchanged.
+ * site in imps.js still works unchanged.
  */
 export const state = {
   // ── Transform tool ──

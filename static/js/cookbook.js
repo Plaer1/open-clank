@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK MODULE (v2 — simplified)
 // What Fits? + Saved presets, inline action panels
@@ -57,8 +58,8 @@ if (typeof window !== 'undefined' && !window._tagScrollGuardWired) {
 
 // Radio-style check marking which model directory is a server's download target.
 // OFF = hollow circle (pickable); ON = checked circle (accent-tinted via CSS).
-export const _MODELDIR_CHECK_OFF = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/></svg>';
-export const _MODELDIR_CHECK_ON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="8 12 11 15 16 9"/></svg>';
+export const _MODELDIR_CHECK_OFF = uiIcon("dot-outline", 13);
+export const _MODELDIR_CHECK_ON = uiIcon("success", 13, {"role":"inherit"});
 
 function _normalizeCookbookModelDir(dir) {
   const d = String(dir || '').replaceAll('✕', '').replaceAll('✖', '').trim();
@@ -1005,7 +1006,7 @@ export function _buildServeCmd(f, modelName, backend) {
 /** Get inline logo HTML for a model name/repo_id */
 export function modelLogo(name) {
   const logo = providerLogo(name);
-  const svg = logo || '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4"/></svg>';
+  const svg = logo || uiIcon("dot", 16);
   return `<span style="width:12px;height:12px;display:inline-flex;align-items:center;vertical-align:-2px;margin-right:3px;opacity:${logo ? '0.5' : '0.2'};">${svg}</span>`;
 }
 
@@ -1290,10 +1291,10 @@ async function _fetchDependencies() {
           </div>
           <div style="position:relative;">
             <pre class="cookbook-dep-recipe-cmds" data-dep-recipe-cmds="${esc(backend)}" data-dep-recipe-install="${esc(initialRuntimeCmds.join('\n'))}" style="margin:0;padding:8px 36px 8px 10px;background:rgba(0,0,0,0.08);border-radius:4px;font-size:11px;line-height:1.5;overflow-x:auto;white-space:pre;">${esc(_recipeDisplayText(initialCmds, initialVariant))}</pre>
-            <button type="button" id="recipe-copy-${esc(backend)}" class="cookbook-dep-recipe-copy" data-dep-recipe-copy="${esc(backend)}" title="Copy" aria-label="Copy" style="position:absolute;top:6px;right:6px;padding:3px 5px;background:none;border:none;color:inherit;opacity:0.7;cursor:pointer;display:inline-flex;align-items:center;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+            <button type="button" id="recipe-copy-${esc(backend)}" class="cookbook-dep-recipe-copy" data-dep-recipe-copy="${esc(backend)}" title="Copy" aria-label="Copy" style="position:absolute;top:6px;right:6px;padding:3px 5px;background:none;border:none;color:inherit;opacity:0.7;cursor:pointer;display:inline-flex;align-items:center;">${uiIcon("copy", 13)}</button>
           </div>
           <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
-            <button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-recipe-run" data-dep-recipe-run="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>Run</button>
+            <button type="button" class="cookbook-dep-tag cookbook-dep-install cookbook-dep-recipe-run" data-dep-recipe-run="${esc(backend)}" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;">${uiIcon("play", 11)}Run</button>
           </div>
         </div>`;
     }
@@ -1839,7 +1840,7 @@ async function _fetchDependencies() {
       let left = Math.min(rect.right - minW, window.innerWidth - minW - 8);
       left = Math.max(8, left);
       dropdown.style.cssText = `position:fixed;display:block;z-index:${topPortalZ()};top:${rect.bottom + 6}px;left:${left}px;right:auto;min-width:${minW}px;max-width:calc(100vw - 16px);background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.3);padding:6px;font-size:11px;`;
-      const upIco = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>';
+      const upIco = uiIcon("refresh", 13);
       const it = document.createElement('div');
       it.className = 'dropdown-item-compact';
       it.innerHTML = `<span class="dropdown-icon">${upIco}</span><span>Update</span>`;
@@ -1851,7 +1852,7 @@ async function _fetchDependencies() {
       });
       dropdown.appendChild(it);
       if (rowPkgName === 'llama_cpp') {
-        const rebuildIco = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
+        const rebuildIco = uiIcon("refresh", 13);
         const rebuild = document.createElement('div');
         rebuild.className = 'dropdown-item-compact';
         rebuild.innerHTML = `<span class="dropdown-icon">${rebuildIco}</span><span>Rebuild</span>`;
@@ -2921,8 +2922,8 @@ export function _serverEntryHtml(s, i, defaultServer, forceRemote, isNew) {
   const _srvKey = isLocal ? 'local' : (s.host || '');
   const _isDefaultSrv = (defaultServer || '') === _srvKey;
   const _pIco = _platformIcon(s.platform);
-  const _keyBtn = `<button class="cookbook-server-key-btn" title="Set up SSH key for this server" style="height:22px;box-sizing:border-box;display:inline-flex;align-items:center;position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="M12 11l8-8"/><path d="M17 6l3 3"/></svg>Key</button>`;
-  const _checkBtn = `<button class="cookbook-server-check-btn" title="Check SSH connection" style="height:22px;box-sizing:border-box;display:inline-flex;align-items:center;position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>Check</button>`;
+  const _keyBtn = `<button class="cookbook-server-key-btn" title="Set up SSH key for this server" style="height:22px;box-sizing:border-box;display:inline-flex;align-items:center;position:relative;top:-2px;">${uiIcon("key", 11, {"style":"margin-right:4px;flex-shrink:0;"})}Key</button>`;
+  const _checkBtn = `<button class="cookbook-server-check-btn" title="Check SSH connection" style="height:22px;box-sizing:border-box;display:inline-flex;align-items:center;position:relative;top:-2px;">${uiIcon("check", 11, {"style":"margin-right:4px;flex-shrink:0;","role":"inherit"})}Check</button>`;
   html += `<span class="cookbook-server-title" style="display:flex;align-items:center;gap:6px;width:100%;font-size:13px;font-weight:600;margin-bottom:4px;">`;
   html += `${esc(_srvTitle)}`;
   html += _pIco ? `<span class="cookbook-srv-platform" title="${esc(s.platform || '')}" style="display:inline-flex;align-items:center;opacity:0.55;">${_pIco}</span>` : '';
@@ -2930,14 +2931,14 @@ export function _serverEntryHtml(s, i, defaultServer, forceRemote, isNew) {
   if (isNew) {
     // New server: Cancel (discard) sits top-right; the default toggle only makes
     // sense once the server is saved.
-    html += `<span style="margin-left:auto;display:inline-flex;gap:4px;align-items:center;">${_checkBtn}${_keyBtn}<button class="cookbook-server-cancel-btn" title="Discard this new server" style="height:22px;box-sizing:border-box;display:inline-flex;align-items:center;position:relative;top:-2px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button></span>`;
+    html += `<span style="margin-left:auto;display:inline-flex;gap:4px;align-items:center;">${_checkBtn}${_keyBtn}<button class="cookbook-server-cancel-btn" title="Discard this new server" style="height:22px;box-sizing:border-box;display:inline-flex;align-items:center;position:relative;top:-2px;">${uiIcon("close", 11, {"style":"margin-right:4px;flex-shrink:0;"})}Cancel</button></span>`;
   } else {
     html += `<span style="margin-left:auto;display:inline-flex;gap:4px;align-items:center;">${!isLocal ? _checkBtn + _keyBtn : ''}<span class="cookbook-srv-default${_isDefaultSrv ? ' active' : ''}" title="${_isDefaultSrv ? 'Default server — Cookbook opens here' : 'Make this the default server'}" data-srv-key="${esc(_srvKey)}">${_serverDefaultHtml(_isDefaultSrv)}</span></span>`;
   }
   html += `</span>`;
   html += `<div class="cookbook-server-row">`;
   html += `<input type="text" class="hwfit-sf cookbook-srv-name" value="${esc(s.name || (isLocal ? 'Local' : ''))}" placeholder="Name (optional)" style="width:92px;flex-shrink:0;" />`;
-  html += `<span class="cookbook-srv-color-wrap has-color" title="Server color"><select class="hwfit-sf cookbook-srv-color" aria-hidden="true" tabindex="-1">${colorOpts}</select><button type="button" class="hwfit-sf cookbook-srv-color-btn" aria-haspopup="listbox" aria-expanded="false"><span class="cookbook-srv-color-dot" aria-hidden="true"></span><span class="cookbook-srv-color-label">${esc(selectedColorLabel)}</span><svg class="cookbook-srv-color-caret" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button><div class="cookbook-srv-color-menu hidden" role="listbox">${colorMenu}</div></span>`;
+  html += `<span class="cookbook-srv-color-wrap has-color" title="Server color"><select class="hwfit-sf cookbook-srv-color" aria-hidden="true" tabindex="-1">${colorOpts}</select><button type="button" class="hwfit-sf cookbook-srv-color-btn" aria-haspopup="listbox" aria-expanded="false"><span class="cookbook-srv-color-dot" aria-hidden="true"></span><span class="cookbook-srv-color-label">${esc(selectedColorLabel)}</span>${uiIcon("chevron-down", 9, {"className":"cookbook-srv-color-caret"})}</button><div class="cookbook-srv-color-menu hidden" role="listbox">${colorMenu}</div></span>`;
   html += `<input type="text" class="hwfit-sf cookbook-srv-host" value="${isLocal ? '' : esc(s.host || '')}" placeholder="e.g. user@ip" style="width:184px;flex-shrink:0;box-sizing:border-box;" ${isLocal ? 'readonly' : ''} />`;
   html += `<input type="text" class="hwfit-sf cookbook-srv-port" value="${esc(s.port || '')}" placeholder="Port" title="SSH port (default 22)" style="width:48px;flex-shrink:0;" ${isLocal ? 'readonly' : ''} />`;
   html += `<select class="hwfit-sf cookbook-srv-env">${envOpts}</select>`;
@@ -2963,10 +2964,10 @@ export function _serverEntryHtml(s, i, defaultServer, forceRemote, isNew) {
   if (isNew) {
     // A brand-new server: Save (confirm) sits where Delete would be; Cancel is
     // top-right in the title. Save confirms with a checkmark (auto-saves on edit too).
-    html += `<button class="cookbook-server-save-btn" title="Save this server" style="${_btnPushStyle}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</button>`;
+    html += `<button class="cookbook-server-save-btn" title="Save this server" style="${_btnPushStyle}">${uiIcon("save", 11, {"style":"margin-right:4px;flex-shrink:0;"})}Save</button>`;
   } else if (!isLocal) {
-    html += `<button class="cookbook-server-rm cookbook-server-rm-btn" title="Delete this server" style="${_btnPushStyle}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>Delete</button>`;
-    html += `<button class="cookbook-server-save-btn" title="Save server changes" style="${_btnBaseStyle}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</button>`;
+    html += `<button class="cookbook-server-rm cookbook-server-rm-btn" title="Delete this server" style="${_btnPushStyle}">${uiIcon("trash", 11, {"style":"margin-right:4px;flex-shrink:0;"})}Delete</button>`;
+    html += `<button class="cookbook-server-save-btn" title="Save server changes" style="${_btnBaseStyle}">${uiIcon("save", 11, {"style":"margin-right:4px;flex-shrink:0;"})}Save</button>`;
   }
   html += `</div>`;
   if (!isLocal) {
@@ -2994,10 +2995,10 @@ function _renderRecipes() {
 
   // Tabs
   html += '<div class="cookbook-tabs">';
-  html += '<button class="cookbook-tab" data-backend="Serve"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:-1px;margin-right:3px;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Launch</button>';
-  html += '<button class="cookbook-tab active" data-backend="Search"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="7 14 12 19 17 14"/><line x1="12" y1="19" x2="12" y2="5"/><line x1="5" y1="21" x2="19" y2="21"/></svg>Download</button>';
-  html += '<button class="cookbook-tab" data-backend="Dependencies"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Dependencies</button>';
-  html += '<button class="cookbook-tab" data-backend="Settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>';
+  html += "<button class=\"cookbook-tab\" data-backend=\"Serve\">" + uiIcon("play", 12, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Launch</button>";
+  html += "<button class=\"cookbook-tab active\" data-backend=\"Search\">" + uiIcon("download", 12, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Download</button>";
+  html += "<button class=\"cookbook-tab\" data-backend=\"Dependencies\">" + uiIcon("model", 12, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Dependencies</button>";
+  html += "<button class=\"cookbook-tab\" data-backend=\"Settings\">" + uiIcon("settings", 12, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Settings</button>";
   html += '</div>';
 
   // Search group
@@ -3011,7 +3012,7 @@ function _renderRecipes() {
   html += `<h2 id="cookbook-dl-tab-fold" class="${_dlTabFolded ? 'is-folded' : ''}" style="margin:0;padding:0;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;flex:1;">Direct Download<span id="cookbook-dl-tab-chevron" style="display:inline-block;transition:transform 0.15s;font-size:1.1em;margin-left:8px;opacity:0.85;">${_dlTabFolded ? '▸' : '▾'}</span></h2>`;
   html += '</div>';
   html += `<div id="cookbook-dl-tab-fold-body" class="${_dlTabFolded ? 'is-folded' : ''}">`;
-  html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Download from <a href="https://huggingface.co/models" target="_blank" rel="noopener" style="color:var(--accent,var(--red));text-decoration:none;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:1px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>HuggingFace</a> by pasting model link, or download directly in the Scan section below.</p>';
+  html += "<p class=\"memory-desc doclib-desc\" style=\"margin-top:6px;\">Download from <a href=\"https://huggingface.co/models\" target=\"_blank\" rel=\"noopener\" style=\"color:var(--accent,var(--red));text-decoration:none;\">" + uiIcon("external", 10, {"style":"vertical-align:-1px;margin-right:1px;"}) + "HuggingFace</a> by pasting model link, or download directly in the Scan section below.</p>";
   html += '<div class="hwfit-container" id="hwfit-container">';
 
   // Section 1: Settings
@@ -3068,7 +3069,7 @@ function _renderRecipes() {
   html += `<div style="display:flex;gap:4px;align-items:center;">`;
   html += `<button type="button" class="memory-toolbar-btn" id="cookbook-hf-latest-toggle" style="flex:1;text-align:left;height:28px;font-size:11px;display:flex;align-items:center;gap:6px;border-radius:5px;">`;
   // Trending-up icon (accent) so the section reads as "what's hot".
-  html += `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;pointer-events:none;"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>`;
+  html += `${uiIcon("usage", 12, {"style":"flex-shrink:0;pointer-events:none;color:var(--accent, var(--red));"})}`;
   html += `<span style="pointer-events:none;flex:1;">Trending models that fit your hardware</span>`;
   // Chevron moved to the RIGHT \u2014 collapsed = pointing right, expanded
   // = rotated 90deg into a down chevron (handled by existing toggle CSS).
@@ -3104,14 +3105,14 @@ function _renderRecipes() {
   html += '<button type="button" class="cookbook-field-input hwfit-usecase-btn" data-hwfit-usecase-btn aria-haspopup="listbox" aria-expanded="false" title="Model type">';
   html += '<span class="hwfit-usecase-btn-icon" data-hwfit-usecase-icon aria-hidden="true"></span>';
   html += '<span class="hwfit-usecase-btn-label" data-hwfit-usecase-label>Standard</span>';
-  html += '<svg class="hwfit-usecase-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+  html += uiIcon("chevron-down", 10, {"className":"hwfit-usecase-caret"});
   html += '</button>';
   html += '<div class="hwfit-usecase-menu" data-hwfit-usecase-menu role="listbox" hidden></div>';
   html += '</span>';
   html += '<div class="hwfit-gpu-toggles" id="hwfit-gpu-toggles"></div>';
-  html += '<button type="button" class="hwfit-gpu-btn hwfit-hw-manual-btn" id="hwfit-hw-manual-btn" title="Set hardware manually" style="flex-shrink:0;position:relative;top:-3px;left:-1px;display:inline-flex;align-items:center;gap:3px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>EDIT</button>';
-  html += '<button type="button" class="hwfit-gpu-btn hwfit-advanced-btn" id="hwfit-advanced-btn" title="Scan settings" aria-label="Scan settings" aria-expanded="false" style="flex-shrink:0;position:relative;top:-3px;left:-3px;width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 4.3l.06.06A1.65 1.65 0 0 0 8.92 4a1.65 1.65 0 0 0 1-1.51V2a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg></button>';
-  html += '<button type="button" class="hwfit-gpu-btn hwfit-hw-refresh-btn" id="hwfit-hw-refresh-btn" title="Refresh selected server hardware and cached models" aria-label="Refresh selected server hardware and cached models" style="flex-shrink:0;position:relative;top:-3px;left:-5px;width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10"/><path d="M3.51 15a9 9 0 0 0 14.85 3.36L23 14"/></svg></button>';
+  html += "<button type=\"button\" class=\"hwfit-gpu-btn hwfit-hw-manual-btn\" id=\"hwfit-hw-manual-btn\" title=\"Set hardware manually\" style=\"flex-shrink:0;position:relative;top:-3px;left:-1px;display:inline-flex;align-items:center;gap:3px;\">" + uiIcon("edit", 10, {"style":"flex-shrink:0;"}) + "EDIT</button>";
+  html += "<button type=\"button\" class=\"hwfit-gpu-btn hwfit-advanced-btn\" id=\"hwfit-advanced-btn\" title=\"Scan settings\" aria-label=\"Scan settings\" aria-expanded=\"false\" style=\"flex-shrink:0;position:relative;top:-3px;left:-3px;width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;\">" + uiIcon("settings", 12) + "</button>";
+  html += "<button type=\"button\" class=\"hwfit-gpu-btn hwfit-hw-refresh-btn\" id=\"hwfit-hw-refresh-btn\" title=\"Refresh selected server hardware and cached models\" aria-label=\"Refresh selected server hardware and cached models\" style=\"flex-shrink:0;position:relative;top:-3px;left:-5px;width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;\">" + uiIcon("refresh", 11) + "</button>";
   // Sort state — the clickable column headers read/write this (pewds' original
   // sort paradigm). Newest is reachable by clicking the Model column header.
   html += '<select class="cookbook-field-input hwfit-sort" id="hwfit-sort" style="display:none">';
@@ -3134,7 +3135,7 @@ function _renderRecipes() {
   html += '<button type="button" class="cookbook-field-input hwfit-engine-btn" data-hwfit-engine-btn aria-haspopup="listbox" aria-expanded="false" title="Filter by serving engine">';
   html += '<span class="hwfit-engine-btn-icon" data-hwfit-engine-icon aria-hidden="true"></span>';
   html += '<span class="hwfit-engine-btn-label" data-hwfit-engine-label>Engine</span>';
-  html += '<svg class="hwfit-engine-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+  html += uiIcon("chevron-down", 10, {"className":"hwfit-engine-caret"});
   html += '</button>';
   html += '<div class="hwfit-engine-menu" data-hwfit-engine-menu role="listbox" hidden></div>';
   html += '<span class="hwfit-help-chip hwfit-help-chip-inline hwfit-engine-help" title="Rule of thumb: GGUF on single GPU / CPU+RAM → llama.cpp (or Ollama). Safetensors on multi-GPU NVIDIA → vLLM. SGLang is a vLLM-class alternative, sometimes faster on big-MoE / long-context.">?</span>';
@@ -3165,7 +3166,7 @@ function _renderRecipes() {
   html += '<label>Total RAM<input class="hwfit-manual-ram" type="text" inputmode="decimal" placeholder="32 GB"></label>';
   html += '<select class="hwfit-manual-backend"><option value="cuda">CUDA</option><option value="rocm">ROCm</option></select>';
   html += '<button type="button" class="hwfit-hw-manual-save">✓ Apply</button>';
-  html += '<button type="button" class="hwfit-hw-manual-clear">× Clear</button>';
+  html += '<button type="button" class="hwfit-hw-manual-clear">' + uiIcon('close', 12) + ' Clear</button>';
   html += '</div>';
   html += '<div id="hwfit-hw-row" style="display:none;align-items:center;gap:4px;margin-top:3px;padding-top:2px;"><span style="font-size:10px;padding:2px 8px;border-radius:10px;background:color-mix(in srgb, var(--fg) 8%, transparent);color:var(--fg);opacity:0.7;white-space:nowrap;flex-shrink:0;position:relative;top:-1px;">Detected hardware</span><div class="hwfit-hw" id="hwfit-hw" style="flex:1;"></div></div>';
   html += '<div class="hwfit-list" id="hwfit-list"></div>';
@@ -3199,7 +3200,7 @@ function _renderRecipes() {
   html += '<select class="memory-sort-select" id="serve-sort" style="height:24px;">';
   html += '<option value="name">Name</option><option value="size-desc">Size \u2193</option><option value="size-asc">Size \u2191</option><option value="recent">Recent</option>';
   html += '</select>';
-  html += '<button type="button" class="hwfit-gpu-btn" id="hwfit-cache-scan" title="Refresh cached models on selected server" aria-label="Refresh cached models on selected server"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10"/><path d="M3.51 15a9 9 0 0 0 14.85 3.36L23 14"/></svg></button>';
+  html += "<button type=\"button\" class=\"hwfit-gpu-btn\" id=\"hwfit-cache-scan\" title=\"Refresh cached models on selected server\" aria-label=\"Refresh cached models on selected server\">" + uiIcon("refresh", 11) + "</button>";
   html += '</div>';
   html += '<div class="memory-toolbar" style="margin-top:8px;">';
   html += '<div class="memory-category-filters">';
@@ -3212,8 +3213,8 @@ function _renderRecipes() {
   html += '<div class="memory-bulk-bar hidden" id="serve-bulk-bar">';
   html += '<label class="memory-bulk-check-all"><input type="checkbox" id="serve-select-all"> All</label>';
   html += '<span id="serve-bulk-count" style="font-size:10px;opacity:0.5;">0 selected</span>';
-  html += '<button class="memory-toolbar-btn danger" id="serve-bulk-delete" style="position:relative;top:-3px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>Delete</button>';
-  html += '<button class="memory-toolbar-btn" id="serve-bulk-cancel" title="Cancel (Esc)" style="margin-left:4px;padding:3px 6px;position:relative;top:-7px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
+  html += "<button class=\"memory-toolbar-btn danger\" id=\"serve-bulk-delete\" style=\"position:relative;top:-3px;\">" + uiIcon("trash", 11, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Delete</button>";
+  html += "<button class=\"memory-toolbar-btn\" id=\"serve-bulk-cancel\" title=\"Cancel (Esc)\" style=\"margin-left:4px;padding:3px 6px;position:relative;top:-7px;\">" + uiIcon("close", 11) + "</button>";
   html += '</div>';
 
   html += '<div class="doclib-grid hwfit-cached-list" id="hwfit-cached-list"></div>';

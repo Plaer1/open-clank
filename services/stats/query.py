@@ -24,7 +24,7 @@ MAX_BUCKETS = 1_000
 MAX_PAGE = 100
 MAX_TOP = 20
 MAX_FILTER_VALUES = 100
-TOP_FIELDS = {"provider_id", "account_id", "route_id", "requested_model", "actual_model", "actor_kind", "source", "status", "observation_scope"}
+TOP_FIELDS = {"workspace_id", "provider_id", "account_id", "route_id", "requested_model", "actual_model", "actor_kind", "source", "status", "observation_scope"}
 TOKEN_VALUE_FIELDS = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens"}
 FORMULA_REVISION = "s04-base-v1"
 
@@ -47,7 +47,7 @@ def _identity_catalogs(owner: str, rows: list[dict]) -> dict[str, IdentityCatalo
     }
 
 
-def _public_report(report: dict, *, owner: str | None = None) -> dict:
+def _public_report(report: dict, *, owner: str | None = None, db=None) -> dict:
     """Remove raw Stats identities at the public boundary.
 
     Query execution retains canonical values locally for filtering.  Responses
@@ -64,10 +64,18 @@ def _public_report(report: dict, *, owner: str | None = None) -> dict:
         effective_owner = "public"
     rows = source.get("rows") if isinstance(source.get("rows"), list) else []
     catalog_values = source.pop("_identity_values", {})
+    from services.stats.presentation import canonical_labels
+    labels = canonical_labels(db, effective_owner) if db is not None else {}
     catalogs = _identity_catalogs(effective_owner, [row for row in rows if isinstance(row, dict)])
     for field, values in catalog_values.items() if isinstance(catalog_values, dict) else ():
         if field in _PUBLIC_ID_FIELDS:
-            catalogs[field] = IdentityCatalog(effective_owner, field, values)
+            catalogs[field] = IdentityCatalog(effective_owner, field, values, labels=labels.get(field, {}))
+    if db is not None:
+        scope_filters = (source.get('scope') or {}).get('filters') or {}
+        for field in scope_filters:
+            if field in _PUBLIC_ID_FIELDS and hasattr(StatsEvent, field):
+                candidates = [r[0] for r in db.query(getattr(StatsEvent, field)).filter(StatsEvent.owner == effective_owner).distinct().limit(MAX_FACTS + 1).all()]
+                catalogs[field] = IdentityCatalog(effective_owner, field, candidates, labels=labels.get(field, {}))
     def project(value, key: str | None = None):
         if isinstance(value, dict):
             result = {}
@@ -97,8 +105,8 @@ def _public_report(report: dict, *, owner: str | None = None) -> dict:
             return [project(item, key) for item in value]
         return value
     projected = project(source)
-    if isinstance(projected.get("scope"), dict):
-        projected["scope"] = safe_scope(effective_owner, projected["scope"], catalogs=catalogs)
+    if isinstance(source.get("scope"), dict):
+        projected["scope"] = safe_scope(effective_owner, source["scope"], catalogs=catalogs)
     projected["owner_scope"] = owner_scope(effective_owner)
     return projected
 
@@ -148,13 +156,13 @@ def parse_scope(*, owner: str, period: str = "7d", timezone_name: str = "UTC",
     if resolution not in {"hour", "day", "week", "month"}:
         raise StatsQueryError("unsupported resolution")
     current = (now or datetime.now(timezone.utc)).astimezone(tz)
-    if period == "custom":
+    if start is not None or end is not None or period == "custom":
         if not start or not end:
             raise StatsQueryError("custom period requires start and end")
         start_utc, end_utc = _parse_dt(start, tz), _parse_dt(end, tz)
     elif period == "all":
         start_utc = end_utc = None
-    elif period in {"today", "3d", "7d", "30d"}:
+    elif period in {"today", "3d", "7d", "30d", "90d"}:
         if period == "today":
             local_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
             local_end = local_start + timedelta(days=1)
@@ -189,15 +197,16 @@ def _event_state(event, field):
 
 def _aggregate(records, *, empty_known=False):
     """Aggregate values without treating missing or unsupported measurements as zero."""
+    records = [(value,state) for value,state in records if state != "not_applicable"]
     total = len(records)
-    known = [value for value, state in records if value is not None and state in {"reported", "estimated"}]
-    states = [state for value, state in records if value is not None and state in {"reported", "estimated"}]
+    known = [value for value, state in records if value is not None and state in {"reported", "estimated", "partial"}]
+    states = [state for value, state in records if value is not None and state in {"reported", "estimated", "partial"}]
     if not records and empty_known:
         return {"value": 0, "state": "reported", "supported": 0, "total": 0}
     if not known:
         state = "unsupported" if records and all(state == "unsupported" for _value, state in records) else "unavailable"
         return {"value": None, "state": state, "supported": 0, "total": total}
-    if len(known) < total:
+    if len(known) < total or "partial" in states:
         state = "partial"
     elif "estimated" in states:
         state = "estimated"
@@ -288,23 +297,17 @@ def discover_filters(db, scope: StatsScope, field: str, *, filters=None, limit: 
         raise StatsQueryError("unsupported filter: " + field)
     if limit < 1 or limit > MAX_FILTER_VALUES:
         raise StatsQueryError("filter value limit exceeded")
-    raw = _install_progress_handler(db, cancel_event, deadline)
-    try:
-        effective_filters = {key: value for key, value in (filters or {}).items() if key != field}
-        rows = _event_query(db, scope, effective_filters).with_entities(getattr(StatsEvent, field)).filter(getattr(StatsEvent, field).isnot(None)).order_by(None).distinct().order_by(getattr(StatsEvent, field)).limit(limit + 1).all()
-    except OperationalError as exc:
-        if (cancel_event is not None and cancel_event.is_set()) or (deadline is not None and time.monotonic() >= deadline):
-            raise TimeoutError("Stats filter discovery cancelled or deadline exceeded") from exc
-        raise
-    finally:
-        if raw is not None:
-            raw.set_progress_handler(None, 0)
-    values = [row[0] for row in rows[:limit]]
-    catalog = IdentityCatalog(scope.owner, field, values) if field in _PUBLIC_ID_FIELDS else None
+    effective_filters = {key: value for key, value in (filters or {}).items() if key != field}
+    projection, fact_truncated = admitted_events(db, scope, filters=effective_filters, cancel_event=cancel_event, deadline=deadline)
+    all_values = sorted({getattr(event, field) for event in projection.events if getattr(event, field, None)})
+    rows = all_values[:limit + 1]
+    values = rows[:limit]
+    from services.stats.presentation import canonical_labels
+    catalog = IdentityCatalog(scope.owner, field, values, labels=canonical_labels(db, scope.owner).get(field, {})) if field in _PUBLIC_ID_FIELDS else None
     return _public_report({"schema": "open-clank.stats.v1", "field": field,
             "choices": catalog.choices() if catalog else [{"handle": str(value), "label": str(value)} for value in values],
             "truncated": len(rows) > limit,
-            "scope": {"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": effective_filters, "excluded_facet": field}, "formula_revision": FORMULA_REVISION, "provenance": {"source": "stats_events", "projection": "s01-ledger"}, "coverage": {"state": "complete", "truncated": len(rows) > limit}, "warnings": ["filter_value_cap_reached"] if len(rows) > limit else []}, owner=scope.owner)
+            "scope": {"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": effective_filters, "excluded_facet": field}, "formula_revision": FORMULA_REVISION, "provenance": {"source": "stats_events", "projection": "s01-ledger"}, "coverage": {"state": "partial_truncated" if fact_truncated else projection.coverage, "truncated": len(rows) > limit or fact_truncated}, "warnings": ["filter_value_cap_reached"] if len(rows) > limit else []}, owner=scope.owner, db=db)
 
 
 def percentile(values, percentile_value: float = 0.5):
@@ -340,7 +343,7 @@ def prior_period(scope: StatsScope) -> StatsScope:
         raise StatsQueryError("prior period requires a bounded range")
     start = scope.start_utc
     end = scope.end_utc
-    if scope.period in {"today", "3d", "7d", "30d"}:
+    if scope.period in {"today", "3d", "7d", "30d", "90d"}:
         days = {"today": 1, "3d": 3, "7d": 7, "30d": 30}[scope.period]
         prior_start = (start.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(scope.timezone)) - timedelta(days=days)).astimezone(timezone.utc).replace(tzinfo=None)
         return StatsScope(scope.owner, scope.timezone, prior_start, scope.start_utc, scope.resolution, "custom")
@@ -352,20 +355,11 @@ def prior_period(scope: StatsScope) -> StatsScope:
 def session_drilldown(db, scope: StatsScope, *, session_id: str, filters=None, page: int = 1, page_size: int = 100, cancel_event=None, deadline=None):
     if page < 1 or page_size < 1 or page_size > MAX_PAGE:
         raise StatsQueryError("invalid page")
-    raw = _install_progress_handler(db, cancel_event, deadline)
-    try:
-        rows = _event_query(db, scope, filters).filter(StatsEvent.session_id == session_id).limit(MAX_FACTS + 1).all()
-    except OperationalError as exc:
-        if (cancel_event is not None and cancel_event.is_set()) or (deadline is not None and time.monotonic() >= deadline):
-            raise TimeoutError("Stats session query cancelled or deadline exceeded") from exc
-        raise
-    finally:
-        if raw is not None:
-            raw.set_progress_handler(None, 0)
-    truncated = len(rows) > MAX_FACTS
-    projection = project_admitted_events(rows[:MAX_FACTS], cancel_event=cancel_event, deadline=deadline)
+    from dataclasses import replace
+    projection, truncated = admitted_events(db, scope, filters=filters, cancel_event=cancel_event, deadline=deadline)
+    projection = replace(projection, events=tuple(e for e in projection.events if e.session_id == session_id))
     selected = list(projection.events)[(page - 1) * page_size: page * page_size]
-    return _public_report({"schema": "open-clank.stats.v1", "session_id": session_id, "scope": {"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": filters or {}}, "formula_revision": FORMULA_REVISION, "_identity_values": {"session_id": [session_id], "actual_model": [row.actual_model for row in projection.events]}, "rows": [{"id": row.id, "event_time": row.event_time.isoformat() + "Z", "scope": row.observation_scope, "status": row.status, "actual_model": row.actual_model, "session_id": session_id, "output_tokens": _typed(row.output_tokens, unit="tokens", state=_event_state(row, "output_tokens"))} for row in selected], "coverage": {"state": "partial_truncated" if truncated else projection.coverage, "excluded": len(projection.excluded), "truncated": truncated}, "warnings": ["fact_cap_reached"] if truncated else [], "pagination": {"page": page, "page_size": page_size, "pages": max(1, (len(projection.events) + page_size - 1) // page_size)}}, owner=scope.owner)
+    return _public_report({"schema": "open-clank.stats.v1", "session_id": session_id, "scope": {"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": filters or {}}, "formula_revision": FORMULA_REVISION, "_identity_values": {"session_id": [session_id], "actual_model": [row.actual_model for row in projection.events]}, "rows": [{"id": row.id, "event_time": row.event_time.isoformat() + "Z", "scope": row.observation_scope, "status": row.status, "actual_model": row.actual_model, "session_id": session_id, "output_tokens": _typed(row.output_tokens, unit="tokens", state=_event_state(row, "output_tokens"))} for row in selected], "coverage": {"state": "partial_truncated" if truncated else projection.coverage, "excluded": len(projection.excluded), "truncated": truncated}, "warnings": ["fact_cap_reached"] if truncated else [], "pagination": {"page": page, "page_size": page_size, "pages": max(1, (len(projection.events) + page_size - 1) // page_size)}}, owner=scope.owner, db=db)
 
 
 def export_json(report: dict, *, max_bytes: int = 5 * 1024 * 1024) -> bytes:
@@ -393,7 +387,7 @@ def _event_query(db, scope: StatsScope, filters: dict[str, str] | None = None):
         query = query.filter(StatsEvent.event_time >= scope.start_utc, StatsEvent.event_time < scope.end_utc)
     filters = _resolve_filter_handles(db, scope.owner, filters or {})
     allowed = {"workspace_id", "provider_id", "account_id", "route_id", "requested_model",
-               "actual_model", "actor_kind", "source", "status", "observation_scope"}
+               "actual_model", "workspace_id", "actor_kind", "source", "status", "observation_scope"}
     unknown = set(filters) - allowed
     if unknown:
         raise StatsQueryError("unsupported filter: " + sorted(unknown)[0])
@@ -427,19 +421,7 @@ def query_summary(db, scope: StatsScope, *, filters: dict[str, str] | None = Non
                   cancel_event: threading.Event | None = None, deadline: float | None = None):
     if page < 1 or page_size < 1 or page_size > MAX_PAGE:
         raise StatsQueryError("page must be >=1 and page_size must be 1..100")
-    raw = _install_progress_handler(db, cancel_event, deadline)
-    try:
-        rows = _event_query(db, scope, filters).limit(MAX_FACTS + 1).all()
-    except OperationalError as exc:
-        if (cancel_event is not None and cancel_event.is_set()) or (deadline is not None and time.monotonic() >= deadline):
-            raise TimeoutError("Stats query cancelled or deadline exceeded") from exc
-        raise
-    finally:
-        if raw is not None:
-            raw.set_progress_handler(None, 0)
-    truncated = len(rows) > MAX_FACTS
-    rows = rows[:MAX_FACTS]
-    projection = project_admitted_events(rows, cancel_event=cancel_event, deadline=deadline)
+    projection, truncated = admitted_events(db, scope, filters=filters, cancel_event=cancel_event, deadline=deadline)
     events = list(projection.events)
     total_pages = max(1, (len(events) + page_size - 1) // page_size)
     selected = list(events) if all_rows else ([] if page > total_pages else events[(page - 1) * page_size: page * page_size])
@@ -447,6 +429,15 @@ def query_summary(db, scope: StatsScope, *, filters: dict[str, str] | None = Non
     for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens"):
         aggregate = _aggregate([(getattr(event, field, None), _event_state(event, field)) for event in events])
         totals[field] = _typed(aggregate["value"], unit="tokens", state=aggregate["state"])
+    dispatches = {(event.owner,event.attempt_id): event for event in events if event.attempt_id}
+    for event in events:
+        for dispatch_id in event.event_metadata.get("covered_dispatch_ids") or []:
+            dispatches.setdefault((event.owner,dispatch_id),None)
+    billable_known = all(event is not None and event.billable is not None for event in dispatches.values())
+    other_metrics = {}
+    for key in sorted({key for event in events for key in event.event_metadata.get("extra_metrics", {})}):
+        aggregate = _aggregate([(getattr(event,key,None),getattr(event,key + "_state","unavailable")) for event in events])
+        other_metrics[key] = _typed(aggregate["value"], unit="requests" if key == "searchRequests" else "tokens", state=aggregate["state"])
     return _public_report({
         "schema": "open-clank.stats.v1",
         "owner_scope": _owner_scope(scope.owner),
@@ -459,10 +450,17 @@ def query_summary(db, scope: StatsScope, *, filters: dict[str, str] | None = Non
         "freshness": {"state": "observed", "ingested_through": max((event.ingested_at for event in events), default=None).isoformat() + "Z" if events and max(event.ingested_at for event in events) else None},
         "units": {field: "tokens" for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")},
         "totals": totals,
+        "other_metrics": other_metrics,
         "fact_count": _typed(len(events)),
+        "operation_counts": {"logical_operations": len({(event.owner, event.operation_id) for event in events if event.operation_id}),
+                             "dispatch_attempts": len(dispatches),
+                             "billable_attempts": {"value": sum(event.billable is True for event in dispatches.values()) if billable_known else None,
+                                                   "state": "reported" if billable_known else "unavailable"},
+                             "method": "distinct_observed_and_explicitly_covered_dispatch_ids"},
         "_identity_values": {field: sorted({getattr(event, field, None) for event in events if getattr(event, field, None)}) for field in _PUBLIC_ID_FIELDS},
         "rows": [{"id": event.id, "event_time": event.event_time.isoformat() + "Z",
                   "session_id": event.session_id, "scope": event.observation_scope,
+                  "conversation_state": "deleted" if event.event_metadata.get("conversation_deleted") else "active",
                   "actual_model": event.actual_model, "status": event.status,
                   "output_tokens": _typed(event.output_tokens, unit="tokens",
                                            state=event.output_tokens_state)} for event in selected],
@@ -471,14 +469,18 @@ def query_summary(db, scope: StatsScope, *, filters: dict[str, str] | None = Non
                       "truncated": truncated},
         "warnings": (["fact_cap_reached"] if truncated else [])
                     + (["overlapping_coverage"] if projection.coverage != "complete" else []),
-    }, owner=scope.owner)
+    }, owner=scope.owner, db=db)
 
 
 def admitted_events(db, scope: StatsScope, *, filters=None, cancel_event=None, deadline=None):
     """Load the bounded owner-filtered projection used by all base panels."""
     raw = _install_progress_handler(db, cancel_event, deadline)
     try:
-        rows = _event_query(db, scope, filters).limit(MAX_FACTS + 1).all()
+        resolved = _resolve_filter_handles(db, scope.owner, filters or {})
+        # Validate dimensions, but admit the complete owner/date population
+        # before selecting dimensions: filtering raw overlaps changes authority.
+        _event_query(db, scope, filters)
+        rows = _event_query(db, scope).limit(MAX_FACTS + 1).all()
     except OperationalError as exc:
         if (cancel_event is not None and cancel_event.is_set()) or (deadline is not None and time.monotonic() >= deadline):
             raise TimeoutError("Stats admitted-event query cancelled or deadline exceeded") from exc
@@ -488,6 +490,10 @@ def admitted_events(db, scope: StatsScope, *, filters=None, cancel_event=None, d
             raw.set_progress_handler(None, 0)
     truncated = len(rows) > MAX_FACTS
     projection = project_admitted_events(rows[:MAX_FACTS], cancel_event=cancel_event, deadline=deadline)
+    if resolved:
+        from dataclasses import replace
+        projection = replace(projection, events=tuple(event for event in projection.events
+            if all(getattr(event, field) == value for field, value in resolved.items())))
     return projection, truncated
 
 

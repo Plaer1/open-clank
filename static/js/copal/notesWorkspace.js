@@ -86,6 +86,10 @@ export function normalizeNotesSettings(raw = {}) {
     readableLineWidth:settings.readableLineWidth !== false,
     ribbon:settings.ribbon === true,
     completedVisibility:settings.completedVisibility === 'hide' ? 'hide' : 'show',
+    // Built-in handbook visibility is on by default; global Copal collections
+    // stay out of a Host folder workspace unless the owner opts in.
+    showTutorialFolder:settings.showTutorialFolder !== false,
+    showCopalInFolderWorkspace:settings.showCopalInFolderWorkspace === true,
     // Template preferences are ordinary workspace state. Keep paths and IDs
     // opaque strings; Files/host authorization remains provider-owned.
     templateFolder:typeof settings.templateFolder === 'string' ? settings.templateFolder.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : '',
@@ -217,37 +221,14 @@ function flattenLeaves(node, output = []) {
   return output;
 }
 
-function migrateLegacy(raw, docsById, fallbackDoc) {
-  const ids = uniqueStrings(raw?.tabs).filter((id) => docsById.has(id));
-  if (typeof raw?.selected === 'string' && docsById.has(raw.selected) && !ids.includes(raw.selected)) ids.push(raw.selected);
-  if (!ids.length && fallbackDoc) ids.push(fallbackDoc.id);
-  const pinned = new Set(uniqueStrings(raw?.pinned));
-  const cursors = raw?.cursors && typeof raw.cursors === 'object' ? raw.cursors : {};
-  const mode = MODES.has(raw?.mode) ? raw.mode : 'live';
-  const leaves = ids.map((id) => makeLeaf(docsById.get(id), { mode, pinned:pinned.has(id), selection:cursors[id] }));
-  const main = makeGroup(leaves, { activeLeafId:leaves.find((leaf) => leaf.docId === raw?.selected)?.id });
-  let root = main;
-  if (typeof raw?.split === 'string' && docsById.has(raw.split)) {
-    const splitLeaf = makeLeaf(docsById.get(raw.split), { mode, selection:cursors[`${raw.split}:split`] });
-    root = { type:'split', id:nextId('split'), orientation:'horizontal', children:[main, makeGroup([splitLeaf])], sizes:[50, 50] };
-  }
-  const activeLeaf = flattenLeaves(root).find((leaf) => leaf.docId === raw?.selected) || flattenLeaves(root)[0] || null;
+function createEmptyWorkspace(fallbackDoc) {
+  const leaf = fallbackDoc ? makeLeaf(fallbackDoc) : null;
+  const root = makeGroup(leaf ? [leaf] : []);
   return {
-    version: NOTES_WORKSPACE_VERSION,
-    root,
-    activeLeafId: activeLeaf?.id || null,
-    left: { open:raw?.explorerOpen !== false, width:224, tab:'files', sort:'name', expanded:uniqueStrings(raw?.expanded), selected:[], showDotFolders:raw?.showDotFolders === true, resourceRoot:null, resourceRows:[], resourceCursor:null },
-    right: {
-      open:raw?.sidebarOpen === true,
-      width:280,
-      tab:RIGHT_TABS.has(raw?.sidebar) ? raw.sidebar : 'properties',
-      pinnedDocId:null,
-    },
-    panels:defaultPanels(),
-    settings:normalizeNotesSettings(),
-    bookmarks:uniqueStrings(raw?.bookmarks || raw?.pinned).filter((id) => docsById.has(id)),
-    recent:ids.slice().reverse(),
-    closed:[],
+    version:NOTES_WORKSPACE_VERSION, root, activeLeafId:leaf?.id || null,
+    left:{ open:true, width:224, tab:'files', sort:'name', expanded:[], selected:[], showDotFolders:false, resourceRoot:null, folderWorkspaceRoot:null, folderWorkspaceId:'', resourceRows:[], resourceCursor:null, resourceQuery:'' },
+    right:{ open:false, width:280, tab:'properties', pinnedDocId:null },
+    panels:defaultPanels(), settings:normalizeNotesSettings(), bookmarks:[], recent:leaf ? [leaf.docId] : [], closed:[],
   };
 }
 
@@ -255,9 +236,7 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
   const visibleDocs = docs.filter((doc) => doc && typeof doc.id === 'string');
   const docsById = new Map(visibleDocs.map((doc) => [doc.id, doc]));
   const fallbackDoc = docsById.get(selected) || visibleDocs[0] || null;
-  // Version 2 already had the split/group tree. Accept it during migration so
-  // upgrading does not collapse open panes or discard saved cursors.
-  if (!raw || ![2, NOTES_WORKSPACE_VERSION].includes(raw.version) || !raw.root) return migrateLegacy(raw || {}, docsById, fallbackDoc);
+  if (!raw || raw.version !== NOTES_WORKSPACE_VERSION || !raw.root) return createEmptyWorkspace(fallbackDoc);
 
   let root = normalizeNode(raw.root, docsById, new Set(), new Set()) || makeGroup();
   let leaves = flattenLeaves(root);
@@ -305,8 +284,11 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
       selected:uniqueStrings(left.selected).filter((id) => docsById.has(id)),
       showDotFolders:left.showDotFolders === true,
       resourceRoot:left.resourceRoot && typeof left.resourceRoot === 'object' ? left.resourceRoot : null,
+      folderWorkspaceRoot:left.folderWorkspaceRoot && typeof left.folderWorkspaceRoot === 'object' ? left.folderWorkspaceRoot : null,
+      folderWorkspaceId:typeof left.folderWorkspaceId === 'string' ? left.folderWorkspaceId.trim() : '',
       resourceRows:Array.isArray(left.resourceRows) ? left.resourceRows.slice(0, 5001) : [],
       resourceCursor:left.resourceCursor || null,
+      resourceQuery:typeof left.resourceQuery === 'string' ? left.resourceQuery : '',
     },
     right: {
       open:right.open === true,

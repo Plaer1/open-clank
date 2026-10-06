@@ -542,13 +542,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ui_control",
-            "description": "Control the user interface. Actions: toggle (turn tools on/off), open_panel (open a modal: documents/library, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), open_email_reply (open an email reply draft document; DOES NOT send. For 'write/draft a reply saying X', include body with the drafted reply), switch_model, set_theme (built-in presets: clanker-dark, clanker-light, dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute), create_theme (CREATE any custom theme with a name + colors object — pick distinctive, evocative hex colors that match the requested aesthetic, NOT generic defaults. The theme auto-applies after creation). When a user asks for ANY theme not in the built-in preset list, ALWAYS use create_theme.",
+            "description": "Control the user interface. Actions: toggle (turn tools on/off), open_panel (open a modal: documents/library, files, email, sessions, notes, memories/brain, skills, settings, cookbook), open_email_reply (open an email reply draft document; DOES NOT send. For 'write/draft a reply saying X', include body with the drafted reply), switch_model, set_theme (built-in presets: clanker-dark, clanker-light, dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute), create_theme (CREATE any custom theme with a name + colors object — pick distinctive, evocative hex colors that match the requested aesthetic, NOT generic defaults. The theme auto-applies after creation). When a user asks for ANY theme not in the built-in preset list, ALWAYS use create_theme.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["toggle", "open_panel", "open_email_reply", "switch_model", "set_theme", "create_theme", "get_toggles"],
                                "description": "The UI action. Use set_theme for presets, create_theme to build a custom theme with any hex colors"},
-                    "name": {"type": "string", "description": "For toggle: web, bash, research, incognito, document_editor (aliases: shell, search, deepresearch, documents). For open_panel: documents, gallery, email, sessions, notes, brain/memories, skills, settings, cookbook, usage/stats. For open_email_reply: email UID. For set_theme: a preset theme name. For create_theme: the custom theme name."},
+                    "name": {"type": "string", "description": "For toggle: web, bash, research, incognito, document_editor (aliases: shell, search, deepresearch, documents). For open_panel: documents, files, email, sessions, notes, brain/memories, skills, settings, cookbook, usage/stats. For open_email_reply: email UID. For set_theme: a preset theme name. For create_theme: the custom theme name."},
                     "value": {"type": "string", "description": "Value: on/off for toggle, model name for switch_model, theme name for set_theme, or folder for open_email_reply"},
                     "uid": {"type": "string", "description": "Email UID for open_email_reply"},
                     "folder": {"type": "string", "description": "Email folder for open_email_reply (default INBOX)"},
@@ -641,7 +641,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "task_type": {"type": "string", "enum": ["llm", "research", "action"],
                                   "description": "llm = AI runs your prompt; research = runs the deep-research pipeline on the prompt as a question; action = direct built-in function"},
                     "action_name": {"type": "string", "enum": [
-                        "tidy_sessions", "tidy_documents", "consolidate_memory", "tidy_research",
+                        "tidy_sessions", "consolidate_memory", "tidy_research",
                         "summarize_emails", "draft_email_replies", "extract_email_events",
                         "classify_events", "learn_sender_signatures",
                         "test_skills", "audit_skills", "check_email_urgency"
@@ -875,11 +875,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_documents",
-            "description": "Manage documents: list all documents (with optional search/language filter), delete documents, or run tidy cleanup.",
+            "description": "Manage documents: list all documents (with optional search/language filter) or delete a selected document.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "delete", "tidy"]},
+                    "action": {"type": "string", "enum": ["list", "delete"]},
                     "document_id": {"type": "string", "description": "Document ID (for delete)"},
                     "search": {"type": "string", "description": "Search query (for list)"},
                     "language": {"type": "string", "description": "Filter by language (for list)"},
@@ -1084,16 +1084,16 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "app_api",
-            "description": "Generic loopback to allowed internal Open Clank endpoints. Use this when there's no named tool for what the user wants. Hits the same routes the UI buttons hit (cookbook, gallery, library/documents, memory, notes, calendar, tasks, settings, themes, research, compare, etc.). action='endpoints' returns the OpenAPI surface (use `filter` to narrow). action='call' (default) takes method+path+body. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked for safety. Do not use for shell commands; use named command tooling instead. Do not use for package installs, engine rebuilds, PID signalling, or email account discovery; use list_email_accounts for email accounts because /api/email/accounts is owner-filtered in tool context.",
+            "description": "Generic loopback to allowed internal Open Clank endpoints. Use this when there's no named tool for what the user wants. Hits the same routes the UI buttons hit (cookbook, files, library/documents, memory, notes, calendar, tasks, settings, themes, research, compare, etc.). action='endpoints' returns the OpenAPI surface (use `filter` to narrow). action='call' (default) takes method+path+body. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked for safety. Do not use for shell commands; use named command tooling instead. Do not use for package installs, engine rebuilds, PID signalling, or email account discovery; use list_email_accounts for email accounts because /api/email/accounts is owner-filtered in tool context.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["call", "endpoints"], "description": "'call' to hit an endpoint, 'endpoints' to list what's available"},
-                    "path": {"type": "string", "description": "Endpoint path starting with /api/ (e.g. '/api/cookbook/gpus', '/api/gallery/list', '/api/calendar/events')"},
+                    "path": {"type": "string", "description": "Endpoint path starting with /api/ (e.g. '/api/cookbook/gpus', '/api/files-v1/roots', '/api/calendar/events')"},
                     "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP method (default GET)"},
                     "body": {"type": "object", "description": "JSON request body for POST/PUT/PATCH"},
                     "query": {"type": "object", "description": "Querystring params as a key-value object"},
-                    "filter": {"type": "string", "description": "For action=endpoints: substring to filter paths/summaries (e.g. 'cookbook', 'gallery')"}
+                    "filter": {"type": "string", "description": "For action=endpoints: substring to filter paths/summaries (e.g. 'cookbook', 'files')"}
                 },
                 "required": ["action"]
             }
@@ -1103,11 +1103,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_image",
-            "description": "Edit a gallery image: upscale, remove background, inpaint, or harmonize.",
+            "description": "Edit a managed image in Imps: upscale, remove background, inpaint, or harmonize.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "image_id": {"type": "string", "description": "Gallery image ID"},
+                    "image_id": {"type": "string", "description": "Managed image resource ID"},
                     "action": {"type": "string", "enum": ["upscale", "rembg", "inpaint", "harmonize"], "description": "Edit action"},
                     "prompt": {"type": "string", "description": "For inpaint: what to fill the masked area with"},
                     "mask": {"type": "string", "description": "For inpaint: base64 PNG mask (white pixels are edited)"},
@@ -1374,7 +1374,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "capture_desktop",
-            "description": "Capture one opted-in macOS display, visible window, or bounded region for the current task. The result is retained through Files and never exposes a host path.",
+            "description": "Capture one opted-in display, visible window, or bounded region on macOS or Windows for the current task. The result is retained through Files and never exposes a host path.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1455,8 +1455,8 @@ _COPAL_MANAGE_ACTIONS = (
     "galaxy.link_event_track", "galaxy.unlink_event_track", "graph.link", "graph.unlink",
     "mind.heading.add", "mind.heading.rename", "mind.heading.move", "mind.heading.reparent", "mind.heading.delete",
     "todo.create", "todo.update", "todo.complete", "todo.trash",
-    "bases.migrate.preview", "bases.migrate.apply", "bases.row.update",
-    "treehouse.command", "treehouse.migrate.preview", "treehouse.migrate.apply",
+    "bases.row.update",
+    "treehouse.command",
     "maintenance.bulk_trash.preview", "maintenance.bulk_trash.apply",
     "maintenance.bulk_restore.preview", "maintenance.bulk_restore.apply", "maintenance.calendar_reconcile",
     "maintenance.import.preview", "maintenance.import.apply", "maintenance.export.preview", "maintenance.export.apply",
@@ -1488,7 +1488,6 @@ _COPAL_MANAGE_FIELDS = {
     "mind.heading.move": _S(id={"type": "string"}, patch={"type": "object"}), "mind.heading.reparent": _S(id={"type": "string"}, patch={"type": "object"}), "mind.heading.delete": _S(id={"type": "string"}, patch={"type": "object"}),
     "graph.link": _S(id={"type": "string"}, patch={"type": "object"}), "graph.unlink": _S(id={"type": "string"}, patch={"type": "object"}),
     "todo.create": _S(event={"type": "object"}), "todo.update": _S(id={"type": "string"}, patch={"type": "object"}), "todo.complete": _S(id={"type": "string"}), "todo.trash": _S(id={"type": "string"}),
-    "bases.migrate.preview": _S(id={"type": "string"}), "bases.migrate.apply": _S(id={"type": "string"}, previewToken={"type": "string"}),
     "bases.row.update": _S(id={"type": "string"}, patch={"type": "object"}),
     "treehouse.command": _S(command={"type": "object", "properties": {"type": {"type": "string", "enum": [
         "profile.create", "profile.update", "course.create", "course.update", "course.publish", "course.archive", "course.author.add", "course.reorder_modules", "course.delete",
@@ -1496,8 +1495,6 @@ _COPAL_MANAGE_FIELDS = {
         "enrollment.enroll", "enrollment.unenroll", "assignment.create", "assignment.update", "assignment.publish", "assignment.delete", "submission.submit", "submission.grade",
         "skill.create", "skill.update", "skill.delete", "evidence.submit", "evidence.review", "badge.create", "badge.update", "badge.delete", "quest.create", "quest.update", "quest.delete",
     ]}}, "required": ["type"]}, commandId={"type": "string"}, expectedRevision={"type": "integer", "minimum": 0}),
-    "treehouse.migrate.preview": _S(commandId={"type": "string"}, expectedRevision={"type": "integer", "minimum": 0}),
-    "treehouse.migrate.apply": _S(commandId={"type": "string"}, expectedRevision={"type": "integer", "minimum": 0}, previewToken={"type": "string"}),
     "maintenance.bulk_trash.preview": _S(ids={"type": "array", "items": {"type": "string"}}), "maintenance.bulk_trash.apply": _S(ids={"type": "array", "items": {"type": "string"}}, previewToken={"type": "string"}),
     "maintenance.bulk_restore.preview": _S(ids={"type": "array", "items": {"type": "string"}}), "maintenance.bulk_restore.apply": _S(ids={"type": "array", "items": {"type": "string"}}, previewToken={"type": "string"}),
     "maintenance.import.preview": _S(attachmentId={"type": "string", "maxLength": 256}, corpus={"type": "string", "enum": ["notes", "wiki"]}),

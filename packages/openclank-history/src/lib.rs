@@ -3,6 +3,7 @@
 //! This package deliberately owns only the low-level content adapter. The history
 //! catalog, IPC protocol and capture policy are separate S17/S18 concerns.
 
+pub mod platform;
 pub mod capture;
 pub mod catalog;
 pub mod operations;
@@ -50,6 +51,7 @@ pub struct HistoryStore {
 impl HistoryStore {
     pub async fn open(root: impl AsRef<Path>) -> StorageResult<Self> {
         let root = root.as_ref().to_path_buf();
+        validate_physical_layout(&root)?;
         Self::initialize_root(&root)?;
         let settings = ImmutableStoreSettings {
             protect_local_fragment: true,
@@ -144,6 +146,35 @@ impl HistoryStore {
             }
         }
     }
+}
+
+/// Lore can upgrade older pack/bucket layouts during open or later flush.
+/// Admit only layouts that its current reader preserves without conversion.
+fn validate_physical_layout(root: &Path) -> io::Result<()> {
+    let immutable = root.join("immutable");
+    let refuse = |path: &Path| io::Error::new(io::ErrorKind::InvalidData,
+        format!("legacy or incompatible Lore layout {}; use an explicit offline history conversion under .clanker/tools", path.display()));
+    if immutable.join("pack").exists() { return Err(refuse(&immutable.join("pack"))); }
+    let mut pending = vec![immutable.join("index")];
+    while let Some(dir) = pending.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() { pending.push(entry.path()); continue; }
+            if !entry.file_name().to_string_lossy().starts_with("index_") { continue; }
+            use std::io::Read;
+            let mut bytes = [0u8;4];
+            fs::File::open(entry.path())?.read_exact(&mut bytes)?;
+            let version = u32::from_le_bytes(bytes);
+            if version != 4 && version != 5 { return Err(refuse(&entry.path())); }
+        }
+    }
+    Ok(())
 }
 
 fn prepare_store_root(root: &Path) -> io::Result<()> {
@@ -242,13 +273,4 @@ fn prepare_store_root(root: &Path) -> io::Result<()> {
     result
 }
 
-#[cfg(unix)]
-fn sync_marker_directory(root: &Path) -> io::Result<()> {
-    let dir = fs::File::open(root)?;
-    dir.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_marker_directory(_root: &Path) -> io::Result<()> {
-    Ok(())
-}
+fn sync_marker_directory(root: &Path) -> io::Result<()> { platform::finish_publication(&root.join(FORMAT_MARKER)) }

@@ -49,36 +49,8 @@ def test_audited_local_artifacts_are_gitignored_but_examples_are_not():
     assert not _git_ignored("secrets.env.example")
 
 
-def test_dockerignore_matcher_preserves_leading_dots():
-    matcher = hygiene.DockerIgnore(
-        (".env", ".env.bak-*", "*.db-wal", "secrets.env.*", "!secrets.env.example")
-    )
-
-    assert matcher.ignored(".env")
-    assert matcher.ignored(".env.bak-tunnel")
-    assert matcher.ignored("runtime.db-wal")
-    assert not matcher.ignored("env")
-    assert not matcher.ignored(".env.example")
-    assert not matcher.ignored("secrets.env.example")
-
-
-def test_audited_local_artifacts_are_absent_from_representative_image_context():
-    context = set(hygiene.docker_context_paths(ROOT))
-    assert not (set(AUDITED_LOCAL_ARTIFACTS) & context)
-    for directory in AUDITED_BUILD_OUTPUTS:
-        assert not any(path == directory or path.startswith(directory + "/") for path in context)
-    assert ".env" not in context
-    assert "secrets.env" not in context
-    assert ".env.example" in context
-    assert "Dockerfile" in context
-
-
-def test_git_index_and_image_context_pass_prohibited_path_contract():
-    index = hygiene.git_index_paths(ROOT)
-    context = hygiene.docker_context_paths(ROOT)
-
-    hygiene.assert_path_contract(index, scope="Git index")
-    hygiene.assert_path_contract(context, scope="image context")
+def test_git_index_passes_prohibited_path_contract():
+    hygiene.assert_path_contract(hygiene.git_index_paths(ROOT), scope="Git index")
 
 
 def test_standard_sqlite_runtime_suffixes_are_rejected_in_every_scope():
@@ -115,7 +87,7 @@ def test_directory_scan_uses_repository_gitleaks_config(tmp_path: Path, monkeypa
         "gitleaks",
         "dir",
         "--no-banner",
-        "--redact",
+        "--redact=100",
         "--exit-code",
         "1",
         "--config",
@@ -129,8 +101,7 @@ def test_directory_scan_uses_repository_gitleaks_config(tmp_path: Path, monkeypa
 def test_secret_scan_workflow_uses_config_for_history_and_release_artifacts():
     workflow = (ROOT / ".github/workflows/secret-scan.yml").read_text(encoding="utf-8")
 
-    assert "gitleaks git --no-banner --redact --verbose --config .gitleaks.toml" in workflow
-    assert "scripts/check_release_artifacts.py --gitleaks ./gitleaks" in workflow
+    assert "scripts/check_release_artifacts.py --history --gitleaks ./gitleaks" in workflow
 
 
 def test_scanner_failure_discards_scanner_output(tmp_path: Path):

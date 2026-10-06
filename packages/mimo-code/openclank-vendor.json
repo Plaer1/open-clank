@@ -16,28 +16,32 @@
   },
   "toolchain": {
     "bun": {
-      "version": "1.3.14",
+      "version": "1.4.0",
       "release_repository": "https://github.com/oven-sh/bun",
       "downloads": {
         "darwin-arm64": {
-          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-aarch64.zip",
-          "sha256": "d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620"
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-aarch64.zip",
+          "sha256": "c669e97f6164e1c96e0701748db98dfa77492908cbd8394c7557134a735de381"
         },
         "darwin-x64": {
-          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-darwin-x64.zip",
-          "sha256": "4183df3374623e5bab315c547cfa0974533cd457d86b73b639f7a87974cd6633"
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-x64.zip",
+          "sha256": "1d0211b8f1dc991182344687ad15e72ee86f154845a5f7fa477994cd341dd9b0"
         },
         "linux-arm64": {
-          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip",
-          "sha256": "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b"
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip",
+          "sha256": "4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e"
         },
         "linux-x64": {
-          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip",
-          "sha256": "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip",
+          "sha256": "2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452"
         },
         "windows-x64": {
-          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-windows-x64.zip",
-          "sha256": "0a0620930b6675d7ba440e81f4e0e00d3cfbe096c4b140d3fff02205e9e18922"
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-windows-x64.zip",
+          "sha256": "e6f093d39da486b20262ca8cdd5ed6a9e8bc9c2f275b78e6d3a0c5b28cc95901"
+        },
+        "windows-arm64": {
+          "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-windows-aarch64.zip",
+          "sha256": "f473bfe2df73ee770548c93dd5d380aea7120c218ec2aa1afdd0bbba7bf18c47"
         }
       }
     }
@@ -61,13 +65,13 @@
     "id": "https://openclank.dev/contracts/managed-provider/v2",
     "version": 2,
     "repository_path": "contracts/openclank/managed-provider-v2.schema.json",
-    "sha256": "611c378cc61719f6290cd28e9c383b5a9f398fc174785c7c84b5269f366073ca"
+    "sha256": "bcac868d6f2bd61ee7a62b8a35afc43f068590fe9a496f279774936cde4b3e31"
   },
   "build": {
     "contract_version": 1,
     "source_date_epoch": 1785240447,
     "source_hash_algorithm": "openclank-tree-sha256-v1",
-    "source_sha256": "996946fcafd8e9c5e17659c27ec21131bbedd885e54816a12efdaf4e1ddd5942",
+    "source_sha256": "455738be3eb522acb6362c7fe26b9f3051a65f2ed250773d3d0728462a533831",
     "tier_1_targets": [
       "linux-x64",
       "linux-arm64",

@@ -8,12 +8,14 @@ bytes into a Files database and they never return raw provider IDs to clients;
 from __future__ import annotations
 
 import asyncio
+from src.openclank.copal_history_wire import capture_metadata, mutation_failure_status
 import hashlib
 import json
 import mimetypes
 import os
 import re
 import stat as stat_module
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -26,7 +28,6 @@ from core.database import (
     Document,
     ChatMessage,
     EditorDraft,
-    GalleryImage,
     FilesImageResource,
     PublishedFile,
     Session as DbSession,
@@ -37,7 +38,7 @@ from src.auth_helpers import copal_owner_for_user
 from src.constants import DEEP_RESEARCH_DIR
 from core.session_manager import _parse_msg_content
 from src.generated_images import resolve_gallery_image_path
-from src.openclank.copal_bridge import CopalBridgeError
+from src.openclank.copal_errors import CopalBridgeError
 from src.openclank.copal_resources import copal_resource_descriptor
 from src.openclank.chat_lifecycle import ChatLifecycleError, ChatLifecycleService
 from src.openclank.files_facade import (
@@ -361,6 +362,10 @@ class CopalFilesProvider:
         self.operation_store = operation_store
         self._preparations: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._preparation_lock = asyncio.Lock()
+        # A disposable metadata projection, never a body store. Every reuse
+        # checks the bridge's current scoped snapshot, including external edits.
+        self._navigation_indexes: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._navigation_lock = asyncio.Lock()
 
     @staticmethod
     def _attachment_operation_id(operation_id: str) -> str:
@@ -649,7 +654,10 @@ class CopalFilesProvider:
             raise FilesFacadeError("Copal resource key is unavailable", code="resource_unavailable") from exc
         if not isinstance(row, Mapping):
             raise FilesFacadeError("Copal resource key is unavailable", code="resource_unavailable")
-        return self._document(row, f"active:{workspace}:all", workspace)
+        parts = self._logical_parts(row.get("name"))
+        state = "system" if row.get("hidden") else "active"
+        parent = self._navigation_origin(state, workspace, "all", parts[:-1])
+        return replace(self._document(row, parent, workspace), name=parts[-1])
 
     async def _action_with_history(
         self,
@@ -673,6 +681,7 @@ class CopalFilesProvider:
         # fresh user action: deriving it from the resource would make a later
         # rename-back collide with the earlier receipt.
         mutation_id = supplied or "files-" + uuid.uuid4().hex
+        args = {**args, "action_id": mutation_id}
         history: dict[str, Any] = {"action_id": mutation_id, "status": "unconfigured", "durable": False, "phase": "unavailable"}
         client = None
         binding = history_binding_for(context.owner_username or "local-installation", "human")
@@ -709,14 +718,17 @@ class CopalFilesProvider:
                     "guard_resource_ids": [resource_key], "modified_resource_ids": [resource_key], "operation": operation,
                     "expected_revision": None, "actor_id": context.owner_username or context.owner_subject_id, "actor_kind": "user",
                     "session_id": None, "run_id": None, "task_id": None, "tool_id": "files-facade",
-                    "before_revision": str(before.get("head") or "") if isinstance(before, Mapping) else None,
+                    "before_revision": None,
                     "expected_after_revision": None,
-                    "original_locator": {"provider": "copal", "workspace_id": resource_key["workspace_id"], "name": str(before.get("name") or "")} if isinstance(before, Mapping) else None,
-                    "destination_locator": {"provider": "copal", "workspace_id": resource_key["workspace_id"], "name": str(args.get("name") or before.get("name") or "")} if isinstance(before, Mapping) else None,
+                    "original_locator": None,
+                    "destination_locator": None,
                     "timestamp_millis": int(__import__("time").time() * 1000),
                     "coverage": {"metadata": {"coverage_kind": "KnownMutationHooks", "roots": [str(args.get("workspace_id") or self.workspace_id)], "exclusions": []}},
                     "per_resource_outcomes": None,
                 }
+                if not isinstance(before, Mapping):
+                    raise ValueError("required Copal recovery preimage is unavailable")
+                envelope.update(capture_metadata(before, workspace=resource_key["workspace_id"], resource_id=resource_key["resource_id"], destination_name=args.get("name")))
                 encoded = json.dumps(before, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8") if isinstance(before, Mapping) else None
                 fingerprint = "missing" if encoded is None else "sha256:" + hashlib.sha256(encoded).hexdigest()
                 await asyncio.to_thread(client.prepare, envelope, content=encoded, fingerprint=fingerprint)
@@ -726,15 +738,20 @@ class CopalFilesProvider:
                 history.update(status="paused" if "history_paused_budget" in str(exc) else "failed", phase="before", error=str(exc))
             except Exception as exc:
                 history.update(status="failed", phase="before", error=str(exc))
+        if isinstance(binding, Mapping) and not capture_ready:
+            raise FilesFacadeError("Required recovery preimage is unavailable; original was preserved", code="recovery_unavailable")
         try:
             result = await self.bridge.call(operation, args)
-        except Exception:
+        except BaseException as exc:
             if client is not None:
                 if capture_ready:
-                    try: await asyncio.to_thread(client.record_live, mutation_id, {"action_id": mutation_id, "status": "NotCommitted", "after_unavailable": True})
+                    try: await asyncio.to_thread(client.record_live, mutation_id, {"action_id": mutation_id, "status": mutation_failure_status(exc), "after_unavailable": True})
                     except Exception: pass
-                try: await asyncio.to_thread(client.abort, mutation_id)
-                except Exception: pass
+                if mutation_failure_status(exc) == "NotCommitted":
+                    try: await asyncio.to_thread(client.abort, mutation_id)
+                    except Exception: pass
+            if mutation_failure_status(exc) == "Unknown" and not isinstance(exc, asyncio.CancelledError):
+                raise CopalBridgeError(f"Mutation outcome Unknown; reconcile action {mutation_id} before retrying") from exc
             raise
         if not capture_ready and fallback_allowed:
             # The Rust Copal bridge is itself the durable history authority.
@@ -755,6 +772,7 @@ class CopalFilesProvider:
                         "status": "complete",
                         "revision": str(latest.get("commit") or "") if isinstance(latest, Mapping) else "",
                         "change_count": len(changes) if isinstance(changes, list) else 0,
+                        "provider": "copal-native",
                     },
                 )
             except Exception as exc:
@@ -768,6 +786,8 @@ class CopalFilesProvider:
                 receipt = await asyncio.to_thread(client.complete, mutation_id, content=encoded_after, fingerprint=fingerprint_after)
                 history.update(status="complete", durable=True, phase="complete", receipt=receipt if isinstance(receipt, Mapping) else {})
             except Exception as exc:
+                try: await asyncio.to_thread(client.after_unavailable, mutation_id)
+                except Exception: pass
                 # A committed provider mutation remains successful when the
                 # history worker disconnects during its after receipt.
                 history.update(status="paused" if "history_paused_budget" in str(exc) else "failed", phase="after", error=str(exc))
@@ -819,6 +839,88 @@ class CopalFilesProvider:
             child_sort_keys=CopalFilesProvider._DOCUMENT_SORTS,
         )
 
+    @staticmethod
+    def _navigation_scope(suffix: str) -> tuple[str, tuple[str, ...]]:
+        if suffix in {"all", "notes", "wiki"}:
+            return suffix, ()
+        try:
+            corpus, path = json.loads(suffix)
+            if corpus not in {"all", "notes", "wiki"} or not isinstance(path, list) or not path:
+                raise ValueError()
+            if not all(isinstance(part, str) and part and "/" not in part and "\\" not in part for part in path):
+                raise ValueError()
+            return corpus, tuple(path)
+        except (ValueError, TypeError):
+            raise FilesFacadeError("Copal folder is unavailable", code="resource_unavailable") from None
+
+    @staticmethod
+    def _navigation_origin(state: str, workspace: str, corpus: str, path: tuple[str, ...]) -> str:
+        suffix = json.dumps([corpus, path], ensure_ascii=False, separators=(",", ":")) if path else corpus
+        return f"{state}:{workspace}:{suffix}"
+
+    def _navigation_folder(self, state: str, workspace: str, corpus: str, path: tuple[str, ...]) -> ProviderResource:
+        origin = self._navigation_origin(state, workspace, corpus, path)
+        return replace(
+            self._folder(origin, path[-1], workspace),
+            parent_origin_id=self._navigation_origin(state, workspace, corpus, path[:-1]),
+            provenance={"domain": "copal", "view": state, "logical_path": "/".join(path)},
+        )
+
+    @staticmethod
+    def _logical_parts(name: Any) -> tuple[str, ...]:
+        # Both imported path separators are presentation metadata only. Never
+        # interpret them as host locators or replace document IDs with paths.
+        return tuple(part for part in re.split(r"[/\\]", str(name or "Untitled")) if part) or ("Untitled",)
+
+    async def _navigation_index(self, context: ProviderContext, workspace: str, state: str, corpus: str) -> dict[str, Any]:
+        args = {
+            **self._scope(context, workspace), "state": "trash" if state == "trash" else "active",
+            "hidden": "only" if state == "system" else "exclude", "corpus": corpus,
+            "query": "", "sort_key": "name", "sort_direction": "asc", "limit": 1,
+        }
+        key = (context.owner_subject_id, context.owner_username, context.policy_generation, workspace, state, corpus)
+        async with self._navigation_lock:
+            try:
+                first = await self.bridge.call("metadata_page", args)
+                snapshot = str(first.get("snapshot") or "")
+                if not snapshot:
+                    raise FilesFacadeError("Copal metadata snapshot is unavailable", code="provider_unavailable")
+                cached = self._navigation_indexes.get(key)
+                if cached and cached["snapshot"] == snapshot:
+                    return cached
+                docs = list(first.get("docs") or ())
+                cursor = first.get("next_cursor")
+                seen = set()
+                while cursor:
+                    if cursor in seen:
+                        raise FilesFacadeError("Copal metadata cursor did not advance", code="provider_unavailable")
+                    seen.add(cursor)
+                    page = await self.bridge.call("metadata_page", {**args, "limit": 200, "cursor": cursor, "snapshot": snapshot})
+                    if str(page.get("snapshot") or "") != snapshot:
+                        raise FilesFacadeError("Copal listing changed", code="stale_cursor")
+                    docs.extend(page.get("docs") or ())
+                    cursor = page.get("next_cursor")
+            except CopalBridgeError as exc:
+                code = "stale_cursor" if str(exc) == "stale_cursor" else "provider_unavailable"
+                raise FilesFacadeError("Copal listing is unavailable", code=code) from exc
+            children: dict[tuple[str, ...], list[Mapping[str, Any]]] = {(): []}
+            folders: dict[tuple[str, ...], set[tuple[str, ...]]] = {(): set()}
+            for row in docs:
+                parts = self._logical_parts(row.get("name"))
+                parent = parts[:-1]
+                children.setdefault(parent, []).append(row)
+                for depth in range(1, len(parts)):
+                    path = parts[:depth]
+                    children.setdefault(path, [])
+                    folders.setdefault(path[:-1], set()).add(path)
+            index = {"snapshot": snapshot, "children": children, "folders": folders}
+            # Keep a bounded number of owner/workspace/corpus projections.
+            self._navigation_indexes.pop(key, None)
+            while len(self._navigation_indexes) >= 16:
+                self._navigation_indexes.pop(next(iter(self._navigation_indexes)))
+            self._navigation_indexes[key] = index
+            return index
+
     async def children(
         self,
         context: ProviderContext,
@@ -847,32 +949,32 @@ class CopalFilesProvider:
 
         if prefix not in {"active", "system", "trash"} or suffix is None:
             raise FilesFacadeError("Copal resource is unavailable", code="resource_unavailable")
-        state, corpus_view = prefix, suffix
+        state = prefix
+        corpus_view, path = self._navigation_scope(suffix)
         corpus = {"notes": "notes", "wiki": "wiki"}.get(corpus_view, "all")
-        args: dict[str, Any] = {
-            **self._scope(context, workspace),
-            "state": "trash" if state == "trash" else "active",
-            "hidden": "only" if state == "system" else "exclude",
-            "corpus": corpus,
-            "query": query,
-            "cursor": cursor,
-            "snapshot": snapshot,
-            "limit": limit,
-            "sort_key": sort["key"],
-            "sort_direction": sort["direction"],
-        }
-        try:
-            result = await self.bridge.call("metadata_page", args)
-        except CopalBridgeError as exc:
-            code = "stale_cursor" if str(exc) == "stale_cursor" else "provider_unavailable"
-            raise FilesFacadeError("Copal listing is unavailable", code=code) from exc
-        rows = tuple(self._document(row, parent_origin_id, workspace) for row in result.get("docs") or ())
-        return ProviderPage(
-            rows,
-            next_cursor=result.get("next_cursor"),
-            total=int(result.get("total") or 0),
-            snapshot=str(result.get("snapshot") or ""),
-        )
+        index = await self._navigation_index(context, workspace, state, corpus)
+        if path not in index["children"]:
+            raise FilesFacadeError("Copal folder is unavailable", code="resource_unavailable")
+        rows = []
+        if query:
+            # Search stays flat with exact full logical names and IDs; only
+            # search within the selected branch, including unloaded descendants.
+            for parent, docs in index["children"].items():
+                if parent[:len(path)] == path:
+                    rows.extend(self._document(row, parent_origin_id, workspace) for row in docs
+                                if query.casefold() in str(row.get("name") or "").casefold())
+        else:
+            rows.extend(self._navigation_folder(state, workspace, corpus, folder)
+                        for folder in index["folders"].get(path, ()))
+            rows.extend(replace(self._document(row, parent_origin_id, workspace), name=self._logical_parts(row.get("name"))[-1])
+                        for row in index["children"][path])
+        rows = _sort_resources(rows, sort)
+        projected_snapshot = _snapshot([index["snapshot"], parent_origin_id, query, dict(sort)])
+        _check_snapshot(snapshot, projected_snapshot)
+        offset = _offset(cursor)
+        page = rows[offset:offset + limit]
+        return ProviderPage(page, next_cursor=str(offset + len(page)) if offset + len(page) < len(rows) else None,
+                            total=len(rows), snapshot=projected_snapshot)
 
     async def search(
         self,
@@ -937,7 +1039,8 @@ class CopalFilesProvider:
             mime_type=mime_type,
             size=int(row.get("size") or 0),
             modified_unix_ms=_millis(row.get("updatedAt") or row.get("ts")),
-            provenance={"domain": "copal", "corpus": row.get("corpus"), "document_kind": row.get("kind")},
+            provenance={"domain": "copal", "corpus": row.get("corpus"), "document_kind": row.get("kind"),
+                        "logical_path": str(row.get("name") or "Untitled")},
             open_target={"app": "copal_notes"},
             download_name=str(row.get("name") or "document.md"),
             preview_kind=preview_kind,
@@ -959,6 +1062,12 @@ class CopalFilesProvider:
                 child_sort_keys=self._ROOT_SORTS,
             )
         if prefix in {"active", "system", "trash"} and suffix is not None:
+            corpus, path = self._navigation_scope(suffix)
+            if path:
+                index = await self._navigation_index(context, workspace, prefix, corpus)
+                if path not in index["children"]:
+                    raise FilesFacadeError("Copal folder is unavailable", code="resource_unavailable")
+                return self._navigation_folder(prefix, workspace, corpus, path)
             label = {
                 "active": {"notes": "Notes", "wiki": "Wiki"}.get(suffix, "Documents"),
                 "system": "System",
@@ -984,10 +1093,10 @@ class CopalFilesProvider:
                 continue
         if not isinstance(row, Mapping):
             raise FilesFacadeError("Copal resource is unavailable", code="resource_unavailable")
-        parent = f"trash:{workspace}:all" if state == "trash" else (
-            f"system:{workspace}:all" if row.get("hidden") else f"active:{workspace}:all"
-        )
-        return self._document(row, parent, workspace)
+        view = "trash" if state == "trash" else "system" if row.get("hidden") else "active"
+        parts = self._logical_parts(row.get("name"))
+        parent = self._navigation_origin(view, workspace, "all", parts[:-1])
+        return replace(self._document(row, parent, workspace), name=parts[-1])
 
     async def query_base(
         self,
@@ -1199,18 +1308,39 @@ class CopalFilesProvider:
             operation = "restore_deleted"
         else:
             raise FilesFacadeError("Copal action is unavailable", code="resource_unavailable")
+        move_proof = None
+        if action in {"rename", "move"}:
+            from src.openclank.document_journeys import prepare_move
+            async def preserve_write(payload):
+                result, _history = await self._action_with_history(context, operation="write", args=payload, action_id=None)
+                return result
+            try:
+                move_proof = await prepare_move(self.bridge, self._scope(context, workspace), document_id, name, preserve_write)
+            except (ValueError, OSError) as exc:
+                raise FilesFacadeError("Attachment preservation could not be prepared; reload before moving", code="resource_changed") from exc
+        if move_proof:
+            operation_args.update(expected_head=move_proof["expectedHead"], expected_name=move_proof["name"])
         try:
             result, history = await self._action_with_history(context, operation=operation, args=operation_args, action_id=action_id)
         except CopalBridgeError as exc:
-            code = "resource_unavailable" if "not found" in str(exc) else "provider_unavailable"
-            raise FilesFacadeError("Copal resource action failed", code=code) from exc
+            unknown = mutation_failure_status(exc) == "Unknown"
+            code = "mutation_unknown" if unknown else "resource_unavailable" if "not found" in str(exc) else "provider_unavailable"
+            raise FilesFacadeError(str(exc) if unknown else "Copal resource action failed", code=code) from exc
         if not isinstance(result, Mapping):
             raise FilesFacadeError("Copal resource action returned invalid metadata", code="provider_unavailable")
+        if move_proof:
+            from src.openclank.document_journeys import finish_move
+            from src.openclank.achievement_producers import record_account_activity
+            emit = lambda family, occurrence, facts: record_account_activity(context.owner_subject_id, family, occurrence, facts, workspace_id=workspace)
+            try:
+                await finish_move(self.bridge, self._scope(context, workspace), move_proof, emit)
+            except (ValueError, OSError):
+                history = {**history, "attachment_verification": "unavailable"}
         updated = await self.stat(context, origin_id=origin_id)
         return replace(updated, action_receipt=history)
 
 
-class GalleryFilesProvider:
+class FilesImagesProvider:
     """Files-managed Gallery image location.
 
     Gallery is a provisioned Files folder with ordinary subfolders. The
@@ -1221,7 +1351,7 @@ class GalleryFilesProvider:
     their Files/Imps owner.
     """
 
-    name = "gallery"
+    name = "files"
     _ROOT_SORTS = ("name",)
     _MEDIA_SORTS = SORT_KEYS
     _DRAFT_SORTS = ("name", "modified")
@@ -1235,6 +1365,120 @@ class GalleryFilesProvider:
         self.session_factory = session_factory
         self.image_resolver = image_resolver
 
+    def _import_parent(self, context: ProviderContext, origin_id: str):
+        from src.openclank.files_image_store import FilesImageStore, FilesImageError
+        store = FilesImageStore(session_factory=self.session_factory)
+        if origin_id == "root":
+            return store.ensure_gallery(context.owner_username)
+        if origin_id == "photos":
+            return store.ensure_photos(context.owner_username)
+        if origin_id.startswith("files-folder:"):
+            db = self.session_factory()
+            try:
+                row = store._get(db, context.owner_username, origin_id.split(":", 1)[1])
+                if row.kind != "folder":
+                    raise FilesFacadeError("Gallery import destination is not a folder", code="resource_unavailable")
+                db.expunge(row)
+                return row
+            except FilesImageError as exc:
+                raise FilesFacadeError(str(exc), code=exc.code) from exc
+            finally:
+                db.close()
+        raise FilesFacadeError("Gallery import destination is not writable", code="resource_unavailable")
+
+    async def stage_import(self, context: ProviderContext, *, destination_origin_id: str, name: str, upload: Any, operation_id: str, item_id: str) -> Mapping[str, Any]:
+        from src.upload_limits import FILES_IMPORT_MAX_BYTES
+        await asyncio.to_thread(self._import_parent, context, destination_origin_id)
+        staged = tempfile.TemporaryFile(mode="w+b")
+        digest = hashlib.sha256(); length = 0
+        try:
+            while part := await upload.read(512 * 1024):
+                if not isinstance(part, (bytes, bytearray)) or length + len(part) > FILES_IMPORT_MAX_BYTES:
+                    raise FilesFacadeError("Gallery import exceeds its byte limit", code="upload_too_large")
+                staged.write(part); digest.update(part); length += len(part)
+            if not length:
+                raise FilesFacadeError("Gallery import has no image bytes", code="invalid_resource_request")
+            staged.seek(0)
+            return {"stage_id": uuid.uuid4().hex, "length": length, "digest": "sha256:" + digest.hexdigest(),
+                    "owner": context.owner_subject_id, "workspace": context.workspace_id, "generation": context.policy_generation,
+                    "destination": destination_origin_id, "name": name, "operation_id": operation_id, "item_id": item_id,
+                    "declared_mime": getattr(upload, "content_type", None), "_file": staged}
+        except BaseException:
+            staged.close()
+            raise
+
+    async def abort_import(self, context: ProviderContext, *, stage: Mapping[str, Any]) -> None:
+        if stage.get("owner") == context.owner_subject_id:
+            staged = stage.get("_file")
+            if staged is not None:
+                staged.close()
+
+    async def finish_import(self, context: ProviderContext, *, destination_origin_id: str, name: str, collision: str, stage: Mapping[str, Any], operation_id: str, item_id: str, request_digest: str | None = None, destination_revision: Mapping[str, Any] | None = None) -> ProviderResource:
+        from src.openclank.files_image_store import FilesImageStore, FilesImageError
+        from PIL import Image
+        if any(stage.get(key) != value for key, value in {
+            "owner": context.owner_subject_id, "workspace": context.workspace_id, "generation": context.policy_generation,
+            "destination": destination_origin_id, "name": name, "operation_id": operation_id, "item_id": item_id,
+        }.items()):
+            raise FilesFacadeError("Gallery import stage identity changed", code="resource_changed")
+        current = await self.stat(context, origin_id=destination_origin_id)
+        observed = dict(current.revision) if current.revision else None
+        if observed != (dict(destination_revision) if destination_revision else None):
+            raise FilesFacadeError("Gallery import destination revision changed", code="resource_changed")
+        parent = await asyncio.to_thread(self._import_parent, context, destination_origin_id)
+        staged = stage.get("_file")
+        if staged is None or staged.closed:
+            raise FilesFacadeError("Gallery import stage is unavailable", code="resource_unavailable")
+        try:
+            staged.seek(0); data = staged.read()
+            if len(data) != stage.get("length") or "sha256:" + hashlib.sha256(data).hexdigest() != stage.get("digest"):
+                raise FilesFacadeError("Gallery import stage bytes changed", code="resource_changed")
+            try:
+                staged.seek(0)
+                with Image.open(staged) as image:
+                    image.load(); width, height = image.size; detected_mime = Image.MIME.get(image.format)
+                if not detected_mime or not detected_mime.startswith("image/"):
+                    raise ValueError("unsupported image")
+            except Exception as exc:
+                raise FilesFacadeError("Gallery import pixels could not be decoded", code="invalid_resource_request") from exc
+            binding = {"account": context.owner_subject_id, "workspace": context.workspace_id, "generation": context.policy_generation,
+                       "operation_id": operation_id, "item_id": item_id, "request_digest": request_digest,
+                       "destination": destination_origin_id, "name": name, "collision": collision, "digest": stage["digest"], "length": len(data)}
+            store = FilesImageStore(session_factory=self.session_factory)
+            try:
+                row = await asyncio.to_thread(store.import_image, context.owner_username, parent_id=parent.id, name=name,
+                                              data=data, mime_type=detected_mime, collision=collision,
+                                              operation_key="files-import:" + operation_id,
+                                              provenance={"width": width, "height": height, "files_import": binding})
+            except FilesImageError as exc:
+                raise FilesFacadeError(str(exc), code=exc.code) from exc
+            return self._managed_resource(row, parent.id)
+        finally:
+            staged.close()
+
+    async def operation_status(self, context: ProviderContext, *, operation_id: str, **expected) -> Mapping[str, Any] | None:
+        from src.openclank.resource_refs import issue_resource_ref, stable_resource_id
+        db = self.session_factory()
+        try:
+            row = db.query(FilesImageResource).filter(FilesImageResource.owner == context.owner_username,
+                                                     FilesImageResource.operation_key == "files-import:" + operation_id,
+                                                     FilesImageResource.is_active.is_(True)).one_or_none()
+            binding = (row.provenance or {}).get("files_import") if row is not None else None
+            if not isinstance(binding, dict) or binding.get("account") != context.owner_subject_id or binding.get("workspace") != context.workspace_id or binding.get("generation") != context.policy_generation:
+                return None
+            if any(value is not None and binding.get(key) != value for key, value in expected.items()):
+                return None
+            entry = self._managed_resource(row, row.parent_id or "root")
+            return {"state": "complete", "_request_digest": binding.get("request_digest"), "items": [{
+                "item_id": binding["item_id"], "outcome": "committed",
+                "resource_key": stable_resource_id(owner_subject_id=context.owner_subject_id, provider=self.name, origin_id=entry.origin_id),
+                "resource_ref": issue_resource_ref(owner_subject_id=context.owner_subject_id, provider=self.name, origin_id=entry.origin_id,
+                                                   kind=entry.kind, capabilities=entry.capabilities, policy_generation=context.policy_generation).token,
+                "revision": dict(entry.revision),
+            }]}
+        finally:
+            db.close()
+
     def supported_sort_keys(self, *, parent_origin_id: str) -> tuple[str, ...]:
         if parent_origin_id == "root":
             return self._ROOT_SORTS
@@ -1242,8 +1486,10 @@ class GalleryFilesProvider:
             return self._MEDIA_SORTS
         if parent_origin_id == "drafts":
             return self._DRAFT_SORTS
+        if parent_origin_id.startswith("files-folder:"):
+            return self._MEDIA_SORTS
         # Albums retired: no album view, no album child listing.
-        raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
+        raise FilesFacadeError("Files image resource is unavailable", code="resource_unavailable")
 
     async def roots(self, context: ProviderContext):
         return [ProviderResource(
@@ -1267,7 +1513,7 @@ class GalleryFilesProvider:
             parent_id = parent_origin_id.split(":", 1)[1]
             parent = type("Parent", (), {"id": parent_id})()
         else:
-            raise FilesFacadeError("Gallery directory parent is unavailable", code="resource_unavailable")
+            raise FilesFacadeError("Files image directory parent is unavailable", code="resource_unavailable")
         try:
             row = store.create_folder(context.owner_username, parent_id=parent.id, name=name, operation_key=operation_id)
         except FilesImageError as exc:
@@ -1277,9 +1523,9 @@ class GalleryFilesProvider:
     @staticmethod
     def _folder(origin_id: str, name: str) -> ProviderResource:
         child_sort_keys = {
-            "photos": GalleryFilesProvider._MEDIA_SORTS,
-            "favorites": GalleryFilesProvider._MEDIA_SORTS,
-            "drafts": GalleryFilesProvider._DRAFT_SORTS,
+            "photos": FilesImagesProvider._MEDIA_SORTS,
+            "favorites": FilesImagesProvider._MEDIA_SORTS,
+            "drafts": FilesImagesProvider._DRAFT_SORTS,
         }[origin_id]
         return ProviderResource(
             origin_id,
@@ -1302,18 +1548,44 @@ class GalleryFilesProvider:
         limit: int,
         sort: Mapping[str, Any],
     ) -> ProviderPage:
-        pages = []
-        for parent in ("photos", "drafts"):
-            pages.append(await self.children(
-                context,
-                parent_origin_id=parent,
-                cursor=None,
-                snapshot=None,
-                limit=limit,
-                sort=_search_sort(sort, self.supported_sort_keys(parent_origin_id=parent)),
-                query=query,
-            ))
-        return _merge_search_pages(pages, limit=limit, sort=sort)
+        return await asyncio.to_thread(self._search_sync, context, query, limit, sort)
+
+    def _search_sync(
+        self,
+        context: ProviderContext,
+        query: str,
+        limit: int,
+        sort: Mapping[str, Any],
+    ) -> ProviderPage:
+        from src.openclank.files_image_store import FilesImageStore
+
+        gallery = FilesImageStore(session_factory=self.session_factory).ensure_gallery(context.owner_username)
+        db = self.session_factory()
+        try:
+            rows = db.query(FilesImageResource).filter(
+                FilesImageResource.owner == context.owner_username,
+                FilesImageResource.id != gallery.id,
+                FilesImageResource.is_active.is_(True),
+            ).all()
+            needle = str(query or "").casefold()
+            if needle:
+                rows = [
+                    row for row in rows
+                    if needle in row.display_name.casefold()
+                    or needle in json.dumps(row.provenance or {}, sort_keys=True).casefold()
+                ]
+            entries = _sort_resources(
+                tuple(self._managed_resource(row, row.parent_id or "root") for row in rows),
+                sort,
+            )
+            return ProviderPage(
+                entries[:limit],
+                next_cursor=str(limit) if len(entries) > limit else None,
+                total=len(entries),
+                snapshot=_snapshot([gallery.id, len(entries), max((row.updated_at for row in rows), default=None)]),
+            )
+        finally:
+            db.close()
 
     def _children_sync(
         self,
@@ -1329,27 +1601,57 @@ class GalleryFilesProvider:
         if parent_origin_id == "root":
             if cursor or snapshot:
                 raise FilesFacadeError("provider cursor is stale", code="stale_cursor")
-            # Albums retired — Gallery is a Files folder with ordinary
-            # subfolders (Photos/Favorites/Saved Projects), not an album system.
-            rows = tuple(self._folder(origin, label) for origin, label in (
-                ("photos", "Photos"),
-                ("favorites", "Favorites"),
-                ("drafts", "Saved Projects"),
-            ))
-            rows = _sort_resources(rows, sort)
-            return ProviderPage(rows, total=len(rows), snapshot="gallery-folders-v2")
+            # The built-in Gallery is a real Files folder. Provision its
+            # Photos child before exposing the stable Files roots.
+            from src.openclank.files_image_store import FilesImageStore
+            store = FilesImageStore(session_factory=self.session_factory)
+            gallery = store.ensure_gallery(context.owner_username)
+            photos = store.ensure_photos(context.owner_username)
+            db = self.session_factory()
+            try:
+                managed_rows = db.query(FilesImageResource).filter(
+                    FilesImageResource.owner == context.owner_username,
+                    FilesImageResource.parent_id == gallery.id,
+                    FilesImageResource.id != photos.id,
+                    FilesImageResource.is_active.is_(True),
+                ).all()
+                entries = (
+                    self._folder("photos", "Photos"),
+                    self._folder("favorites", "Favorites"),
+                    self._folder("drafts", "Saved Projects"),
+                    *(self._managed_resource(row, gallery.id) for row in managed_rows),
+                )
+                entries = _sort_resources(entries, sort)
+                snapshot_value = _snapshot([gallery.id, len(entries), max((row.updated_at for row in managed_rows), default=None)])
+                return ProviderPage(entries, total=len(entries), snapshot=snapshot_value)
+            finally:
+                db.close()
         db = self.session_factory()
         try:
-            managed_parent = parent_origin_id
-            if parent_origin_id in {"photos", "favorites"}:
-                folder = db.query(FilesImageResource.id).filter(
+            if parent_origin_id == "favorites":
+                rows = db.query(FilesImageResource).filter(
                     FilesImageResource.owner == context.owner_username,
-                    FilesImageResource.kind == "folder",
-                    FilesImageResource.parent_id.is_(None) == False,
-                    FilesImageResource.display_name == "Photos",
+                    FilesImageResource.kind == "image",
+                    FilesImageResource.favorite.is_(True),
                     FilesImageResource.is_active.is_(True),
-                ).first()
-                managed_parent = folder[0] if folder else None
+                ).all()
+                if query:
+                    needle = query.casefold()
+                    rows = [row for row in rows if needle in row.display_name.casefold()]
+                entries = _sort_resources(tuple(self._managed_resource(row, "favorites") for row in rows), sort)
+                current_snapshot = _snapshot(["favorites", len(entries), max((row.updated_at for row in rows), default=None)])
+                _check_snapshot(snapshot, current_snapshot)
+                offset = _offset(cursor)
+                page_entries = entries[offset:offset + limit]
+                next_cursor = str(offset + len(page_entries)) if offset + len(page_entries) < len(entries) else None
+                return ProviderPage(page_entries, next_cursor=next_cursor, total=len(entries), snapshot=current_snapshot)
+            managed_parent = parent_origin_id
+            entries: tuple[ProviderResource, ...] = ()
+            if parent_origin_id == "photos":
+                from src.openclank.files_image_store import FilesImageStore
+                managed_parent = FilesImageStore(
+                    session_factory=self.session_factory
+                ).ensure_photos(context.owner_username).id
             elif parent_origin_id.startswith("files-folder:"):
                 managed_parent = parent_origin_id.split(":", 1)[1]
             if managed_parent:
@@ -1369,54 +1671,7 @@ class GalleryFilesProvider:
                     _check_snapshot(snapshot, snapshot_value)
                     next_cursor = str(offset + len(page_entries)) if offset + len(page_entries) < len(entries) else None
                     return ProviderPage(page_entries, next_cursor=next_cursor, total=len(entries), snapshot=snapshot_value)
-            if parent_origin_id in {"photos", "favorites"}:
-                query_obj = db.query(
-                    GalleryImage.id,
-                    GalleryImage.filename,
-                    GalleryImage.favorite,
-                    GalleryImage.album_id,
-                    GalleryImage.file_size,
-                    GalleryImage.updated_at,
-                    GalleryImage.created_at,
-                ).filter(
-                    GalleryImage.owner == context.owner_username,
-                    GalleryImage.is_active == True,
-                )
-                if parent_origin_id == "favorites":
-                    query_obj = query_obj.filter(GalleryImage.favorite == True)
-                if query:
-                    term = f"%{query}%"
-                    query_obj = query_obj.filter(or_(
-                        GalleryImage.filename.ilike(term),
-                        GalleryImage.prompt.ilike(term),
-                        GalleryImage.caption.ilike(term),
-                        GalleryImage.tags.ilike(term),
-                    ))
-                total, latest = query_obj.with_entities(
-                    func.count(GalleryImage.id), func.max(GalleryImage.updated_at)
-                ).one()
-                current_snapshot = _snapshot([parent_origin_id, total, latest])
-                _check_snapshot(snapshot, current_snapshot)
-                if sort["key"] == "kind":
-                    # MIME/kind is normalized from the stored filename. SQL
-                    # has no portable MIME collation, so select metadata only,
-                    # sort it honestly, and then apply the bound offset.
-                    all_entries = _sort_resources(
-                        tuple(self._image(row, parent_origin_id) for row in query_obj.all()),
-                        sort,
-                    )
-                    offset = _offset(cursor)
-                    entries = all_entries[offset:offset + limit]
-                else:
-                    field = {
-                        "name": func.lower(GalleryImage.filename),
-                        "size": GalleryImage.file_size,
-                        "modified": GalleryImage.updated_at,
-                    }[sort["key"]]
-                    order = field.desc() if sort["direction"] == "desc" else field.asc()
-                    rows = query_obj.order_by(order, GalleryImage.id.asc()).offset(_offset(cursor)).limit(limit).all()
-                    entries = tuple(self._image(row, parent_origin_id) for row in rows)
-            elif parent_origin_id == "drafts":
+            if parent_origin_id == "drafts":
                 query_obj = db.query(
                     EditorDraft.id,
                     EditorDraft.name,
@@ -1452,41 +1707,16 @@ class GalleryFilesProvider:
                     provenance={"domain": "gallery", "draft": True},
                     open_target={"app": "imps"},
                 ) for row in rows)
+            elif managed_parent:
+                total = len(entries)
+                current_snapshot = _snapshot([managed_parent, total])
             else:
-                raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
+                raise FilesFacadeError("Files image resource is unavailable", code="resource_unavailable")
             offset = _offset(cursor)
             next_cursor = str(offset + len(entries)) if offset + len(entries) < int(total or 0) else None
             return ProviderPage(entries, next_cursor=next_cursor, total=int(total or 0), snapshot=current_snapshot)
         finally:
             db.close()
-
-    @staticmethod
-    def _image(row: GalleryImage, parent: str) -> ProviderResource:
-        stored_name = _safe_gallery_storage_name(row.filename)
-        display_name = _download_name(row.filename)
-        mime_type = mimetypes.guess_type(display_name)[0]
-        preview_kind = _preview_kind_for_mime(mime_type)
-        capabilities = ["stat", "open", "favorite"]
-        if stored_name is not None:
-            capabilities.append("download")
-        if stored_name is not None and preview_kind in {"image", "audio"}:
-            capabilities.append("preview")
-        return ProviderResource(
-            f"image:{row.id}",
-            display_name,
-            "image" if preview_kind == "image" else "file",
-            tuple(capabilities),
-            parent_origin_id=parent,
-            mime_type=mime_type,
-            size=row.file_size,
-            modified_unix_ms=_millis(row.updated_at),
-            created_unix_ms=_millis(row.created_at),
-            provenance={"domain": "gallery", "favorite": bool(row.favorite), "album_id": row.album_id},
-            open_target={"app": "imps"},
-            download_name=display_name if stored_name is not None else None,
-            preview_kind=preview_kind if stored_name is not None else None,
-            sort_kind=preview_kind or mime_type or ("image" if preview_kind == "image" else "file"),
-        )
 
     @staticmethod
     def _managed_resource(row: FilesImageResource, parent: str) -> ProviderResource:
@@ -1495,7 +1725,8 @@ class GalleryFilesProvider:
                 f"files-folder:{row.id}", row.display_name, "virtual_folder",
                 ("children", "stat", "search", "write", "rename", "move"), parent_origin_id=parent,
                 provenance={"domain": "gallery", "files_owned": True},
-                child_sort_keys=GalleryFilesProvider._MEDIA_SORTS,
+                child_sort_keys=FilesImagesProvider._MEDIA_SORTS,
+                revision={"kind": "filesImageRevision", "value": str(row.revision)},
             )
         preview_kind = "image" if str(row.mime_type or "").startswith("image/") else None
         capabilities = ["stat", "open", "favorite", "rename", "move"]
@@ -1511,6 +1742,7 @@ class GalleryFilesProvider:
             provenance={"domain": "gallery", "files_owned": True, "favorite": bool(row.favorite)},
             open_target={"app": "imps"}, download_name=row.display_name if row.locator else None,
             preview_kind=preview_kind,
+            revision={"kind": "imageSha256", "value": "sha256:" + row.digest} if row.digest else None,
         )
 
     async def stat(self, context: ProviderContext, *, origin_id: str) -> ProviderResource:
@@ -1541,35 +1773,6 @@ class GalleryFilesProvider:
                 ).one_or_none()
                 if managed:
                     return self._managed_resource(managed, "photos")
-            if origin_id.startswith("image:"):
-                row = db.query(
-                    GalleryImage.id,
-                    GalleryImage.filename,
-                    GalleryImage.favorite,
-                    GalleryImage.album_id,
-                    GalleryImage.file_size,
-                    GalleryImage.updated_at,
-                    GalleryImage.created_at,
-                ).filter(
-                    GalleryImage.id == origin_id.split(":", 1)[1],
-                    GalleryImage.owner == context.owner_username,
-                    GalleryImage.is_active == True,
-                ).first()
-                if row:
-                    return self._image(row, "photos")
-            if origin_id.startswith("album:"):
-                # Albums are retired. A legacy album link resolves to the
-                # folder its images now live in (Photos) rather than a hard
-                # 404, so persisted references keep landing somewhere useful.
-                return ProviderResource(
-                    "photos",
-                    "Photos",
-                    "virtual_folder",
-                    ("children", "stat", "search"),
-                    parent_origin_id="root",
-                    provenance={"domain": "gallery", "view": "photos", "retired_alias": "album"},
-                    child_sort_keys=self._MEDIA_SORTS,
-                )
             if origin_id.startswith("draft:"):
                 row = db.query(
                     EditorDraft.id,
@@ -1593,7 +1796,7 @@ class GalleryFilesProvider:
                         provenance={"domain": "gallery", "draft": True},
                         open_target={"app": "imps"},
                     )
-            raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
+            raise FilesFacadeError("Files image resource is unavailable", code="resource_unavailable")
         finally:
             db.close()
 
@@ -1623,7 +1826,7 @@ class GalleryFilesProvider:
                 args.get("expected_revision"),
             )
         if action != "favorite.set" or not origin_id.startswith("image:"):
-            raise FilesFacadeError("Gallery action is unavailable", code="resource_unavailable")
+            raise FilesFacadeError("Files image action is unavailable", code="resource_unavailable")
         return await asyncio.to_thread(
             self._set_favorite_sync,
             context,
@@ -1641,7 +1844,7 @@ class GalleryFilesProvider:
     ) -> ProviderResource:
         from src.openclank.files_image_store import FilesImageError, FilesImageStore
         if not name:
-            raise FilesFacadeError("Gallery resource name is required", code="invalid_name")
+            raise FilesFacadeError("Files image resource name is required", code="invalid_name")
         resource_id = origin_id.split(":", 1)[1]
         db = self.session_factory()
         try:
@@ -1651,7 +1854,7 @@ class GalleryFilesProvider:
                 FilesImageResource.is_active.is_(True),
             ).one_or_none()
             if row is None:
-                raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
+                raise FilesFacadeError("Files image is unavailable", code="resource_unavailable")
             parent_id = row.parent_id
             if parent_origin_id:
                 if parent_origin_id == "root":
@@ -1661,7 +1864,7 @@ class GalleryFilesProvider:
                 elif parent_origin_id.startswith("files-folder:"):
                     parent_id = parent_origin_id.split(":", 1)[1]
                 else:
-                    raise FilesFacadeError("Gallery destination is unavailable", code="resource_unavailable")
+                    raise FilesFacadeError("Files image destination is unavailable", code="resource_unavailable")
             revision = int(expected_revision) if expected_revision is not None else int(row.revision)
         finally:
             db.close()
@@ -1669,8 +1872,8 @@ class GalleryFilesProvider:
             moved = FilesImageStore(session_factory=self.session_factory).move(
                 context.owner_username,
                 resource_id,
-                parent_id,
-                name,
+                parent_id=parent_id,
+                name=name,
                 expected_revision=revision,
             )
         except FilesImageError as exc:
@@ -1685,37 +1888,30 @@ class GalleryFilesProvider:
     ) -> ProviderResource:
         db = self.session_factory()
         try:
-            row = db.query(GalleryImage).filter(
-                GalleryImage.id == image_id,
-                GalleryImage.owner == context.owner_username,
-                GalleryImage.is_active == True,
-            ).first()
-            if row is None:
-                raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
-            row.favorite = bool(value)
             managed = db.query(FilesImageResource).filter(
                 FilesImageResource.id == image_id,
                 FilesImageResource.owner == context.owner_username,
                 FilesImageResource.kind == "image",
                 FilesImageResource.is_active.is_(True),
             ).one_or_none()
-            if managed is not None:
-                managed.favorite = bool(value)
+            if managed is None:
+                raise FilesFacadeError("Files image is unavailable", code="resource_unavailable")
+            managed.favorite = bool(value)
             db.commit()
-            db.refresh(row)
-            return self._image(row, "favorites" if value else "photos")
+            db.refresh(managed)
+            return self._managed_resource(managed, managed.parent_id or "root")
         except FilesFacadeError:
             db.rollback()
             raise
         except Exception as exc:
             db.rollback()
-            raise FilesFacadeError("Gallery action failed", code="provider_unavailable") from exc
+            raise FilesFacadeError("Files image action failed", code="provider_unavailable") from exc
         finally:
             db.close()
 
     def _content_sync(self, context: ProviderContext, origin_id: str) -> ProviderContent:
         if not origin_id.startswith("image:"):
-            raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
+            raise FilesFacadeError("Files image is unavailable", code="resource_unavailable")
         db = self.session_factory()
         try:
             managed = db.query(FilesImageResource).filter(
@@ -1724,29 +1920,19 @@ class GalleryFilesProvider:
                 FilesImageResource.kind == "image",
                 FilesImageResource.is_active.is_(True),
             ).one_or_none()
-            if managed is not None:
-                row = (managed.id, managed.locator)
-            else:
-                row = db.query(
-                    GalleryImage.id,
-                    GalleryImage.filename,
-                ).filter(
-                    GalleryImage.id == origin_id.split(":", 1)[1],
-                    GalleryImage.owner == context.owner_username,
-                    GalleryImage.is_active == True,
-                ).first()
+            row = (managed.id, managed.locator) if managed is not None else None
         finally:
             db.close()
         if not row:
-            raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
-        stored_name = _safe_gallery_storage_name(managed.locator) if managed is not None else _safe_gallery_storage_name(row.filename)
+            raise FilesFacadeError("Files image is unavailable", code="resource_unavailable")
+        stored_name = _safe_gallery_storage_name(managed.locator)
         if stored_name is None:
-            raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
+            raise FilesFacadeError("Files image resource is unavailable", code="resource_unavailable")
         try:
             path = self.image_resolver(stored_name)
         except Exception as exc:
-            raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable") from exc
-        media_type = (managed.mime_type if managed is not None else None) or mimetypes.guess_type(stored_name)[0] or "application/octet-stream"
+            raise FilesFacadeError("Files image is unavailable", code="resource_unavailable") from exc
+        media_type = managed.mime_type or mimetypes.guess_type(stored_name)[0] or "application/octet-stream"
         return _path_content(
             origin_id,
             filename=_download_name(stored_name),
@@ -1767,60 +1953,19 @@ class GalleryFilesProvider:
             if managed is not None:
                 media_type = str(managed.mime_type or "")
                 if not media_type.startswith("image/"):
-                    raise FilesFacadeError("Gallery image preview is unavailable", code="resource_unavailable")
+                    raise FilesFacadeError("Files image preview is unavailable", code="resource_unavailable")
                 self._content_sync(context, origin_id)
                 return {
-                    "provider": "gallery", "resource_id": origin_id,
+                    "provider": "files", "resource_id": origin_id,
                     "filename": managed.display_name, "prompt": str((managed.provenance or {}).get("prompt", "")),
-                    "caption": "", "model": str((managed.provenance or {}).get("model", "")),
-                    "size": "", "quality": "", "tags": "", "ai_tags": "",
+                    "caption": str((managed.provenance or {}).get("caption", "")), "model": str((managed.provenance or {}).get("model", "")),
+                    "size": str((managed.provenance or {}).get("size", "")), "quality": str((managed.provenance or {}).get("quality", "")), "tags": "", "ai_tags": "",
                     "favorite": bool(managed.favorite), "created_at": _millis(managed.created_at),
                     "updated_at": _millis(managed.updated_at), "file_size": int(managed.size),
+                    "width": (managed.provenance or {}).get("width"), "height": (managed.provenance or {}).get("height"),
                     "media_type": media_type, "read_only": False,
                 }
-            row = db.query(GalleryImage).filter(
-                GalleryImage.id == image_id,
-                GalleryImage.owner == context.owner_username,
-                GalleryImage.is_active == True,
-            ).first()
-            if row is None:
-                raise FilesFacadeError("Gallery resource is unavailable", code="resource_unavailable")
-            stored_name = _safe_gallery_storage_name(row.filename)
-            media_type = mimetypes.guess_type(stored_name or "")[0]
-            if stored_name is None or not str(media_type or "").startswith("image/"):
-                raise FilesFacadeError("Gallery image preview is unavailable", code="resource_unavailable")
-            # Verify that the same owner-scoped provider content which the
-            # opaque response will load is present before returning metadata.
-            self._content_sync(context, origin_id)
-            camera = " ".join(part for part in (row.camera_make, row.camera_model) if part).strip()
-            return {
-                # Stable managed image identity for Imps save/load. This is the
-                # (provider, resource_id) pair the managed project surface uses;
-                # the Files opaque ref stays capability-scoped and separate.
-                "provider": "gallery",
-                "resource_id": origin_id,
-                "filename": _download_name(row.filename),
-                "prompt": str(row.prompt or ""),
-                "caption": str(row.caption or ""),
-                "model": str(row.model or ""),
-                "size": str(row.size or ""),
-                "quality": str(row.quality or ""),
-                "tags": str(row.tags or ""),
-                "ai_tags": str(row.ai_tags or ""),
-                "favorite": bool(row.favorite),
-                "taken_at": _millis(row.taken_at),
-                "created_at": _millis(row.created_at),
-                "updated_at": _millis(row.updated_at),
-                "camera": camera,
-                "width": int(row.width) if row.width is not None else None,
-                "height": int(row.height) if row.height is not None else None,
-                "file_size": int(row.file_size) if row.file_size is not None else None,
-                "media_type": str(media_type),
-                # Imps writes pixels through the managed /api/imps save surface
-                # under owner scope. Exact open is no longer read-only now that
-                # Save is a recoverable managed operation.
-                "read_only": False,
-            }
+            raise FilesFacadeError("Files image is unavailable", code="resource_unavailable")
         finally:
             db.close()
 
@@ -2714,4 +2859,4 @@ class LibraryFilesProvider:
         raise FilesFacadeError("Library resource is unavailable", code="resource_unavailable")
 
 
-__all__ = ["CopalFilesProvider", "GalleryFilesProvider", "LibraryFilesProvider"]
+__all__ = ["CopalFilesProvider", "FilesImagesProvider", "LibraryFilesProvider"]

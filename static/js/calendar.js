@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 /**
  * Calendar Module — CalDAV-backed month/week/year calendar.
  */
@@ -548,7 +549,7 @@ function _showEventMoreMenu(ev, anchor) {
     return it;
   };
 
-  const _editIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  const _editIcon = uiIcon("edit", 12);
 
   dropdown.appendChild(_item(_editIcon, 'Edit', () => {
     closeMenu();
@@ -674,7 +675,7 @@ function _getModal() {
   _modal.innerHTML = `
     <div class="modal-content cal-modal-content">
       <div class="modal-header">
-        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Calendar</h4>
+        <h4>${uiIcon("calendar", 14, {"style":"vertical-align:-2px;margin-right:6px"})}Calendar</h4>
         <button class="close-btn" id="cal-close">✖</button>
       </div>
       <div class="modal-body" id="cal-body"></div>
@@ -830,12 +831,7 @@ function _renderEmpty() {
   const hasError = !!_calendarsError;
   body.innerHTML = `
     <div class="cal-empty-state">
-      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3">
-        <rect x="3" y="4" width="18" height="18" rx="2"/>
-        <line x1="16" y1="2" x2="16" y2="6"/>
-        <line x1="8" y1="2" x2="8" y2="6"/>
-        <line x1="3" y1="10" x2="21" y2="10"/>
-      </svg>
+      ${uiIcon("calendar", 48, {"style":"opacity:0.3"})}
       <div class="cal-empty-title">${hasError ? 'Calendar unavailable' : 'No calendars yet'}</div>
       <div class="cal-empty-msg">${hasError ? _e(_calendarsError) : 'Create a local calendar, import an .ics file, or sync via CalDAV.'}</div>
       ${hasError ? `
@@ -919,8 +915,8 @@ function _headerHTML() {
           `<button class="cal-view-btn${_view === v ? ' active' : ''}" data-view="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`
         ).join('')}
       </div>
-      <button class="cal-nav" id="cal-settings" title="Calendar settings" style="position:relative;top:-3px;"><svg width="13" height="13" style="position:relative;top:2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.68 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-      <button class="cal-nav${window._calSyncing ? ' cal-syncing' : ''}${window._calSyncDone ? ' cal-sync-done' : ''}" id="cal-sync" title="Refresh from database" style="position:relative;top:-3px;">${window._calSyncDone ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>'}</button>
+      <button class="cal-nav" id="cal-settings" title="Calendar settings" style="position:relative;top:-3px;">${uiIcon("settings", 13, {"style":"position:relative;top:2px;"})}</button>
+      <button class="cal-nav${window._calSyncing ? ' cal-syncing' : ''}${window._calSyncDone ? ' cal-sync-done' : ''}" id="cal-sync" title="Refresh from database" style="position:relative;top:-3px;">${window._calSyncDone ? uiIcon("check", 13, {"role":"success"}) : uiIcon("refresh", 13)}</button>
       ${_filtersToggleHTML()}
       <button class="cal-add-btn cal-add-btn-text" id="cal-add" title="New event"><span class="cal-add-plus">+</span><span class="cal-add-label">New</span></button>
     </div>
@@ -933,7 +929,7 @@ function _headerHTML() {
       placeholder=" "
       autocomplete="off"
     />
-    <span class="cal-quickadd-hint" id="cal-quickadd-hint" aria-hidden="true"><span class="qa-hint-accent">Quick add</span> — <span class="qa-hint-example" id="qa-hint-example">return home to Ithaca 1pm tmrw</span> <svg class="qa-hint-enter" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg></span>
+    <span class="cal-quickadd-hint" id="cal-quickadd-hint" aria-hidden="true"><span class="qa-hint-accent">Quick add</span> — <span class="qa-hint-example" id="qa-hint-example">return home to Ithaca 1pm tmrw</span> ${uiIcon("enter", 12, {"className":"qa-hint-enter"})}</span>
     <span class="cal-quickadd-status" id="cal-quickadd-status"></span>
   </div>`;
 }
@@ -1866,7 +1862,7 @@ function _dayDetailHTML(dateStr) {
   // body to global search results instead of just this day's events.
   // Magnifying-glass icon inside the search field via a wrapper + padding-left.
   const searchInput = `<div class="cal-search-wrap">
-    <svg class="cal-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+    ${uiIcon("search", 13, {"className":"cal-search-icon"})}
     <input type="search" class="cal-search-input cal-day-search" id="cal-search" placeholder="Search all events…" value="${_e(_searchQuery)}" />
   </div>`;
   let h = `<div class="cal-splitter" role="separator" aria-orientation="horizontal" tabindex="0" title="Drag to resize"><div class="cal-splitter-grip"></div></div>
@@ -2531,12 +2527,12 @@ async function _showCalSettings() {
               <div class="cal-settings-row" data-id="${_e(c.href)}" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;background:color-mix(in srgb, var(--fg) 4%, transparent);">
                 <input type="color" value="${c.color || '#5b8abf'}" class="cal-s-color" style="width:24px;height:24px;border:none;background:none;cursor:pointer;padding:0;border-radius:50%;overflow:hidden;" />
                 <input type="text" value="${_e(c.name)}" class="cal-s-name" style="flex:1;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 6px;color:var(--fg);font-size:12px;" />
-                <button class="cal-s-del" title="Delete calendar" style="background:none;border:none;color:var(--accent, var(--red));opacity:0.75;cursor:pointer;padding:2px;display:flex;position:relative;top:4px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></button>
+                <button class="cal-s-del" title="Delete calendar" style="background:none;border:none;color:var(--accent, var(--red));opacity:0.75;cursor:pointer;padding:2px;display:flex;position:relative;top:4px;">${uiIcon("trash", 13)}</button>
               </div>
             `).join('')}
           </div>
           <button class="memory-toolbar-btn" id="cal-settings-add" style="margin-top:8px;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            ${uiIcon("add", 11, {"style":"vertical-align:-1px;margin-right:3px;color:var(--accent, var(--red));"})}
             New calendar
           </button>
         </div>
@@ -2544,7 +2540,7 @@ async function _showCalSettings() {
           <div style="font-size:11px;opacity:0.5;margin-bottom:6px;">Import calendar</div>
           <div style="display:flex;gap:8px;align-items:center;">
             <label class="memory-toolbar-btn" style="cursor:pointer;">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="position:relative;top:5px;margin-right:3px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              ${uiIcon("upload", 11, {"style":"position:relative;top:5px;margin-right:3px;"})}
               <span style="position:relative;top:4px;">Import .ics</span>
               <input type="file" accept=".ics,.ical" id="cal-import-file" style="display:none;" />
             </label>
@@ -2557,7 +2553,7 @@ async function _showCalSettings() {
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
             ${cals.map(c => `
               <button class="memory-toolbar-btn cal-s-export-chip" data-id="${_e(c.href)}" title="Download ${_e(c.name)}.ics" style="cursor:pointer;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="position:relative;top:2px;margin-right:3px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                ${uiIcon("download", 11, {"style":"position:relative;top:2px;margin-right:3px;"})}
                 <span style="position:relative;top:1px;">${_e(c.name)}</span>
               </button>
             `).join('')}
@@ -2575,7 +2571,7 @@ async function _showCalSettings() {
           <div style="font-size:11px;opacity:0.5;margin-bottom:6px;">Sync</div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             <button class="memory-toolbar-btn" id="cal-settings-sync-now" style="cursor:pointer;">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="position:relative;top:2px;margin-right:3px;"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              ${uiIcon("refresh", 11, {"style":"position:relative;top:2px;margin-right:3px;"})}
               <span style="position:relative;top:1px;">Sync now</span>
             </button>
             <span id="cal-settings-sync-status" style="font-size:11px;opacity:0.6;"></span>
@@ -2824,7 +2820,7 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
 
   body.innerHTML = `<div class="cal-form cal-form-bespoke${_expandedAtStart ? ' is-expanded' : ''}">
     <button type="button" class="cal-form-mobile-cancel" id="cal-form-mobile-cancel" title="Cancel" aria-label="Cancel event">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      ${uiIcon("close", 15)}
     </button>
     <div class="cal-form-today" id="cal-form-today">Today is <span id="cal-form-today-text">${_clockDate(_today())} · ${_nowClock()}</span></div>
     <div class="cal-hero">
@@ -2837,7 +2833,7 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
 
     <div class="cal-title-wrap">
       <input type="text" id="cal-f-sum" placeholder=" " value="${_e(existing?.summary || '')}" class="cal-input cal-hero-title" autocomplete="off" />
-      <span class="cal-title-hint" aria-hidden="true">${isEdit ? 'Event title' : 'What’s happening?'}<svg class="cal-title-enter-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg></span>
+      <span class="cal-title-hint" aria-hidden="true">${isEdit ? 'Event title' : 'What’s happening?'}${uiIcon("enter", 13, {"className":"cal-title-enter-ico"})}</span>
     </div>
 
     <div class="cal-form-details" id="cal-form-details" aria-hidden="${_expandedAtStart ? 'false' : 'true'}">
@@ -2858,7 +2854,7 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
       <div class="cal-loc-row">
         <input type="text" id="cal-f-loc" placeholder="Location" value="${_e(existing?.location || '')}" class="cal-input" />
         <a id="cal-f-loc-map" class="cal-loc-map" href="#" target="_blank" rel="noopener noreferrer" title="Open in Maps" aria-label="Open in Apple Maps" tabindex="-1">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 1 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+          ${uiIcon("location", 14)}
         </a>
       </div>
       <select id="cal-f-rrule" class="cal-input">
@@ -2883,17 +2879,14 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
             style="display:inline-flex;align-items:center;gap:6px;background:transparent;
                    color:var(--accent,var(--red));border:1px solid var(--border);
                    border-radius:6px;padding:5px 10px;font:inherit;font-size:12px;cursor:pointer;">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9 11l3 3L22 4"/>
-              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
-            </svg>
+            ${uiIcon("check", 12, {"role":"inherit"})}
             <span>Open in Clanker Tasks</span>
           </button>
           <span style="font-size:11px;opacity:0.5;">Linked to a Cookbook scheduled task</span>
         </div>`;
       })()}
       <div class="cal-form-row" style="align-items:center;gap:8px;">
-        <label style="font-size:11px;display:flex;align-items:center;gap:4px;"><svg class="cal-remind-bell" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span style="opacity:0.5;">Reminder</span></label>
+        <label style="font-size:11px;display:flex;align-items:center;gap:4px;">${uiIcon("bell", 11, {"className":"cal-remind-bell","style":"color:var(--accent, var(--red));"})}<span style="opacity:0.5;">Reminder</span></label>
         <select id="cal-f-remind" class="cal-input" style="flex:1;">
           <option value="" ${isEdit ? 'selected' : ''}>No reminder</option>
           <option value="0">At event time</option>
@@ -2930,11 +2923,11 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
     </div>
 
     <div class="cal-form-actions">
-      ${isEdit ? `<button id="cal-f-del" class="cal-btn cal-btn-danger" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>Delete</button>` : ''}
-      <button id="cal-f-cancel" class="cal-btn" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
+      ${isEdit ? `<button id="cal-f-del" class="cal-btn cal-btn-danger" style="display:inline-flex;align-items:center;gap:5px;">${uiIcon("trash", 13)}Delete</button>` : ''}
+      <button id="cal-f-cancel" class="cal-btn" style="display:inline-flex;align-items:center;gap:5px;">${uiIcon("close", 13)}Cancel</button>
       <button id="cal-f-save" class="cal-btn cal-btn-primary" style="display:inline-flex;align-items:center;gap:5px;">${isEdit
-        ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>Save'
-        : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Create'}</button>
+        ? uiIcon("check", 13, {"role":"inherit"}) + "Save"
+        : uiIcon("add", 13) + "Create"}</button>
     </div>
   </div>`;
 

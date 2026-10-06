@@ -62,17 +62,6 @@ async def action_tidy_sessions(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
-async def action_tidy_documents(owner: str, **kwargs) -> Tuple[str, bool]:
-    """Run tidy on documents for the owner."""
-    try:
-        from src.document_actions import run_document_tidy
-        result = await run_document_tidy(owner)
-        return result, True
-    except Exception as e:
-        logger.error(f"tidy_documents action failed: {e}")
-        return str(e), False
-
-
 async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
     """Consolidate/deduplicate memories for the owner.
 
@@ -1773,15 +1762,9 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
         _owner_slug = "".join(c if (c.isalnum() or c in "-_.@") else "_" for c in (owner or "default"))
         STATE = _P(DATA_DIR) / f"note_pings_{_owner_slug}.json"
         STATE.parent.mkdir(parents=True, exist_ok=True)
-        # One-time migration: if legacy global file exists and per-owner file
-        # doesn't, seed from global (entries for OTHER owners still get pruned
-        # on their first run — acceptable, prevents silent loss).
         _legacy = _P(DATA_DIR) / "note_pings.json"
         if _legacy.exists() and not STATE.exists():
-            try:
-                STATE.write_text(_legacy.read_text(encoding="utf-8"), encoding="utf-8")
-            except Exception:
-                pass
+            raise RuntimeError("Legacy note ping state requires .clanker/tools/migrations/python/secondary.py note-pings")
         # Scanner ticks every 60s in _note_pings_loop. 90s window guarantees
         # every note's due time lands inside at least one tick's window.
         WINDOW_SEC = 90
@@ -2741,19 +2724,17 @@ async def action_cookbook_serve(
     body = {"repo_id": repo_id, "cmd": cmd}
     if host:
         body["remote_host"] = host
-    env = (state.get("env") or {})
-    srv = next(
-        (s for s in (env.get("servers") or [])
-         if isinstance(s, dict) and (s.get("host") == host or s.get("name") == host)),
-        {},
-    )
-    if srv.get("env") == "venv" and srv.get("envPath"):
-        body["env_prefix"] = f"source {srv['envPath']}/bin/activate"
-    elif srv.get("env") == "conda" and srv.get("envPath"):
-        body["env_prefix"] = f"conda activate {srv['envPath']}"
-    if srv.get("hfToken"): body["hf_token"] = srv["hfToken"]
-    if srv.get("port"): body["ssh_port"] = str(srv["port"])
-    if srv.get("platform"): body["platform"] = srv["platform"]
+    from src.openclank.cookbook_execution import cookbook_launch_environment
+    from routes.cookbook_helpers import load_stored_hf_token
+
+    env = state.get("env") or {}
+    resolved = cookbook_launch_environment(env if isinstance(env, dict) else {}, host)
+    target = resolved.pop("remote_host")
+    if target:
+        body["remote_host"] = target
+    host = target
+    body.update(resolved)
+    body["hf_token"] = load_stored_hf_token()
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -2817,8 +2798,8 @@ async def action_cookbook_serve(
             )
             if existing is None:
                 display_name = repo_id.split("/")[-1] if "/" in repo_id else repo_id
-                ssh_port = str(srv.get("port") or cfg.get("ssh_port") or "")
-                platform = str(srv.get("platform") or cfg.get("platform") or "linux")
+                ssh_port = str(body.get("ssh_port") or cfg.get("ssh_port") or "")
+                platform = str(body.get("platform") or cfg.get("platform") or "linux")
                 placeholder = (
                     f"Launched by scheduled task {task_name!r} — waiting for tmux output…\n"
                     f"  session: {sid}\n"
@@ -2870,7 +2851,6 @@ async def action_cookbook_serve(
 
 BUILTIN_ACTIONS = {
     "tidy_sessions": action_tidy_sessions,
-    "tidy_documents": action_tidy_documents,
     "consolidate_memory": action_consolidate_memory,
     "tidy_research": action_tidy_research,
     "summarize_emails": action_summarize_emails,
@@ -2895,7 +2875,6 @@ BUILTIN_ACTIONS = {
 # Descriptions for the UI/API
 BUILTIN_ACTION_INFO = {
     "tidy_sessions": "Clean up empty chat sessions and auto-sort into folders",
-    "tidy_documents": "Remove junk/empty documents",
     "consolidate_memory": "Remove duplicate memories",
     "tidy_research": "Remove orphaned research files (sessions that were deleted)",
     "summarize_emails": "Pre-generate AI summaries for new inbox emails",

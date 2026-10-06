@@ -91,7 +91,6 @@ user data and never appear in first-party source (ruling R9, enforced by
 
 ## Rulings
 
-R1-R16, canonized 2026-07-16 in
-`.clanker/futures/AGENT-IDENTITY-METAPLAN-INDEX-2026-07-16.md` (evidence in
-`.clankers/robonotes/identity-audit-2026-07-16-*`). Tool disposition:
+R1–R16 were canonized in the July 16, 2026 identity audit; detailed receipts
+remain private operator evidence. Public tool disposition:
 `docs/agent-tool-parity.md`.

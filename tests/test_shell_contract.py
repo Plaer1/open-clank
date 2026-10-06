@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import io
 import json
 import os
@@ -53,6 +54,110 @@ def test_minimal_environment_and_redaction():
         "token=sk-secret-secret-secret-secret",
         source_env={"OPENAI_API_KEY": "sk-secret-secret-secret-secret"},
     )
+
+
+def test_direct_fallback_persists_authenticated_run_and_explicit_absent_task(tmp_path, monkeypatch):
+    """The fallback path must not invent a task identity for Lore."""
+    from src import agent_runs
+    from src.agent_tools import TOOL_HANDLERS
+    from src.openclank import history_capture
+    from src.openclank.history_capture import HistoryContext
+
+    captured = {}
+
+    class Client:
+        def prepare(self, envelope, *, content, fingerprint):
+            captured["envelope"] = envelope
+
+    def trusted_context(**values):
+        return HistoryContext(
+            actor_id=values["actor_id"], account_id=values["account_id"],
+            workspace_id=values["workspace_id"], session_id=values["session_id"],
+            run_id=values["run_id"], task_id=values["task_id"], tool_id=values["tool_id"],
+            roots=(str(tmp_path),), client=Client(),
+        )
+
+    async def fake_bash(_content, ctx):
+        target = tmp_path / "fallback.txt"
+        target.write_text("before", encoding="utf-8")
+        handle = history_capture.begin_file_capture(
+            str(target), operation="shell", context=ctx["history_context"], action_id="action-fallback"
+        )
+        assert handle.available
+        return {"exit_code": 0}
+
+    monkeypatch.setattr(tool_execution, "_copal_account_id", lambda _owner: ("alice", "acct-a", None))
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda _owner: True)
+    monkeypatch.setattr(agent_runs, "get_run_id", lambda _session: "run-authenticated")
+    monkeypatch.setattr(history_capture, "trusted_tool_context", trusted_context)
+    monkeypatch.setitem(TOOL_HANDLERS, "bash", fake_bash)
+
+    result = asyncio.run(tool_execution._direct_fallback(
+        "bash", "printf changed > fallback.txt", session_id="chat-a", owner="alice"
+    ))
+
+    assert result == {"exit_code": 0}
+    envelope = captured["envelope"]
+    assert envelope["actor_id"] == "alice"
+    assert envelope["session_id"] == "chat-a"
+    assert envelope["run_id"] == "run-authenticated"
+    assert envelope["task_id"] is None
+    assert envelope["tool_id"] == "bash"
+
+
+def test_direct_background_route_persists_run_and_explicit_absent_task(tmp_path, monkeypatch):
+    """The marker route carries its identity into the serialized Lore context."""
+    from types import SimpleNamespace
+    from src import agent_runs
+    from src.openclank import history_capture
+    from src.openclank.history_capture import HistoryContext
+
+    observed = {}
+
+    async def approved(*_args, **_kwargs):
+        return None
+
+    def trusted_context(**values):
+        return HistoryContext(
+            actor_id=values["actor_id"], account_id=values["account_id"],
+            workspace_id=values["workspace_id"], session_id=values["session_id"],
+            run_id=values["run_id"], task_id=values["task_id"], tool_id=values["tool_id"],
+            roots=(str(tmp_path),),
+        )
+
+    def launch(_command, **kwargs):
+        observed.update(kwargs)
+        return {"id": "job-authenticated", "started_at": time.time()}
+
+    monkeypatch.setattr(tool_execution, "_copal_account_id", lambda _owner: ("alice", "acct-a", None))
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda _owner: True)
+    monkeypatch.setattr(agent_runs, "get_run_id", lambda _session: "run-authenticated")
+    monkeypatch.setattr(history_capture, "trusted_tool_context", trusted_context)
+    monkeypatch.setattr(bg_jobs, "launch", launch)
+    monkeypatch.setattr(shell_policy, "contained_argv", lambda *args, **kwargs: (args[0], "off"))
+    monkeypatch.setattr(shell_policy, "require_shell_approval", approved)
+
+    block = SimpleNamespace(tool_type="bash", content="#!bg\nprintf changed > note.txt")
+    description, result = asyncio.run(tool_execution._execute_tool_block_impl(
+        block, session_id="chat-a", owner="alice"
+    ))
+
+    assert description.startswith("bash (background):")
+    assert result["bg_job_id"] == "job-authenticated"
+    assert observed["run_id"] == "run-authenticated"
+    assert observed["task_id"] is None
+    context = history_capture.context_from_mapping(observed["history_context"])
+    assert context is not None
+    target = tmp_path / "background.txt"
+    target.write_text("before", encoding="utf-8")
+    envelope = history_capture._envelope(
+        action_id="action-background", operation="shell", path=str(target),
+        before=b"before", context=context,
+    )
+    assert envelope["session_id"] == "chat-a"
+    assert envelope["run_id"] == "run-authenticated"
+    assert envelope["task_id"] is None
+    assert envelope["tool_id"] == "bash"
 
 
 @pytest.mark.parametrize(
@@ -966,8 +1071,31 @@ def test_foreground_capture_keeps_non_overlapping_head_and_tail():
     output = capture.text()
     assert output.count("0000-") == 1
     assert output.count("0299-") == 1
-    assert "chars omitted" in output
+    assert "bytes omitted" in output
     assert len(output) < 1100
+
+
+def test_foreground_capture_enforces_utf8_byte_budget():
+    capture = _BoundedCapture(1024)
+    capture.append_chunk("é" * 1_000)
+    output = capture.text()
+    assert len(output.encode("utf-8")) <= 1024
+    assert "bytes omitted" in output
+
+
+def test_foreground_capture_keeps_full_utf8_stream_digest_when_inline_is_bounded():
+    import hashlib
+
+    source = "😀" * 1_000 + "\nerror tail"
+    capture = _BoundedCapture(1024)
+    capture.append_chunk(source)
+
+    metadata = capture.metadata()
+    assert metadata["source_complete"] is True
+    assert metadata["inline_truncated"] is True
+    assert metadata["source_bytes"] == len(source.encode("utf-8"))
+    assert metadata["value"] == hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert len(capture.text().encode("utf-8")) <= 1024
 
 
 def test_shell_argv_keeps_bash_powershell_and_cmd_contracts(monkeypatch):
@@ -1082,7 +1210,7 @@ def test_bwrap_workspace_is_write_contained(tmp_path, monkeypatch):
             "--noprofile",
             "--norc",
             "-c",
-            "printf ok > inside; printf nope > /home/e/open-clank-shell-escape-probe",
+            "printf ok > inside; printf nope > /tmp/open-clank-shell-escape-probe",
         ],
         workspace=str(tmp_path),
         cwd=str(tmp_path),
@@ -1101,7 +1229,7 @@ def test_bwrap_workspace_is_write_contained(tmp_path, monkeypatch):
     assert mode == "bwrap"
     assert (tmp_path / "inside").read_text(encoding="utf-8") == "ok"
     assert result.returncode != 0
-    assert not Path("/home/e/open-clank-shell-escape-probe").exists()
+    assert not Path("/tmp/open-clank-shell-escape-probe").exists()
 
 
 @pytest.mark.skipif(
@@ -1564,7 +1692,7 @@ def test_foreground_100k_lines_completes_without_marker_timeout(
     assert result["exit_code"] == 0
     assert result["output"].startswith("1\n")
     assert "99999" in result["output"]
-    assert "chars omitted" in result["output"]
+    assert "bytes omitted" in result["output"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="fixture uses POSIX sleep")
@@ -1671,3 +1799,1117 @@ def test_durable_shell_log_is_redacted_and_disk_bounded(tmp_path, monkeypatch):
         b"output capped at 4 MiB" in retained
         or b"<redacted-long-token>" in retained
     )
+
+
+class _ShellHistoryClient:
+    def __init__(self):
+        self.calls = []
+
+    def prepare_batch(self, envelope, entries):
+        self.calls.append(("prepare_batch", envelope, entries))
+        return {"Accepted": None}
+
+    def record_live(self, action_id, receipt):
+        self.calls.append(("record_live", action_id, receipt))
+        return {"Accepted": None}
+
+    def complete_batch(self, action_id, entries):
+        self.calls.append(("complete_batch", action_id, entries))
+        return {"Accepted": None}
+
+    def abort(self, action_id):
+        self.calls.append(("abort", action_id))
+        return {"Accepted": None}
+
+
+def _open_fd_count():
+    try:
+        return len(os.listdir("/dev/fd"))
+    except OSError:
+        return None
+
+
+def test_shell_mutation_capture_prepares_exact_root_and_after_manifest(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    before = root / "before.txt"
+    before.write_bytes(b"before")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-1",
+        account_id="account-1",
+        workspace_id="chat-1",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "destructive_actions": ["overwrite"],
+            "session_id": "chat-1",
+            "action_id": "action-1",
+        },
+        str(root),
+        "printf after > before.txt",
+    )
+    assert capture is not None
+    assert client.calls[0][0] == "prepare_batch"
+    prepared = client.calls[0][2]
+    assert prepared[0]["resource_type"] == "Directory"
+    assert prepared[0]["content"]
+
+    (root / "before.txt").write_bytes(b"after")
+    (root / "created.txt").write_bytes(b"created")
+    status = capture.finish(committed=True)
+    assert status["history_status"] == "complete"
+    completed = next(call for call in client.calls if call[0] == "complete_batch")
+    manifest = json.loads(completed[2][0]["content"])
+    entries = {item["path"]: item for item in manifest["entries"]}
+    assert entries["before.txt"]["content"] == "YWZ0ZXI="
+    assert entries["created.txt"]["content"] == "Y3JlYXRlZA=="
+
+
+def test_shell_mutation_capture_reconciles_a_late_writer_before_completion(tmp_path, monkeypatch):
+    from threading import Thread
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "late.txt"
+    target.write_bytes(b"before")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-1",
+        account_id="account-1",
+        workspace_id="chat-1",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "destructive_actions": ["overwrite"],
+            "action_id": "action-late",
+            "late_writer_grace_ms": 220,
+        },
+        str(root),
+        "writer",
+    )
+    assert capture is not None
+    writer = Thread(target=lambda: (time.sleep(0.07), target.write_bytes(b"late")))
+    writer.start()
+    status = capture.finish(committed=True)
+    writer.join()
+    assert status["history_status"] == "complete"
+    completed = next(call for call in client.calls if call[0] == "complete_batch")
+    manifest = json.loads(completed[2][0]["content"])
+    entry = next(item for item in manifest["entries"] if item["path"] == "late.txt")
+    assert entry["content"] == "bGF0ZQ=="
+
+
+def test_shell_capture_keeps_authenticated_worker_alive_for_descendant_reconciliation(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "late.txt"
+    target.write_bytes(b"before")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-1", account_id="account-1", workspace_id="chat-1",
+        roots=(str(root),), client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    journal_path = tmp_path / "roots.journal.json"
+    state_path = tmp_path / "capture.json"
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "destructive_actions": ["overwrite"],
+            "owner": "alice", "session_id": "chat-1", "run_id": "run-1",
+            "task_id": "task-1", "tool_id": "bash", "action_id": "action-late",
+            "root_journal_path": str(journal_path),
+            "capture_state_path": str(state_path),
+            "late_writer_grace_ms": 10,
+            "reconciliation_timeout_s": 1,
+        },
+        str(root),
+        "writer",
+    )
+    assert capture is not None
+    calls = 0
+
+    def descendant_alive():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            target.write_bytes(b"late")
+            return True
+        return False
+
+    monkeypatch.setattr(capture, "_process_group_alive", descendant_alive)
+    result = capture.finish(committed=True)
+    assert result["history_status"] == "complete"
+    assert calls >= 2
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["phase"] == "complete"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["phase"] == "settled"
+    assert journal["generation"] == 1
+
+
+def test_shell_mutation_capture_rejects_protected_reach_before_history_prepare(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / ".env").write_text("OPENAI_API_KEY=secret\n", encoding="utf-8")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-1",
+        account_id="account-1",
+        workspace_id="chat-1",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    with pytest.raises(shell_policy.ShellApprovalError, match="protected path"):
+        shell_worker._prepare_shell_capture(
+            {
+                "history_context": {"history_capture": True},
+                "history_roots": [str(root)],
+                "destructive_actions": ["overwrite"],
+            },
+            str(root),
+            "rm -rf .",
+        )
+    assert client.calls == []
+
+
+def test_shell_mutation_capture_rejects_symlink_reach_before_history_prepare(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside.txt"
+    root.mkdir()
+    outside.write_text("outside", encoding="utf-8")
+    try:
+        (root / "link.txt").symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-1",
+        account_id="account-1",
+        workspace_id="chat-1",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    with pytest.raises(shell_policy.ShellApprovalError, match="symlink boundary"):
+        shell_worker._prepare_shell_capture(
+            {
+                "history_context": {"history_capture": True},
+                "history_roots": [str(root)],
+                "destructive_actions": ["overwrite"],
+            },
+            str(root),
+            "rm -rf .",
+        )
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("kind", ["protected", "nested-protected", "symlink"])
+def test_shell_after_capture_rejects_new_protected_tree_entries(tmp_path, monkeypatch, kind):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "tracked.txt"
+    target.write_text("before", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-after",
+        account_id="account-after",
+        workspace_id="chat-after",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "action_id": f"after-{kind}",
+            "late_writer_grace_ms": 120,
+        },
+        str(root),
+        "printf after > tracked.txt",
+    )
+    assert capture is not None
+    target.write_text("after", encoding="utf-8")
+    if kind == "protected":
+        (root / ".env.local").write_text("secret", encoding="utf-8")
+    elif kind == "nested-protected":
+        nested = root / "nested"
+        nested.mkdir()
+        (nested / "credentials.json").write_text("secret", encoding="utf-8")
+    else:
+        try:
+            (root / "new-link").symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    result = capture.finish(committed=True)
+    assert result["history_status"] == "failed"
+    assert result["capture_phase"] == "after_failed"
+    assert not any(call[0] == "complete_batch" for call in client.calls)
+    assert sum(call[0] == "record_live" for call in client.calls) == 1
+
+
+@pytest.mark.parametrize("raced_kind", ["protected", "symlink"])
+def test_shell_before_capture_rejects_raced_entry_before_prepare(tmp_path, monkeypatch, raced_kind):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "tracked.txt").write_text("before", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-before-race",
+        account_id="account-before-race",
+        workspace_id="chat-before-race",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    original = shell_worker._history_capture._capture_payload
+    raced = False
+    armed = False
+    touched: list[str] = []
+
+    def race(path, **kwargs):
+        nonlocal armed, raced
+        if not raced:
+            raced = True
+            if raced_kind == "protected":
+                (root / ".env").write_text("secret", encoding="utf-8")
+            else:
+                try:
+                    (root / "raced-link").symlink_to(outside)
+                except (OSError, NotImplementedError) as exc:
+                    pytest.skip(f"symlinks unavailable: {exc}")
+            armed = True
+        return original(path, **kwargs)
+
+    real_open = os.open
+
+    def tracked_open(file, *args, **kwargs):
+        if armed:
+            try:
+                candidate = os.fspath(file)
+            except TypeError:
+                candidate = ""
+            if candidate.endswith(".env") or candidate.endswith("raced-link"):
+                touched.append(candidate)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(shell_worker._history_capture, "_capture_payload", race)
+    monkeypatch.setattr(os, "open", tracked_open)
+    with pytest.raises(shell_policy.ShellApprovalError, match="unavailable before spawn") as caught:
+        shell_worker._prepare_shell_capture(
+            {
+                "history_context": {"history_capture": True},
+                "history_roots": [str(root)],
+                "action_id": f"before-race-{raced_kind}",
+            },
+            str(root),
+            "printf after > tracked.txt",
+        )
+    assert raced is True, str(caught.value)
+    assert touched == []
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
+def test_shell_before_capture_rejects_nested_directory_replacement_before_prepare(
+    tmp_path, monkeypatch, replacement_kind
+):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    nested = root / "nested"
+    root.mkdir()
+    nested.mkdir()
+    (nested / "tracked.txt").write_text("before", encoding="utf-8")
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "credentials.json").write_text("secret", encoding="utf-8")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-nested-before",
+        account_id="account-nested-before",
+        workspace_id="chat-nested-before",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    real_open = os.open
+    swapped = False
+    payload_opened: list[str] = []
+    nested_open_flags: list[int] = []
+
+    def swap_nested(file, *args, **kwargs):
+        nonlocal swapped
+        if file == "nested" and kwargs.get("dir_fd") is not None and not swapped:
+            nested_open_flags.append(int(args[0]))
+            swapped = True
+            nested.rename(tmp_path / "nested-original")
+            if replacement_kind == "symlink":
+                try:
+                    nested.symlink_to(replacement, target_is_directory=True)
+                except (OSError, NotImplementedError) as exc:
+                    pytest.skip(f"symlinks unavailable: {exc}")
+            else:
+                nested.mkdir()
+                (nested / "credentials.json").write_text("secret", encoding="utf-8")
+        if file == "credentials.json":
+            payload_opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    gc.collect()
+    fd_before = _open_fd_count()
+    monkeypatch.setattr(os, "open", swap_nested)
+    with pytest.raises(shell_policy.ShellApprovalError, match="unavailable before spawn"):
+        shell_worker._prepare_shell_capture(
+            {
+                "history_context": {"history_capture": True},
+                "history_roots": [str(root)],
+                "action_id": f"nested-before-{replacement_kind}",
+            },
+            str(root),
+            "printf after > nested/tracked.txt",
+        )
+    assert swapped is True
+    assert nested_open_flags and nested_open_flags[0] & os.O_NOFOLLOW
+    assert payload_opened == []
+    assert client.calls == []
+    gc.collect()
+    fd_after = _open_fd_count()
+    if fd_before is not None and fd_after is not None:
+        assert fd_after == fd_before
+
+
+@pytest.mark.parametrize("replacement_kind", ["directory", "symlink"])
+def test_shell_after_capture_rejects_nested_directory_replacement_before_complete(
+    tmp_path, monkeypatch, replacement_kind
+):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    nested = root / "nested"
+    root.mkdir()
+    nested.mkdir()
+    (nested / "tracked.txt").write_text("before", encoding="utf-8")
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "credentials.json").write_text("secret", encoding="utf-8")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-nested-after",
+        account_id="account-nested-after",
+        workspace_id="chat-nested-after",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "action_id": f"nested-after-{replacement_kind}",
+            "late_writer_grace_ms": 0,
+        },
+        str(root),
+        "printf after > nested/tracked.txt",
+    )
+    assert capture is not None
+    real_open = os.open
+    swapped = False
+    payload_opened: list[str] = []
+    nested_open_flags: list[int] = []
+
+    def swap_nested(file, *args, **kwargs):
+        nonlocal swapped
+        if file == "nested" and kwargs.get("dir_fd") is not None and not swapped:
+            nested_open_flags.append(int(args[0]))
+            swapped = True
+            nested.rename(tmp_path / "nested-original")
+            if replacement_kind == "symlink":
+                try:
+                    nested.symlink_to(replacement, target_is_directory=True)
+                except (OSError, NotImplementedError) as exc:
+                    pytest.skip(f"symlinks unavailable: {exc}")
+            else:
+                nested.mkdir()
+                (nested / "credentials.json").write_text("secret", encoding="utf-8")
+        if file == "credentials.json":
+            payload_opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    fd_before = _open_fd_count()
+    monkeypatch.setattr(os, "open", swap_nested)
+    result = capture.finish(committed=True)
+    assert swapped is True
+    assert nested_open_flags and nested_open_flags[0] & os.O_NOFOLLOW
+    assert result["history_status"] == "failed"
+    assert result["capture_phase"] == "after_failed"
+    assert payload_opened == []
+    assert not any(call[0] == "complete_batch" for call in client.calls)
+    assert sum(call[0] == "record_live" for call in client.calls) == 1
+    fd_after = _open_fd_count()
+    if fd_before is not None and fd_after is not None:
+        assert fd_after == fd_before
+
+
+def test_shell_capture_pins_root_identity_between_validation_and_prepare(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "tracked.txt").write_text("before", encoding="utf-8")
+    replacement = tmp_path / "replacement"
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-root-race",
+        account_id="account-root-race",
+        workspace_id="chat-root-race",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    original_roots = shell_worker._shell_history_roots
+    swapped = False
+
+    def validate_then_swap(spec, workspace, current_context):
+        nonlocal swapped
+        roots = original_roots(spec, workspace, current_context)
+        root.rename(tmp_path / "workspace-original")
+        replacement.mkdir()
+        (replacement / "credentials.json").write_text("secret", encoding="utf-8")
+        root.mkdir()
+        swapped = True
+        return roots
+
+    monkeypatch.setattr(shell_worker, "_shell_history_roots", validate_then_swap)
+    real_open = os.open
+    payload_opened: list[str] = []
+
+    def tracked_open(file, *args, **kwargs):
+        if file == "credentials.json":
+            payload_opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    fd_before = _open_fd_count()
+    monkeypatch.setattr(os, "open", tracked_open)
+    with pytest.raises(shell_policy.ShellApprovalError, match="unavailable before spawn"):
+        shell_worker._prepare_shell_capture(
+            {
+                "history_context": {"history_capture": True},
+                "history_roots": [str(root)],
+                "action_id": "root-race",
+            },
+            str(root),
+            "printf after > tracked.txt",
+        )
+    assert swapped is True
+    assert payload_opened == []
+    assert client.calls == []
+    fd_after = _open_fd_count()
+    if fd_before is not None and fd_after is not None:
+        assert fd_after == fd_before
+
+
+def test_shell_before_capture_rechecks_exact_tree_before_prepare(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "tracked.txt").write_text("before", encoding="utf-8")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-prepare-boundary",
+        account_id="account-prepare-boundary",
+        workspace_id="workspace-prepare-boundary",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    original_batch_entries = shell_worker._history_capture._batch_entries
+    injected = False
+    armed = False
+    touched: list[str] = []
+
+    def inject_after_manifest(*args, **kwargs):
+        nonlocal armed, injected
+        entries, before = original_batch_entries(*args, **kwargs)
+        (root / ".env").write_text("secret", encoding="utf-8")
+        injected = True
+        armed = True
+        return entries, before
+
+    real_open = os.open
+
+    def tracked_open(file, *args, **kwargs):
+        if armed:
+            try:
+                candidate = os.fspath(file)
+            except TypeError:
+                candidate = ""
+            if candidate.endswith(".env"):
+                touched.append(candidate)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(shell_worker._history_capture, "_batch_entries", inject_after_manifest)
+    monkeypatch.setattr(os, "open", tracked_open)
+    gc.collect()
+    fd_before = _open_fd_count()
+    with pytest.raises(shell_policy.ShellApprovalError, match="unavailable before spawn"):
+        shell_worker._prepare_shell_capture(
+            {
+                "history_context": {"history_capture": True},
+                "history_roots": [str(root)],
+                "action_id": "prepare-boundary-race",
+            },
+            str(root),
+            "printf after > tracked.txt",
+        )
+    assert injected is True
+    assert touched == []
+    assert client.calls == []
+    gc.collect()
+    fd_after = _open_fd_count()
+    if fd_before is not None and fd_after is not None:
+        assert fd_after == fd_before
+
+
+def test_shell_after_capture_rechecks_payload_before_complete_batch(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "tracked.txt"
+    target.write_bytes(b"before")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-complete-boundary",
+        account_id="account-complete-boundary",
+        workspace_id="workspace-complete-boundary",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    original_payload = shell_worker._history_capture._capture_payload
+    armed = False
+    injected = False
+
+    def inject_after_payload(path, **kwargs):
+        nonlocal armed, injected
+        result = original_payload(path, **kwargs)
+        if armed and not injected and os.path.abspath(path) == os.path.abspath(root):
+            target.write_bytes(b"raced!")
+            injected = True
+        return result
+
+    monkeypatch.setattr(shell_worker._history_capture, "_capture_payload", inject_after_payload)
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "action_id": "complete-boundary-race",
+            "late_writer_grace_ms": 0,
+        },
+        str(root),
+        "printf after > tracked.txt",
+    )
+    assert capture is not None
+    armed = True
+    result = capture.finish(committed=True)
+    assert injected is True
+    assert result["history_status"] == "failed"
+    assert result["capture_phase"] == "after_failed"
+    assert not any(call[0] == "complete_batch" for call in client.calls)
+    assert sum(call[0] == "record_live" for call in client.calls) == 1
+
+
+@pytest.mark.parametrize("raced_kind", ["protected", "symlink"])
+def test_shell_after_capture_rejects_tree_entry_before_open(tmp_path, monkeypatch, raced_kind):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "tracked.txt").write_text("before", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-race",
+        account_id="account-race",
+        workspace_id="chat-race",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "action_id": "after-race",
+        },
+        str(root),
+        "printf after > tracked.txt",
+    )
+    assert capture is not None
+    original = shell_worker._history_capture._capture_payload
+    raced = False
+    armed = False
+    touched: list[str] = []
+
+    def race(path, **kwargs):
+        nonlocal armed, raced
+        if not raced:
+            raced = True
+            if raced_kind == "protected":
+                (root / ".env").write_text("secret", encoding="utf-8")
+            else:
+                try:
+                    (root / "raced-link").symlink_to(outside)
+                except (OSError, NotImplementedError) as exc:
+                    pytest.skip(f"symlinks unavailable: {exc}")
+            armed = True
+        return original(path, **kwargs)
+
+    real_open = os.open
+
+    def tracked_open(file, *args, **kwargs):
+        if armed:
+            try:
+                candidate = os.fspath(file)
+            except TypeError:
+                candidate = ""
+            if candidate.endswith(".env") or candidate.endswith("raced-link"):
+                touched.append(candidate)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(shell_worker._history_capture, "_capture_payload", race)
+    monkeypatch.setattr(os, "open", tracked_open)
+    result = capture.finish(committed=True)
+    assert result["history_status"] == "failed"
+    assert result["capture_phase"] == "after_failed"
+    assert not any(call[0] == "complete_batch" for call in client.calls)
+    assert sum(call[0] == "record_live" for call in client.calls) == 1
+    assert touched == []
+
+
+def test_shell_after_capture_rejects_lstat_to_open_symlink_swap(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "tracked.txt"
+    target.write_text("before", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-swap",
+        account_id="account-swap",
+        workspace_id="chat-swap",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "action_id": "after-symlink-swap",
+        },
+        str(root),
+        "printf after > tracked.txt",
+    )
+    assert capture is not None
+    real_open = os.open
+    swapped = False
+
+    def swap_on_open(file, *args, **kwargs):
+        nonlocal swapped
+        if file == "tracked.txt" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            target.unlink()
+            target.symlink_to(outside)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_on_open)
+    result = capture.finish(committed=True)
+    assert swapped is True
+    assert result["history_status"] == "failed"
+    assert result["capture_phase"] == "after_failed"
+    assert not any(call[0] == "complete_batch" for call in client.calls)
+    assert sum(call[0] == "record_live" for call in client.calls) == 1
+
+
+def test_shell_after_capture_rejects_same_inode_content_race(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = root / "tracked.txt"
+    target.write_bytes(b"before")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor-content-race",
+        account_id="account-content-race",
+        workspace_id="chat-content-race",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "action_id": "same-inode-content-race",
+            "late_writer_grace_ms": 0,
+        },
+        str(root),
+        "printf after > tracked.txt",
+    )
+    assert capture is not None
+    real_open = os.open
+    real_fstat = os.fstat
+    tracked_fd = None
+    fstat_samples = []
+
+    def track_open(file, *args, **kwargs):
+        nonlocal tracked_fd
+        fd = real_open(file, *args, **kwargs)
+        if file == "tracked.txt" and kwargs.get("dir_fd") is not None:
+            tracked_fd = fd
+        return fd
+
+    def race_after_first_fstat(fd):
+        info = real_fstat(fd)
+        if fd == tracked_fd:
+            fstat_samples.append(info)
+            if len(fstat_samples) == 1:
+                target.write_bytes(b"raced!")
+        return info
+
+    monkeypatch.setattr(os, "open", track_open)
+    monkeypatch.setattr(os, "fstat", race_after_first_fstat)
+    result = capture.finish(committed=True)
+    assert tracked_fd is not None
+    assert len(fstat_samples) == 2
+    assert fstat_samples[0].st_ino == fstat_samples[1].st_ino
+    assert result["history_status"] == "failed"
+    assert result["capture_phase"] == "after_failed"
+    assert not any(call[0] == "complete_batch" for call in client.calls)
+    assert sum(call[0] == "record_live" for call in client.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("command", "mutating"),
+    [
+        ("git status", False),
+        ("git diff -- README.md", False),
+        ("cat README.md", False),
+        ("printf 'ready\\n'; sleep 0", False),
+        ("git add README.md", True),
+        ("git commit -m save", True),
+        ("make all", True),
+        ("python -c 'open(\"x\", \"w\").write(\"x\")'", True),
+        ("unknown-local-tool --write", True),
+        ("printf x > output.txt", True),
+    ],
+)
+def test_shell_capture_mutation_classifier_is_conservative(command, mutating):
+    assert shell_worker._shell_command_may_mutate({}, command) is mutating
+
+
+def test_mutating_detached_shell_without_authenticated_context_is_truthfully_unavailable(tmp_path):
+    state_path = tmp_path / "capture.json"
+    assert shell_worker._prepare_shell_capture(
+        {
+            "action_id": "action-no-context", "destructive_actions": [],
+            "capture_state_path": str(state_path),
+        },
+        str(tmp_path), "git add README.md",
+    ) is None
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["phase"] == "unavailable"
+    assert state["history_status"] == "unavailable"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fixture invokes the POSIX shell worker")
+def test_configured_but_down_history_worker_keeps_approved_shell_live(tmp_path, monkeypatch):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    command = "printf live > live.txt"
+    spec = {
+        "command_size": len(command.encode()), "workspace": str(root), "cwd": str(root),
+        "log_path": str(tmp_path / "worker.log"), "exit_path": str(tmp_path / "worker.exit"),
+        "child_pid_path": str(tmp_path / "worker.child.pid"),
+        "stdin_path": str(tmp_path / "worker.stdin"),
+        "stdin_ready_path": str(tmp_path / "worker.stdin.ready"),
+        "capture_state_path": str(tmp_path / "worker.capture.json"),
+        "root_journal_path": str(tmp_path / "worker.root-journal.json"),
+        "shell": "/bin/bash", "network": "enabled", "owner": "alice", "session_id": "chat-1",
+        "run_id": "run-1", "task_id": "task-1", "tool_id": "bash", "action_id": "action-down",
+        "history_context": {
+            "history_capture": True, "actor_id": "alice", "account_id": "acct-1",
+            "workspace_id": "workspace-1", "history_socket": str(tmp_path / "down.sock"),
+            "history_roots": [str(root)],
+        },
+        "history_roots": [str(root)], "destructive_actions": [],
+    }
+    spec_path = tmp_path / "worker.spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    env = dict(os.environ)
+    env["OPEN_CLANK_SHELL_SANDBOX"] = "off"
+    result = subprocess.run(
+        [sys.executable, "-m", "src.shell_worker", str(spec_path)], input=command.encode(),
+        cwd=Path(__file__).parents[1], env=env, capture_output=True, timeout=20, check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert (root / "live.txt").read_text(encoding="utf-8") == "live"
+    state = json.loads((tmp_path / "worker.capture.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "unavailable"
+    assert state["coverage_status"] == "unavailable"
+
+
+def test_strict_shell_capture_unsupported_host_is_truthfully_unavailable(tmp_path, monkeypatch):
+    context = {
+        "history_capture": True,
+        "actor_id": "actor-platform",
+        "account_id": "account-platform",
+        "workspace_id": "workspace-platform",
+        "history_roots": [str(tmp_path)],
+    }
+    monkeypatch.setattr(shell_worker._history_capture, "_strict_capture_supported", lambda: False)
+    capture = shell_worker._prepare_shell_capture(
+        {"history_context": context, "history_roots": [str(tmp_path)], "action_id": "action-platform"},
+        str(tmp_path), "printf x > output.txt",
+    )
+    assert capture is not None
+    assert capture.finish(committed=True)["history_status"] == "unavailable"
+
+
+@pytest.mark.parametrize("missing_flag", ["O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC"])
+def test_strict_shell_capture_missing_open_flag_fails_before_prepare(
+    tmp_path, monkeypatch, missing_flag
+):
+    context = {
+        "history_capture": True,
+        "actor_id": "actor-platform-flag",
+        "account_id": "account-platform-flag",
+        "workspace_id": "workspace-platform-flag",
+        "history_roots": [str(tmp_path)],
+    }
+    monkeypatch.delattr(os, missing_flag, raising=False)
+    capture = shell_worker._prepare_shell_capture(
+        {"history_context": context, "history_roots": [str(tmp_path)], "action_id": f"action-missing-{missing_flag}"},
+        str(tmp_path), "printf x > output.txt",
+    )
+    assert capture is not None
+    assert capture.finish(committed=True)["capture_phase"] == "unavailable"
+
+
+def test_strict_shell_capture_missing_descriptor_scandir_fails_before_prepare(tmp_path, monkeypatch):
+    context = {
+        "history_capture": True,
+        "actor_id": "actor-platform-scandir",
+        "account_id": "account-platform-scandir",
+        "workspace_id": "workspace-platform-scandir",
+        "history_roots": [str(tmp_path)],
+    }
+    monkeypatch.setattr(shell_worker._history_capture, "_SCANDIR_SUPPORTS_FD", False)
+    capture = shell_worker._prepare_shell_capture(
+        {"history_context": context, "history_roots": [str(tmp_path)], "action_id": "action-missing-scandir"},
+        str(tmp_path), "printf x > output.txt",
+    )
+    assert capture is not None
+    assert capture.finish(committed=True)["capture_phase"] == "unavailable"
+
+
+def test_reconciliation_polls_metadata_without_manifest_rereads(tmp_path, monkeypatch):
+    from src.openclank.history_capture import HistoryContext
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "note.txt").write_text("before", encoding="utf-8")
+    client = _ShellHistoryClient()
+    context = HistoryContext(
+        actor_id="actor",
+        account_id="account",
+        workspace_id="chat",
+        roots=(str(root),),
+        client=client,
+    )
+    monkeypatch.setattr(shell_worker, "context_from_mapping", lambda _raw: context)
+    original = shell_worker._history_capture._capture_payload
+    calls = 0
+
+    def counted(path, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(shell_worker._history_capture, "_capture_payload", counted)
+    capture = shell_worker._prepare_shell_capture(
+        {
+            "history_context": {"history_capture": True},
+            "history_roots": [str(root)],
+            "action_id": "action-cost",
+            "late_writer_grace_ms": 180,
+        },
+        str(root),
+        "git add README.md",
+    )
+    assert capture is not None
+    before_finish = calls
+    (root / "note.txt").write_text("after", encoding="utf-8")
+    assert capture.finish(committed=True)["history_status"] == "complete"
+    # Prepare reads the exact preimage once; completion reads each declared
+    # root once for the final after-state.  Polling must not add scans.
+    assert calls - before_finish <= 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="detached worker fixture uses POSIX FIFO")
+def test_real_detached_worker_history_service_journey(tmp_path, monkeypatch):
+    """Run the owned worker through its OS boundary against the real service.
+
+    The repository does not ship a service binary in every checkout; the
+    externally supplied qualification binary is the only accepted provider
+    authority.  When present this exercises prepare/complete, exact subtree
+    after-state, service restart, and a second replay action.
+    """
+    configured_binary = os.environ.get("OPENCLANK_HISTORY_TEST_BIN", "").strip()
+    if not configured_binary or not Path(configured_binary).is_file():
+        pytest.skip("OPENCLANK_HISTORY_TEST_BIN is required for real-service qualification")
+    from src.openclank.history_client import HistoryServiceSupervisor, ScopedHistoryCredential
+
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "one.txt").write_text("one-before", encoding="utf-8")
+    (root / "two.txt").write_text("two-before", encoding="utf-8")
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    root_id = "s03-root"
+    history_context = {
+        "history_capture": True,
+        "actor_id": "actor-s03",
+        "account_id": "acct-s03",
+        "workspace_id": "chat-s03",
+        "history_roots": [{"root_id": root_id, "canonical_path": str(root)}],
+        "session_id": "chat-s03",
+        "run_id": "run-s03",
+        "task_id": "task-s03",
+        "tool_id": "mimo-bash",
+    }
+    socket_path = Path("/tmp") / f"oc-s03-{os.getpid()}-{uuid.uuid4().hex[:6]}.sock"
+
+    async def exercise():
+        credential = ScopedHistoryCredential(
+            actor_id="*",
+            account_id="acct-s03",
+            capabilities=frozenset({"admin", "capture", "read", "restore"}),
+        )
+        supervisor = HistoryServiceSupervisor(
+            configured_binary,
+            socket_path=socket_path,
+            catalog_path=tmp_path / "history.redb",
+            lore_root=tmp_path / "lore",
+            credential_file=tmp_path / "credentials.json",
+            credentials=[credential],
+            host_root=root,
+            authorized_roots=[
+                {
+                    "root_id": root_id,
+                    "canonical_path": str(root),
+                    "account_ids": ["acct-s03"],
+                    "workspace_ids": ["chat-s03"],
+                }
+            ],
+        )
+        await supervisor.start()
+        try:
+            history_context["history_socket"] = str(socket_path)
+            history_context["history_token"] = credential.token
+
+            async def one(action_id: str):
+                spec_path = jobs / f"{action_id}.spec.json"
+                spec = {
+                    "command_size": 0,
+                    "workspace": str(root),
+                    "cwd": str(root),
+                    "log_path": str(jobs / f"{action_id}.log"),
+                    "exit_path": str(jobs / f"{action_id}.exit"),
+                    "child_pid_path": str(jobs / f"{action_id}.child.pid"),
+                    "stdin_path": str(jobs / f"{action_id}.stdin"),
+                    "stdin_ready_path": str(jobs / f"{action_id}.stdin.ready"),
+                    "capture_state_path": str(jobs / f"{action_id}.capture.json"),
+                    "shell": "/bin/bash",
+                    "network": "enabled",
+                    "owner": "acct-s03",
+                    "session_id": "chat-s03",
+                    "run_id": "run-s03",
+                    "task_id": "task-s03",
+                    "action_id": action_id,
+                    "history_context": history_context,
+                    "history_roots": [history_context["history_roots"][0]],
+                    "destructive_actions": [],
+                }
+                command = (
+                    "printf changed > one.txt; mkdir -p subtree; printf created > subtree/new.txt; mv two.txt replaced.txt"
+                    if action_id.endswith("1")
+                    else "printf changed-again > one.txt; mv replaced.txt replaced-again.txt"
+                )
+                spec["command_size"] = len(command.encode())
+                spec_path.write_text(json.dumps(spec), encoding="utf-8")
+                env = dict(os.environ)
+                env["OPEN_CLANK_SHELL_SANDBOX"] = "off"
+                result = subprocess.run(
+                    [sys.executable, "-m", "src.shell_worker", str(spec_path)],
+                    input=command.encode(),
+                    cwd=Path(__file__).parents[1],
+                    env=env,
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+                assert result.returncode == 0, result.stderr.decode(errors="replace")
+                state = json.loads((jobs / f"{action_id}.capture.json").read_text())
+                assert state["phase"] == "complete"
+                assert state["result"]["receipt"]
+
+            await one("s03-real-1")
+            await supervisor.stop()
+            await supervisor.start()
+            # A restarted provider accepts a fresh durable action and retains
+            # the first action in its catalog; this is the replay boundary.
+            await one("s03-real-2")
+        finally:
+            await supervisor.stop()
+
+    asyncio.run(exercise())

@@ -122,10 +122,13 @@ def test_default_loader_joins_owner_and_keeps_content_opt_in(tmp_path):
     loader = DatabaseStatsAnalysisLoader(factory)
     events, coverage = loader.load_quality("alice", deadline=9999999999)
     assert len(events) == 1
-    assert "owner" not in events[0]
+    assert events[0]["owner"] == "alice"
+    assert events[0]["source_state"] == "unavailable"  # The event has no owned session binding.
+    assert events[0]["session_handle"] is None
     assert events[0]["evidence_id"].startswith("event_")
     assert len(events[0]["evidence_id"]) == 30
-    assert coverage == {"covered": 1, "total": 1, "truncated": False}
+    assert {key: coverage[key] for key in ("covered", "total", "truncated")} == {"covered": 1, "total": 1, "truncated": False}
+    assert coverage["ordinary_evidence"]["state"] == "unavailable"
     messages, message_meta = loader.load_messages("alice", deadline=9999999999)
     assert len(messages) == 1 and messages[0]["owner"] == "alice"
     assert messages[0]["text"] == "alice private seam"

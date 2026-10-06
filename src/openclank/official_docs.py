@@ -1,14 +1,16 @@
 """Maintained official Open Clank documentation — source, manifest, provisioning.
 
-This module owns the first-party official content that is provisioned into a
-top-level read-only docs folder in every account's Copal. Content reflects the
-approved host/product behavior from the S11–S20 slices: Editor owns Wiki as a
-page type, image work uses Files/Imps, Theme lives in Settings, Graph hides
+This module owns the first-party official content that is exposed through
+small top-level read-only reference records in every account's Copal. Canonical
+bodies live in official_docs_content; owner records retain identity and revision metadata
+without duplicating the handbook bytes. Content reflects the approved
+host/product behavior: Wiki has a distinct page-authoring applet over the
+shared Editor document core, image work uses Files/Imps, Theme lives in Settings, Graph hides
 provisioned docs by identity. Repository docs under ``docs/`` remain
 learning/reference material and are not relocated by this module.
 
 The manifest is data, not a home-directory side effect. Stable article IDs,
-hierarchy, bodies and known aliases live here so provisioning can be
+hierarchy and known aliases are exposed here so provisioning can be
 idempotent, Help can address the same content IDs as folder browsing, and the
 Graph can recognize provisioned records by real identity metadata.
 """
@@ -18,6 +20,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from functools import lru_cache
+from types import MappingProxyType
 from typing import Any
 
 # Stable content version. Bump when maintained bodies change so idempotent
@@ -25,7 +29,20 @@ from typing import Any
 # v2 — S30 reconciliation against the completed S22–S26 theme/effect UI:
 # shipped effect names, typography/accessibility controls, and repaired
 # clank://chat / clank://tasks app-link targets.
-OFFICIAL_DOCS_SEED_VERSION = 2
+# v5 — expanded canonical handbook and verified demonstration media bindings.
+# v6 — reconciled current Settings, LCARS and Hexes labels and workflows.
+# v7 — publish the final verified Appearance artwork pool guidance and media.
+# v8 — Help offers the complete shared handbook through Wiki and Copal.
+# v12 — Beta 1 English handbook: 26 articles and reproducible standalone receipt.
+# v13 — final Beta 1 body reflow, qualified media and current capture bindings.
+# v14 — complete Copal/Wiki-only handbook; separate reader retired.
+# v15 — built-in handbook guidance stays read-only without editable-copy promotion.
+# v16 — manual Save/shared Undo, click-in syntax comments and current navigation.
+# v17 — final Windows support prose and current manual-Save/navigation media.
+# v18 — final verified read-only Help, Editor/Wiki and current media bindings.
+# v19 — current hosted Files-only authority; older-store recovery preserved.
+# v20 — Docker unsupported; retained legacy references carry no release gate.
+OFFICIAL_DOCS_SEED_VERSION = 20
 
 # Top-level folder that holds every provisioned official page. Derived identity
 # (product/builtin markers) is the real recognition mechanism; this name is the
@@ -37,15 +54,13 @@ OFFICIAL_ROOT_FOLDER = "OpenClank"
 # status alone.
 PRODUCT_MARKER = "open-clank"
 
-# Rejected legacy page-unit vocabulary. Literal and decoded checks confirm this
-# terminology is absent from official content; personal history is never
-# rewritten to enforce it.
-_BANNED_TERMINOLOGY = ("tiddler", "tiddly")
-
 _ARTICLE: dict[str, dict[str, Any]] = {}
 
 
 def _article(article_id: str, name: str, title: str, body: str, *, aliases: tuple[str, ...] = (), order: int = 0) -> None:
+    media = article_media(ARTICLE_ASSETS.get(article_id, ()))
+    if media:
+        body = body.rstrip() + "\n\n## Demonstration media\n\n" + media + "\n"
     _ARTICLE[article_id] = {
         "id": article_id,
         "name": name,
@@ -56,686 +71,18 @@ def _article(article_id: str, name: str, title: str, body: str, *, aliases: tupl
     }
 
 
-# ── Official articles ────────────────────────────────────────────────────────
-
-_article(
-    "openclank-docs-home",
-    f"{OFFICIAL_ROOT_FOLDER}/Home",
-    "Open Clank Handbook",
-    """# Open Clank Handbook
-
-Welcome. This is the maintained handbook that ships with Open Clank. It is
-read-only: use **Make editable copy** on any page to keep your own notes beside
-it. Updates replace these pages in place and never touch your personal copies.
-
-## Start here
-
-- [[Getting Work Done]] — the shape of a normal session
-- [[Editor]] — documents, Wiki pages, templates and media
-- [[Files and Imps]] — the file tree and managed image projects
-- [[Graph]] — how your documents connect
-
-## Your account and tools
-
-- [[Accounts and Models]] — identity, providers and model choice
-- [[Chat and Workspaces]] — conversations, drafts and context
-- [[Tasks and Continuations]] — turning notes into follow-through
-
-## The rest of the handbook
-
-- [[Memory and Lore]] — what the assistant remembers and how recovery works
-- [[Settings and Themes]] — appearance, panels and preferences
-- [[Recovery]] — history, backups and when things go wrong
-- [[Limits and Platform Support]] — honest capability limits
-- [[Markdown Formatting Demo]] — every rendered element with its source
-
-## Go somewhere in the app
-
-These links open the real screen. They never close a window you already have
-open and never start a chat on your behalf.
-
-- Open [Settings](clank://settings) or jump to [appearance](clank://settings/appearance)
-- Browse [Files](clank://files) or open the [Graph](clank://graph)
-- Continue in [Editor](clank://editor) or the [Wiki library](clank://wiki)
-""",
-    aliases=(f"{OFFICIAL_ROOT_FOLDER}/Start Here", "OpenClank Handbook"),
-    order=0,
+# ── Canonical content bundle ────────────────────────────────────────────────
+# Keep provisioning and native-note encoding here; author bodies in one place.
+from .official_docs_assets import ASSETS, article_media
+from .official_docs_content import (
+    ADDITIONAL_ARTICLES, ARTICLE_ASSETS, ARTICLE_CONTENT, ARTICLE_EXAMPLES,
+    EXISTING_ARTICLES,
 )
 
-_article(
-    "openclank-docs-getting-work-done",
-    f"{OFFICIAL_ROOT_FOLDER}/Getting Work Done",
-    "Getting Work Done",
-    """# Getting Work Done
-
-Open Clank is a chat-first workspace. You talk with your assistant in the
-center, and the Copal suite — Editor, Files, Graph, Timeline, TreeHouse and
-Tasks — holds the durable material you produce together.
-
-## A normal session
-
-1. Start or resume a chat. Every conversation keeps its own transcript and its
-   own task list.
-2. Ask for something concrete. The assistant can read and write your Copal
-   documents, run tools, and reference what it did later.
-3. Capture the durable parts. Notes, tables, images and tasks live in Copal
-   rather than only in the transcript.
-
-Open [Editor](clank://editor) to see the documents, or [Chat](clank://chat) to
-return to the conversation.
-
-## Where things live
-
-| You want to | Go to |
-| --- | --- |
-| Write or read long-form documents | [Editor](clank://editor) |
-| Organize linked knowledge pages | [Wiki library](clank://wiki) |
-| Manage files and images | [Files](clank://files) |
-| See how documents connect | [Graph](clank://graph) |
-| Track follow-through | [Tasks](clank://tasks) |
-| Change appearance or behavior | [Settings](clank://settings) |
-
-## Two kinds of content
-
-**Personal** notes, copies and annotations belong to you. Rename them, edit
-them, delete them — the assistant will not overwrite them just because a name
-looks familiar.
-
-**Official** pages like this handbook are read-only and shared by every
-account on this installation. They live in the `OpenClank/` folder and update
-with the product.
-
-When you want to change an official page, make an editable copy. Your copy is
-yours from then on.
-""",
-    order=1,
-)
-
-_article(
-    "openclank-docs-accounts-models",
-    f"{OFFICIAL_ROOT_FOLDER}/Accounts and Models",
-    "Accounts and Models",
-    """# Accounts and Models
-
-Open Clank is multi-account. Each account owns its own chats, documents, files
-and settings, so two people can share one installation without seeing each
-other's work.
-
-## Your account
-
-Your account is chosen at sign-in. Documents, tasks, memory and settings are
-scoped to that account. If you sign in as someone else you get their
-workspace, not yours — nothing is merged.
-
-Local installs without authentication map to a single local account. The
-Copal document store is still scoped per owner internally, so enabling
-authentication later does not scramble existing data.
-
-## Choosing a model
-
-Models are configured in [Settings](clank://settings/providers). A provider is
-the service that runs a model — a local runtime, or a hosted API you bring a
-key for.
-
-Practical guidance:
-
-- Pick a small, fast model for quick edits and summaries.
-- Pick a stronger model for long reasoning, code or research.
-- Switch mid-conversation if a task grows; the transcript keeps both.
-
-Compare is available for side-by-side answers from two models on the same
-prompt. It is useful when you are deciding which model to keep.
-
-## What Open Clank does not do
-
-- It does not choose a model for you or silently fall back to a different
-  provider without telling you.
-- It does not send your documents to a provider unless a tool call or prompt
-  needs them.
-- It does not store provider API keys in your documents or in first-party
-  source.
-
-See [[Limits and Platform Support]] for what runs where.
-""",
-    order=2,
-)
-
-_article(
-    "openclank-docs-chat-workspaces",
-    f"{OFFICIAL_ROOT_FOLDER}/Chat and Workspaces",
-    "Chat and Workspaces",
-    """# Chat and Workspaces
-
-Chat is the conversational surface. Copal is the document surface. They share
-one account and one set of resources, but they have different rules.
-
-## Chat
-
-Each conversation is its own transcript with its own history, attachments and
-task list. You can keep many conversations open and switch between them from
-the sidebar.
-
-Chats can reference Copal documents by name. When the assistant quotes or
-links a document, opening that link goes to the document in Editor — it does
-not fork the chat or lose your draft.
-
-## Workspaces and drafts
-
-Editor keeps drafts. If you type into a document and navigate away, the draft
-is kept and restored when you come back. Saving is guarded: if the stored
-version moved underneath you, the save is refused rather than silently
-overwriting newer work.
-
-Windows in Copal (Editor, Graph, Timeline and the rest) keep their own
-position and selection. Closing a window does not delete anything.
-
-## Identity in links
-
-Document links carry the document identity, not just a title. Renaming a
-document keeps its links working. Sharing a link to someone on another account
-of the same installation resolves inside their own scope — they see their
-copy of the target, not yours.
-
-## Preserving your work
-
-- Drafts survive navigation and window management.
-- Answering a task toast resumes in the original task chat, not whichever
-  chat happens to be in front.
-- Nothing in chat rewrites a Copal document without going through the normal
-  guarded save.
-
-Continue with [[Editor]] or [[Tasks and Continuations]].
-""",
-    order=3,
-)
-
-_article(
-    "openclank-docs-editor",
-    f"{OFFICIAL_ROOT_FOLDER}/Editor",
-    "Editor",
-    """# Editor
-
-Editor is the shared document workspace. Markdown pages, Wiki pages, typed
-notes, Bases, Canvas, tables and media all open here as typed leaves with
-tabs and splits.
-
-## Pages and tabs
-
-Open a document from the file tree or a link. Use tabs for parallel reading,
-and splits for side-by-side work. Navigation intent is honored: a normal click
-opens in the current tab, Command/Control-click opens a new tab, and the
-context menu offers split right or split below.
-
-Links between documents navigate the tab you are in. Explicit new-tab
-navigation stays explicit — nothing hijacks your current view.
-
-## Wiki pages
-
-Wiki is a page type inside Editor, not a separate application. The Wiki
-library lists your knowledge pages and can create, export and import them as
-`.memes` files. Opening a page gives you the article view with links,
-backlinks and details — the same tabs, splits and save ownership as any other
-document.
-
-Wikilinks look like `[[Some Page]]`. Existing targets open on click; missing
-targets are shown as broken links you can create. Backlinks on a page list
-every page that points at it.
-
-See the [Wiki library](clank://wiki) or open [Editor](clank://editor).
-
-## Templates
-
-Templates live in a folder you choose in
-[Settings](clank://settings). Inserting a template copies its assets and
-links into the current document and keeps resource identity, so attachments
-stay attached.
-
-## Source comments
-
-Rich source comments attach a comment to a range of the document source. They
-travel with the document and survive edits outside the range. Comments are
-part of the document record, not a separate overlay store.
-
-## Media and attachments
-
-Images, audio, video and PDFs can be attached to a document or referenced by
-path. Embedded media renders inline in the Markdown view. Attached files are
-owned by the document and move with it.
-
-The [[Markdown Formatting Demo]] shows every formatting element this renderer
-supports, with its raw source one click away.
-""",
-    order=4,
-)
-
-_article(
-    "openclank-docs-formatting-demo",
-    f"{OFFICIAL_ROOT_FOLDER}/Markdown Formatting Demo",
-    "Markdown Formatting Demo",
-    """# Markdown Formatting Demo
-
-This page is the formatting demonstration. Click any rendered element below to
-reveal the exact Markdown source that produced it. The source inspector is
-read-only — you can select and copy from it, but it never edits this page and
-never starts a save. Use **Back to rendered** to return.
-
-## Headings
-
-### A level-three heading
-
-#### A level-four heading
-
-## Emphasis and marks
-
-Some **bold text**, some *italic text*, some ~~struck-through text~~, and some
-==highlighted text==.
-
-Inline `code spans` look like this.
-
-## Lists
-
-- First bullet
-- Second bullet
-  - A nested bullet
-- Third bullet
-
-1. First step
-2. Second step
-3. Third step
-
-## Task list
-
-- [x] A finished item
-- [ ] An open item
-
-## Quote
-
-> A quoted line.
-> It can span more than one line.
-
-## Code
-
-```
-function hello() {
-  return 'world';
-}
-```
-
-## Rule
-
----
-
-## Table
-
-| Column | Meaning |
-| --- | --- |
-| Name | What it is called |
-| Value | What it holds |
-
-## Links and references
-
-A [standard link](clank://settings) opens a real app screen.
-
-A wikilink target such as [[Editor]] opens another document in this Editor.
-
-## Footnote-style note
-
-Everything on this page is ordinary Markdown. The only special behavior is
-the read-only source reveal above, and it exists for this demonstration alone
-— normal documentation pages simply stay rendered.
-""",
-    aliases=(f"{OFFICIAL_ROOT_FOLDER}/Formatting Demo",),
-    order=5,
-)
-
-_article(
-    "openclank-docs-files-imps",
-    f"{OFFICIAL_ROOT_FOLDER}/Files and Imps",
-    "Files and Imps",
-    """# Files and Imps
-
-Files is the file tree for your account: documents, folders, media and the
-managed image projects that Imps produces.
-
-## The file tree
-
-Open [Files](clank://files) to browse. Files and Editor share one resource
-identity: a document opened from Files is the same document, with the same
-draft and history. Moving a document keeps its links and attachments.
-
-Files exposes capabilities explicitly — read, edit, write — so a read-only
-resource says so instead of failing later on save.
-
-## Imps managed projects
-
-Imps is the image editor. Its projects are managed records: every save
-captures a recovery preimage first, and the save is refused if that capture
-fails. You can undo a save by restoring the captured preimage.
-
-Project endpoints live under `/api/imps/projects/*`. A project binds to a
-provider image resource and keeps its own revision counter so concurrent
-saves cannot silently clobber each other.
-
-## Gallery
-
-The separate Gallery applet is retired. Provisioned image content now lives
-in the **Photos** folder under Files. Legacy `gallery:` links resolve to
-Files, and image editing opens the Imps editor. Album management is gone with
-the applet; the folder is an ordinary folder you can move and rename.
-
-Open [Files](clank://files) to see Photos.
-
-## Media in documents
-
-Media attached to documents is stored with the document and moves with it.
-Embedding an image in Markdown renders it inline; a PDF embed shows a viewer;
-audio and video embed their player.
-
-See [[Editor]] for attaching media to a document.
-""",
-    order=6,
-)
-
-_article(
-    "openclank-docs-graph",
-    f"{OFFICIAL_ROOT_FOLDER}/Graph",
-    "Graph",
-    """# Graph
-
-Graph shows how your documents connect: wikilinks, embeds, tags and typed
-relations all become edges. Galaxy mode arranges documents and calendar
-events together; structure mode turns a document's headings and bullets into
-a navigable outline.
-
-Open the [Graph](clank://graph) or jump to [Galaxy](clank://galaxy).
-
-## What you see
-
-Nodes are documents. Edges are relationships — a link, an embed, a tag
-membership or a typed relation from a note's properties. Clicking a node
-opens that document in Editor.
-
-## Filters
-
-The filter panel narrows by kind, folder, tag and property value. Facets come
-from real document metadata, so a value that exists only on a document you
-have not loaded yet is still discoverable — the facet list pages through the
-server until it has seen everything.
-
-Empty selections narrow the result; clearing a filter opens it back up.
-
-## Official documentation in Graph
-
-This handbook is provisioned documentation. Graph hides provisioned documents
-by default so your personal notes are what you see first. Turn on **Include
-official docs** to add them back, or click the `OpenClank` folder chip to
-include just that folder.
-
-Hiding is based on real identity metadata — the shipped product marker — not
-on the folder name. Your own notes in any folder, including `OpenClank/`, are
-never hidden just because of where they live.
-
-## Structure mode
-
-For a single document, structure mode lists headings and bullets and lets you
-rearrange sections. It is the right tool for reshaping a long page; [[Editor]]
-is the right tool for rewriting one.
-""",
-    order=7,
-)
-
-_article(
-    "openclank-docs-memory-lore",
-    f"{OFFICIAL_ROOT_FOLDER}/Memory and Lore",
-    "Memory and Lore",
-    """# Memory and Lore
-
-Open Clank has two related but separate memory systems. **Memory** (the Brain
-surface) is what the assistant recalls between sessions. **Lore** is the
-recovery ledger that lets work be undone and reconstructed.
-
-## Memory
-
-Memory capture is optional and per-account. When enabled, the assistant can
-save short recollections that later sessions can use. You can review, edit and
-delete saved memories from [Settings](clank://settings) under Brain.
-
-Memory never replaces your documents. It is recall, not storage — the
-authoritative record of your work is Copal and the chat transcript.
-
-## Lore
-
-Lore is the durable preimage and action ledger behind recoverable operations.
-When a managed save happens — an Imps project save, a guarded document
-commit — the previous state is captured first. If capture fails, the save is
-refused rather than leaving an unrecoverable hole.
-
-You do not interact with Lore directly. You see it in History and in the
-undo/restore affordances that depend on it.
-
-## History
-
-Document history lists checkpoints and changes for a single document. From
-there you can inspect a prior version and restore it. History is scoped to
-the document and the account.
-
-See [Settings](clank://settings/history) for retention budgets.
-
-## What memory is not
-
-- It is not a search index over everything you have ever typed.
-- It is not shared between accounts.
-- It is not a substitute for saving a document you care about.
-
-[[Recovery]] covers what to do when something goes wrong.
-""",
-    order=8,
-)
-
-_article(
-    "openclank-docs-tasks",
-    f"{OFFICIAL_ROOT_FOLDER}/Tasks and Continuations",
-    "Tasks and Continuations",
-    """# Tasks and Continuations
-
-Tasks are durable follow-through items. They are the bridge between "the
-assistant said it would do X" and "X actually happened, and here is where."
-
-## Task chats
-
-Each task keeps one durable chat. Opening a task from the toast, the badge or
-the task list opens that chat — the original one — not whichever conversation
-happens to be in front. Answering a question in the toast resumes the task
-chat without hijacking your foreground chat.
-
-Open [Meatbag Tasks](clank://tasks) for the full list, or [the task view](clank://tasks)
-inside Copal.
-
-## Sources
-
-Tasks can come from a chat, from a checkbox in a document, or from a
-scheduled run. A checkbox task in a document carries the document identity,
-so the task and the line it came from stay connected.
-
-## Continuations
-
-A continuation is a resumed run of the same task chat. Context accumulates in
-that task's transcript rather than scattering across new conversations. When
-a task is done, its chat remains as the record of what happened.
-
-## Practical habits
-
-- Ask the assistant to create a task when work will outlive the current
-  conversation.
-- Keep one task per outcome; the chat under it holds the detail.
-- Use checkboxes in documents for work that belongs to that document.
-
-Next: [[Memory and Lore]] for what survives a restart, or [[Recovery]] for
-what to do when a run goes wrong.
-""",
-    order=9,
-)
-
-_article(
-    "openclank-docs-settings-themes",
-    f"{OFFICIAL_ROOT_FOLDER}/Settings and Themes",
-    "Settings and Themes",
-    """# Settings and Themes
-
-Settings owns configuration and appearance. Theme lives here — there is no
-separate theme applet.
-
-Open [Settings](clank://settings).
-
-## Panels
-
-| Panel | What it holds |
-| --- | --- |
-| [Appearance](clank://settings/appearance) | Theme, colors, background effects |
-| [Providers](clank://settings/providers) | Model providers and keys |
-| [History](clank://settings/history) | Memory and retention budgets |
-| [File access](clank://settings/file-access) | What the assistant may touch |
-
-Settings panels are reachable by direct navigation. Opening a panel from a
-link focuses it; it never closes a window you already had open.
-
-## Themes
-
-Themes change colors, backgrounds and effects across the whole shell. The
-theme picker shows live previews. Custom accent colors are available on every
-theme, and you can save your own named themes (up to eight) and share them as
-JSON.
-
-Background / Effect chooses the decorative background. The shipped effects
-are: Solid, Clanker Signal Routes, Shipibo Kene-Inspired Signal Weave,
-Clanker LCARS, Clanker Gem Drift, Clanker Emoji Drift, Clanker Matrix Rain,
-Clanker Emoji Rain, Clanker LCARS Status Sweep, Dots, Synapse, Rain,
-Constellations, Perlin Flow, Petals, Sparkles and Embers. Each effect that
-supports it exposes an effect color, an Intensity slider and a Size slider;
-effects without those controls hide them.
-
-Background effects are decorative. On machines where an effect is too heavy
-it can be turned off without changing the rest of the theme.
-
-## Typography and accessibility
-
-Appearance also controls typography: a font choice, a density setting
-(comfortable, compact, spacious) and a UI text-size scale that is independent
-of the active theme. A frosted-glass toggle softens panels where the theme
-supports it. These are readability controls, not decoration.
-
-## What settings does not do
-
-- It does not migrate your documents.
-- It does not change other accounts' settings.
-- It does not require a restart for appearance changes.
-
-[[Accounts and Models]] covers provider setup in more detail.
-""",
-    order=10,
-)
-
-_article(
-    "openclank-docs-recovery",
-    f"{OFFICIAL_ROOT_FOLDER}/Recovery",
-    "Recovery",
-    """# Recovery
-
-Most of the time nothing goes wrong. When it does, this page is the map.
-
-## A save was refused
-
-Guarded saves refuse to overwrite newer work. Reopen the document and merge —
-the version you were editing is still in your draft buffer, and the stored
-version is intact.
-
-## A document looks wrong
-
-If a document shows a recovery panel instead of its content, the stored bytes
-could not be decoded. The original source is preserved. Use the recovery
-panel to inspect the preserved source, or restore from history.
-
-Nothing silently rewrites a document that failed to decode.
-
-## Undo a managed save
-
-Imps project saves capture a preimage first. Restore from the project's
-history to replay that preimage and undo the save.
-
-## Restore a document version
-
-Document history lists checkpoints. Pick a version and restore it. The
-restore is itself recorded, so you can go forward again.
-
-## Start over on official pages
-
-Official handbook pages like this one are read-only and update with the
-product. If you made an editable copy and want a fresh original, delete your
-copy and reopen the official page — the original is still there.
-
-## When to ask for help
-
-- A scheduled task ran but produced nothing: its task chat has the transcript.
-- Files are missing: check [Files](clank://files) trash before assuming loss.
-- Settings look wrong: [Settings](clank://settings) panels are per account.
-
-See [[Memory and Lore]] for the history and retention side.
-""",
-    order=11,
-)
-
-_article(
-    "openclank-docs-limits",
-    f"{OFFICIAL_ROOT_FOLDER}/Limits and Platform Support",
-    "Limits and Platform Support",
-    """# Limits and Platform Support
-
-Honest limits are part of the handbook. This page is where they live.
-
-## Data formats
-
-**Strict JSON has no comments.** Anything stored as strict JSON —
-configuration, project files, interchange bundles — cannot carry explanatory
-comments. Use a Markdown page or a document property if you need to annotate
-data.
-
-**Native notes are structured.** A Copal note is a document tree with typed
-blocks, properties and relations, not a plain `.md` file. Markdown is the
-interchange and the editing projection; the stored record is richer.
-
-## Platform support
-
-Open Clank runs natively on macOS, Windows and Linux. GPU-accelerated local
-models depend on the platform:
-
-- macOS: Metal through the local runtime. MLX-only models are not served.
-- Windows: native launcher binds loopback by default; LAN exposure is opt-in.
-- Linux: native packages; GPU support depends on the installed driver stack.
-
-Containerized deployment is documented for servers but is not the desktop
-experience and is not what these desktop docs qualify.
-
-## Renderer scope
-
-The Markdown renderer is not CommonMark-complete. It supports headings,
-emphasis, marks, inline code, fenced code, lists, task lists, quotes,
-dividers, tables, wikilinks, standard links, app links and embedded media.
-Exotic constructs fall through as literal text rather than being mangled.
-
-The formatting source-reveal inspector exists for
-[[Markdown Formatting Demo]] only. Normal documentation pages stay rendered.
-
-## What is not claimed here
-
-- No web or public documentation site is launched by this handbook.
-- No cross-account sharing of documents.
-- No automatic migration of personal files into Copal.
-
-If something on this page is out of date relative to the running product,
-the running product is right and this page will be updated with it.
-""",
-    order=12,
-)
+for _id, _name, _title, _aliases, _order in EXISTING_ARTICLES:
+    _article(_id, _name, _title, ARTICLE_CONTENT[_id], aliases=_aliases, order=_order)
+for _order, (_id, _title, _body) in enumerate(ADDITIONAL_ARTICLES, start=len(EXISTING_ARTICLES)):
+    _article(_id, f"{OFFICIAL_ROOT_FOLDER}/{_title}", _title, _body, order=_order)
 
 
 # ── Manifest access ──────────────────────────────────────────────────────────
@@ -761,22 +108,6 @@ def known_names() -> list[str]:
         names.append(article["name"])
         names.extend(article["aliases"])
     return names
-
-
-# ── Terminology gate ─────────────────────────────────────────────────────────
-
-def terminology_violations(text: str) -> list[str]:
-    """Rejected legacy vocabulary found in ``text`` (case-insensitive)."""
-    lowered = str(text or "").lower()
-    return [term for term in _BANNED_TERMINOLOGY if term in lowered]
-
-
-def validate_official_terminology(*texts: str) -> list[str]:
-    """All rejected terms across the supplied texts, for install-fixture checks."""
-    found: list[str] = []
-    for text in texts:
-        found.extend(terminology_violations(text))
-    return found
 
 
 # ── Native note encoding ─────────────────────────────────────────────────────
@@ -930,9 +261,70 @@ def article_payload(article: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@lru_cache(maxsize=4)
+def _cached_official_payloads(version: int) -> tuple[dict[str, Any], ...]:
+    """Encode the installed handbook once per process/content version."""
+    del version  # The version is deliberately part of the cache key.
+    return tuple(article_payload(article) for article in official_articles())
+
+
+@lru_cache(maxsize=4)
+def _cached_official_references(version: int) -> MappingProxyType:
+    """Build immutable canonical references alongside the payload cache."""
+    references: dict[str, MappingProxyType] = {}
+    for payload in _cached_official_payloads(version):
+        content = str(payload["content"])
+        raw = content.encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        doc_id = str(payload["docId"])
+        references[doc_id] = MappingProxyType({
+            "docId": doc_id,
+            "content": content,
+            "digest": f"sha256:{digest}",
+            "head": f"sha256:{digest}:{len(raw)}",
+            "size": len(raw),
+            "version": version,
+        })
+    return MappingProxyType(references)
+
+
+@lru_cache(maxsize=4)
+def _cached_official_reference_manifest(version: int) -> MappingProxyType:
+    """Return the cached, content-addressed revision of all references."""
+    references = _cached_official_references(version)
+    receipt = [
+        (doc_id, reference["head"], reference["digest"], reference["size"])
+        for doc_id, reference in sorted(references.items())
+    ]
+    encoded = json.dumps(receipt, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return MappingProxyType({
+        "version": version,
+        "fingerprint": f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+        "count": len(receipt),
+    })
+
+
+def official_reference_manifest() -> dict[str, Any]:
+    """A caller-safe receipt for the complete canonical reference set."""
+    return dict(_cached_official_reference_manifest(OFFICIAL_DOCS_SEED_VERSION))
+
+
 def official_payloads() -> list[dict[str, Any]]:
-    """Every article ready for provisioning, in display order."""
-    return [article_payload(article) for article in official_articles()]
+    """Every article ready for provisioning, in display order.
+
+    Return shallow copies so a caller can prepare a hypothetical provision
+    without mutating the process-wide canonical payload cache.
+    """
+    return [
+        {**payload, "aliases": list(payload.get("aliases") or ())}
+        for payload in _cached_official_payloads(OFFICIAL_DOCS_SEED_VERSION)
+    ]
+
+
+def official_reference(article_id: str) -> dict[str, Any] | None:
+    """Resolve one installed handbook payload without creating an owner copy."""
+    reference = _cached_official_references(OFFICIAL_DOCS_SEED_VERSION).get(str(article_id or ""))
+    return dict(reference) if reference is not None else None
 
 
 # ── Provisioning plan ────────────────────────────────────────────────────────
@@ -1013,6 +405,11 @@ def plan_input_from_content(
     }
 
 
+def _is_provisioned_record(document: dict[str, Any]) -> bool:
+    """Official identity on an editable personal copy is not install ownership."""
+    return document.get("readOnly") is True and _is_official_record(document)
+
+
 def plan_official_provision(
     existing: list[dict[str, Any]],
     payloads: list[dict[str, Any]] | None = None,
@@ -1039,7 +436,7 @@ def plan_official_provision(
         if not isinstance(document, dict) or document.get("trashed"):
             continue
         doc_id = _existing_doc_id(document)
-        if doc_id:
+        if doc_id and _is_provisioned_record(document):
             by_doc_id[doc_id] = document
         name = str(document.get("name") or "")
         if name:
@@ -1056,13 +453,13 @@ def plan_official_provision(
             # alias is adopted and renamed to the canonical name in place.
             for alias in payload.get("aliases") or ():
                 alias_hit = by_name.get(str(alias))
-                if alias_hit is not None and _is_official_record(alias_hit) and not _is_user_modified(alias_hit):
+                if alias_hit is not None and _is_provisioned_record(alias_hit) and not _is_user_modified(alias_hit):
                     matched = alias_hit
                     rename_from = str(alias_hit.get("name") or "")
                     break
         if matched is None:
             named = by_name.get(name)
-            if named is not None and _is_official_record(named) and not _existing_doc_id(named):
+            if named is not None and _is_provisioned_record(named) and not _existing_doc_id(named):
                 # Previously installed default without a stable id: adopt it.
                 matched = named
         if matched is not None and rename_from is None:
@@ -1073,7 +470,7 @@ def plan_official_provision(
                 rename_from = current_name
         if matched is None:
             collision = by_name.get(name)
-            if collision is not None and not _is_official_record(collision):
+            if collision is not None and not _is_provisioned_record(collision):
                 plan["conflicts"].append({
                     "docId": doc_id,
                     "name": name,

@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // static/js/presets.js
 
 /**
@@ -245,7 +246,7 @@ function initExpandButton() {
       promptInput.style.opacity = '0.3';
     } catch (e) {}
 
-    btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:2px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg> Expanding...';
+    btn.innerHTML = uiIcon("sparkles", 11, {"style":"vertical-align:-1px;margin-right:2px;"}) + " Expanding...";
 
     try {
       const res = await fetch(`${API_BASE}/api/presets/expand`, {

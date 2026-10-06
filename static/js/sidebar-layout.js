@@ -169,8 +169,12 @@ export function initSidebarLayout(Storage, opts) {
     } else {
       iconRail.style.display = (sidebarHidden && !railHidden) ? '' : 'none';
     }
-    // Hamburger is always visible — just update body classes for CSS layout adjustments
+    // One persistent hamburger follows the sidebar edge in every mode.
     if (hamburgerBtn) {
+      const label = sidebarHidden ? 'Show sidebar' : 'Collapse sidebar';
+      hamburgerBtn.setAttribute('aria-expanded', String(!sidebarHidden));
+      hamburgerBtn.setAttribute('aria-label', label);
+      hamburgerBtn.title = label;
       document.body.classList.toggle('hamburger-right', isRight);
       document.body.classList.toggle('hamburger-left', !isRight);
       document.body.classList.toggle('hamburger-only', sidebarHidden && railHidden);
@@ -199,14 +203,6 @@ export function initSidebarLayout(Storage, opts) {
   _applyStoredSidebarMode();
   syncRailSide();
   void _loadMobileControlSide();
-
-  // In-sidebar toggle button — same behavior as hamburger
-  const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
-  if (sidebarToggleBtn) {
-    sidebarToggleBtn.addEventListener('click', (e) => {
-      if (hamburgerBtn) hamburgerBtn.click();
-    });
-  }
 
   // Header-only new-chat aliases. #sidebar-new-chat-btn is wired in app.js
   // because it needs the full default-model/pending-chat flow; wiring it here

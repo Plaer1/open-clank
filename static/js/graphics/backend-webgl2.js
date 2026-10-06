@@ -125,6 +125,22 @@ function clamp01(value) {
   return Math.max(0, Math.min(1, n));
 }
 
+// Emoji rain uses native-color glyphs. Treat a complete, short emoji sequence
+// as one atlas sprite regardless of its requested CSS size; the quad's existing
+// metric scale restores that size without multiplying cache entries by buckets.
+const NATIVE_EMOJI_PATTERN = (() => {
+  try {
+    return new RegExp('^(?:\\p{Extended_Pictographic}(?:\\uFE0E|\\uFE0F|\\p{Emoji_Modifier}|\\u20E3|\\u200D\\p{Extended_Pictographic})*|(?:\\p{Regional_Indicator}){2}|[0-9#*]\\uFE0F?\\u20E3)$', 'u');
+  } catch (_) {
+    return /^(?:[\u{1F000}-\u{1FAFF}]|[\u{1F1E6}-\u{1F1FF}]{2}|[0-9#*]\uFE0F?\u20E3)$/u;
+  }
+})();
+
+function isNativeEmojiGlyph(value) {
+  const text = String(value == null ? '' : value);
+  return text.length > 0 && text.length <= 32 && NATIVE_EMOJI_PATTERN.test(text);
+}
+
 /**
  * Create the WebGL2 backend. Throws when a usable WebGL2 context cannot be
  * created so callers can fall back to the ordinary Canvas2D backend.
@@ -162,6 +178,7 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
 
   const colorVao = gl.createVertexArray();
   const colorBuffer = gl.createBuffer();
+  const colorIndexBuffer = gl.createBuffer();
   gl.bindVertexArray(colorVao);
   gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
   gl.bufferData(gl.ARRAY_BUFFER, vertexData.byteLength, gl.DYNAMIC_DRAW);
@@ -169,12 +186,21 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, FLOATS_PER_VERTEX * 4, 0);
   gl.enableVertexAttribArray(1);
   gl.vertexAttribPointer(1, 4, gl.FLOAT, false, FLOATS_PER_VERTEX * 4, 8);
+  // ELEMENT_ARRAY_BUFFER binding is VAO state in WebGL2. Keep a distinct
+  // index buffer with the color VAO so drawElements has valid element data.
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, colorIndexBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indexData.byteLength, gl.DYNAMIC_DRAW);
   gl.bindVertexArray(null);
 
   const textureVao = gl.createVertexArray();
   const textureBuffer = gl.createBuffer();
+  const textureIndexBuffer = gl.createBuffer();
   // Texture path uses interleaved x,y,u,v,r,g,b,a (8 floats).
   const textureStride = 8 * 4;
+  const textureData = new Float32Array(MAX_VERTICES * 8);
+  const textureIndexData = new Uint16Array(MAX_VERTICES * 3);
+  let textureVertexCount = 0;
+  let textureIndexCount = 0;
   gl.bindVertexArray(textureVao);
   gl.bindBuffer(gl.ARRAY_BUFFER, textureBuffer);
   gl.bufferData(gl.ARRAY_BUFFER, MAX_VERTICES * 8 * 4, gl.DYNAMIC_DRAW);
@@ -184,15 +210,15 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
   gl.vertexAttribPointer(1, 2, gl.FLOAT, false, textureStride, 8);
   gl.enableVertexAttribArray(2);
   gl.vertexAttribPointer(2, 4, gl.FLOAT, false, textureStride, 16);
+  // Textured glyph/image draws need their own VAO-associated element buffer.
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, textureIndexBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, textureIndexData.byteLength, gl.DYNAMIC_DRAW);
   gl.bindVertexArray(null);
-
-  const textureData = new Float32Array(MAX_VERTICES * 8);
-  let textureVertexCount = 0;
-  let textureIndexCount = 0;
-  const textureIndexData = new Uint16Array(MAX_VERTICES * 3);
 
   let width = canvas.width || 1;
   let height = canvas.height || 1;
+  let logicalWidth = width;
+  let logicalHeight = height;
   let disposed = false;
   let lost = false;
   let currentTexture = null;
@@ -202,6 +228,7 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
   let atlasCursorX = 0;
   let atlasCursorY = 0;
   let atlasRowHeight = 0;
+  let atlasDirty = false;
 
   const glyphAtlas = createGlyphAtlas({
     maxEntries: limits.maxGlyphCacheEntries || 512,
@@ -210,6 +237,63 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
   const imageCache = createBoundedCache({
     maxEntries: Math.max(8, Math.min(256, limits.maxTextureSize ? 256 : 64)),
   });
+  // Artwork shares atlas pages so painter order stays intact while random
+  // sprite identities remain in one GPU submission. Pages have a4M-pixel cap.
+  const imagePages = [];
+  const imageAtlasSize = Math.max(256, Math.min(1024, limits.maxTextureSize || 1024));
+  const maxImagePages = Math.max(1, Math.floor(4 * 1024 * 1024 / (imageAtlasSize * imageAtlasSize)));
+
+  function releaseImagePages() {
+    for (const page of imagePages) {
+      gl.deleteTexture(page.texture);
+      page.canvas.width = page.canvas.height = 0;
+    }
+    imagePages.length = 0;
+  }
+
+  function uploadImagePage(page) {
+    if (!page?.dirty || !alive()) return;
+    gl.bindTexture(gl.TEXTURE_2D, page.texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, page.canvas);
+    page.dirty = false;
+  }
+
+  function imageAtlasEntry(source) {
+    const sw = Number(source.naturalWidth || source.width) || 0;
+    const sh = Number(source.naturalHeight || source.height) || 0;
+    if (!sw || !sh || sw + 2 > imageAtlasSize || sh + 2 > imageAtlasSize) return null;
+    let page = imagePages.at(-1);
+    if (page && page.x + sw + 2 > imageAtlasSize) { page.x = 0; page.y += page.row; page.row = 0; }
+    if (!page || page.y + sh + 2 > imageAtlasSize) {
+      if (imagePages.length >= maxImagePages) {
+        // Draw queued old-page quads before freeing or overwriting any pixels.
+        flushTexture();
+        imageCache.clear();
+        releaseImagePages();
+        currentTexture = null;
+      }
+      const surface = canvas.ownerDocument.createElement('canvas');
+      surface.width = surface.height = imageAtlasSize;
+      const ctx = surface.getContext('2d');
+      const texture = gl.createTexture();
+      if (!ctx || !texture) return null;
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      page = { canvas: surface, ctx, texture, x: 0, y: 0, row: 0, dirty: true };
+      imagePages.push(page);
+    }
+    const x = page.x + 1;
+    const y = page.y + 1;
+    page.ctx.drawImage(source, x, y, sw, sh);
+    page.x += sw + 2;
+    page.row = Math.max(page.row, sh + 2);
+    page.dirty = true;
+    return { texture: page.texture, page, uv: [x / imageAtlasSize, y / imageAtlasSize,
+      (x + sw) / imageAtlasSize, (y + sh) / imageAtlasSize] };
+  }
 
   function alive() {
     return !disposed && !lost && !!gl;
@@ -218,10 +302,12 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
   function flushColor() {
     if (!alive() || indexCount === 0) return;
     gl.useProgram(colorProgram);
-    gl.uniform2f(colorUResolution, width, height);
+    gl.uniform2f(colorUResolution, logicalWidth, logicalHeight);
     gl.bindVertexArray(colorVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertexData.subarray(0, vertexCount * FLOATS_PER_VERTEX));
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, colorIndexBuffer);
+    gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, indexData.subarray(0, indexCount));
     gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_SHORT, 0);
     gl.bindVertexArray(null);
     vertexCount = 0;
@@ -230,14 +316,19 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
 
   function flushTexture() {
     if (!alive() || textureIndexCount === 0 || !currentTexture) return;
+    if (currentTexture === atlasTexture) uploadDirtyAtlas();
+    const imagePage = imagePages.find(page => page.texture === currentTexture);
+    if (imagePage) uploadImagePage(imagePage);
     gl.useProgram(textureProgram);
-    gl.uniform2f(textureUResolution, width, height);
+    gl.uniform2f(textureUResolution, logicalWidth, logicalHeight);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, currentTexture);
     gl.uniform1i(textureUTexture, 0);
     gl.bindVertexArray(textureVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, textureBuffer);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, textureData.subarray(0, textureVertexCount * 8));
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, textureIndexBuffer);
+    gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, textureIndexData.subarray(0, textureIndexCount));
     gl.drawElements(gl.TRIANGLES, textureIndexCount, gl.UNSIGNED_SHORT, 0);
     gl.bindVertexArray(null);
     textureVertexCount = 0;
@@ -305,52 +396,83 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
     return atlasCanvas;
   }
 
-  function rasterizeGlyph(glyph) {
+  function uploadDirtyAtlas() {
+    if (!atlasDirty || !atlasTexture || !atlasCanvas || !alive()) return;
+    gl.bindTexture(gl.TEXTURE_2D, atlasTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlasCanvas);
+    atlasDirty = false;
+  }
+
+  function rasterizeGlyph(glyph, rasterSize = glyph.size) {
     ensureAtlas();
     if (!atlasCtx || !atlasTexture) return null;
-    const size = glyphAtlas.quantizeSize(glyph.size || 12);
+    const bucketSize = glyphAtlas.quantizeSize(rasterSize || 12);
     const weight = glyph.weight || 400;
     const family = glyph.font || 'sans-serif';
     const text = String(glyph.text);
-    const font = `${weight} ${size}px ${family}`;
+    const font = `${weight} ${bucketSize}px ${family}`;
     atlasCtx.font = font;
+    atlasCtx.textAlign = 'left';
+    atlasCtx.textBaseline = 'alphabetic';
     const metrics = atlasCtx.measureText(text);
-    const w = Math.max(1, Math.ceil(metrics.width || size * 0.6 * text.length));
-    const h = Math.max(1, Math.ceil(size * 1.3));
+    const metric = (name, fallback) => {
+      const value = Number(metrics[name]);
+      return Number.isFinite(value) && value >= 0 ? value : fallback;
+    };
+    const advance = metric('width', bucketSize * 0.6 * text.length);
+    const inkLeft = metric('actualBoundingBoxLeft', 0);
+    const inkRight = metric('actualBoundingBoxRight', Math.max(advance, bucketSize * 0.6 * text.length));
+    const fontAscent = metric('fontBoundingBoxAscent', metric('actualBoundingBoxAscent', bucketSize * 0.8));
+    const fontDescent = metric('fontBoundingBoxDescent', metric('actualBoundingBoxDescent', bucketSize * 0.2));
+    const inkAscent = metric('actualBoundingBoxAscent', fontAscent);
+    const inkDescent = metric('actualBoundingBoxDescent', fontDescent);
     const pad = 1;
+    // Atlas bounds are actual ink, not an arbitrary 1.3× em square. Keep
+    // offset/advance metrics so the scaled quad can reconstruct Canvas2D's
+    // left/alphabetic anchor, overhangs, and descenders at any request size.
+    const w = Math.max(1, Math.ceil(inkLeft + inkRight) + pad * 2);
+    const h = Math.max(1, Math.ceil(inkAscent + inkDescent) + pad * 2);
     if (atlasCursorX + w + pad * 2 > atlasCanvas.width) {
       atlasCursorX = 0;
       atlasCursorY += atlasRowHeight + pad;
       atlasRowHeight = 0;
     }
     if (atlasCursorY + h + pad * 2 > atlasCanvas.height) {
+      // Queued quads still reference the old atlas. Upload and draw them
+      // before clearing the backing canvas or invalidating cached UVs.
+      flushTexture();
       atlasCtx.clearRect(0, 0, atlasCanvas.width, atlasCanvas.height);
       atlasCursorX = 0;
       atlasCursorY = 0;
       atlasRowHeight = 0;
       glyphAtlas.clear();
+      atlasDirty = true;
     }
     const x = atlasCursorX + pad;
     const y = atlasCursorY + pad;
     atlasCtx.clearRect(x, y, w, h);
     atlasCtx.fillStyle = '#ffffff';
-    atlasCtx.textBaseline = 'top';
-    atlasCtx.fillText(text, x, y);
+    atlasCtx.fillText(text, x + pad + inkLeft, y + pad + inkAscent);
     atlasCursorX += w + pad * 2;
     atlasRowHeight = Math.max(atlasRowHeight, h + pad * 2);
-    // Upload the whole atlas; UVs address the glyph rect. Full-canvas uploads
-    // avoid per-driver texSubImage crop quirks and stay off the readback path.
-    gl.bindTexture(gl.TEXTURE_2D, atlasTexture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlasCanvas);
-    const uv = {
+    // Defer the full atlas upload until its queued quads flush. UVs address
+    // the glyph rect, and batching avoids one full texture upload per glyph.
+    atlasDirty = true;
+    return {
       u0: x / atlasCanvas.width,
       v0: y / atlasCanvas.height,
       u1: (x + w) / atlasCanvas.width,
       v1: (y + h) / atlasCanvas.height,
       w,
       h,
+      bucketSize,
+      advance,
+      inkLeft,
+      inkAscent,
+      fontAscent,
+      fontDescent,
+      pad,
     };
-    return uv;
   }
 
   function pushTexturedQuad(texture, x, y, w, h, u0, v0, u1, v1, rgb, alpha) {
@@ -401,16 +523,19 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
       lost = true;
     },
 
-    resize(nextWidth, nextHeight, dpr = 1) {
+    resize(nextWidth, nextHeight, dpr = 1, logicalExtent = null) {
       if (!alive()) return;
       width = Math.max(1, Math.floor(nextWidth));
       height = Math.max(1, Math.floor(nextHeight));
+      const fallbackWidth = width / Math.max(1, Number(dpr) || 1);
+      const fallbackHeight = height / Math.max(1, Number(dpr) || 1);
+      logicalWidth = Math.max(1, Number(logicalExtent?.width) || fallbackWidth);
+      logicalHeight = Math.max(1, Number(logicalExtent?.height) || fallbackHeight);
       canvas.width = width;
       canvas.height = height;
+      // The viewport is backing pixels; CSS-space geometry is transformed by
+      // the shader resolution so DPR/clamping never changes its visible extent.
       gl.viewport(0, 0, width, height);
-      // dpr is applied by the caller into the coordinate system; WebGL clips
-      // in pixel space so the transform is folded into scene coordinates.
-      void dpr;
     },
 
     beginFrame() {
@@ -553,22 +678,37 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
       ensureAtlas();
       for (const glyph of glyphs) {
         if (!glyph || glyph.text == null) continue;
-        const key = glyphAtlas.key(glyph.text, glyph.size, glyph.weight, glyph.font);
+        const emoji = isNativeEmojiGlyph(glyph.text);
+        const rasterSize = emoji ? 24 : glyph.size;
+        const key = glyphAtlas.key(glyph.text, rasterSize, glyph.weight, glyph.font);
         let entry = glyphAtlas.get(key);
         if (!entry || !entry.uv) {
-          const uv = rasterizeGlyph(glyph);
+          const uv = rasterizeGlyph(glyph, rasterSize);
           if (!uv) continue;
           entry = glyphAtlas.set(key, { uv }, uv.w * uv.h);
         }
         const rgb = hexToRgb(glyph.color);
         const alpha = clamp01(glyph.alpha == null ? 1 : glyph.alpha) * globalAlpha;
         const { uv } = entry;
-        let x = glyph.x;
-        let y = glyph.y;
-        if (glyph.align === 'center') x -= uv.w / 2;
-        else if (glyph.align === 'right') x -= uv.w;
-        if (glyph.baseline === 'middle') y -= uv.h / 2;
-        else if (glyph.baseline === 'bottom' || glyph.baseline === 'alphabetic') y -= uv.h;
+        const requestedSize = Math.max(1, Number(glyph.size) || uv.bucketSize);
+        const scale = requestedSize / uv.bucketSize;
+        const advance = uv.advance * scale;
+        let anchorX = glyph.x;
+        if (glyph.align === 'center') anchorX -= advance / 2;
+        else if (glyph.align === 'right' || glyph.align === 'end') anchorX -= advance;
+        // Canvas2D positions text by an anchor point, while atlas UVs cover
+        // ink plus padding. Reconstruct that anchor using measured font/ink
+        // metrics, then scale the bucket raster to this glyph's requested size.
+        let baselineY = glyph.y;
+        if (glyph.baseline === 'top') baselineY += uv.fontAscent * scale;
+        else if (glyph.baseline === 'middle') baselineY += (uv.fontAscent - uv.fontDescent) * scale / 2;
+        else if (glyph.baseline === 'bottom') baselineY -= uv.fontDescent * scale;
+        else if (glyph.baseline === 'hanging') baselineY += uv.fontAscent * scale * 0.8;
+        else if (glyph.baseline === 'ideographic') baselineY -= uv.fontDescent * scale;
+        const quadW = uv.w * scale;
+        const quadH = uv.h * scale;
+        const x = anchorX - (uv.inkLeft + uv.pad) * scale;
+        const y = baselineY - (uv.inkAscent + uv.pad) * scale;
         // Head-glyph glow. The batched atlas path has no shadowBlur, so the
         // pre-S24 leading-glyph halo is approximated with a slightly larger,
         // translucent copy underneath (drawn first).
@@ -580,8 +720,8 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
             atlasTexture,
             x - pad,
             y - pad,
-            uv.w + pad * 2,
-            uv.h + pad * 2,
+            quadW + pad * 2,
+            quadH + pad * 2,
             uv.u0,
             uv.v0,
             uv.u1,
@@ -590,14 +730,20 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
             alpha * 0.35,
           );
         }
-        pushTexturedQuad(atlasTexture, x, y, uv.w, uv.h, uv.u0, uv.v0, uv.u1, uv.v1, rgb, alpha);
+        pushTexturedQuad(atlasTexture, x, y, quadW, quadH, uv.u0, uv.v0, uv.u1, uv.v1, rgb, alpha);
       }
     },
 
-    drawImage(source, dx, dy, dw, dh) {
+    drawImage(source, dx, dy, dw, dh, alpha = 1) {
       if (!alive() || !source) return;
+      const requestedAlpha = Number(alpha);
+      const opacity = clamp01(Number.isFinite(requestedAlpha) ? requestedAlpha : 1);
       flushColor();
       let entry = imageCache.get(source);
+      if (!entry || !entry.texture) {
+        entry = imageAtlasEntry(source);
+        if (entry) imageCache.set(source, entry);
+      }
       if (!entry || !entry.texture) {
         const texture = gl.createTexture();
         if (!texture) return;
@@ -619,7 +765,16 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
       const sh = source.height || dh || 1;
       const w = dw == null ? sw : dw;
       const h = dh == null ? sh : dh;
-      pushTexturedQuad(entry.texture, dx, dy, w, h, 0, 0, 1, 1, [1, 1, 1], clamp01(this.__globalAlpha == null ? 1 : this.__globalAlpha));
+      pushTexturedQuad(
+        entry.texture,
+        dx,
+        dy,
+        w,
+        h,
+        ...(entry.uv || [0, 0, 1, 1]),
+        [1, 1, 1],
+        clamp01(this.__globalAlpha == null ? 1 : this.__globalAlpha) * opacity,
+      );
     },
 
     endFrame() {
@@ -632,10 +787,13 @@ export function createWebGL2Backend({ canvas, limits = {}, gl: injectedGl = null
       if (disposed) return;
       disposed = true;
       imageCache.clear();
+      releaseImagePages();
       glyphAtlas.clear();
       try {
         if (colorBuffer) gl.deleteBuffer(colorBuffer);
+        if (colorIndexBuffer) gl.deleteBuffer(colorIndexBuffer);
         if (textureBuffer) gl.deleteBuffer(textureBuffer);
+        if (textureIndexBuffer) gl.deleteBuffer(textureIndexBuffer);
         if (colorVao) gl.deleteVertexArray(colorVao);
         if (textureVao) gl.deleteVertexArray(textureVao);
         if (colorProgram) gl.deleteProgram(colorProgram);

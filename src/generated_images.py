@@ -19,25 +19,14 @@ GENERATED_IMAGE_HEADERS = {
     "Pragma": "no-cache",
     "X-Content-Type-Options": "nosniff",
 }
-LOCAL_GALLERY_OWNER = "local-installation"
 _GALLERY_STAGE_PREFIX = ".openclank-gallery-stage-"
 _GALLERY_BACKUP_PREFIX = ".openclank-gallery-backup-"
 
 
 def gallery_owner_key(user: object) -> Optional[str]:
-    """Return the durable Gallery principal for the current request.
-
-    Auth-disabled installations still need an explicit owner stamp: ``NULL``
-    cannot distinguish local data from legacy/ambiguous data.  In auth-enabled
-    mode a missing principal stays missing so every byte route can fail closed.
-    """
-
+    """Return a named Gallery principal; missing identity stays missing."""
     owner = str(user or "").strip()
-    if owner:
-        return owner
-    if os.getenv("AUTH_ENABLED", "true").lower() == "false":
-        return LOCAL_GALLERY_OWNER
-    return None
+    return owner or None
 
 
 def gallery_image_root(root: str | Path | None = None) -> Path:
@@ -58,7 +47,7 @@ def has_generated_image_provenance(
 ) -> bool:
     """Fail-closed proof that one active Gallery row owns ``filename``."""
 
-    if owner is None:
+    if not owner or not str(owner).strip():
         return False
     db = None
     allowed = False

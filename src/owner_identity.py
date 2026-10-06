@@ -1,19 +1,7 @@
-"""Owner/identity predicates for auth-disabled and domain-adapter scopes.
+"""Named account identity and historical domain-adapter identifiers.
 
-Open Clank keeps named account identity authoritative (O01). This module
-centralizes the *existing* domain adapters for the unnamed scope so call sites
-stop re-deriving them inconsistently. It never migrates stored rows and never
-creates synthetic human users named ``Default`` or ``Local``.
-
-Astra mapping shape (host/runtime audit 08):
-
-- auth-disabled / first-run unnamed scope: ``require_user`` returns ``""``
-- provider routing maps that scope to ``local-installation``
-- Copal maps that scope to ``local``
-- a delegated API token attributes data to its owner but never inherits that
-  owner's interactive admin or dangerous-tool authority
-- explicit ``AUTH_ENABLED=false`` and unconfigured first-run loopback are
-  different cases and must stay distinguishable
+Historical local scopes remain recognizable for explicit recovery. They never
+supply an authenticated user or administrator and are never adopted at boot.
 """
 
 from __future__ import annotations
@@ -42,15 +30,6 @@ FORBIDDEN_STORED_IDENTITIES = frozenset(
 )
 FORBIDDEN_STORED_PREFIXES = ("user:", "deleted:", "agent:")
 
-
-def auth_disabled() -> bool:
-    """True when the operator explicitly disabled auth via ``AUTH_ENABLED``."""
-    return os.getenv("AUTH_ENABLED", "true").lower() == "false"
-
-
-def localhost_bypass_enabled() -> bool:
-    """True when the documented loopback dev bypass is on."""
-    return os.getenv("LOCALHOST_BYPASS", "false").lower() == "true"
 
 
 def is_unnamed_scope(user: Optional[str]) -> bool:

@@ -8,11 +8,10 @@ from fastapi import APIRouter, Request, HTTPException
 import time
 
 from services.search import get_search_config, PROVIDER_INFO, SearchService
+from services.search.service import ANTIGRAVITY_PREREQUISITES, ANTIGRAVITY_UNAVAILABLE_REASON
 from services.search.core import _call_provider
 from services.search.providers import _get_provider_key, _get_search_instance, _get_search_settings
-from src.auth_helpers import effective_user
-from src.auth_helpers import _auth_disabled
-from src.owner_identity import LOCAL_INSTALLATION_OWNER
+from src.auth_helpers import effective_user, require_authenticated_request
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +42,8 @@ def setup_search_routes(config) -> APIRouter:
     router = APIRouter(tags=["search"])
 
     @router.get("/api/search/config")
-    async def get_search_settings() -> Dict[str, Any]:
+    async def get_search_settings(request: Request) -> Dict[str, Any]:
+        require_authenticated_request(request)
         return get_search_config()
 
     @router.post("/api/search")
@@ -52,6 +52,10 @@ def setup_search_routes(config) -> APIRouter:
 
         Used by Compare mode to pre-search once and share results across panes.
         """
+        require_authenticated_request(request)
+        owner = str(effective_user(request) or "").strip().lower()
+        if not owner:
+            raise HTTPException(401, "Authentication required")
         values = await _request_values(request)
         query = str(values.get("query") or values.get("q") or "").strip()
         if not query:
@@ -68,7 +72,6 @@ def setup_search_routes(config) -> APIRouter:
         if time_filter is not None and time_filter.lower() not in {"day", "week", "month", "year", "pd", "pw", "pm", "py"}:
             raise HTTPException(status_code=422, detail="unsupported search freshness")
         try:
-            owner = str(effective_user(request) or "")
             provider = values.get("provider")
             response = await SearchService().search(query, mode=mode, provider=str(provider).strip() if provider else None,
                                                     freshness=time_filter, caller="chat", owner=owner, intent=intent,
@@ -84,10 +87,11 @@ def setup_search_routes(config) -> APIRouter:
     @router.get("/api/search/providers")
     async def list_search_providers(request: Request):
         """Return available search providers with config status."""
-        settings = _get_search_settings()
+        require_authenticated_request(request)
         owner = str(effective_user(request) or "").strip().lower()
-        if not owner and _auth_disabled():
-            owner = LOCAL_INSTALLATION_OWNER
+        if not owner:
+            raise HTTPException(401, "Authentication required")
+        settings = _get_search_settings()
         mimo_preflight = {"configured": False, "selected_provider_family": None}
         if owner:
             try:
@@ -143,13 +147,19 @@ def setup_search_routes(config) -> APIRouter:
             "status": "unavailable",
             "unverified": True,
             "selected": settings.get("search_provider") == "antigravity",
-            "reason": "no owner-bound Antigravity subscription adapter or source-authority binding is qualified",
+            "reason": ANTIGRAVITY_UNAVAILABLE_REASON,
+            "prerequisites": list(ANTIGRAVITY_PREREQUISITES),
+            "qualification": "adapter_unshipped",
         })
         return providers
 
     @router.post("/api/search/query")
     async def search_with_provider(request: Request) -> Dict[str, Any]:
         """Search using a specific provider. Used by compare search mode."""
+        require_authenticated_request(request)
+        owner = str(effective_user(request) or "").strip().lower()
+        if not owner:
+            raise HTTPException(401, "Authentication required")
         values = await _request_values(request)
         query = str(values.get("query") or values.get("q") or "").strip()
         provider = str(values.get("provider") or "").strip()
@@ -162,7 +172,6 @@ def setup_search_routes(config) -> APIRouter:
             raise HTTPException(status_code=422, detail="unsupported search intent")
         if freshness is not None and str(freshness).strip().lower() not in {"day", "week", "month", "year", "pd", "pw", "pm", "py"}:
             raise HTTPException(status_code=422, detail="unsupported search freshness")
-        owner = str(effective_user(request) or "")
         raw_count = values.get("count") if values.get("count") is not None else values.get("limit")
         count = None
         if raw_count not in (None, ""):

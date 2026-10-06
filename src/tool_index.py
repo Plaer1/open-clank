@@ -18,7 +18,6 @@ from src.embedding_lanes import (
     LANE_FASTEMBED,
     build_embedding_lanes,
     dedupe_results,
-    migrate_legacy_collection,
 )
 
 try:
@@ -112,7 +111,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "manage_webhooks": "Webhook management: list, add, delete, enable, or disable webhooks.",
     "api_call": "Call a configured API integration by name (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, RSS reader, git forge, bookmark manager, smart home, or any other registered service). Make a GET/POST/PUT/PATCH/DELETE request to the integration's endpoint path, with an optional JSON body. Use whenever the user asks to query or control one of their connected integrations/services.",
     "manage_tokens": "API token management: list, create, or delete API access tokens.",
-    "manage_documents": "List, read, delete, or tidy documents in the editor panel. action='list' returns clickable rows (most-recent first) so the user can open any doc by clicking. action='read' (aka view/open/get) with document_id returns the content; supports offset=<N> + limit=<N> to page through large docs (response includes next_offset when more remains, so you can keep calling with offset=next_offset). action='delete' with document_id removes a doc (only way to delete). Use this for ANY 'show/read/list/open my documents/docs/files/notes' request — never shell or curl.",
+    "manage_documents": "List or read documents and delete only a selected document. action='list' returns clickable rows (most-recent first) so the user can open any doc by clicking. action='read' (aka view/open/get) with document_id returns the content; supports offset=<N> + limit=<N> to page through large docs (response includes next_offset when more remains, so you can keep calling with offset=next_offset). action='delete' with document_id removes that selected doc. Use this for ANY 'show/read/list/open my documents/docs/files/notes' request — never shell or curl.",
     "manage_research": "List, read/open, or delete saved DEEP RESEARCH results from the Library. action='list' returns clickable [query](#research-<id>) rows (most-recent first). action='read' (aka open/view/get) with id returns the report + sources. action='delete' with id removes it. Use this for ANY 'open/read/find/delete my research / that report / the research on X' request. NOTE: this is for EXISTING research; to START new research use trigger_research.",
     "manage_settings": "Change ANY real app setting (the ones the Settings panel writes) so the user never has to open it: TTS voice/provider/speed, STT, search engine + result count, default/teacher/task/utility/vision/image/research models, image quality, reminder channel (browser/email/ntfy), agent timeout/tool-call budget, and more. action=set with key (friendly aliases ok: voice, 'search engine', 'default model', 'teacher model', 'image quality', 'reminder channel'...) + value; get/list/reset too. Also toggles tools on/off (disable_tool/enable_tool/list_tools). Secrets/API keys are read-only. Use for any 'change my…/set my…/use X for…/turn on…' preference request.",
     "create_session": "Create a new chat with a name and model.",
@@ -154,7 +153,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "edit_image": "Edit an image in the gallery: upscale (increase resolution), remove background (rembg), inpaint (fill selected area), or harmonize (blend edits). Specify image ID and action.",
     "trigger_research": "Start a deep research job on any topic — appears in the Deep Research sidebar, streams progress, produces a detailed report. Use for 'research X', 'look into Y', 'do deep research on Z', 'investigate'. NOT a scheduled task — it runs now and surfaces in the sidebar.",
     "manage_bg_jobs": "Start and control durable workspace-contained shell sessions scoped to this owner/chat/workspace. Actions: start, poll, write, wait, terminate, list, tail. Tail uses a bounded byte cursor; terminate tears down the process tree.",
-    "capture_desktop": "Capture one opted-in macOS display, visible window, or bounded region for the current task; retain it through Files without exposing a host path.",
+    "capture_desktop": "Capture one opted-in display, visible window, or bounded region on macOS or Windows for the current task; retain it through Files without exposing a host path.",
 }
 
 
@@ -170,7 +169,7 @@ class _ChromaToolIndex:
             (lane.collection for lane in self._lanes if lane.name == LANE_FASTEMBED),
             self._lanes[0].collection,
         )
-        migrate_legacy_collection(COLLECTION_NAME, self._lanes)
+
         self._fingerprint = ""
         self._mcp_generation = -1
         self._healthy = True

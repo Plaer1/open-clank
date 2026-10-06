@@ -542,6 +542,41 @@ test("binding admission reads authoritative state after marker invalidation", as
   unregisterMemorySessionScope(sessionID)
 })
 
+test("managed history uses only bound host callbacks for queries, media, mutations, and outages", async () => {
+  const sessionID = "engine-history"
+  registerMemorySessionScope(sessionID, [bindingDescriptor(sessionID)], "/work")
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+  ManagedProvider.installHostConnection({
+    async extMethod(method: string, params: Record<string, unknown>) {
+      calls.push({ method, params })
+      if (method === "_openclank/history/v1/query" && params.operation === "search") {
+        if (params.query === "outage") throw new Error("host history unavailable")
+        return { ok: true, operation: "search", result: { ok: true, hits: [], limit: 10, more: false } }
+      }
+      if (method === "_openclank/history/v1/query" && params.operation === "media") {
+        return { ok: true, operation: "media", result: { ok: true, attachments: [{ asset_id: "asset-1", mime_type: "image/png", filename: null, byte_size: 3 }] } }
+      }
+      if (method === "_openclank/history/v1/mutate") {
+        return { ok: true, operation: params.operation, accepted: 1, duplicate: 0, enqueued: 1 }
+      }
+      throw new Error(`unexpected callback ${method}`)
+    },
+  } as any)
+
+  await expect(ManagedProvider.historyCall(sessionID, "search", { query: "host only", limit: 10 })).resolves.toEqual({ ok: true, hits: [], limit: 10, more: false })
+  await expect(ManagedProvider.historyCall(sessionID, "media", { assetID: "asset-1" })).resolves.toEqual({ ok: true, attachments: [{ asset_id: "asset-1", mime_type: "image/png", filename: null, byte_size: 3 }] })
+  await expect(ManagedProvider.historyMutate(sessionID, "replay", [{ messageID: "m", partID: "p", role: "user", partType: "text", content: "replayed" }])).resolves.toMatchObject({ accepted: 1 })
+  await expect(ManagedProvider.historyCall(sessionID, "search", { query: "outage" })).rejects.toThrow("host history unavailable")
+  expect(calls.map((call) => call.method)).toEqual([
+    "_openclank/history/v1/query",
+    "_openclank/history/v1/query",
+    "_openclank/history/v1/mutate",
+    "_openclank/history/v1/query",
+  ])
+  expect(calls.every((call) => !("owner" in call.params) && !("stableChatID" in call.params))).toBe(true)
+  unregisterMemorySessionScope(sessionID)
+})
+
 test("session cwd accepts exact revisions and preserves explicit rejection", async () => {
   let response: unknown = {
     outcome: "accepted",

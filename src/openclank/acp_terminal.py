@@ -28,6 +28,7 @@ class _Terminal:
     truncated: bool = False
     reader: asyncio.Task | None = None
     reaper: asyncio.Task | None = None
+    windows_job: Any = None
 
 
 class ACPTerminalManager:
@@ -90,7 +91,16 @@ class ACPTerminalManager:
             owned = sum(1 for terminal in self._terminals.values() if terminal.session_id == session_id)
             if owned >= 4 or len(self._terminals) >= 32:
                 raise RuntimeError("ACP terminal concurrency limit reached")
-            process = await asyncio.create_subprocess_exec(
+            windows_job = None
+            if os.name == "nt":
+                from src.openclank.worker_windows import spawn_owned
+                async def spawn_terminal(*argv, **options):
+                    nonlocal windows_job
+                    process, windows_job = await spawn_owned(*argv, **options)
+                    return process
+            else:
+                spawn_terminal = asyncio.create_subprocess_exec
+            process = await spawn_terminal(
                 *argv,
                 cwd=str(cwd),
                 env=env,
@@ -99,7 +109,7 @@ class ACPTerminalManager:
                 start_new_session=True,
             )
             terminal_id = f"term_{uuid.uuid4().hex}"
-            terminal = _Terminal(terminal_id, session_id, process, byte_limit)
+            terminal = _Terminal(terminal_id, session_id, process, byte_limit, windows_job=windows_job)
             self._terminals[terminal_id] = terminal
             terminal.reader = asyncio.create_task(self._read(terminal))
             terminal.reaper = asyncio.create_task(self._timeout(terminal, 300.0))
@@ -117,8 +127,20 @@ class ACPTerminalManager:
             raise
 
     async def _timeout(self, terminal: _Terminal, timeout: float) -> None:
+        async def wait_owned():
+            if terminal.windows_job is not None:
+                # asyncio Process.wait may await stdout EOF held open by a
+                # descendant after the direct child exits. Close the Job at
+                # direct-child exit so those pipes cannot strand cleanup.
+                while terminal.process.returncode is None:
+                    await asyncio.sleep(0.05)
+                if terminal.windows_job is not None:
+                    terminal.windows_job.close()
+                    terminal.windows_job = None
+            await terminal.process.wait()
+
         try:
-            await asyncio.wait_for(terminal.process.wait(), timeout=timeout)
+            await asyncio.wait_for(wait_owned(), timeout=timeout)
         except asyncio.TimeoutError:
             await self._terminate(terminal)
         except asyncio.CancelledError:
@@ -139,7 +161,7 @@ class ACPTerminalManager:
             return None
         return {
             "exitCode": code if code >= 0 else None,
-            "signal": signal.Signals(-code).name if code < 0 else None,
+            "signal": signal.Signals(-code).name if os.name != "nt" and code < 0 else None,
         }
 
     async def output(self, params: dict) -> dict:
@@ -159,6 +181,13 @@ class ACPTerminalManager:
         return self._status(terminal) or {"exitCode": None, "signal": None}
 
     async def _terminate(self, terminal: _Terminal) -> None:
+        if terminal.windows_job is not None:
+            # Closing the private Job terminates every owned descendant, even
+            # when the original terminal process has already exited.
+            terminal.windows_job.close()
+            terminal.windows_job = None
+            await terminal.process.wait()
+            return
         if terminal.process.returncode is not None:
             return
         try:

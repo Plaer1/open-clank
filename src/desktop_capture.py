@@ -1,4 +1,4 @@
-"""Task-triggered macOS desktop capture with owner-scoped admission.
+"""Task-triggered native desktop capture with owner-scoped admission.
 
 The capture runner is injectable so policy and argv behavior can be tested
 without spawning ``screencapture`` or taking pixels.
@@ -115,6 +115,54 @@ class _NativeDesktopHelpers:
         if not isinstance(value, Mapping):
             raise DesktopCaptureError("Vision OCR returned invalid data", code="ocr_unavailable")
         return dict(value)
+
+
+class _WindowsDesktopHelpers:
+    def metadata(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        from src.windows_desktop_capture import metadata, NativeCaptureError
+        try:
+            return metadata(request)
+        except NativeCaptureError as exc:
+            raise DesktopCaptureError(str(exc), code=exc.code) from exc
+
+    async def ocr(self, path: Path) -> Mapping[str, Any]:
+        result = await _run_capture(_windows_helper_argv("ocr", str(path)), timeout=8)
+        if result["returncode"] != 0 or not isinstance(result.get("value"), Mapping):
+            raise DesktopCaptureError("Windows OCR is unavailable", code="ocr_unavailable")
+        return result["value"]
+
+
+def _windows_helper_argv(action: str, *args: str) -> list[str]:
+    if getattr(sys, "frozen", False):
+        from src.runtime_paths import get_app_root
+        root = Path(get_app_root())
+        candidates = (root / "bin" / "openclank-windows-desktop-capture.exe", root / "openclank-windows-desktop-capture.exe")
+        helper = next((path for path in candidates if path.is_file()), None)
+        if helper is None:
+            raise DesktopCaptureError("bundled Windows desktop helper is unavailable", code="unavailable")
+        return [str(helper), action, *args]
+    return [sys.executable, str(Path(__file__).with_name("windows_desktop_capture.py")), action, *args]
+
+
+async def _await_capture_job(value: Any, cancel_event: asyncio.Event | None) -> Any:
+    if not inspect.isawaitable(value):
+        return value
+    if cancel_event is None:
+        return await value
+    job = asyncio.ensure_future(value)
+    cancellation = asyncio.create_task(cancel_event.wait())
+    try:
+        await asyncio.wait((job, cancellation), return_when=asyncio.FIRST_COMPLETED)
+        if cancel_event.is_set():
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+            raise DesktopCaptureError("desktop capture was cancelled", code="cancelled")
+        return await job
+    finally:
+        cancellation.cancel()
+        if not job.done():
+            job.cancel()
+        await asyncio.gather(job, cancellation, return_exceptions=True)
 
 
 class DesktopCaptureError(ValueError):
@@ -260,7 +308,7 @@ def host_files_importer(*, owner: str, account_id: str, workspace: str, reposito
     return _import
 
 
-def _argv(request: Mapping[str, Any], output: str) -> list[str]:
+def _argv(request: Mapping[str, Any], output: str, metadata: Mapping[str, Any] | None = None) -> list[str]:
     target = str(request.get("target") or "display")
     args = ["/usr/sbin/screencapture", "-x", "-t", "png"]
     if target == "display":
@@ -280,6 +328,10 @@ def _argv(request: Mapping[str, Any], output: str) -> list[str]:
         args += ["-R", ",".join(str(v) for v in region)]
     else:
         raise DesktopCaptureError("capture target is unsupported", code="unsupported_target")
+    if sys.platform == "win32":
+        if metadata is None:
+            raise DesktopCaptureError("Windows capture target metadata is required", code="target_unavailable")
+        return _windows_helper_argv("capture", json.dumps(dict(request)), output, json.dumps(dict(metadata)))
     return args + [output]
 
 
@@ -310,11 +362,10 @@ async def capture_desktop(
             raise DesktopCaptureError("capture target bounds are invalid", code="target_unavailable")
     with tempfile.TemporaryDirectory(prefix="openclank-capture-") as temp_dir:
         output = str(Path(temp_dir) / "capture.png")
-        argv = _argv(request, output)
+        argv = _argv(request, output, target_metadata)
         try:
             result = runner(argv, timeout=CAPTURE_TIMEOUT_SECONDS)
-            if inspect.isawaitable(result):
-                result = await result
+            result = await _await_capture_job(result, cancel_event)
         except (subprocess.TimeoutExpired, asyncio.TimeoutError) as exc:
             raise DesktopCaptureError("desktop capture timed out", code="timeout") from exc
         except asyncio.CancelledError as exc:
@@ -326,7 +377,8 @@ async def capture_desktop(
         if cancel_event and cancel_event.is_set():
             raise DesktopCaptureError("desktop capture was cancelled", code="cancelled")
         if isinstance(result, Mapping) and int(result.get("returncode", 0)) != 0:
-            raise DesktopCaptureError("screen recording permission is unavailable", code="permission_required")
+            code = str(result.get("value", {}).get("error", "permission_required")) if isinstance(result.get("value"), Mapping) else "permission_required"
+            raise DesktopCaptureError("desktop capture failed", code=code)
         path = Path(output)
         if not path.is_file():
             raise DesktopCaptureError("desktop capture produced no image", code="unavailable")
@@ -336,8 +388,14 @@ async def capture_desktop(
         ocr = None
         if ocr_runner is not None:
             ocr = ocr_runner(path)
-            if inspect.isawaitable(ocr):
-                ocr = await ocr
+            try:
+                ocr = await _await_capture_job(ocr, cancel_event)
+            except asyncio.CancelledError as exc:
+                raise DesktopCaptureError("desktop capture was cancelled", code="cancelled") from exc
+            except asyncio.TimeoutError as exc:
+                raise DesktopCaptureError("desktop OCR timed out", code="timeout") from exc
+        if cancel_event and cancel_event.is_set():
+            raise DesktopCaptureError("desktop capture was cancelled", code="cancelled")
         if importer is None:
             raise DesktopCaptureError("Files import is unavailable", code="files_unavailable")
         metadata = {"kind": "desktop_capture", "owner": owner, "source": request.get("target", "display"), "target": target_metadata, "ocr": ocr}
@@ -412,10 +470,11 @@ def _valid_png(path: Path) -> bool:
         return False
 
 
-async def _run_capture(argv: list[str], *, timeout: int) -> dict[str, int]:
+async def _run_capture(argv: list[str], *, timeout: int) -> dict[str, Any]:
     process = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         start_new_session=(os.name == "posix"),
+        creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
     )
     try:
         _stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -440,7 +499,13 @@ async def _run_capture(argv: list[str], *, timeout: int) -> dict[str, int]:
                     pass
                 await process.wait()
         raise
-    return {"returncode": int(process.returncode or 0)}
+    result: dict[str, Any] = {"returncode": int(process.returncode or 0)}
+    if sys.platform == "win32":
+        try:
+            result["value"] = json.loads(_stdout)
+        except (ValueError, UnicodeError):
+            pass
+    return result
 
 
 async def capture_tool(content: str, ctx: Mapping[str, Any]) -> dict[str, Any]:
@@ -469,6 +534,10 @@ async def capture_tool(content: str, ctx: Mapping[str, Any]) -> dict[str, Any]:
     ocr_runner = None
     if sys.platform == "darwin" and not caller_supplied_importer:
         helpers = _NativeDesktopHelpers()
+        metadata_reader = helpers.metadata
+        ocr_runner = helpers.ocr
+    elif sys.platform == "win32" and not caller_supplied_importer:
+        helpers = _WindowsDesktopHelpers()
         metadata_reader = helpers.metadata
         ocr_runner = helpers.ocr
     if request.get("action") == "correct":

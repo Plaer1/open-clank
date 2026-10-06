@@ -2,7 +2,6 @@
 """Initialize all application components and dependencies."""
 import os
 import logging
-import sqlite3
 from typing import Dict, Any
 
 from src.constants import (
@@ -36,26 +35,10 @@ def create_directories():
 
 
 def prepare_frankenmemory_database() -> str:
-    """Create/read the durable DB identity inherited by every fm-mcp child."""
-    os.makedirs(os.path.dirname(FM_DB_PATH), exist_ok=True)
-    with sqlite3.connect(FM_DB_PATH) as connection:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS fm_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT OR IGNORE INTO fm_meta(key,value) VALUES ('database_id', lower(hex(randomblob(16))))"
-        )
-        database_id = connection.execute(
-            "SELECT value FROM fm_meta WHERE key='database_id'"
-        ).fetchone()[0]
-    expected = os.environ.get("FM_DB_ID", "").strip()
-    if expected and expected != database_id:
-        raise RuntimeError(
-            f"frankenmemory database identity mismatch: expected {expected}, opened {database_id}"
-        )
-    os.environ["FM_DB_ID"] = database_id
-    return database_id
-        
+    """Admit native current schema and read the durable identity."""
+    from src.frankenmemory_database import prepare_frankenmemory_database as prepare
+    return prepare(FM_DB_PATH)
+
 def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     """
     Initialize all manager and handler instances.

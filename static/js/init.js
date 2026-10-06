@@ -1,8 +1,13 @@
+import { acknowledgeVisible } from './achievementProducer.js';
 // Odysseus UI — Initialization Scripts
 // ES6 module — extracted from index.html inline scripts
 
 import Storage from './storage.js';
+import { adoptAchievementAccount, startAchievementLifecycle, drainAchievementNotifications } from './achievementClient.js';
 import { bindModelStateOwner } from './modelCatalog.js';
+
+// Notification listening starts with the authenticated app, even when chat is hidden.
+startAchievementLifecycle();
 
 function markComposerUserEdited() {
   const msgInput = document.getElementById('message');
@@ -113,6 +118,116 @@ window.__odysseusAuthContextPromise = (async () => {
   } catch (_) { /* anonymous / loopback mode — nothing to do */ return null; }
 })();
 
+/* N01 first-use acknowledgement. The app bootstrap calls this only after its
+   session load succeeds and the loader has been removed. Server-side account
+   scope and the existing award ledger remain authoritative. */
+{
+  const MAX_ATTEMPTS = 3;
+  const RETRY_DELAYS = [750, 2000];
+  const SYSTEM_ACCOUNT = /^(?:local-installation|installer|maintenance|template[_-]seed|test[_-]fixture|import|background[_-]maintenance)$/i;
+  let accountId = '';
+  let shellMounted = false;
+  let attemptCount = 0;
+  let generation = 0;
+  let activeGeneration = -1;
+  let completedGeneration = -1;
+  let retryTimer = null;
+  let pendingEvent = null;
+
+  const shellIsUsable = () => {
+    const shell = document.getElementById('chat-container');
+    const composer = document.getElementById('message');
+    const loader = document.getElementById('app-loader');
+    if (!shell || !composer || loader?.isConnected || !document.body?.isConnected) return false;
+    const style = window.getComputedStyle(shell);
+    const bounds = shell.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden'
+      && bounds.width > 0 && bounds.height > 0;
+  };
+
+  function resetAccount(nextId) {
+    if (nextId === accountId) return;
+    accountId = nextId;
+    generation += 1;
+    attemptCount = 0;
+    activeGeneration = -1;
+    completedGeneration = -1;
+    pendingEvent = null;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    if (shellMounted && accountId) void submitShellReady(generation);
+  }
+
+  function adoptAuthContext(context) {
+    adoptAchievementAccount(context);
+    const username = String(context?.username || '').trim();
+    const candidate = String(context?.accountId || '').trim();
+    const systemIdentity = SYSTEM_ACCOUNT.test(candidate) || SYSTEM_ACCOUNT.test(username);
+    resetAccount(username && candidate && !systemIdentity ? candidate : '');
+  }
+
+  function makeEvent() {
+    const id = globalThis.crypto?.randomUUID?.()
+      || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    return {
+      source_event_id: `shell.ready:${id}`,
+      event_family: 'shell.ready',
+      kind: 'U',
+      result: 'acknowledged',
+      actor_kind: 'user',
+      occurred_at: new Date().toISOString(),
+      facts: { accountResolved: true, visiblyMounted: true },
+    };
+  }
+
+  async function submitShellReady(expectedGeneration) {
+    if (!shellMounted || !accountId || !shellIsUsable()
+        || expectedGeneration !== generation
+        || activeGeneration === generation
+        || completedGeneration === generation
+        || attemptCount >= MAX_ATTEMPTS) return;
+    activeGeneration = generation;
+    attemptCount += 1;
+    pendingEvent ||= makeEvent();
+    try {
+      const response = await fetch('/api/copal/treehouse/achievements/events', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId, events: [pendingEvent] }),
+      });
+      if (!response.ok) throw new Error(`Achievement event failed (${response.status})`);
+      if (expectedGeneration === generation) {
+        completedGeneration = generation;
+        pendingEvent = null;
+        acknowledgeVisible(document.getElementById('chat-container'), 'surface.visited', { surface:'chat', visited:true }, { accountId });
+        void drainAchievementNotifications();
+      }
+    } catch (_) {
+      if (expectedGeneration === generation && attemptCount < MAX_ATTEMPTS) {
+        const delay = RETRY_DELAYS[Math.min(attemptCount - 1, RETRY_DELAYS.length - 1)];
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          void submitShellReady(expectedGeneration);
+        }, delay);
+      }
+    } finally {
+      if (activeGeneration === expectedGeneration) activeGeneration = -1;
+    }
+  }
+
+  document.addEventListener('openclank:auth-context-changed', (event) => {
+    adoptAuthContext(event.detail);
+  });
+  window.__odysseusAuthContextPromise?.then(adoptAuthContext, () => adoptAuthContext(null));
+  window.__openClankShellMounted = (sessionsLoaded) => {
+    if (sessionsLoaded !== true || !shellIsUsable()) return false;
+    shellMounted = true;
+    if (accountId) void submitShellReady(generation);
+    return true;
+  };
+}
+
 /* Sidebar section default-collapsed setup. The click-to-toggle handlers
    themselves live in js/section-management.js — attaching them in BOTH
    places caused two toggles per click, which read as "clicks aren't doing
@@ -202,39 +317,6 @@ window.__odysseusAuthContextPromise = (async () => {
     new MutationObserver(_sync).observe(rail, { attributes: true, attributeFilter: ['class', 'style'] });
   }
   window.addEventListener('resize', _sync);
-}
-
-/* Keep minimized tool chips above the composer. Both the current modalManager
-   dock and the legacy fallback dock consume this root-level clearance. */
-{
-  const root = document.documentElement;
-  const chatBar = document.querySelector('.chat-input-bar');
-  const attachStrip = document.getElementById('attach-strip');
-  const chatContainer = document.getElementById('chat-container');
-  const _syncComposerClearance = () => {
-    let top = window.innerHeight;
-    for (const el of [attachStrip, chatBar]) {
-      if (!el) continue;
-      const rect = el.getBoundingClientRect();
-      if (rect.height > 0) top = Math.min(top, rect.top);
-    }
-    const clearance = Math.max(12, Math.ceil(window.innerHeight - top + 8));
-    root.style.setProperty('--composer-clearance', clearance + 'px');
-  };
-  requestAnimationFrame(_syncComposerClearance);
-  if (typeof ResizeObserver !== 'undefined') {
-    const ro = new ResizeObserver(_syncComposerClearance);
-    if (chatBar) ro.observe(chatBar);
-    if (attachStrip) ro.observe(attachStrip);
-  }
-  if (chatContainer && typeof MutationObserver !== 'undefined') {
-    new MutationObserver(_syncComposerClearance).observe(chatContainer, {
-      attributes: true,
-      attributeFilter: ['class'],
-    });
-  }
-  if (chatBar) chatBar.addEventListener('transitionend', _syncComposerClearance);
-  window.addEventListener('resize', _syncComposerClearance);
 }
 
 /* ---- Resizable sidebar — drag edge to resize, collapse if small, drag rail edge to expand ---- */

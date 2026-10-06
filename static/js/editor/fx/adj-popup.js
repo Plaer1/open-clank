@@ -197,7 +197,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
       btn.addEventListener('click', activate);
     });
     // Esc closes the menu, capture-phase + stopPropagation so the
-    // gallery modal's own Esc handler doesn't fire too.
+    // editor overlay's own Esc handler doesn't fire too.
     const onKey = (ev) => {
       if (ev.key === 'Escape') {
         ev.preventDefault();
@@ -374,7 +374,7 @@ export function createAdjPopupSystem({ composite, saveState, renderLayerPanel })
         head.addEventListener('pointerup', onUp);
       });
     }
-    // Esc closes; capture-phase + stopPropagation so the gallery modal's
+    // Esc closes; capture-phase + stopPropagation so the editor overlay's
     // own Esc handler doesn't fire too.
     const onKey = (ev) => {
       if (ev.key === 'Escape') {

@@ -394,11 +394,17 @@ class SessionManager:
                 getattr(db_session, "owner", None),
                 message.content,
                 message.metadata,
+                session_id=session_id,
             )
             if missing_upload_id:
                 raise ValueError(
                     f"Referenced upload is no longer available: {missing_upload_id}"
                 )
+
+            if not getattr(self.sessions.get(session_id), "incognito", False):
+                from src.openclank.conversation_archive import get_conversation_archive
+                if get_conversation_archive().chat_erasure_started(owner=db_session.owner, chat_id=session_id):
+                    raise RuntimeError("Conversation deletion is pending; history writes are closed")
 
             reserved_id = str(
                 getattr(message, "persistence_id", None) or ""
@@ -536,6 +542,10 @@ class SessionManager:
                 logger.warning("Cannot replace history for missing session %s", session_id)
                 return False
 
+            from src.openclank.conversation_archive import get_conversation_archive
+            if get_conversation_archive().chat_erasure_started(owner=db_session.owner, chat_id=session_id):
+                raise RuntimeError("Conversation deletion is pending; history writes are closed")
+
             # Reserve every incoming attachment before removing any durable
             # message row. reserve_upload() shares the upload lifecycle lock
             # with cleanup, so an upload cannot be deleted between this
@@ -547,6 +557,7 @@ class SessionManager:
                     getattr(db_session, "owner", None),
                     message.content,
                     message.metadata,
+                    session_id=session_id,
                 )
                 if missing_upload_id:
                     raise ValueError(
@@ -884,12 +895,15 @@ class SessionManager:
         try:
             from src.openclank.conversation_archive import get_conversation_archive
             summary_ids = []
+            source_summaries = []
             retained = []
             for message in messages:
                 metadata = getattr(message, "metadata", None) or {}
                 msg_id = str(metadata.get("_db_id") or getattr(message, "persistence_id", None) or "")
                 if metadata.get("compacted"):
                     summary_ids.append(msg_id)
+                    if metadata.get("hidden") or getattr(message, "role", None) == "system":
+                        source_summaries.append((msg_id, str(getattr(message, "content", "") or "")))
                 else:
                     retained.append(msg_id)
             if not summary_ids:
@@ -898,9 +912,9 @@ class SessionManager:
                 owner=str(owner or ""),
                 chat_id=str(session_id),
                 actor_id="main",
-                summary_id=summary_ids[-1] or f"summary-{session_id}",
+                summary_id=(source_summaries[-1][0] if source_summaries else summary_ids[-1]) or f"summary-{session_id}",
                 projection_revision=len(summary_ids),
-                summary_text=str(getattr(messages[0], "content", "") or "")[:4000],
+                summary_text=(source_summaries[-1][1] if source_summaries else str(getattr(messages[0], "content", "") or ""))[:4000],
                 included_message_ids=[],
                 retained_message_ids=retained,
                 trigger_kind="host_finite_projection",
@@ -925,6 +939,12 @@ class SessionManager:
             # Lazy hydrate: metadata-only entries get their messages on first read.
             if not cached.history and getattr(cached, "message_count", 0) > 0:
                 self._load_session_from_db(session_id)
+
+        current = self.sessions.get(session_id)
+        if current is not None and not getattr(current, "incognito", False):
+            from src.openclank.conversation_archive import get_conversation_archive
+            if get_conversation_archive().chat_erasure_started(owner=current.owner, chat_id=session_id):
+                raise RuntimeError("Conversation deletion is pending; retry erasure to finish")
 
         # Keep model/endpoint metadata fresh. Endpoint deletion can clear the
         # DB row while a session object is still cached in RAM.
@@ -1104,6 +1124,14 @@ class SessionManager:
                 else getattr(memory_session, "owner", None)
             )
             if db_session is not None or memory_session is not None:
+                from src import agent_runs
+                if agent_runs.is_active(session_id):
+                    raise RuntimeError("Conversation has an active run")
+                if not session_owner:
+                    raise RuntimeError("Conversation owner is unavailable")
+                if not getattr(memory_session, "incognito", False):
+                    from src.openclank.conversation_archive import get_conversation_archive
+                    get_conversation_archive().begin_chat_erasure(owner=session_owner, chat_id=session_id)
                 from src import bg_jobs
 
                 bg_jobs.delete_for_session_owner(
@@ -1111,22 +1139,34 @@ class SessionManager:
                     owner=str(session_owner or ""),
                 )
 
-            pending_image_filenames: set[str] = set()
+            pending_image_ids: set[str] = set()
             try:
                 from src.session_image_cleanup import (
-                    cleanup_session_image_files,
-                    cleanup_session_images,
+                    mark_session_image_source_removed,
                     session_image_refs,
                 )
 
-                _image_ids, pending_image_filenames = session_image_refs(
+                pending_image_ids = session_image_refs(
                     db,
                     session_id,
                     session_owner,
                 )
-                cleanup_session_images(session_id, session_owner, db=db)
-            except Exception as e:
-                logger.warning(f"Image cleanup failed while deleting session {session_id}: {e}")
+                if self.upload_handler and session_owner:
+                    self.upload_handler.conversation_attachment_intent(owner=session_owner, session_id=session_id, image_ids=pending_image_ids, persist=True)
+            except Exception:
+                raise
+
+            if db_session is not None or memory_session is not None:
+                # Independent native/Skills/Copal reference coverage is not
+                # complete. Preserve Files bytes and mark removed provenance
+                # in this same core transaction, rather than guess exclusivity.
+                mark_session_image_source_removed(db, owner=session_owner, session_id=session_id, image_ids=pending_image_ids)
+                if not getattr(memory_session, "incognito", False):
+                    from src.openclank.session_deletion import erase_retained_content
+                    erase_retained_content(db, owner=session_owner, session_id=session_id, upload_handler=self.upload_handler)
+                    # SessionLocal disables autoflush. Persist content-free
+                    # Stats/Memory detachment before message/session cascades.
+                    db.flush()
 
             # Detach documents so they survive as orphans in the library
             db.query(DbDocument).filter(DbDocument.session_id == session_id).update(
@@ -1144,20 +1184,15 @@ class SessionManager:
             # session lives only here (never persisted, or its row was removed
             # out-of-band); without this it can never be cleared and keeps
             # 404ing on every operation (issue #1044).
-            removed_in_memory = self.sessions.pop(session_id, None) is not None
+            removed_in_memory = session_id in self.sessions
 
             if db_session or removed_in_memory:
                 # Commit the document-detach / message-delete above (a no-op when
                 # the ghost had no rows) together with the session delete.
                 db.commit()
-                try:
-                    cleanup_session_image_files(pending_image_filenames)
-                except Exception as exc:
-                    logger.warning(
-                        "Generated-image GC failed after deleting session %s: %s",
-                        session_id,
-                        exc,
-                    )
+                self.sessions.pop(session_id, None)
+                from src.session_image_cleanup import retire_reconciled_session_images
+                retire_reconciled_session_images(owner=session_owner, session_id=session_id, upload_handler=self.upload_handler)
                 logger.info(f"Deleted session {session_id}")
                 return True
             return False

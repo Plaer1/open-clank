@@ -1,3 +1,4 @@
+import { uiIcon } from '../uiIcons.js';
 import * as Modals from '../modalManager.js';
 import { makeWindowDraggable } from '../windowDrag.js';
 import {
@@ -13,6 +14,7 @@ import {
 export function createOpenClankWindow({
   id,
   label,
+  icon = label === 'Files' ? 'folder' : '',
   subtitle = 'Copal · Redb',
   minWidth = 560,
   minHeight = 420,
@@ -37,7 +39,7 @@ export function createOpenClankWindow({
   root.setAttribute('aria-label', label);
 
   const content = document.createElement('section');
-  content.className = 'modal-content copal-modal-content copal-workspace';
+  content.className = 'modal-content copal-modal-content copal-workspace oc-applet-frame';
   content.setAttribute('aria-label', label);
   const header = document.createElement('header');
   header.className = 'modal-header copal-workspace-header';
@@ -47,18 +49,23 @@ export function createOpenClankWindow({
   const small = document.createElement('small');
   small.textContent = subtitle;
   heading.append(title, small);
+  if (icon) {
+    const titleIcon = document.createElement('span');
+    titleIcon.innerHTML = uiIcon(icon, 16, { role:'inherit', style:'margin-right:5px;' });
+    heading.prepend(titleIcon);
+  }
   const actions = document.createElement('div');
   actions.className = 'copal-window-actions';
   const backButton = document.createElement('button');
   backButton.type = 'button';
   backButton.className = 'copal-window-nav copal-window-nav-back';
-  backButton.textContent = '‹';
+  backButton.innerHTML = uiIcon('back', 14);
   backButton.title = 'Back';
   backButton.setAttribute('aria-label', `Back in ${label}`);
   const forwardButton = document.createElement('button');
   forwardButton.type = 'button';
   forwardButton.className = 'copal-window-nav copal-window-nav-forward';
-  forwardButton.textContent = '›';
+  forwardButton.innerHTML = uiIcon('forward', 14);
   forwardButton.title = 'Forward';
   forwardButton.setAttribute('aria-label', `Forward in ${label}`);
   const status = document.createElement('span');
@@ -67,7 +74,7 @@ export function createOpenClankWindow({
   const closeButton = document.createElement('button');
   closeButton.className = 'close-btn';
   closeButton.type = 'button';
-  closeButton.textContent = '×';
+  closeButton.innerHTML = uiIcon('close', 14);
   closeButton.title = `Close ${label}`;
   closeButton.setAttribute('aria-label', `Close ${label}`);
   const body = document.createElement('main');
@@ -165,6 +172,7 @@ export function createOpenClankWindow({
         closeFn: () => windowApi.requestCloseAsync(true),
         restoreFn: () => windowApi.focus(),
         label,
+        icon: icon || 'workspace',
       });
       Modals.injectMinimizeButton(root, id);
       onActivate?.(windowApi);

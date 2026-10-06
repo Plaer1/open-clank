@@ -387,40 +387,24 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
             return {"action": "rename", "session_id": target_sid, "name": new_name,
                     "results": f"Session renamed to '{new_name}'"}
 
-        elif action == "archive":
+        elif action in ("archive", "unarchive", "delete"):
             db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            db_sess.archived = True
-            db.commit()
-            return {"action": "archive", "session_id": target_sid,
-                    "results": f"Session '{db_sess.name}' archived"}
-
-        elif action == "unarchive":
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            db_sess.archived = False
-            db.commit()
-            return {"action": "unarchive", "session_id": target_sid,
-                    "results": f"Session '{db_sess.name}' unarchived"}
-
-        elif action == "delete":
-            if target_sid == session_id:
-                return {"error": "Cannot delete the current session while chatting in it. Delete other sessions first."}
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Refusing to delete an unknown chat id; use the exact id from list_sessions."}
-            if db_sess and db_sess.is_important:
-                return {"error": f"Session '{db_sess.name}' is starred/favorited. Unstar it first before deleting."}
+            if db_sess is None or not owner or db_sess.owner != owner:
+                return {"error": f"Session '{target_sid}' not found. Use the exact owned id from list_sessions."}
+            name = db_sess.name or target_sid
+            # Release this read transaction before the canonical owner opens
+            # its own SQL/external-store lifecycle transactions.
+            db.rollback()
+            from src.openclank.chat_lifecycle import ChatLifecycleService, ChatLifecycleError
+            service = ChatLifecycleService(session_manager=_session_manager)
             try:
-                ok = _session_manager.delete_session(target_sid)
-                if not ok:
-                    return {"error": f"Session '{target_sid}' was not deleted because it no longer exists."}
-                return {"action": "delete", "session_id": target_sid,
-                        "results": f"Session '{db_sess.name or target_sid}' deleted"}
-            except Exception as e:
-                return {"error": f"Failed to delete session: {e}"}
+                if action == "delete":
+                    await service.erase(owner=owner, session_id=target_sid)
+                else:
+                    await service.set_archived(owner=owner, session_id=target_sid, archived=action == "archive")
+            except ChatLifecycleError as exc:
+                return {"error": str(exc), "state": exc.code, "retryable": exc.code == "erasure_pending"}
+            return {"action": action, "session_id": target_sid, "results": f"Session '{name}' {action + 'd' if action != 'unarchive' else 'restored'}"}
 
         elif action in ("important", "unimportant"):
             is_important = action == "important"

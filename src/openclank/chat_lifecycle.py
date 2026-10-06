@@ -27,15 +27,55 @@ class ChatLifecycleService:
         session_factory: Callable = SessionLocal,
         session_manager: Any | None = None,
         mimo_supervisor: Any | None = None,
+        memory_provider: Any | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.session_manager = session_manager
-        self.mimo_supervisor = mimo_supervisor
+        context = getattr(session_manager, "lifecycle_context", None)
+        self.mimo_supervisor = mimo_supervisor or getattr(context, "mimo_supervisor", None)
+        self.memory_provider = memory_provider or getattr(context, "memory_provider", None)
+
+    async def erase(self, *, owner: str, session_id: str, allow_protected: bool = False) -> dict[str, Any]:
+        """One deletion journey for real routes and authenticated agent tools."""
+        owner, session_id = str(owner or "").strip(), str(session_id or "").strip()
+        if not owner or not session_id or self.session_manager is None:
+            raise ChatLifecycleError("Conversation owner is unavailable")
+        db = self.session_factory()
+        try:
+            row = db.query(DbSession).filter(DbSession.id == session_id, DbSession.owner == owner).first()
+            cached = self.session_manager.sessions.get(session_id)
+            if row is None and (cached is None or cached.owner != owner):
+                raise ChatLifecycleError("Conversation is unavailable")
+            if row is not None and row.is_important and not allow_protected:
+                raise ChatLifecycleError("Unfavorite before deleting", code="protected")
+        finally:
+            db.close()
+        from src import agent_runs
+        if agent_runs.is_active(session_id):
+            raise ChatLifecycleError("Conversation has an active run", code="active_run")
+        from src.openclank.transcript_projection import purge_execution_projection
+        try:
+            await purge_execution_projection(self.mimo_supervisor, session_id, owner=owner)
+            if not getattr(cached, "incognito", False):
+                from src.openclank.conversation_archive import get_conversation_archive
+                get_conversation_archive().begin_chat_erasure(owner=owner, chat_id=session_id)
+                if self.memory_provider is not None:
+                    detach = getattr(self.memory_provider, "mark_conversation_source_removed", None)
+                    if not callable(detach):
+                        raise RuntimeError("Memery source-link owner is unavailable")
+                    receipt = await detach(owner=owner, session_id=session_id)
+                    if not isinstance(receipt, dict) or receipt.get("complete") is not True:
+                        raise RuntimeError("Memery source-link removal is incomplete")
+            if not await asyncio.to_thread(self.session_manager.delete_session, session_id):
+                raise RuntimeError("Conversation erasure did not complete")
+        except Exception as exc:
+            raise ChatLifecycleError("Deletion incomplete; retry this conversation", code="erasure_pending") from exc
+        return {"status": "deleted", "retained_content_erased": True}
 
     async def set_archived(self, *, owner: str | None, session_id: str, archived: bool) -> None:
         normalized_owner = str(owner or "").strip()
         normalized_id = str(session_id or "").strip()
-        if not normalized_id:
+        if not normalized_id or not normalized_owner:
             raise ChatLifecycleError("Chat is unavailable")
 
         from src import agent_runs
@@ -82,11 +122,9 @@ class ChatLifecycleService:
         db = self.session_factory()
         try:
             query = db.query(DbSession).filter(DbSession.id == session_id)
-            # Auth-disabled single-user mode historically permits owner-stamped
-            # rows after a deployment toggles authentication off. Authenticated
-            # callers always supply an owner and remain exact-owner scoped.
-            if owner:
-                query = query.filter(DbSession.owner == owner)
+            if not owner:
+                return False
+            query = query.filter(DbSession.owner == owner)
             row = query.first()
             if row is None:
                 return False

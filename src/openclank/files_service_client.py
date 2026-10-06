@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import os
+import queue
 import secrets
 import stat
 import struct
@@ -21,14 +22,14 @@ import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from src.openclank.filesystem_registry import FilesystemRootRegistry
+from src.openclank.filesystem_registry import FilesystemRootRegistry, FilesystemRegistryError
 from src.tool_security import owner_is_admin_or_single_user
 
 
 _FRAME = struct.Struct("!I")
 _MAX_FRAME_BYTES = 8 * 1024 * 1024
 _CLIENTS: dict[tuple[str, str, str], "OdysseusFilesClient"] = {}
-_AGENT_CLIENTS: dict[tuple[str, str | None, int, str], "AgentFilesClient"] = {}
+_AGENT_CLIENTS: dict[tuple[str, str | None, str, str, int, str], "AgentFilesClient"] = {}
 _CLIENTS_LOCK = threading.Lock()
 _HISTORY_BINDING_PROVIDER: Any = None
 
@@ -110,9 +111,12 @@ class OdysseusFilesClient:
         self._ready = False
         self._lock = threading.RLock()
         self._grpc_tempdir: tempfile.TemporaryDirectory[str] | None = None
-        self._grpc_socket_path: Path | None = None
+        self._grpc_socket_path: Path | str | None = None
         self._grpc_session: str | None = None
         self.stable_object_handles = False
+        self._history_environment_snapshot: dict[str, str] | None = None
+        self._active_grpc_operations = 0
+        self._grpc_watch_calls: set[tuple[Any, Any]] = set()
 
     @property
     def process(self) -> subprocess.Popen[bytes] | None:
@@ -128,10 +132,12 @@ class OdysseusFilesClient:
             # Packaged desktop/PyInstaller layouts first: the service is a
             # release artifact beside the Python executable, never a copied
             # Python fallback.
+            bundle_root / "bin" / executable if bundle_root else None,
             bundle_root / executable if bundle_root else None,
             bundle_root / "libexec" / "openclank" / executable if bundle_root else None,
             bundle_root / "libexec" / "openclank" / "files" / executable if bundle_root else None,
             Path(sys.executable).resolve().parent / executable,
+            Path(sys.executable).resolve().parent / "bin" / executable,
             repository / "packages" / "odysseus-files" / "target" / "release" / executable,
             repository / "packages" / "odysseus-files" / "target" / "debug" / executable,
         ]
@@ -182,10 +188,10 @@ class OdysseusFilesClient:
             self.close()
             raise
 
-    def _start_grpc_locked(self) -> tuple[Path, str]:
+    def _start_grpc_locked(self) -> tuple[Path | str, str]:
         if self.transport != "grpc":
             raise FilesServiceError("Tonic transport was not selected", code="protocol_mismatch")
-        if sys.platform != "darwin":
+        if sys.platform not in {"darwin", "win32"}:
             raise FilesServiceError(
                 "Tonic filesystem transport is currently available only on macOS",
                 code="protocol_mismatch",
@@ -199,14 +205,14 @@ class OdysseusFilesClient:
             return self._grpc_socket_path, self._grpc_session
         if self._process is not None or self._grpc_tempdir is not None:
             self.close()
-        private_parent = Path("/private/tmp") if Path("/private/tmp").is_dir() else None
-        self._grpc_tempdir = tempfile.TemporaryDirectory(
-            prefix="ocf-",
-            dir=str(private_parent) if private_parent else None,
-        )
-        private_directory = Path(self._grpc_tempdir.name)
-        private_directory.chmod(0o700)
-        socket_path = private_directory / "files.sock"
+        if sys.platform == "win32":
+            socket_path: Path | str = "loopback"
+        else:
+            private_parent = Path("/private/tmp") if Path("/private/tmp").is_dir() else None
+            self._grpc_tempdir = tempfile.TemporaryDirectory(prefix="ocf-", dir=str(private_parent) if private_parent else None)
+            private_directory = Path(self._grpc_tempdir.name)
+            private_directory.chmod(0o700)
+            socket_path = private_directory / "files.sock"
         session_binding = secrets.token_hex(32)
         environment = self._service_environment()
         environment.update(
@@ -219,7 +225,7 @@ class OdysseusFilesClient:
             self._process = subprocess.Popen(
                 [self._binary_path()],
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE if sys.platform == "win32" else subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 env=environment,
                 bufsize=0,
@@ -228,6 +234,24 @@ class OdysseusFilesClient:
         except OSError as error:
             self.close()
             raise FilesServiceError(f"could not start Tonic filesystem service: {error}") from error
+        if sys.platform == "win32":
+            endpoints: queue.Queue[bytes] = queue.Queue(maxsize=1)
+            process = self._process
+            def read_endpoint() -> None:
+                try:
+                    endpoints.put(process.stdout.readline(128) if process.stdout else b"")
+                except OSError:
+                    endpoints.put(b"")
+            threading.Thread(target=read_endpoint, name="files-grpc-readiness", daemon=True).start()
+            try:
+                endpoint = endpoints.get(timeout=5.0).decode("ascii").strip()
+                host, port = endpoint.rsplit(":", 1)
+                if host != "127.0.0.1" or not port.isdecimal() or not 1 <= int(port) <= 65535:
+                    raise ValueError("invalid endpoint")
+                socket_path = endpoint
+            except (queue.Empty, UnicodeError, ValueError) as error:
+                self.close()
+                raise FilesServiceError("Windows Files service failed private endpoint readiness") from error
         self._grpc_socket_path = socket_path
         self._grpc_session = session_binding
         self._ready = False
@@ -243,12 +267,6 @@ class OdysseusFilesClient:
         if expected is None:
             return
         registry = self._registry()
-        if not Path(registry.rust_snapshot_path()).is_file():
-            self.close()
-            raise FilesServiceError(
-                "filesystem policy registry is unavailable",
-                code="policy_generation_changed",
-            )
         try:
             current = registry.generation()
         except Exception as error:
@@ -264,6 +282,93 @@ class OdysseusFilesClient:
                 code="policy_generation_changed",
             )
 
+    def _history_environment(self) -> dict[str, str]:
+        """Resolve the current trusted History binding for this Files scope."""
+        environment: dict[str, str] = {}
+        if not callable(_HISTORY_BINDING_PROVIDER):
+            return environment
+        try:
+            binding = history_binding_for(
+                self.owner,
+                "agent" if isinstance(self, AgentFilesClient) else "human",
+                self.app_scope,
+            )
+        except Exception:
+            # A configured lookup outage must not masquerade as intentionally
+            # unconfigured capture. The native engine keeps reads available,
+            # but its required-capture admission blocks every live mutation.
+            return {"OPENCLANK_HISTORY_SOCKET": "history-binding-unavailable"}
+        if not binding:
+            return environment
+        environment.update(
+            {
+                "OPENCLANK_HISTORY_SOCKET": str(binding["socket"]),
+                "OPENCLANK_HISTORY_ACCOUNT_ID": str(binding["account_id"]),
+                "OPENCLANK_HISTORY_ACTOR_ID": str(binding["actor_id"]),
+                "OPENCLANK_HISTORY_TOKEN": str(binding["token"]),
+                "OPENCLANK_HISTORY_WORKSPACE_ID": str(binding.get("workspace_id") or "default"),
+                "OPENCLANK_HISTORY_WORKSPACE_ROOT": str(binding.get("workspace_root") or ""),
+            }
+        )
+        root_bindings = binding.get("root_bindings")
+        if isinstance(root_bindings, list) and root_bindings:
+            environment["OPENCLANK_HISTORY_ROOT_BINDINGS"] = json.dumps(
+                root_bindings, separators=(",", ":"), sort_keys=True
+            )
+        return environment
+
+    def _refresh_history_binding_locked(self) -> None:
+        """Respawn before a request when the trusted capture binding changed."""
+        current = self._history_environment()
+        if current == self._history_environment_snapshot:
+            return
+        if self._active_grpc_operations:
+            raise FilesServiceError(
+                "filesystem History binding changed; retry after the active operation",
+                code="history_binding_changed",
+            )
+        # Framed calls hold this lock through their exchange. Tonic calls use
+        # the active count below, so closing here cannot interrupt an in-flight
+        # request or stream.
+        self.close()
+        self._history_environment_snapshot = None
+
+    def _end_grpc_operation(self) -> None:
+        with self._lock:
+            self._active_grpc_operations = max(0, self._active_grpc_operations - 1)
+
+    def _cancel_obsolete_watches_locked(self) -> None:
+        # A client may be used by another event loop. Cancel only its watches
+        # on their owning loops; reads and mutations retain the old service.
+        for loop, call in tuple(self._grpc_watch_calls):
+            try:
+                loop.call_soon_threadsafe(call.cancel)
+            except RuntimeError:
+                # A closed owning loop cannot release its stream here. The
+                # admission deadline must fail without closing other work.
+                pass
+
+    async def _begin_grpc_operation(self) -> None:
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while True:
+            with self._lock:
+                current = self._history_environment()
+                if self._active_grpc_operations and current != self._history_environment_snapshot:
+                    self._cancel_obsolete_watches_locked()
+                    wait_for_active = True
+                else:
+                    if not self._active_grpc_operations:
+                        self._refresh_history_binding_locked()
+                    self._active_grpc_operations += 1
+                    return
+            if wait_for_active:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise FilesServiceError(
+                        "filesystem History binding changed; retry after the active operation",
+                        code="history_binding_changed",
+                    )
+                await asyncio.sleep(0.01)
+
     def _service_environment(self) -> dict[str, str]:
         environment = os.environ.copy()
         environment.update(
@@ -278,41 +383,31 @@ class OdysseusFilesClient:
                 "ODYSSEUS_FILES_APP_SCOPE": json.dumps(self.app_scope, separators=(",", ":"), sort_keys=True),
             }
         )
-        registry_path = os.environ.get("ODYSSEUS_FILES_REGISTRY") or FilesystemRootRegistry().rust_snapshot_path()
+        try:
+            registry_path = self._registry().rust_snapshot_path(expected_generation=self._policy_generation)
+        except FilesystemRegistryError as error:
+            raise FilesServiceError(str(error), code=error.code) from error
         # Host-wide administrator compatibility does not need the registry;
         # omitting a not-yet-created snapshot also lets an unassigned user
         # start and receive a typed deny instead of a transport failure.
         if not self.app_scope.get("host") and Path(registry_path).is_file():
             environment["ODYSSEUS_FILES_REGISTRY"] = registry_path
-        elif os.environ.get("ODYSSEUS_FILES_REGISTRY"):
-            environment["ODYSSEUS_FILES_REGISTRY"] = str(os.environ["ODYSSEUS_FILES_REGISTRY"])
-        if callable(_HISTORY_BINDING_PROVIDER):
-            try:
-                binding = history_binding_for(
-                    self.owner,
-                    "agent" if isinstance(self, AgentFilesClient) else "human",
-                    self.app_scope,
-                )
-            except Exception:
-                # History outage or an owner rotation must leave ordinary
-                # Files reads/writes usable with an honest paused receipt.
-                binding = None
-            if binding:
-                environment.update(
-                    {
-                        "OPENCLANK_HISTORY_SOCKET": str(binding["socket"]),
-                        "OPENCLANK_HISTORY_ACCOUNT_ID": str(binding["account_id"]),
-                        "OPENCLANK_HISTORY_ACTOR_ID": str(binding["actor_id"]),
-                        "OPENCLANK_HISTORY_TOKEN": str(binding["token"]),
-                        "OPENCLANK_HISTORY_WORKSPACE_ID": str(binding.get("workspace_id") or "default"),
-                        "OPENCLANK_HISTORY_WORKSPACE_ROOT": str(binding.get("workspace_root") or ""),
-                    }
-                )
-                root_bindings = binding.get("root_bindings")
-                if isinstance(root_bindings, list) and root_bindings:
-                    environment["OPENCLANK_HISTORY_ROOT_BINDINGS"] = json.dumps(
-                        root_bindings, separators=(",", ":"), sort_keys=True
-                    )
+        else:
+            environment.pop("ODYSSEUS_FILES_REGISTRY", None)
+        history_names = (
+            "OPENCLANK_HISTORY_SOCKET",
+            "OPENCLANK_HISTORY_ACCOUNT_ID",
+            "OPENCLANK_HISTORY_ACTOR_ID",
+            "OPENCLANK_HISTORY_TOKEN",
+            "OPENCLANK_HISTORY_WORKSPACE_ID",
+            "OPENCLANK_HISTORY_WORKSPACE_ROOT",
+            "OPENCLANK_HISTORY_ROOT_BINDINGS",
+        )
+        for name in history_names:
+            environment.pop(name, None)
+        history_environment = self._history_environment()
+        environment.update(history_environment)
+        self._history_environment_snapshot = history_environment
         return environment
 
     @staticmethod
@@ -330,6 +425,7 @@ class OdysseusFilesClient:
     def _request_sync(self, request: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             self._assert_policy_generation()
+            self._refresh_history_binding_locked()
             self._start_locked()
             return self._exchange_locked(request)
 
@@ -464,7 +560,7 @@ class OdysseusFilesClient:
                     code="root_unavailable",
                 )
             try:
-                if stat.S_ISSOCK(socket_path.lstat().st_mode):
+                if isinstance(socket_path, str) or stat.S_ISSOCK(socket_path.lstat().st_mode):
                     break
             except FileNotFoundError:
                 pass
@@ -477,7 +573,7 @@ class OdysseusFilesClient:
             await asyncio.sleep(0.01)
         grpc, wire, wire_grpc = self._grpc_modules()
         channel = grpc.aio.insecure_channel(
-            f"unix:{socket_path}",
+            socket_path if isinstance(socket_path, str) else f"unix:{socket_path}",
             options=(
                 ("grpc.max_send_message_length", _MAX_FRAME_BYTES + 4096),
                 ("grpc.max_receive_message_length", _MAX_FRAME_BYTES + 4096),
@@ -492,7 +588,7 @@ class OdysseusFilesClient:
                 health = await stub.Health(wire.HealthRequest(), metadata=metadata, timeout=2.0)
                 if (
                     not health.ready
-                    or health.transport != "private-unix-domain-socket"
+                    or health.transport != ("authenticated-loopback-tcp" if sys.platform == "win32" else "private-unix-domain-socket")
                     or health.protocol_major != 1
                 ):
                     raise FilesServiceError(
@@ -509,6 +605,7 @@ class OdysseusFilesClient:
     async def _grpc_request(self, request: dict[str, Any]) -> dict[str, Any]:
         grpc, wire, _wire_grpc = self._grpc_modules()
         channel = None
+        await self._begin_grpc_operation()
         try:
             channel, stub, metadata = await self._grpc_connection()
             body = json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -529,6 +626,7 @@ class OdysseusFilesClient:
         finally:
             if channel is not None:
                 await channel.close()
+            self._end_grpc_operation()
         if not isinstance(decoded, dict):
             raise FilesServiceError("Tonic filesystem service returned an invalid response")
         if decoded.get("code"):
@@ -622,8 +720,9 @@ class OdysseusFilesClient:
         height: int,
         scale: float = 1.0,
         deadline_ms: int = 2_000,
+        icon: bool = False,
     ) -> bytes:
-        """Return macOS Quick Look content pixels for one stable Rust handle."""
+        """Return native content pixels, or explicitly requested Windows Shell icon pixels."""
         if self.transport != "grpc":
             raise FilesServiceError(
                 "native thumbnails require the private Tonic transport",
@@ -642,12 +741,14 @@ class OdysseusFilesClient:
                 "height": int(height),
                 "scale_milli": scale_milli,
                 "deadline_ms": int(deadline_ms),
+                "icon": bool(icon),
             },
         )
         grpc, wire, _wire_grpc = self._grpc_modules()
         body = json.dumps(envelope, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         channel = None
         call = None
+        await self._begin_grpc_operation()
         try:
             channel, stub, metadata = await self._grpc_connection()
             call = stub.Thumbnail(
@@ -669,6 +770,7 @@ class OdysseusFilesClient:
         finally:
             if channel is not None:
                 await channel.close()
+            self._end_grpc_operation()
 
     async def watch_path(self, path: str) -> AsyncIterator[dict[str, Any]]:
         """Yield path-free hints for one authorized, non-recursive directory."""
@@ -686,15 +788,23 @@ class OdysseusFilesClient:
         body = json.dumps(envelope, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         channel = None
         call = None
+        watch_registration = None
         expected_sequence = 0
         allowed_kinds = {"created", "modified", "deleted", "rescan_required"}
         expected_generation = int(self.app_scope.get("generation") or 0)
+        await self._begin_grpc_operation()
         try:
             channel, stub, metadata = await self._grpc_connection()
             call = stub.Watch(
                 wire.WatchRequest(envelope_json=body),
                 metadata=metadata,
             )
+            with self._lock:
+                watch_registration = (asyncio.get_running_loop(), call)
+                self._grpc_watch_calls.add(watch_registration)
+                # Binding may rotate between admission and Watch creation.
+                if self._history_environment() != self._history_environment_snapshot:
+                    self._cancel_obsolete_watches_locked()
             async for event in call:
                 self._assert_policy_generation()
                 if event.request_id != envelope["request_id"] or event.sequence != expected_sequence:
@@ -727,10 +837,14 @@ class OdysseusFilesClient:
         except grpc.aio.AioRpcError as error:
             raise self._grpc_service_error(error) from error
         finally:
+            if watch_registration is not None:
+                with self._lock:
+                    self._grpc_watch_calls.discard(watch_registration)
             if call is not None:
                 call.cancel()
             if channel is not None:
                 await channel.close()
+            self._end_grpc_operation()
 
     async def _stream_read_envelope(
         self,
@@ -756,6 +870,7 @@ class OdysseusFilesClient:
         expected_sequence = 0
         expected_offset = offset
         saw_final = False
+        await self._begin_grpc_operation()
         try:
             channel, stub, metadata = await self._grpc_connection()
             call = stub.Read(
@@ -793,6 +908,7 @@ class OdysseusFilesClient:
                 call.cancel()
             if channel is not None:
                 await channel.close()
+            self._end_grpc_operation()
 
     @staticmethod
     def _grpc_service_error(error: Any) -> FilesServiceError:
@@ -878,8 +994,10 @@ def client_for_owner(
 class AgentFilesClient(OdysseusFilesClient):
     """Rust service client bound to one agent owner and workspace folder."""
 
-    def __init__(self, owner: str, active_workspace: str | None, *, binary: str | None = None) -> None:
+    def __init__(self, owner: str, active_workspace: str | None, *, binary: str | None = None, workspace_id: str = "", chat_id: str = "") -> None:
         super().__init__(owner, binary=binary)
+        self.workspace_id = str(workspace_id)
+        self.chat_id = str(chat_id)
         self.active_workspace = str(Path(active_workspace).expanduser().resolve(strict=False)) if active_workspace else None
         self._agent_policy_generation: int | None = None
 
@@ -904,12 +1022,17 @@ class AgentFilesClient(OdysseusFilesClient):
             )
 
     def _service_environment(self) -> dict[str, str]:
-        registry_path = os.environ.get("ODYSSEUS_FILES_REGISTRY") or FilesystemRootRegistry().rust_snapshot_path()
-        registry = FilesystemRootRegistry(registry_path)
+        registry = self._registry()
         is_admin = owner_is_admin_or_single_user(self.owner)
         app_visibility = None if is_admin else registry.visibility_for_subject(self.owner)
-        scope = registry.agent_scope(self.owner, self.active_workspace, app_visibility=app_visibility)
-        self._agent_policy_generation = registry.generation()
+        try:
+            scope = registry.agent_scope(self.owner, self.active_workspace, app_visibility=app_visibility,
+                workspace_id=self.workspace_id, chat_id=self.chat_id)
+            self._agent_policy_generation = int(scope.pop("generation"))
+            self._policy_generation = self._agent_policy_generation
+            registry_path = registry.rust_snapshot_path(expected_generation=self._agent_policy_generation)
+        except FilesystemRegistryError as error:
+            raise FilesServiceError(str(error), code=error.code) from error
         # Compute the signed root scope before asking the base client for its
         # history binding. This keeps agent history capture tied to the same
         # allowlisted root IDs as the Files operation instead of the base
@@ -942,24 +1065,26 @@ class AgentFilesClient(OdysseusFilesClient):
         return environment
 
 
-def agent_client_for(owner: str, active_workspace: str | None) -> AgentFilesClient:
+def agent_client_for(owner: str, active_workspace: str | None, *, workspace_id: str = "", chat_id: str = "") -> AgentFilesClient:
     registry_path = os.environ.get("ODYSSEUS_FILES_REGISTRY")
     registry = FilesystemRootRegistry(registry_path) if registry_path else FilesystemRootRegistry()
     generation = registry.generation()
     key = (
         str(owner),
         str(active_workspace) if active_workspace else None,
+        str(workspace_id),
+        str(chat_id),
         generation,
         _transport_cache_key(),
     )
     stale: list[AgentFilesClient] = []
     with _CLIENTS_LOCK:
         for old_key in list(_AGENT_CLIENTS):
-            if old_key[:2] == key[:2] and old_key != key:
+            if old_key[:4] == key[:4] and old_key != key:
                 stale.append(_AGENT_CLIENTS.pop(old_key))
         client = _AGENT_CLIENTS.get(key)
         if client is None:
-            client = AgentFilesClient(key[0], key[1])
+            client = AgentFilesClient(key[0], key[1], workspace_id=key[2], chat_id=key[3])
             _AGENT_CLIENTS[key] = client
     for old_client in stale:
         old_client.close()

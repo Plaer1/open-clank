@@ -107,6 +107,8 @@ class MemoryManager:
     def ensure_file_exists(self):
         """Create memory file if it doesn't exist."""
         if not os.path.exists(self.memory_file):
+            if os.path.exists(os.path.join(os.path.dirname(self.memory_file), "memory.txt")):
+                raise ValueError("Legacy memory text requires .clanker/tools/migrations/python/secondary.py memory-text")
             with open(self.memory_file, 'w', encoding='utf-8') as f:
                 json.dump([], f, ensure_ascii=False, indent=2)
     
@@ -122,7 +124,7 @@ class MemoryManager:
                     return self._validate_entries(data)
         except (json.JSONDecodeError, PermissionError) as e:
             logger.error("Error loading memory.json: %s", e)
-            return self._migrate_from_legacy()
+            raise ValueError("Legacy memory store requires .clanker/tools/migrations/python/secondary.py memory-text") from e
 
         return []
 
@@ -153,10 +155,8 @@ class MemoryManager:
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            if "id" not in entry:
-                entry["id"] = str(uuid.uuid4())
-            if "timestamp" not in entry:
-                entry["timestamp"] = int(time.time())
+            if "id" not in entry or "timestamp" not in entry:
+                raise ValueError("Legacy memory entries require .clanker/tools/migrations/python/secondary.py memory-json-fields")
             if "source" not in entry:
                 entry["source"] = "unknown"
             if "category" not in entry:
@@ -166,32 +166,6 @@ class MemoryManager:
             validated.append(entry)
         return validated
     
-    def _migrate_from_legacy(self) -> List[Dict]:
-        """Migrate from old text format to JSON if needed."""
-        legacy_path = os.path.join(os.path.dirname(self.memory_file), "memory.txt")
-        if not os.path.exists(legacy_path):
-            return []
-            
-        logger.info("Converting legacy memory.txt to new JSON format")
-        try:
-            with open(legacy_path, "r", encoding="utf-8") as f:
-                lines = [ln.strip() for ln in f.readlines() if ln.strip()]
-            
-            entries = []
-            for line in lines:
-                entries.append({
-                    "id": str(uuid.uuid4()),
-                    "text": line,
-                    "timestamp": int(time.time()),
-                    "source": "user",
-                    "category": "fact"
-                })
-            
-            self.save(entries)
-            return entries
-        except Exception as e:
-            logger.error("Failed to convert legacy memory: %s", e)
-            return []
     
     def save(self, entries: List[Dict]):
         """Save memory entries to JSON file."""

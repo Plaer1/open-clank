@@ -1,12 +1,13 @@
+# Source template: install under a dedicated OS account; adjust paths before use.
 [Unit]
 Description=Open Clank owner-local project policy worker
 
 [Service]
 Type=simple
-WorkingDirectory=/home/e/sauce/ai/open-clank
-ExecStart=/home/e/sauce/ai/open-clank/.venv/bin/python /home/e/sauce/ai/open-clank/scripts/odysseus-policy --socket /run/user/%U/open-clank/policy.sock serve --db /home/e/sauce/ai/open-clank/data/frankenmemory.db --state-dir /home/e/.local/state/open-clank/policy
-Environment=OPEN_CLANK_DATA_DIR=/home/e/sauce/ai/open-clank/data
-Environment=FM_DB_PATH=/home/e/sauce/ai/open-clank/data/frankenmemory.db
+WorkingDirectory=%h/open-clank
+ExecStart=%h/open-clank/.venv/bin/python %h/open-clank/scripts/odysseus-policy --socket /run/user/%U/open-clank/policy.sock serve --db %h/open-clank/data/frankenmemory.db --state-dir %h/.local/state/open-clank/policy
+Environment=OPEN_CLANK_DATA_DIR=%h/open-clank/data
+Environment=FM_DB_PATH=%h/open-clank/data/frankenmemory.db
 Restart=on-failure
 RestartSec=1
 UMask=0077

@@ -259,7 +259,7 @@ class SkillsManager:
                 continue
             if (sk.owner or "") != (owner or ""):
                 continue
-            return path, self._restage_legacy_published(path, sk)
+            return path, sk
         return None
 
     @staticmethod
@@ -524,72 +524,16 @@ class SkillsManager:
             logger.warning(f"Failed to parse {path}: {e}")
             return None
 
-    def _restage_legacy_published(self, path: str, skill: Skill) -> Skill:
-        """One-time fail-closed migration for pre-lifecycle published files.
-
-        The lifecycle null pointer lands before the head rewrite, so a crash
-        cannot briefly preserve activation. The old status survives only as
-        provenance; reactivation must use the normal audited local publish.
-        """
-        lifecycle_path = os.path.join(os.path.dirname(path), "_lifecycle.json")
-        state = load_state(path)
-        pending = (
-            skill.status == "published"
-            and state.get("published") is None
-            and isinstance(state.get("migration"), dict)
-            and state["migration"].get("kind") == "legacy-status-restage"
-        )
-        if skill.status != "published" or (
-            os.path.exists(lifecycle_path) and not pending
-        ):
-            return skill
-        with locked(path):
-            current = self._read_skill(path)
-            if current is None or current.status != "published":
-                return current or skill
-            state = load_state(path)
-            pending = (
-                state.get("published") is None
-                and isinstance(state.get("migration"), dict)
-                and state["migration"].get("kind") == "legacy-status-restage"
-            )
-            if os.path.exists(lifecycle_path) and not pending:
-                return current
-            original_status = current.status
-            current.source_status = (
-                current.source_status
-                or (state.get("migration") or {}).get("source_status")
-                or original_status
-            )
-            current.status = "draft"
-            hydrate_identity(current, path)
-            ensure_revision(
-                current,
-                path,
-                state if pending else {
-                    "published": None,
-                    "migration": {
-                        "kind": "legacy-status-restage",
-                        "source_status": original_status,
-                        "restaged_at": time.time(),
-                        "requires_local_publish": True,
-                    },
-                },
-            )
-            # `ensure_revision` atomically persists the null pointer first.
-            # Rewriting the visible head second makes every crash point staged.
-            from core.atomic_io import atomic_write_text
-
-            atomic_write_text(path, current.to_markdown())
-            current.path = path
-            return current
 
     def _write_skill(self, sk: Skill) -> str:
+        from src.openclank.attachment_admission import admit_references, settle_references
+        admitted = admit_references(sk.owner, "skills", sk.to_markdown())
         path = self._skill_file(sk.category or "general", sk.name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         hydrate_identity(sk, path)
         from core.atomic_io import atomic_write_text
         atomic_write_text(path, sk.to_markdown())
+        settle_references(admitted)
         sk.path = path
         return path
 
@@ -664,58 +608,6 @@ class SkillsManager:
         # includes legacy frontmatter, explicit demotion, and malformed state.
         return None, None
 
-    def _backfill_lifecycle_owner_metadata(self, path: str, head: Skill) -> None:
-        """Add missing owner metadata only when the immutable chain agrees."""
-        with locked(path):
-            current = self._read_skill(path)
-            if current is None or current.skill_id != head.skill_id:
-                return
-            state = load_state(path)
-            if not state:
-                return
-            owner = str(current.owner or "")
-            if (
-                state.get("skill_id") != current.skill_id
-                or state.get("head_revision") != current.revision
-                or state.get("head_hash") != current.content_hash
-                or (
-                    "owner" in state
-                    and str(state.get("owner") or "") != owner
-                )
-            ):
-                return
-            candidate = dict(state)
-            changed = "owner" not in candidate
-            candidate["owner"] = owner
-            pointer = candidate.get("published")
-            if isinstance(pointer, dict):
-                if (
-                    (
-                        "skill_id" in pointer
-                        and pointer.get("skill_id") != current.skill_id
-                    )
-                    or (
-                        "owner" in pointer
-                        and str(pointer.get("owner") or "") != owner
-                    )
-                ):
-                    return
-                updated_pointer = dict(pointer)
-                changed = (
-                    changed
-                    or "skill_id" not in updated_pointer
-                    or "owner" not in updated_pointer
-                )
-                updated_pointer["skill_id"] = current.skill_id
-                updated_pointer["owner"] = owner
-                candidate["published"] = updated_pointer
-                active, _ = self._active_skill(path, current, candidate)
-                if active is None:
-                    return
-            elif pointer is not None:
-                return
-            if changed:
-                save_state(path, candidate)
 
     def _resume_owner_transfer(self, path: str) -> bool:
         """Finish a state-first owner transfer interrupted after the head write."""
@@ -774,81 +666,6 @@ class SkillsManager:
             ensure_revision(current, path, state)
             return True
 
-    def backfill_owner(self, primary_owner: str, valid_owners: Optional[set[str]] = None) -> int:
-        """Assign legacy/unclaimed skill files to the primary owner.
-
-        Skills are disk-backed, so the DB legacy-owner migration cannot fix
-        them. Normal startup passes no owner set and claims only ownerless
-        files. A non-empty owner is durable attribution even when that account
-        no longer exists. Supplying ``valid_owners`` keeps the older explicit
-        owner-recovery behavior for controlled migrations.
-        """
-        primary_owner = (primary_owner or "").strip()
-        if not primary_owner:
-            return 0
-        valid_owners = None if valid_owners is None else set(valid_owners)
-        changed = 0
-        for path in self._iter_skill_files():
-            sk = self._read_skill(path)
-            if not sk:
-                continue
-            sk = self._restage_legacy_published(path, sk)
-            owner = (sk.owner or "").strip()
-            if owner == primary_owner:
-                changed += int(self._resume_owner_transfer(path))
-                self._backfill_lifecycle_owner_metadata(path, sk)
-                continue
-            if owner and (valid_owners is None or owner in valid_owners):
-                changed += int(self._resume_owner_transfer(path))
-                self._backfill_lifecycle_owner_metadata(path, sk)
-                continue
-            try:
-                with locked(path):
-                    current = self._read_skill(path)
-                    if current is None:
-                        continue
-                    current_owner = (current.owner or "").strip()
-                    if (
-                        current_owner == primary_owner
-                        or current_owner
-                        and (valid_owners is None or current_owner in valid_owners)
-                    ):
-                        continue
-                    state = ensure_revision(current, path, load_state(path))
-                    old_revision = current.revision
-                    old_hash = current.content_hash
-                    current.owner = primary_owner
-                    current.status = "draft"
-                    current.content_hash = current.compute_content_hash()
-                    if current.content_hash != old_hash:
-                        current.parent_revision = old_revision
-                        current.revision = old_revision + 1
-                    state["published"] = None
-                    state["owner"] = primary_owner
-                    state["owner_transfer"] = {
-                        "from": current_owner,
-                        "to": primary_owner,
-                        "at": time.time(),
-                        "requires_local_publish": True,
-                        "skill_id": current.skill_id,
-                        "name": current.name,
-                        "revision": current.revision,
-                        "content_hash": current.content_hash,
-                    }
-                    save_state(path, state)
-
-                    from core.atomic_io import atomic_write_text
-
-                    atomic_write_text(path, current.to_markdown())
-                    current.path = path
-                    completed = dict(state["owner_transfer"])
-                    completed["completed_at"] = time.time()
-                    state["owner_transfer"] = completed
-                    ensure_revision(current, path, state)
-                    changed += 1
-            except Exception as e:
-                logger.warning("Failed to backfill owner for skill %s: %s", sk.name, e)
-        return changed
 
     # ----------------------------------------------------------------------
     # Public API — keeps the old method names so callers don't break
@@ -864,7 +681,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk:
                 continue
-            sk = self._restage_legacy_published(path, sk)
+
             d = sk.to_dict()
             u = self._usage_entry(
                 usage, sk.skill_id, sk.owner, legacy_name=sk.name
@@ -1143,6 +960,8 @@ class SkillsManager:
 
         if not files:
             raise SkillImportError("empty bundle")
+        from src.openclank.attachment_admission import admit_references, settle_references
+        admitted = admit_references(owner, "skills", files)
         _rel, skill_md = pick_skill_md(files)
         sk = Skill.from_markdown(skill_md)
         incoming_source_uri = str(sk.source_uri or "").strip()
@@ -1238,6 +1057,7 @@ class SkillsManager:
                         pass
                     raise
                 stage_dir = ""
+                settle_references(admitted)
                 return result
             finally:
                 if stage_dir:
@@ -2674,18 +2494,28 @@ class SkillsManager:
                     shutil.rmtree(tombstone)
                 except OSError:
                     failures.append("a quarantined skill tree could not be erased")
-            return {
+            result = {
                 "complete": not failures,
                 "count": preview["count"],
                 "counts": preview["counts"],
                 "failures": failures,
             }
+        if result["complete"]:
+            from src.openclank.attachment_admission import refresh_domain_references
+            from src.openclank.attachment_inventory import skills_inventory
+            refresh_domain_references("skills", lambda: skills_inventory(self))
+        return result
 
     def delete_skill(self, *args, **kwargs) -> bool:
         """Delete a skill under the global memory/skill lifecycle lock."""
         lock_target = os.path.join(self.skills_root, "PROMOTIONS")
         with locked(lock_target):
-            return self._delete_skill_unlocked(*args, **kwargs)
+            result = self._delete_skill_unlocked(*args, **kwargs)
+        if result:
+            from src.openclank.attachment_admission import refresh_domain_references
+            from src.openclank.attachment_inventory import skills_inventory
+            refresh_domain_references("skills", lambda: skills_inventory(self))
+        return result
 
     def _delete_skill_unlocked(
         self, skill_id: str, owner: Optional[str] = None
@@ -2894,7 +2724,7 @@ class SkillsManager:
                 continue
             if (sk.owner or "") != (owner or ""):
                 continue
-            sk = self._restage_legacy_published(path, sk)
+
             with locked(path):
                 current = self._read_skill(path)
                 if not self._matches_locked_head(current, sk, name, owner):

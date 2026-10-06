@@ -4,7 +4,7 @@ export const PROVIDER_STORE_VERSION = 1 as const
 export const OPERATION_ROUTER_VERSION = 1 as const
 export const SCHEMA_VERSION = 2 as const
 export const SCHEMA_ID = "https://openclank.dev/contracts/managed-provider/v2" as const
-export const SCHEMA_HASH = "611c378cc61719f6290cd28e9c383b5a9f398fc174785c7c84b5269f366073ca" as const
+export const SCHEMA_HASH = "bcac868d6f2bd61ee7a62b8a35afc43f068590fe9a496f279774936cde4b3e31" as const
 
 export const PROVIDER_STORE_METHODS = [
   "_openclank/provider-store/v1/account/bind",
@@ -38,6 +38,13 @@ export const SESSION_METHODS = [
   "_openclank/session/v1/cwd/change",
   "_openclank/session/v1/binding/read",
   "_openclank/session/v1/settings/effective",
+  "_openclank/history/v1/query",
+  "_openclank/history/v1/mutate",
+  "_openclank/session/v1/goal/completed",
+] as const
+export const LOGGING_METHODS = [
+  "_openclank/logging/v1/admit",
+  "_openclank/logging/v1/events",
 ] as const
 export const OPERATIONS = [
   "chat.stream",
@@ -83,11 +90,16 @@ export const METHOD_DIRECTIONS = {
   "_openclank/session/v1/cwd/change": "engine_to_host",
   "_openclank/session/v1/binding/read": "engine_to_host",
   "_openclank/session/v1/settings/effective": "host_to_engine",
+  "_openclank/history/v1/query": "engine_to_host",
+  "_openclank/history/v1/mutate": "engine_to_host",
+  "_openclank/logging/v1/admit": "engine_to_host",
+  "_openclank/logging/v1/events": "engine_to_host",
+  "_openclank/session/v1/goal/completed": "engine_to_host",
 } as const
 
 export type ProviderStoreMethod = (typeof PROVIDER_STORE_METHODS)[number]
 export type ProviderControlMethod = (typeof PROVIDER_CONTROL_METHODS)[number]
 export type OperationMethod = (typeof OPERATION_METHODS)[number]
 export type SessionMethod = (typeof SESSION_METHODS)[number]
-export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod | SessionMethod
+export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod | SessionMethod | (typeof LOGGING_METHODS)[number]
 export type Operation = (typeof OPERATIONS)[number]

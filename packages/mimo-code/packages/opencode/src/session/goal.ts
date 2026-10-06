@@ -1026,7 +1026,11 @@ export const layer = Layer.effect(
             events: [
               GoalState.journal(completed, "completed", "verifier", now, {
                 reasonCode: "met",
-                evidenceRefs: [evidence.id],
+                // Capture only references that this completion revalidated.
+                // The journal remains the durable receipt/replay authority.
+                evidenceRefs: [evidence.id, ...eligible.filter((item) =>
+                  validIDs.has(item.id) && (item.kind === "file" || item.kind === "command"),
+                ).map((item) => item.id)],
               }),
               ...(next ? [GoalState.journal(next, "activated", "system", now)] : []),
             ],

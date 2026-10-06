@@ -2,16 +2,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { withCopalBrowser } from './helpers/copal_browser_fixture.mjs';
 
 const source = fs.readFileSync('static/js/copal.js', 'utf8');
-const bridgeSource = fs.readFileSync('packages/Copal/rust/copal-db/src/bin/copal-bridge.rs', 'utf8');
-const seedStart = bridgeSource.indexOf('const WIKI_SEEDS: &[WikiSeed]');
-const legacyStart = bridgeSource.indexOf('struct LegacyWikiSeed {', seedStart);
-const freshSeedSource = bridgeSource.slice(seedStart, legacyStart);
-assert.doesNotMatch(freshSeedSource, /tiddly|tiddler|\.wiki\//i, 'fresh Wiki seeds use .memes vocabulary');
+const freshNames = JSON.parse(execFileSync('venv/bin/python', ['-B', '-c', 'import json; from src.openclank.official_docs import official_articles; print(json.dumps([item["name"] for item in official_articles()]))'], { encoding:'utf8' }));
+assert(freshNames.length > 0, 'fresh installed Wiki articles are available');
+for (const name of freshNames) assert.doesNotMatch(name, /\.wiki\//i, 'fresh installed Wiki articles avoid legacy .wiki names');
 const overrides = {
-  '/static/js/copal.js': `${source}\nexport const wikiFixture = { state, init, open, openDocument, ensureViewWindow, renderWiki, notesFeature };\n`,
+  '/static/js/copal.js': `${source}\nexport const wikiFixture = { state, init, open, openDocument, ensureViewWindow, notesFeature };\n`,
 };
 
 const clone = value => JSON.parse(JSON.stringify(value));

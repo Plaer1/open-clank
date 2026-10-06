@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from core.database import Base, FilesImageResource
 from src.openclank.files_image_store import FilesImageError, FilesImageStore
 from src.openclank.files_facade import ProviderContext
-from src.openclank.files_managed_providers import GalleryFilesProvider
+from src.openclank.files_managed_providers import FilesImagesProvider
 
 
 @pytest.fixture
@@ -122,7 +122,7 @@ def test_builtin_gallery_and_photos_are_singletons_under_concurrent_sessions(tmp
 async def test_gallery_provider_browses_files_owned_rows_and_content(store, tmp_path):
     photos = store.ensure_photos("alice")
     image = store.import_image("alice", parent_id=photos.id, name="nested.png", data=b"pixels", mime_type="image/png", operation_key="browse")
-    provider = GalleryFilesProvider(session_factory=store.session_factory, image_resolver=lambda name: tmp_path / name)
+    provider = FilesImagesProvider(session_factory=store.session_factory, image_resolver=lambda name: tmp_path / name)
     (tmp_path / image.locator).write_bytes(b"pixels")
     context = ProviderContext("alice", "alice", 1)
     page = await provider.children(context, parent_origin_id="photos", cursor=None, snapshot=None, limit=10, sort={"key":"name", "direction":"asc"}, query="")
@@ -134,3 +134,43 @@ async def test_gallery_provider_browses_files_owned_rows_and_content(store, tmp_
     other = ProviderContext("bob", "bob", 1)
     with pytest.raises(Exception):
         await provider.stat(other, origin_id=f"image:{image.id}")
+
+
+@pytest.mark.asyncio
+async def test_gallery_root_lists_ordinary_files_folders(store):
+    root = store.ensure_gallery("alice")
+    photos = store.ensure_photos("alice")
+    work = store.create_folder("alice", parent_id=root.id, name="Work")
+    provider = FilesImagesProvider(session_factory=store.session_factory)
+    page = await provider.children(
+        ProviderContext("alice", "alice", 1), parent_origin_id="root",
+        cursor=None, snapshot=None, limit=10,
+        sort={"key": "name", "direction": "asc"}, query="",
+    )
+    assert {entry.origin_id for entry in page.entries} == {
+        f"files-folder:{photos.id}", f"files-folder:{work.id}",
+    }
+    assert all(entry.provenance["files_owned"] for entry in page.entries)
+
+
+def test_locator_delivery_proof_is_owner_scoped(store):
+    root = store.ensure_gallery("alice")
+    image = store.import_image("alice", parent_id=root.id, name="private.png", data=b"pixels")
+    assert store.owns_locator("alice", image.locator)
+    assert not store.owns_locator("bob", image.locator)
+    assert not store.owns_locator("alice", "../private.png")
+
+
+def test_digest_and_provenance_updates_do_not_cross_owner_boundaries(store):
+    root = store.ensure_gallery("alice")
+    image = store.import_image(
+        "alice", parent_id=root.id, name="upload.png", data=b"unique-pixels",
+        provenance={"prompt": "upload"},
+    )
+
+    found = store.find_by_digest("alice", image.digest)
+    assert found is not None and found.id == image.id
+    assert store.find_by_digest("bob", image.digest) is None
+    changed = store.update_provenance("alice", image.id, caption="OCR text")
+    assert changed.provenance == {"prompt": "upload", "caption": "OCR text"}
+    assert changed.revision == image.revision + 1

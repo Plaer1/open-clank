@@ -148,6 +148,96 @@ async def test_stop_cancels_detached_run_and_saves_partial_exactly_once():
 
 
 @pytest.mark.asyncio
+async def test_stale_run_identity_cannot_stop_a_replacement():
+    session_id = "sess-run-identity"
+    agent_runs._RUNS.pop(session_id, None)
+    release = asyncio.Event()
+
+    async def first_stream():
+        yield "data: first\n\n"
+
+    async def second_stream():
+        yield "data: second\n\n"
+        await release.wait()
+
+    first = agent_runs.start(session_id, first_stream())
+    await first.task
+    replay = agent_runs.subscribe(session_id, expected_run=first)
+    second = agent_runs.start(session_id, second_stream())
+    await asyncio.sleep(0)
+
+    assert agent_runs.get_run_id(session_id) == second.run_id
+    assert agent_runs.stop(session_id, expected_run_id=first.run_id) is False
+    assert [event async for event in replay] == ["id: 1\ndata: first\n\n"]
+    assert agent_runs.stop(session_id, expected_run_id=second.run_id) is True
+    await second.task
+
+
+@pytest.mark.asyncio
+async def test_replaced_run_drain_cannot_arm_replacement_eviction():
+    """The old drain finishes after replacement but owns no new-run timer."""
+    session_id = "sess-replaced-drain-eviction"
+    agent_runs._RUNS.pop(session_id, None)
+    old_started = asyncio.Event()
+    release_replacement = asyncio.Event()
+
+    async def old_stream():
+        old_started.set()
+        await asyncio.Event().wait()
+        yield "data: unreachable\n\n"
+
+    async def replacement_stream():
+        await release_replacement.wait()
+        yield "data: replacement\n\n"
+
+    old = agent_runs.start(session_id, old_stream())
+    await old_started.wait()
+    replacement = agent_runs.start(session_id, replacement_stream())
+
+    # replacement waits for old to unwind. Its eviction timer must remain
+    # untouched while old finally runs under the reused session ID.
+    await old.task
+    assert replacement.status == "running"
+    assert replacement.evict_task is None
+
+    release_replacement.set()
+    await replacement.task
+    assert replacement.evict_task is not None
+    replacement.evict_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_old_subscriber_close_cannot_reset_replacement_replay_grace():
+    """Closing an old replay subscription leaves the replacement timer intact."""
+    session_id = "sess-replaced-subscriber-eviction"
+    agent_runs._RUNS.pop(session_id, None)
+
+    async def old_stream():
+        yield "data: old\n\n"
+
+    async def replacement_stream():
+        yield "data: replacement\n\n"
+
+    old = agent_runs.start(session_id, old_stream())
+    await old.task
+    old_subscriber = agent_runs.subscribe(session_id, expected_run=old)
+    assert await anext(old_subscriber) == "id: 1\ndata: old\n\n"
+
+    replacement = agent_runs.start(session_id, replacement_stream())
+    await replacement.task
+    replacement_evict = replacement.evict_task
+    assert replacement_evict is not None and not replacement_evict.done()
+
+    # The suspended old subscriber executes its finally block now. It must not
+    # cancel and replace the new run's grace timer.
+    await old_subscriber.aclose()
+    assert replacement.evict_task is replacement_evict
+    assert not replacement_evict.cancelled()
+
+    replacement_evict.cancel()
+
+
+@pytest.mark.asyncio
 async def test_normal_completion_saves_exactly_once_not_partial():
     """Regression: a stream that finishes normally (no disconnect, no stop)
     saves via the completion path exactly once, and never via the

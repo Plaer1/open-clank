@@ -1210,7 +1210,7 @@ function scanPhpHtml(ctx: ScanContext, forms: CommentForm[], allowHeredoc = fals
 type LezerNodeLike = { name: string; from: number; to: number; get?: (name: string) => any; firstChild?: any; nextSibling?: any; parent?: any };
 
 interface LezerParserLike {
-  parse(input: string): { iterate(spec: { enter(node: { name: string; from: number; to: number }): void }): void };
+  parse(input: string): { iterate(spec: { enter(node: { name: string; from: number; to: number }): void; leave?(node: { name:string; from:number; to:number }): void }): void };
 }
 
 const lezerParserCache = new Map<string, Promise<LezerParserLike | null>>();
@@ -1390,7 +1390,7 @@ interface PyNode {
   to: number;
 }
 
-function isPythonStatementName(name: string): boolean {
+export function isPythonStatementName(name: string): boolean {
   return /Statement$/.test(name) || name === 'FunctionDefinition' || name === 'ClassDefinition' || name === 'Decorated';
 }
 
@@ -1447,7 +1447,7 @@ function collectPythonDocstrings(source: string, parser: LezerParserLike): Docum
   return regions;
 }
 
-function docstringRegionFromExpression(source: string, expr: PyNode, nodes: PyNode[]): DocumentationRegion | null {
+export function docstringRegionFromExpression(source: string, expr: PyNode, nodes: PyNode[]): DocumentationRegion | null {
   const inner = nodes.filter((n) => n.from >= expr.from && n.to <= expr.to
     && !(n.name === expr.name && n.from === expr.from && n.to === expr.to));
   const hasBinary = inner.some((n) => /Binary|Call|FormatString|Assignment/i.test(n.name));
@@ -1621,6 +1621,48 @@ function resolveDialect(options: RegionOptions, language?: string): string {
  * adapters for the eight legacy rows. Callers that only need a quick sync
  * map can use `documentationRegions`.
  */
+/** Viewport projection from the editor's incremental tree. Never reparses source. */
+export function documentationRegionsFromTree(source: string, language: string, tree: any, options: RegionOptions = {}, windows: readonly { from:number; to:number }[] = []): DocumentationRegion[] {
+  const label = advertisedLabel(language, options);
+  const spec = LANGUAGE_SPECS[label];
+  if (!spec || !windows.length || (label === 'JSON' && resolveDialect(options, language) !== 'jsonc')) return [];
+  const comments: Array<{ from:number; to:number }> = [];
+  const docstrings: DocumentationRegion[] = [];
+  const seen = new Set<string>();
+  for (const window of windows) tree.iterate({ from:window.from, to:window.to, enter(ref: any) {
+    const key = `${ref.from}:${ref.to}`;
+    if (seen.has(key)) return;
+    if (commentNodeName(ref.name)) { seen.add(key); comments.push({ from:ref.from, to:ref.to }); }
+    if (label !== 'Python' || ref.name !== 'ExpressionStatement' || !ref.node) return;
+    const expression = ref.node;
+    const parent = expression.parent;
+    if (!parent || !(parent.name === 'Script' || (parent.name === 'Body' && /^(ClassDefinition|FunctionDefinition)$/.test(parent.parent?.name || '')))) return;
+    for (let previous = expression.prevSibling; previous; previous = previous.prevSibling) if (isPythonStatementName(previous.name)) return;
+    if (ref.to - ref.from > 32768) return; // Oversized presentation stays editable raw source.
+    const nodes: PyNode[] = [];
+    expression.cursor().iterate((node: any) => { nodes.push({ name:node.name, from:node.from, to:node.to }); });
+    const region = docstringRegionFromExpression(source, { name:ref.name, from:ref.from, to:ref.to }, nodes);
+    if (region) { seen.add(key); docstrings.push(region); }
+  } });
+  comments.sort((a, b) => a.from - b.from || a.to - b.to);
+  const spans: Array<{ from:number; to:number }> = [];
+  for (const comment of comments) {
+    const previous = spans.at(-1);
+    // Stream parsers split block comments into styled line tokens. Join only
+    // whitespace gaps; the delimiter check below keeps standalone continuations raw.
+    if (previous && comment.from >= previous.to && /^\s*$/.test(source.slice(previous.to, comment.from)) && spec.forms.some(form => form.close && source.startsWith(form.open, previous.from) && !source.slice(previous.from, previous.to).endsWith(form.close))) previous.to = comment.to;
+    else if (!previous || comment.from >= previous.to) spans.push({ ...comment });
+  }
+  const regions = spans.flatMap(span => {
+    if (span.to - span.from > 32768) return [];
+    const form = spec.forms.find(candidate => source.startsWith(candidate.open, span.from));
+    if (!form || (form.close && !source.slice(span.from, span.to).endsWith(form.close))) return [];
+    const region = regionFromLezerComment(source, span.from, span.to, label, spec.forms);
+    return region ? [region] : [];
+  });
+  return [...groupAdjacentLineRegions(source, regions, label, spec.forms), ...docstrings].sort((a, b) => a.from - b.from || a.to - b.to);
+}
+
 export async function documentationRegionsAsync(source: string, language?: string, options: RegionOptions = {}): Promise<DocumentationRegion[]> {
   const label = advertisedLabel(language, options);
   const spec = LANGUAGE_SPECS[label];

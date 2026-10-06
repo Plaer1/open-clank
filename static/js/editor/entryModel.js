@@ -1,6 +1,7 @@
 // Pure Files/Code entry presentation helpers. This module never performs I/O,
 // reads storage, or makes an authorization decision.
 import { fileIconKey } from '../langIcons.js';
+export { languageForPath, languageDialectForPath, isTextPath, ADVERTISED_LANGUAGE_LABELS } from './languageRegistry.js';
 
 export function isDirectory(entry) {
   const kind = String(entry?.kind || entry?.type || '').toLowerCase();
@@ -28,30 +29,6 @@ export function normalizeSortKeys(keys, { fallback = SORT_KEYS } = {}) {
     .filter(key => SORT_KEYS.includes(key));
   return normalized.includes('name') ? normalized : ['name'];
 }
-
-const LANGUAGE_BY_EXTENSION = Object.freeze({
-  js:'JavaScript', jsx:'JavaScript JSX', mjs:'JavaScript', cjs:'JavaScript',
-  ts:'TypeScript', tsx:'TypeScript JSX', py:'Python', rs:'Rust', go:'Go',
-  java:'Java', kt:'Kotlin', kts:'Kotlin', c:'C', h:'C/C++ header', cc:'C++', cpp:'C++',
-  hpp:'C++ header', cs:'C#', rb:'Ruby', php:'PHP', swift:'Swift', sh:'Shell',
-  bash:'Shell', zsh:'Shell', json:'JSON', jsonc:'JSON', yaml:'YAML', yml:'YAML', toml:'TOML',
-  xml:'XML', html:'HTML', htm:'HTML', css:'CSS', scss:'SCSS', md:'Markdown', sql:'SQL',
-  mmd:'Mermaid', mermaid:'Mermaid',
-});
-
-const TEXT_EXTENSIONS = new Set([
-  ...Object.keys(LANGUAGE_BY_EXTENSION),
-  'cfg', 'conf', 'config', 'csv', 'env', 'ini', 'log', 'properties', 'text', 'txt', 'tsv', 'mmd', 'mermaid',
-]);
-
-const TEXT_FILE_NAMES = Object.freeze({
-  '.bash_profile':'Shell', '.bashrc':'Shell', '.editorconfig':'Plain text', '.env':'Plain text',
-  '.dockerignore':'Plain text', '.gitattributes':'Plain text', '.gitignore':'Plain text',
-  '.npmrc':'Plain text', '.nvmrc':'Plain text', '.prettierignore':'Plain text',
-  '.profile':'Shell', '.zprofile':'Shell', '.zshrc':'Shell',
-  dockerfile:'Dockerfile', gemfile:'Ruby', justfile:'Plain text', license:'Plain text',
-  makefile:'Plain text', procfile:'Plain text', rakefile:'Ruby', readme:'Plain text',
-});
 
 export function normalizeSortSpec(spec = {}) {
   const key = SORT_KEYS.includes(String(spec.key || '').toLowerCase()) ? String(spec.key).toLowerCase() : 'name';
@@ -121,43 +98,7 @@ export function sortEntries(entries, spec = {}) {
 function pathParts(path) {
   const leaf = String(path || '').replace(/\\/g, '/').split('/').pop()?.toLowerCase() || '';
   const lastDot = leaf.lastIndexOf('.');
-  const ext = lastDot > 0 ? leaf.slice(lastDot + 1) : '';
-  return { leaf, ext };
-}
-
-export function languageForPath(path) {
-  const { leaf, ext } = pathParts(path);
-  if (leaf.startsWith('dockerfile.')) return 'Dockerfile';
-  return TEXT_FILE_NAMES[leaf] || LANGUAGE_BY_EXTENSION[ext] || 'Plain text';
-}
-
-/**
- * Dialect under a shared display label. `.jsonc` stays the JSON label but
- * routes to the comment-capable JSONC grammar; strict `.json` never does.
- */
-export function languageDialectForPath(path) {
-  const { leaf, ext } = pathParts(path);
-  if (ext === 'jsonc' || ext === 'json5') return 'jsonc';
-  if (FILENAME_JSON_C_DIALECTS.has(leaf)) return 'jsonc';
-  return '';
-}
-
-const FILENAME_JSON_C_DIALECTS = new Set(['.babelrc', '.eslintrc', '.prettierrc', 'tsconfig.json', 'jsconfig.json']);
-
-/** The 30 advertised language labels, including aliases resolved by languageForPath. */
-export const ADVERTISED_LANGUAGE_LABELS = Object.freeze([
-  'JavaScript', 'JavaScript JSX', 'TypeScript', 'TypeScript JSX', 'Python', 'Rust', 'Go', 'Java',
-  'Kotlin', 'C', 'C/C++ header', 'C++', 'C++ header', 'C#', 'Ruby', 'PHP', 'Swift', 'Shell',
-  'JSON', 'YAML', 'TOML', 'XML', 'HTML', 'CSS', 'SCSS', 'Markdown', 'SQL', 'Mermaid', 'Dockerfile',
-  'Plain text',
-]);
-
-/** Extension/name hint only. The server remains authoritative when content is read. */
-export function isTextPath(path) {
-  const { leaf, ext } = pathParts(path);
-  return !!TEXT_FILE_NAMES[leaf]
-    || leaf.startsWith('dockerfile.')
-    || TEXT_EXTENSIONS.has(ext);
+  return { leaf, ext:lastDot > 0 ? leaf.slice(lastDot + 1) : '' };
 }
 
 function unixMilliseconds(value) {
@@ -209,7 +150,7 @@ function providerMediaType(row, source) {
   if (language === 'markdown') return 'text/markdown';
   if (language === 'json') return 'application/json';
   if (language === 'html') return 'text/html';
-  if (source === 'gallery') return 'image/*';
+  if (source === 'files') return 'image/*';
   if (source === 'copal') return ['note', 'wiki', 'markdown'].includes(String(row?.kind || '').toLowerCase())
     ? 'text/markdown'
     : 'application/json';

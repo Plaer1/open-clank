@@ -722,19 +722,12 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
     router = APIRouter(prefix="/api/notes", tags=["notes"])
 
     def _owner(request: Request) -> Optional[str]:
-        # require_user, not bare get_current_user: a request that reaches
-        # these owner-scoped routes with NO identity (auth-middleware
-        # regression, SSRF from a sibling service) must fail closed (401)
-        # when auth is configured — not be treated as the single-user mode
-        # and handed blanket access to every account's notes. The documented
-        # anonymous modes (AUTH_ENABLED=false, LOCALHOST_BYPASS on loopback,
-        # unconfigured first-run) still resolve to None, the single-user
-        # path. fire_reminder below already gated this way; the CRUD routes
-        # did not.
+        # Owner-scoped notes require the identity verified by middleware,
+        # including first-run and loopback traffic.
         return require_user(request) or None
 
-    def _reserve_note_uploads(owner: Optional[str], *values) -> None:
-        missing_id = reserve_upload_references(upload_handler, owner, *values)
+    def _reserve_note_uploads(owner: Optional[str], *values, db=None) -> None:
+        missing_id = reserve_upload_references(upload_handler, owner, *values, db=db)
         if missing_id:
             raise HTTPException(409, f"Referenced upload is no longer available: {missing_id}")
 
@@ -787,15 +780,10 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
     @router.post("")
     def create_note(request: Request, body: NoteCreate):
         user = _owner(request)
-        _reserve_note_uploads(
-            user,
-            body.image_url,
-            body.color,
-            body.content,
-            json.dumps(body.items) if body.items is not None else None,
-        )
         db = SessionLocal()
         try:
+            _reserve_note_uploads(user, body.image_url, body.color, body.content,
+                                  json.dumps(body.items) if body.items is not None else None, db=db)
             note = Note(
                 id=str(uuid.uuid4()),
                 owner=user,
@@ -857,6 +845,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
                 body.color,
                 body.content,
                 json.dumps(body.items) if body.items is not None else None,
+                db=db,
             )
             if body.title is not None:
                 note.title = body.title

@@ -1,8 +1,10 @@
+import { clampFloatingWindow, windowViewportBounds, observeWindowWorkspace } from './windowResize.js';
+
 // Right-edge snap docking for draggable modals.
 //
 // Adds a "drag-to-right" gesture that docks a modal as a right-side panel
 // (mirrors the snap-to-top fullscreen pattern used by _makeDraggable in
-// emailLibrary.js / documentLibrary.js / galleryEditor.js). While docked:
+// emailLibrary.js / documentLibrary.js / imps.js). While docked:
 //   - the modal-content lives at `right: 0; top: 0; bottom: 0` with a
 //     viewport-fraction width
 //   - body gets `right-dock-active` + `--right-dock-w` so the workspace
@@ -105,8 +107,9 @@ function _activeDockWidth(side) {
 }
 
 function _clampDockWidthToSpace(width, min, max) {
-  const floor = Math.min(min, Math.max(220, Math.round(max)));
-  const ceiling = Math.max(floor, Math.round(max));
+  const available = Math.max(1, windowViewportBounds().width);
+  const ceiling = Math.min(available, Math.max(1, Math.round(max)));
+  const floor = Math.min(min, ceiling);
   return Math.min(ceiling, Math.max(floor, Math.round(width)));
 }
 
@@ -114,7 +117,7 @@ function _clampRightDockWidth(width) {
   const min = _minEdgeDockWidth();
   const navRight = _leftNavRight();
   const leftDockW = _activeDockWidth('left');
-  const maxByChat = window.innerWidth - navRight - leftDockW - _chatWidthFloor();
+  const maxByChat = windowViewportBounds().right - navRight - leftDockW - _chatWidthFloor();
   const max = Math.min(Math.round(window.innerWidth * 0.82), maxByChat);
   return _clampDockWidthToSpace(width, min, max);
 }
@@ -122,7 +125,7 @@ function _clampRightDockWidth(width) {
 function _clampLeftDockWidth(width, left = _leftNavRight()) {
   const min = _minEdgeDockWidth();
   const rightDockW = _activeDockWidth('right');
-  const available = Math.max(0, window.innerWidth - left - rightDockW);
+  const available = Math.max(0, windowViewportBounds().right - left - rightDockW);
   const max = Math.min(Math.round(available * 0.82), available - _chatWidthFloor());
   return _clampDockWidthToSpace(width, min, max);
 }
@@ -151,9 +154,10 @@ function _showSnapHint(on, side = 'right') {
   hint = document.createElement('div');
   hint.className = 'modal-snap-hint ' + cls;
   const w = _defaultDockWidth();
-  const edge = side === 'left' ? 'left:0' : 'right:0';
+  const bounds = windowViewportBounds();
+  const edge = side === 'left' ? 'left:' + bounds.left + 'px' : 'right:' + (window.innerWidth - bounds.right) + 'px';
   const borderSide = side === 'left' ? 'border-right' : 'border-left';
-  hint.style.cssText = `position:fixed;${edge};top:0;bottom:0;width:${w}px;background:color-mix(in srgb, var(--accent-primary, #60a5fa) 12%, transparent);${borderSide}:2px dashed color-mix(in srgb, var(--accent-primary, #60a5fa) 60%, transparent);z-index:9998;pointer-events:none;transition:opacity 0.12s;`;
+  hint.style.cssText = `position:fixed;${edge};top:${bounds.top}px;height:${bounds.height}px;width:${Math.min(w, bounds.width)}px;background:color-mix(in srgb, var(--accent-primary, #60a5fa) 12%, transparent);${borderSide}:2px dashed color-mix(in srgb, var(--accent-primary, #60a5fa) 60%, transparent);z-index:9998;pointer-events:none;transition:opacity 0.12s;`;
   document.body.appendChild(hint);
 }
 
@@ -177,23 +181,10 @@ function _shouldAutoCollapseSidebar(dockW) {
 // Right edge (px) of whatever left navigation is currently showing — the
 // expanded sidebar if visible, otherwise the icon rail. Used to anchor the
 // left dock so it always sits flush to the right of the nav.
-function _leftNavRight() {
-  const sidebar = document.getElementById('sidebar');
-  const rail = document.getElementById('icon-rail');
-  let x = 0;
-  if (sidebar && !sidebar.classList.contains('hidden')) {
-    const r = sidebar.getBoundingClientRect();
-    if (r.width) x = Math.max(x, r.right);
-  }
-  if (rail && window.getComputedStyle(rail).display !== 'none') {
-    const r = rail.getBoundingClientRect();
-    if (r.width) x = Math.max(x, r.right);
-  }
-  return x;
-}
+function _leftNavRight() { return windowViewportBounds().left; }
 
 function _clampEmailDocSplitWidth(width, left = _leftNavRight()) {
-  const available = Math.max(0, window.innerWidth - left);
+  const available = Math.max(0, windowViewportBounds().right - left);
   if (!available) return 0;
   const compact = available < 760;
   const minEmail = compact ? 260 : 340;
@@ -239,12 +230,12 @@ function _applyEmailDocSplitGeometry(left, emailWidth) {
   if (!docPane || window.innerWidth <= 768) return;
   docPane.style.setProperty('position', 'fixed', 'important');
   docPane.style.setProperty('left', `${x}px`, 'important');
-  docPane.style.setProperty('right', 'var(--right-dock-w, 0px)', 'important');
-  docPane.style.setProperty('top', '0px', 'important');
-  docPane.style.setProperty('bottom', '0px', 'important');
+  docPane.style.setProperty('right', (window.innerWidth - windowViewportBounds().right + _activeDockWidth('right')) + 'px', 'important');
+  docPane.style.setProperty('top', windowViewportBounds().top + 'px', 'important');
+  docPane.style.setProperty('bottom', (window.innerHeight - windowViewportBounds().bottom) + 'px', 'important');
   docPane.style.setProperty('width', 'auto', 'important');
   docPane.style.setProperty('max-width', 'none', 'important');
-  docPane.style.setProperty('height', '100vh', 'important');
+  docPane.style.setProperty('height', windowViewportBounds().height + 'px', 'important');
   docPane.style.setProperty('z-index', '260', 'important');
   docPane.style.setProperty('transform', 'none', 'important');
 }
@@ -263,7 +254,7 @@ function _clearEmailDocSplitGeometry() {
 }
 
 function _resolveEmailDocSplitWidth(content, left) {
-  const available = Math.max(0, window.innerWidth - left);
+  const available = Math.max(0, windowViewportBounds().right - left);
   const fallback = Math.max(440, available * 0.55);
   const requested = content?._emailDocSplitUserW || _storedEmailDocSplitWidth() || fallback;
   return _clampEmailDocSplitWidth(requested, left);
@@ -398,11 +389,11 @@ function _applyDockInternal(modal, side, dockClass) {
   }
   modal.classList.add(dockClass);
   content.style.position = 'fixed';
-  content.style.top = '0';
-  content.style.bottom = '0';
-  content.style.height = '100vh';
-  content.style.maxHeight = '100vh';
-  content.style.borderRadius = '0';
+  const bounds = windowViewportBounds();
+  content.style.top = bounds.top + 'px';
+  content.style.bottom = (window.innerHeight - bounds.bottom) + 'px';
+  content.style.height = bounds.height + 'px';
+  content.style.maxHeight = bounds.height + 'px';
   content.style.transform = 'none';
   content.style.margin = '0';
   let w;
@@ -501,7 +492,7 @@ function _applyDockInternal(modal, side, dockClass) {
   } else {
     w = _resolveRightDockWidth(modal, content);
     content.style.left = 'auto';
-    content.style.right = '0';
+    content.style.right = (window.innerWidth - windowViewportBounds().right) + 'px';
     content.style.width = w + 'px';
     content.style.maxWidth = w + 'px';
     document.body.classList.add('right-dock-active');
@@ -667,6 +658,7 @@ export function clearRightDock(modal, cx, cy, dockClass) {
     : (sty.top || (r ? r.top + 'px' : Math.max(8, (window.innerHeight - refH) / 3) + 'px'));
   content.style.left = (typeof targetLeft === 'number') ? targetLeft + 'px' : targetLeft;
   content.style.top = (typeof targetTop === 'number') ? targetTop + 'px' : targetTop;
+  clampFloatingWindow(content);
   delete content._preDockSnapshot;
   delete content._dockSuspended;
   _positionEdgeDockResizeHandles();
@@ -757,7 +749,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
   let _hoveringSnap = false;
   const _distFromEdge = (cx) => {
     if (side === 'left') return cx - _leftNavWidth();
-    return window.innerWidth - cx;
+    return windowViewportBounds().right - cx;
   };
   return {
     onMove(cx, cy) {
@@ -873,10 +865,10 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     if (!content) return 0;
     let w = 0;
     if (side === 'right') {
-      w = _clampRightDockWidth(window.innerWidth - clientX);
+      w = _clampRightDockWidth(windowViewportBounds().right - clientX);
       content._userDockWidth = w;
       content.style.left = 'auto';
-      content.style.right = '0';
+      content.style.right = (window.innerWidth - windowViewportBounds().right) + 'px';
       content.style.width = w + 'px';
       content.style.maxWidth = w + 'px';
       document.body.classList.add('right-dock-active');
@@ -1081,3 +1073,22 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
   window.addEventListener('resize', _position);
   _position();
 })();
+
+// Both dock sides follow the same workspace changes as tiles and floating frames.
+if (typeof document !== 'undefined') observeWindowWorkspace(bounds => {
+  for (const modal of document.querySelectorAll('.modal-left-docked, .modal-right-docked')) {
+    const content = _resolveDockNodes(modal)?.content;
+    if (!content || content._dockSuspended) continue;
+    content.style.top = bounds.top + 'px';
+    content.style.bottom = (window.innerHeight - bounds.bottom) + 'px';
+    content.style.height = bounds.height + 'px'; content.style.maxHeight = bounds.height + 'px';
+    if (content._dockSide === 'left') _anchorLeftDock(content);
+    else {
+      const width = _resolveRightDockWidth(modal, content);
+      content.style.right = (window.innerWidth - bounds.right) + 'px';
+      content.style.width = width + 'px'; content.style.maxWidth = width + 'px';
+      document.documentElement.style.setProperty('--right-dock-w', width + 'px');
+    }
+  }
+  _positionEdgeDockResizeHandles();
+});

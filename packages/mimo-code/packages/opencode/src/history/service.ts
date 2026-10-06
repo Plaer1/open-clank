@@ -10,6 +10,7 @@ import { buildFtsQuery } from "./fts-query"
 import type { Kind } from "./extract"
 import { layer as writerLayer, Service as WriterService } from "./writer"
 import { layer as backfillLayer, Service as BackfillService } from "./backfill"
+import { ManagedProvider } from "@/acp/managed-provider"
 
 export type SearchHit = {
   part_id: string
@@ -72,6 +73,7 @@ export interface Interface {
 
   readonly around: (input: {
     session_id: string
+    chat_id?: string
     message_id: string
     before?: number
     after?: number
@@ -80,6 +82,7 @@ export interface Interface {
   /** Full-part get. Reads the canonical part body, not an FTS preview. */
   readonly get: (input: {
     session_id: string
+    chat_id?: string
     message_id: string
     part_id: string
     length?: number
@@ -89,8 +92,10 @@ export interface Interface {
   /** Explicit single-attachment locator metadata (owned assets only). */
   readonly media: (input: {
     session_id: string
+    chat_id?: string
     message_id: string
     part_id: string
+    asset_id?: string
   }) => Effect.Effect<FullPart["attachments"]>
 }
 
@@ -169,6 +174,22 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const search = Effect.fn("History.search")(function* (input: Parameters<Interface["search"]>[0]) {
+      if (ManagedProvider.enabled()) {
+        if (!input.session_id) throw new Error("managed history search requires bound session")
+        if (input.scope === "project") {
+          throw new Error("managed history does not support project scope; omit scope for the bound chat or use global")
+        }
+        const remote = (yield* Effect.tryPromise(() => ManagedProvider.historyCall(input.session_id!, "search", {
+          query: input.query,
+          scope: input.scope === "global" ? "global" : "chat",
+          ...(input.kind ? { kind: Array.isArray(input.kind) ? input.kind : [input.kind] } : {}),
+          ...(input.tool_name ? { toolName: input.tool_name } : {}),
+          ...(input.time_after !== undefined ? { timeAfter: input.time_after } : {}),
+          ...(input.time_before !== undefined ? { timeBefore: input.time_before } : {}),
+          limit: input.limit,
+        })).pipe(Effect.orDie)) as { hits?: SearchHit[] }
+        return (remote.hits ?? []) as SearchHit[]
+      }
       const ftsQuery = buildFtsQuery(input.query)
       if (!ftsQuery) return []
 
@@ -233,6 +254,10 @@ export const layer = Layer.effect(
     })
 
     const around = Effect.fn("History.around")(function* (input: Parameters<Interface["around"]>[0]) {
+      if (ManagedProvider.enabled()) {
+        const remote = (yield* Effect.tryPromise(() => ManagedProvider.historyCall(input.session_id, "around", { messageID: input.message_id, before: input.before, after: input.after, ...(input.chat_id ? { chatID: input.chat_id } : {}) })).pipe(Effect.orDie)) as { session_id?: string; messages?: MessageContext[] }
+        return { session_id: remote.session_id ?? "", messages: (remote.messages ?? []) as MessageContext[] }
+      }
       const before = input.before ?? 5
       const after = input.after ?? 5
       // Scope the anchor to the caller's authorized session/project. Guessed
@@ -352,6 +377,10 @@ export const layer = Layer.effect(
     // Reads are scoped to the caller's authorized chat/session/owner.
     const GET_LENGTH_MAX = 8000
     const get = Effect.fn("History.get")(function* (input: Parameters<Interface["get"]>[0]) {
+      if (ManagedProvider.enabled()) {
+        const remote = (yield* Effect.tryPromise(() => ManagedProvider.historyCall(input.session_id, "get", { messageID: input.message_id, partID: input.part_id, length: input.length, offset: input.offset, ...(input.chat_id ? { chatID: input.chat_id } : {}) })).pipe(Effect.orDie)) as { ok?: boolean; part?: FullPart }
+        return remote.ok ? (remote.part as FullPart) : null
+      }
       const row = Database.use((db) =>
         db
           .select({
@@ -425,6 +454,23 @@ export const layer = Layer.effect(
     })
 
     const media = Effect.fn("History.media")(function* (input: Parameters<Interface["media"]>[0]) {
+      if (ManagedProvider.enabled()) {
+        const part = yield* get({
+          session_id: input.session_id,
+          chat_id: input.chat_id,
+          message_id: input.message_id,
+          part_id: input.part_id,
+        })
+        const assetID = input.asset_id ?? part?.attachments[0]?.asset_id
+        if (!assetID) return []
+        const remote = (yield* Effect.tryPromise(() => ManagedProvider.historyCall(input.session_id, "media", {
+          assetID,
+          messageID: input.message_id,
+          partID: input.part_id,
+          ...(input.chat_id ? { chatID: input.chat_id } : {}),
+        })).pipe(Effect.orDie)) as { ok?: boolean; attachments?: FullPart["attachments"] }
+        return remote.ok ? (remote.attachments ?? []) : []
+      }
       const part = yield* get({
         session_id: input.session_id,
         message_id: input.message_id,

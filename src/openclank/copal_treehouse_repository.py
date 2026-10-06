@@ -16,6 +16,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,21 @@ class TreeHouseRepositoryError(RuntimeError):
         self.code = code
         self.status = status
         self.details = details or {}
+
+
+class _AchievementConnection:
+    """Borrow the ingest transaction without nested commits or BEGINs."""
+    def __init__(self, connection): self.connection = connection
+    def __enter__(self): return self
+    def __exit__(self, *_args): return False
+    def execute(self, sql, *args):
+        if sql.strip().upper().startswith("BEGIN"):
+            return self.connection.cursor()
+        return self.connection.execute(sql, *args)
+    def commit(self): pass
+    def rollback(self): raise RuntimeError("Achievement transaction aborted")
+    def close(self): pass
+    def __getattr__(self, name): return getattr(self.connection, name)
 
 
 class TreeHouseRepository:
@@ -41,16 +57,50 @@ class TreeHouseRepository:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._achievement_connection = threading.local()
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
+        borrowed = getattr(self._achievement_connection, "current", None)
+        if borrowed is not None:
+            return borrowed
         connection = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA journal_mode=WAL")
         return connection
 
+    @contextmanager
+    def achievement_transaction(self):
+        """Receipt, predicate, award and notification outbox commit together."""
+        with self._lock:
+            if getattr(self._achievement_connection, "current", None) is not None:
+                yield
+                return
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+            self._achievement_connection.current = _AchievementConnection(connection)
+            try:
+                yield
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                self._achievement_connection.current = None
+                connection.close()
+
     def _initialize(self) -> None:
+        if self.path.is_file() and self.path.stat().st_size:
+            with sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True) as admission:
+                expected = {'treehouse_catalogues': ['owner_account_id', 'workspace_id', 'state_json', 'revision', 'updated_at'], 'treehouse_grants': ['grant_id', 'owner_account_id', 'workspace_id', 'course_id', 'recipient_account_id', 'role', 'access_revision', 'token_hash', 'accepted_at', 'revoked_at', 'revision', 'created_at', 'grant_group_id'], 'treehouse_recipient_index': ['recipient_account_id', 'workspace_id', 'grant_id', 'owner_account_id', 'course_id', 'access_revision', 'active'], 'treehouse_progress': ['learner_account_id', 'owner_account_id', 'workspace_id', 'course_id', 'state_json', 'revision', 'reset_epoch', 'updated_at'], 'treehouse_progress_reset_generations': ['learner_account_id', 'workspace_id', 'generation', 'updated_at'], 'treehouse_idempotency': ['principal_account_id', 'workspace_id', 'command_id', 'payload_digest', 'result_json', 'created_at'], 'treehouse_attachment_preparations': ['preparation_id', 'operation_id', 'caller_account_id', 'owner_account_id', 'workspace_id', 'course_id', 'lesson_id', 'policy_generation', 'grant_revision', 'catalogue_revision', 'source_json', 'source_digest', 'mode', 'result_json', 'consumed_at', 'created_at'], 'treehouse_activity_receipts': ['account_id', 'source_event_id', 'schema_version', 'event_family', 'kind', 'result', 'actor_kind', 'workspace_id', 'occurred_at', 'facts_json', 'source_hash', 'evidence_digest', 'via', 'ingested_at'], 'treehouse_achievement_awards': ['account_id', 'achievement_id', 'predicate_version', 'catalog_revision', 'earned_at', 'evidence_json', 'awarded_via', 'created_at'], 'treehouse_achievement_predicate_state': ['account_id', 'state_json', 'predicate_version', 'updated_at'], 'treehouse_achievement_backfill_cursors': ['account_id', 'source_family', 'cursor_json', 'predicate_version', 'catalog_revision', 'processed', 'completed_at', 'updated_at'], 'treehouse_achievement_outbox': ['outbox_id', 'account_id', 'achievement_id', 'batch_id', 'state', 'created_at', 'delivered_at']}
+                present = {row[0] for row in admission.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if present.intersection(expected):
+                    for table, columns in expected.items():
+                        found = {row[1] for row in admission.execute(f"PRAGMA table_info({table})")}
+                        if not set(columns).issubset(found):
+                            raise TreeHouseRepositoryError("manual_migration_required", "TreeHouse store schema does not match this release. Stop writers and keep a complete backup; restore the matching release or prepare an offline conversion.")
+                    return
         with self._connect() as db:
             db.executescript(
                 """
@@ -197,11 +247,6 @@ class TreeHouseRepository:
                     ON treehouse_achievement_outbox(account_id, state);
                 """
             )
-            try:
-                db.execute("ALTER TABLE treehouse_grants ADD COLUMN grant_group_id TEXT")
-            except sqlite3.OperationalError as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
 
     @staticmethod
     def _digest(payload: dict[str, Any]) -> str:
@@ -1072,7 +1117,7 @@ class TreeHouseRepository:
         Unique on (account_id, achievement_id) so reconnects and tabs cannot
         re-deliver the same award.  A failed toast never erases the award.
         """
-        outbox_id = f"award:{account_id}:{achievement_id}"
+        outbox_id = f"award:{account_id}:{achievement_id}:{secrets.token_hex(16)}"
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -1093,10 +1138,31 @@ class TreeHouseRepository:
         with self._connect() as db:
             rows = db.execute(
                 "SELECT outbox_id,account_id,achievement_id,batch_id,state,created_at,delivered_at "
-                "FROM treehouse_achievement_outbox WHERE account_id=? AND state='pending' ORDER BY created_at LIMIT ?",
-                (account_id, int(limit)),
+                "FROM treehouse_achievement_outbox WHERE account_id=? AND state='pending' AND (delivered_at IS NULL OR delivered_at<?) ORDER BY created_at LIMIT ?",
+                (account_id, time.time(), int(limit)),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def claim_notification(self, account_id: str, outbox_id: str) -> bool:
+        """Lease delivery for one tab; expired claims may retry after a crash."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            now = time.time()
+            changed = db.execute(
+                "UPDATE treehouse_achievement_outbox SET delivered_at=? "
+                "WHERE account_id=? AND outbox_id=? AND "
+                "state='pending' AND (delivered_at IS NULL OR delivered_at<?)",
+                (now + 60, account_id, outbox_id, now),
+            ).rowcount
+            db.commit()
+        return bool(changed)
+
+    def owns_notification(self, account_id: str, outbox_id: str) -> bool:
+        with self._connect() as db:
+            return db.execute(
+                "SELECT 1 FROM treehouse_achievement_outbox WHERE account_id=? AND outbox_id=?",
+                (account_id, outbox_id),
+            ).fetchone() is not None
 
     def mark_notification_delivered(self, outbox_id: str) -> dict[str, Any]:
         with self._lock, self._connect() as db:
@@ -1113,11 +1179,11 @@ class TreeHouseRepository:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
-                "UPDATE treehouse_achievement_outbox SET state='failed' WHERE outbox_id=? AND state='pending'",
+                "UPDATE treehouse_achievement_outbox SET state='pending',delivered_at=NULL WHERE outbox_id=? AND state='pending'",
                 (outbox_id,),
             )
             db.commit()
-        return {"outboxId": outbox_id, "state": "failed"}
+        return {"outboxId": outbox_id, "state": "pending"}
 
     # -- account lifecycle (export / purge / restore / rename) ------------
 
@@ -1147,6 +1213,18 @@ class TreeHouseRepository:
             "predicateVersion": (state_row["predicate_version"] if state_row else None),
             "backfillCursors": cursors,
         }
+
+    def journal_activity_delivered(self, account_id: str, occurrence: str) -> bool:
+        with self._connect() as db:
+            return db.execute("SELECT 1 FROM treehouse_idempotency WHERE principal_account_id=? AND workspace_id=? AND command_id=?",
+                              (account_id, "__achievement_journal__", occurrence)).fetchone() is not None
+
+    def mark_journal_activity_delivered(self, account_id: str, occurrence: str, digest: str) -> None:
+        # Called inside achievement_transaction: the permanent delivery marker
+        # commits with the receipt, predicate, award and notification outbox.
+        with self._connect() as db:
+            db.execute("INSERT INTO treehouse_idempotency VALUES(?,?,?,?,?,?)",
+                       (account_id, "__achievement_journal__", occurrence, digest, "{}", time.time()))
 
     def purge_achievement_ledger(self, account_id: str) -> dict[str, int]:
         counts: dict[str, int] = {}

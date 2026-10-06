@@ -1,6 +1,10 @@
-import { addCursorAbove, addCursorBelow, defaultKeymap, history, historyKeymap, indentSelection, indentWithTab, redo, undo } from '@codemirror/commands';
+import { addCursorAbove, addCursorBelow, defaultKeymap, history, historyKeymap, undoDepth, redoDepth, indentSelection, indentWithTab, redo, undo } from '@codemirror/commands';
 import { markdown } from '@codemirror/lang-markdown';
-import { HighlightStyle, StreamLanguage, bracketMatching, defaultHighlightStyle, foldGutter, forceParsing, indentOnInput, syntaxHighlighting, syntaxTree, syntaxTreeAvailable } from '@codemirror/language';
+import { collectSpellingScope, type SpellingToken } from './openclank-spelling-scope';
+import { loadSourceLanguage as loadRegisteredSourceLanguage, sourceLanguageMetadata, sourceCommentCapability, LANGUAGE_REGISTRY } from './openclank-source-languages';
+import { sourceCommentRegions, serializeCommentBody, safeSourceCommentInsertion, wrapSourceComment, type SourceCommentRegion } from './openclank-comment-regions';
+import { CommentInsetWidget, type CommentInsetOptions } from './openclank-comment-widget';
+import { HighlightStyle, Language, LanguageDescription, LanguageSupport, bracketMatching, defaultHighlightStyle, foldGutter, forceParsing, indentOnInput, syntaxHighlighting, syntaxTree, syntaxTreeAvailable } from '@codemirror/language';
 import { Compartment, EditorSelection, EditorState, SelectionRange, StateEffect, StateField, Transaction } from '@codemirror/state';
 import {
   Decoration,
@@ -27,6 +31,7 @@ import {
   dialectForPath,
   documentationRegions,
   documentationRegionsAsync,
+  documentationRegionsFromTree,
   regionMarkdown,
   supportsRichComments,
   safeCommentInsertion,
@@ -97,6 +102,13 @@ export function normalizeEditorSelection(value: SelectionInput | null | undefine
   return { ranges, mainIndex };
 }
 
+const sourceSnapshots = new WeakMap<object, string>();
+function documentSource(state: EditorState) {
+  let source = sourceSnapshots.get(state.doc);
+  if (source === undefined) { source = state.doc.toString(); sourceSnapshots.set(state.doc, source); }
+  return source;
+}
+
 function selectionSnapshot(state: EditorState): EditorSelectionSnapshot {
   const ranges = state.selection.ranges.map((range) => ({ anchor:range.anchor, head:range.head }));
   const main = ranges[state.selection.mainIndex] || ranges[0] || { anchor:0, head:0 };
@@ -112,16 +124,28 @@ interface MarkdownEditorOptions {
   scrollTop?: number;
   mode?: EditorMode;
   language?: string;
+  languageOverride?: string;
   lineNumbers?: boolean;
   readableLineWidth?: boolean;
   lineWrapping?: boolean;
-  onChange?: (value: string, update: ViewUpdate) => void;
+  onChange?: (value: string, update: ViewUpdate, edit?:{ origin:string }) => void;
   onFocus?: () => void;
-  onSelection?: (selection: EditorSelectionSnapshot) => void;
+  historyOwner?: { undo:() => boolean; redo:() => boolean; state:() => { canUndo:boolean; canRedo:boolean; historyNotice?:string } };
+  getLocalRevision?: () => number;
+  registerPendingSourceEdit?: (edit:{ id:string; body:string; expectedSource:string; expectedLocalRevision:number; flush?:() => { outcome:string; message?:string }; discard?:() => void }) => boolean;
+  getPendingSourceEdit?: (id:string) => { id:string; body:string; expectedSource:string; expectedLocalRevision:number; flush?:() => { outcome:string; message?:string }; discard?:() => void } | null;
+  getPendingSourceEdits?: () => Array<{ id:string; body:string; expectedSource:string; expectedLocalRevision:number; flush?:() => { outcome:string; message?:string }; discard?:() => void }>;
+  removePendingSourceEdit?: (id:string) => boolean;
+  applySourceTransaction?: (transform:(source:string) => string, options?:{ origin?:string; expectedLocalRevision?:number; expectedSource?:string }) => unknown;
+  onNotice?: (message:string) => void;
+  onSelection?: (selection: EditorSelectionSnapshot, update?:ViewUpdate) => void;
   onScroll?: (scrollTop: number) => void;
-  onCommand?: (command: string) => void;
+  onCommand?: (command: string) => boolean | void;
+  onSyntaxStatus?: (status: { state:string; message:string; retryable:boolean }) => void;
   /** Render a resolved Markdown image/embed source without coupling CodeMirror to resource resolution. */
   renderPreview?: (source: string) => HTMLElement | null;
+  /** Full prose renderer for comment bodies; standalone embeds keep renderPreview. */
+  renderComment?: (source:string, editBody?:(body:string)=>void) => HTMLElement | null;
   /** Opt-in source-preserving presentation for documentation comments/docstrings. */
   richComments?: boolean;
   /** Dialect under a shared label, e.g. `jsonc` under JSON. */
@@ -158,12 +182,10 @@ export function serializeEditorSource(value: string, original: string) {
 }
 
 // Rich comments cover every advertised comment/docstring-capable language.
-// The gate is the documentation-region adapter's source round-trip fixture,
-// not parser presence or highlighter color. Markdown and Plain text keep
-// their applicable behaviors (full-document preview / plain editing); strict
-// JSON has no comments while the JSONC dialect does.
+// Capability comes from the mounted language metadata. Plain and strict JSON
+// have no comments; unresolved syntax is never promoted by text heuristics.
 export function isRichCommentLanguageQualified(language?: string, options: { dialect?: string; path?: string } = {}) {
-  return supportsRichComments(language, options);
+  return sourceCommentCapability(language,options).strategy !== 'none';
 }
 
 function regionToCommentSourceRange(region: DocumentationRegion, language: string): CommentSourceRange {
@@ -186,7 +208,7 @@ function regionToCommentSourceRange(region: DocumentationRegion, language: strin
 /** Return parser/adapter-recognized documentation regions with exact offsets. */
 export function parserCommentSourceRanges(state: EditorState, language = '', options: { dialect?: string; path?: string } = {}): CommentSourceRange[] {
   if (!state || !String(language || '').trim()) return [];
-  const source = state.doc.toString();
+  const source = documentSource(state);
   return documentationRegions(source, language, options).map((region) => regionToCommentSourceRange(region, language));
 }
 
@@ -196,7 +218,7 @@ export function parserCommentSourceRanges(state: EditorState, language = '', opt
  */
 export async function parserCommentSourceRangesAsync(state: EditorState, language = '', options: { dialect?: string; path?: string } = {}): Promise<CommentSourceRange[]> {
   if (!state || !String(language || '').trim()) return [];
-  const source = state.doc.toString();
+  const source = documentSource(state);
   const regions = await documentationRegionsAsync(source, language, options);
   return regions.map((region) => regionToCommentSourceRange(region, language));
 }
@@ -236,94 +258,18 @@ const openClankHighlightStyle = HighlightStyle.define([
   { tag: tags.invalid, color: 'var(--hl-number)', textDecoration: 'underline' },
 ]);
 
+const fencedLanguages = LANGUAGE_REGISTRY.filter(entry => entry.selectable && entry.parser !== 'plain').map(entry => LanguageDescription.of({
+  name:entry.displayName, alias:[entry.id, ...entry.aliases],
+  load:async () => {
+    const extension = await loadRegisteredSourceLanguage(entry.id);
+    if (extension instanceof LanguageSupport) return extension;
+    if (extension instanceof Language) return new LanguageSupport(extension);
+    throw new Error(`No embeddable syntax grammar for ${entry.displayName}`);
+  },
+}));
+function markdownSupport() { return markdown({ codeLanguages:fencedLanguages }); }
 function initialLanguage(language?: string) {
-  const key = String(language || '').toLowerCase();
-  if (key === 'markdown') return markdown();
-  return [];
-}
-
-// Mermaid has no maintained Lezer grammar in the focused bundle. This small
-// StreamLanguage parser colors source vocabulary only; it never renders a
-// diagram or claims semantic validation. Unknown constructs remain editable.
-const mermaidStreamParser: any = {
-  startState: () => ({ lineStart: true }),
-  token(stream: any, state: any) {
-    if (stream.sol()) state.lineStart = true;
-    if (stream.match(/^%%.*$/)) return 'comment';
-    if (stream.match(/^\s*%%\{.*?\}%%/)) return 'meta';
-    if (stream.match(/^(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|gantt|pie|mindmap|timeline|gitGraph|journey|quadrantChart|xychart-beta|block-beta)\b/i)) return 'keyword';
-    if (stream.match(/^(?:subgraph|end|participant|actor|title|section|class|state|Note|direction|todayMarker|dateFormat|axisFormat|accTitle|accDescr)\b/i)) return 'keyword';
-    if (stream.match(/^(?:-->|-.->|==>|-->>|->>|-\.|--|==|\+\+|--)/)) return 'operator';
-    if (stream.match(/^"(?:\\.|[^"\\])*"/)) return 'string';
-    if (stream.match(/^'(?:\\.|[^'\\])*'/)) return 'string';
-    if (stream.match(/^\b\d+(?:\.\d+)?\b/)) return 'number';
-    if (stream.match(/^[A-Za-z_][A-Za-z0-9_-]*(?=\s*[\[({:])/)) return 'variableName';
-    if (stream.match(/^[A-Za-z_][A-Za-z0-9_-]*/)) return state.lineStart ? 'definition(variableName)' : 'variableName';
-    state.lineStart = false;
-    stream.next();
-    return null;
-  },
-};
-
-const sourceLanguageLoads = new Map<string, Promise<any>>();
-
-// JSONC keeps the JSON label but adds real comment tokens. Strict JSON stays
-// on the Lezer JSON grammar and never receives invented comment syntax.
-const jsoncStreamParser: any = {
-  startState: () => ({}),
-  token(stream: any, _state: any) {
-    if (stream.match(/^\/\/.*/)) return 'comment';
-    if (stream.match(/^\/\*[\s\S]*?\*\//)) return 'comment';
-    if (stream.match(/^"(?:\\.|[^"\\])*"?/)) return 'string';
-    if (stream.match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/)) return 'number';
-    if (stream.match(/^(?:true|false|null)\b/)) return 'atom';
-    if (stream.match(/^[{}[\],:]/)) return 'punctuation';
-    stream.next();
-    return null;
-  },
-};
-
-function loadSourceLanguage(language?: string, options: { dialect?: string; path?: string } = {}) {
-  const key = String(language || '').toLowerCase();
-  if (!key || key === 'plain text') return Promise.resolve([]);
-  if (key === 'markdown') return Promise.resolve(markdown());
-  const dialect = String(options.dialect || options.path || '').toLowerCase();
-  if (key === 'json' && (dialect.includes('jsonc') || /(?:^|[/\\.])jsonc$/i.test(String(options.path || '')) || key.includes('jsonc'))) {
-    return Promise.resolve(StreamLanguage.define(jsoncStreamParser));
-  }
-  const cached = sourceLanguageLoads.get(key);
-  if (cached) return cached;
-  let pending: Promise<any>;
-  if (['javascript', 'javascript jsx', 'jsx', 'typescript', 'typescript jsx'].includes(key)) {
-    pending = import('@codemirror/lang-javascript').then(({ javascript }) => javascript({ jsx:key.includes('jsx') || key === 'jsx', typescript:key.includes('typescript') }));
-  } else if (key === 'json') pending = import('@codemirror/lang-json').then(({ json }) => json());
-  else if (key === 'jsonc') pending = Promise.resolve(StreamLanguage.define(jsoncStreamParser));
-  else if (key === 'html') pending = import('@codemirror/lang-html').then(({ html }) => html());
-  else if (key === 'xml') pending = import('@codemirror/lang-xml').then(({ xml }) => xml());
-  else if (key === 'scss') pending = import('@codemirror/lang-sass').then(({ sass }) => sass());
-  else if (key === 'css') pending = import('@codemirror/lang-css').then(({ css }) => css());
-  else if (['c', 'c++', 'c/c++ header', 'c++ header'].includes(key)) pending = import('@codemirror/lang-cpp').then(({ cpp }) => cpp());
-  else if (key === 'c#') pending = import('@codemirror/legacy-modes/mode/clike').then(({ csharp }) => StreamLanguage.define(csharp));
-  else if (key === 'java') pending = import('@codemirror/lang-java').then(({ java }) => java());
-  else if (key === 'kotlin') pending = import('@codemirror/legacy-modes/mode/clike').then(({ kotlin }) => StreamLanguage.define(kotlin));
-  else if (key === 'go') pending = import('@codemirror/lang-go').then(({ go }) => go());
-  else if (key === 'python') pending = import('@codemirror/lang-python').then(({ python }) => python());
-  else if (key === 'php') pending = import('@codemirror/lang-php').then(({ php }) => php());
-  else if (key === 'rust') pending = import('@codemirror/lang-rust').then(({ rust }) => rust());
-  else if (key === 'ruby') pending = import('@codemirror/legacy-modes/mode/ruby').then(({ ruby }) => StreamLanguage.define(ruby));
-  else if (key === 'swift') pending = import('@codemirror/legacy-modes/mode/swift').then(({ swift }) => StreamLanguage.define(swift));
-  else if (key === 'shell') pending = import('@codemirror/legacy-modes/mode/shell').then(({ shell }) => StreamLanguage.define(shell));
-  else if (key === 'dockerfile') pending = import('@codemirror/legacy-modes/mode/dockerfile').then(({ dockerFile }) => StreamLanguage.define(dockerFile));
-  else if (key === 'yaml') pending = import('@codemirror/lang-yaml').then(({ yaml }) => yaml());
-  else if (key === 'toml') pending = import('@codemirror/legacy-modes/mode/toml').then(({ toml }) => StreamLanguage.define(toml));
-  else if (key === 'sql') pending = import('@codemirror/lang-sql').then(({ sql }) => sql());
-  else if (key === 'mermaid') pending = Promise.resolve(StreamLanguage.define(mermaidStreamParser));
-  else return Promise.resolve([]);
-  // A failed parser load must never make the buffer uneditable or poison later
-  // attempts after an updated static asset is deployed.
-  sourceLanguageLoads.set(key, pending);
-  pending.catch(() => sourceLanguageLoads.delete(key));
-  return pending;
+  return String(language || '').toLowerCase() === 'markdown' ? markdownSupport() : [];
 }
 
 interface DecorationRange {
@@ -796,113 +742,87 @@ class CommentPreviewWidget extends WidgetType {
   ignoreEvent() { return false; }
 }
 
-function buildCommentDecorations(state: EditorState, language: string, renderPreview?: (source:string) => HTMLElement | null, visibleRanges: readonly { from:number; to:number }[] = [], comments = parserCommentSourceRanges(state, language), onSeeSource?: (range: { from:number; to:number; source:string; markdown:string }, event: Event) => void): DecorationSet {
-  const source = state.doc.toString();
+// Only reuse an existing visible projection for cheap context-menu eligibility.
+const visibleCommentProjections = new WeakMap<EditorView, { doc:EditorState['doc']; tree:unknown; language:string; ranges:CommentSourceRange[] }>();
+function visibleCommentRanges(view: EditorView, language: string, regionOptions: { dialect?:string; path?:string }) {
+  const tree = syntaxTree(view.state);
+  const entry=sourceLanguageMetadata(language,regionOptions);
+  const ranges = sourceCommentRegions(view.state,entry.id,[view.viewport],documentSource(view.state));
+  visibleCommentProjections.set(view, { doc:view.state.doc, tree, language, ranges });
+  return ranges;
+}
+
+const commentSourceReveal = StateEffect.define<Array<{from:number;to:number}>>();
+function buildCommentDecorations(state: EditorState, language: string, renderPreview?: (source:string) => HTMLElement | null, visibleRanges: readonly { from:number; to:number }[] = [], comments: SourceCommentRegion[] = [], onSeeSource?: (range: { from:number; to:number; source:string; markdown:string }, event: Event) => void, inset?:CommentInsetOptions, revealed:readonly {from:number;to:number}[]=[]): DecorationSet {
   const active = state.selection.ranges;
-  const decorations = comments.map((comment) => ({
-    ...comment,
-    markdown:comment.contentRanges.map((span) => source.slice(span.from, span.to)).join('\n'),
-  })).flatMap((comment) => {
-    // Rendering is a viewport concern. The source map API remains available
-    // for callers that need raw offsets, while rich widgets stay bounded on
-    // large files and are rebuilt only for visible comments.
-    if (visibleRanges.length && !visibleRanges.some((visible) => visible.from < comment.to && visible.to > comment.from)) return [];
-    // A cursor or selection inside a comment always exposes its source so
-    // editing and keyboard shortcuts continue to address exact source bytes.
-    if (active.some((selection) => selection.from <= comment.to && selection.to >= comment.from)) return [];
-    const attributes = {
-      'data-comment-source-from':String(comment.from),
-      'data-comment-source-to':String(comment.to),
-    };
+  const decorations = comments.flatMap(comment => {
+    if (!visibleRanges.some(visible => visible.from < comment.to && visible.to > comment.from)) return [];
+    if (revealed.some(range=>range.from<=comment.to&&range.to>=comment.from) || active.some(selection => selection.from < selection.to && selection.from <= comment.to && selection.to >= comment.from)) return [];
+    const attributes = { 'data-comment-source-from':String(comment.from), 'data-comment-source-to':String(comment.to) };
     if (!renderPreview) return [{ from:comment.from, to:comment.to, value:Decoration.mark({ class:'cm-rich-comment-source', attributes }) }];
-    return [{
-      from:comment.from,
-      to:comment.to,
-      value:Decoration.replace({ widget:new CommentPreviewWidget(source.slice(comment.from, comment.to), comment.markdown, comment.from, comment.to, renderPreview, onSeeSource), block:source.slice(comment.from, comment.to).includes('\n') }),
-    }];
+    const source = state.doc.sliceString(comment.from, comment.to);
+    const markdown = comment.contentRanges.map(span => state.doc.sliceString(span.from, span.to)).join('\n');
+    return [{ from:comment.from, to:comment.to, value:Decoration.replace({ widget:inset?new CommentInsetWidget(comment,inset):new CommentPreviewWidget(source, markdown, comment.from, comment.to, renderPreview, onSeeSource), block:source.includes('\n') }) }];
   });
   return Decoration.set(decorations, true);
 }
 
 /** Opt-in parser-backed comment presentation with a safe source fallback. */
-function createRichCommentPlugin(language: string, renderPreview?: (source:string) => HTMLElement | null, regionOptions: { dialect?: string; path?: string } = {}, onSeeSource?: (range: { from:number; to:number; source:string; markdown:string }, event: Event) => void) {
-  return ViewPlugin.fromClass(class {
-    decorations: DecorationSet;
-    comments: CommentSourceRange[];
-    rawSelectionActive = false;
-    /** Monotonic revision tag; stale async parses are discarded. */
-    parseRevision = 0;
-    parsePending = false;
-    constructor(view: EditorView) {
-      this.comments = parserCommentSourceRanges(view.state, language, regionOptions);
-      this.rawSelectionActive = view.state.selection.ranges.some((selection) => this.comments.some((comment) => selection.from <= comment.to && selection.to >= comment.from));
-      this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments, onSeeSource);
-      // First paint may use the sync map; immediately converge on the
-      // grammar-aware path so JSX text / CDATA never stay as widgets.
-      this.scheduleParse(view);
-    }
-    scheduleParse(view: EditorView) {
-      this.parseRevision += 1;
-      if (this.parsePending) return;
-      this.parsePending = true;
-      void (async () => {
-        this.parsePending = false;
-        if (!view.dom.isConnected) return;
-        // Parse the newest document revision: edits that arrived while this
-        // parse was queued are already reflected in view.state. The async
-        // API is the production source of truth (opaque-span filtering).
-        const parsedRevision = this.parseRevision;
-        this.comments = await parserCommentSourceRangesAsync(view.state, language, regionOptions);
-        this.decorations = buildCommentDecorations(view.state, language, renderPreview, view.visibleRanges, this.comments, onSeeSource);
-        view.dispatch({});
-        if (this.parseRevision !== parsedRevision) {
-          // A newer revision was tagged while the parse ran; catch up.
-          this.scheduleParse(view);
-        }
-      })();
-    }
-    update(update: ViewUpdate) {
-      let delimiterIntroduced = false;
-      if (update.docChanged) update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
-        if (/(?:\/\/|\/\*|\*\/|<!--|-->|^\s*#|^\s*--|^\s*%%)/m.test(inserted.toString())) delimiterIntroduced = true;
-      });
-      const changedComment = update.docChanged && this.comments.some((comment) => update.changes.touchesRange(comment.from, comment.to));
-      const visibleChanged = update.docChanged && update.view.visibleRanges.some((range) => update.changes.touchesRange(range.from, range.to));
-      const reparseChanged = visibleChanged && (changedComment || delimiterIntroduced);
-      if (update.docChanged) {
-        this.comments = this.comments.map((comment) => ({
-          ...comment,
-          from:update.changes.mapPos(comment.from, 1),
-          to:update.changes.mapPos(comment.to, -1),
-          contentFrom:update.changes.mapPos(comment.contentFrom, 1),
-          contentTo:update.changes.mapPos(comment.contentTo, -1),
-          contentRanges:comment.contentRanges.map((range) => ({ from:update.changes.mapPos(range.from, 1), to:update.changes.mapPos(range.to, -1) })),
-        }));
-        // Edit latency stays on the mapPos path. A full reparse is scheduled
-        // asynchronously so a 1 MiB file cannot blow the p95 budget.
-        this.decorations = this.decorations.map(update.changes);
+function createRichCommentPlugin(language: string, renderPreview?: (source:string) => HTMLElement | null, regionOptions: { dialect?:string; path?:string } = {}, onSeeSource?: (range: { from:number; to:number; source:string; markdown:string }, event: Event) => void, inset?:CommentInsetOptions) {
+  const projection=StateEffect.define<{doc:EditorState['doc'];regions:SourceCommentRegion[];windows:Array<{from:number;to:number}>}>();
+  const field=StateField.define<{decorations:DecorationSet;regions:SourceCommentRegion[];windows:Array<{from:number;to:number}>;revealed:Array<{from:number;to:number}>}>({
+    create:()=>({decorations:Decoration.none,regions:[],windows:[],revealed:[]}),
+    update(value,transaction){
+      let regions=value.regions,windows=value.windows,revealed=value.revealed;
+      if(transaction.docChanged){
+        const source=documentSource(transaction.state);
+        regions=regions.flatMap(region=>{
+          const from=transaction.changes.mapPos(region.from,1),to=transaction.changes.mapPos(region.to,-1);
+          if(source.slice(from,to)!==region.sourceText)return [];
+          const map=<T extends {from:number;to:number}>(span:T):T=>({...span,from:transaction.changes.mapPos(span.from,1),to:transaction.changes.mapPos(span.to,-1)});
+          return [{...region,from,to,sourceDocument:transaction.state.doc,contentFrom:transaction.changes.mapPos(region.contentFrom,1),contentTo:transaction.changes.mapPos(region.contentTo,-1),contentRanges:region.contentRanges.map(map),bodySpans:region.bodySpans.map(map),lineStart:transaction.state.doc.lineAt(from).from,lineEnd:transaction.state.doc.lineAt(to).to}];
+        });
+        windows=windows.map(range=>({from:transaction.changes.mapPos(range.from,1),to:transaction.changes.mapPos(range.to,-1)}));
+        revealed=revealed.map(range=>({from:transaction.changes.mapPos(range.from,1),to:transaction.changes.mapPos(range.to,-1)}));
       }
-      let selectionMovedAcrossWidget = false;
-      if (update.selectionSet) {
-        const rawSelection = update.state.selection.ranges.some((selection) => this.comments.some((comment) => selection.from <= comment.to && selection.to >= comment.from));
-        selectionMovedAcrossWidget = rawSelection !== this.rawSelectionActive;
-        this.rawSelectionActive = rawSelection;
+      for(const effect of transaction.effects){
+        if(effect.is(projection)&&effect.value.doc===transaction.state.doc){regions=effect.value.regions;windows=effect.value.windows;}
+        if(effect.is(commentSourceReveal))revealed=effect.value;
       }
-      if (selectionMovedAcrossWidget || update.viewportChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
-        this.decorations = buildCommentDecorations(update.state, language, renderPreview, update.view.visibleRanges, this.comments, onSeeSource);
-      }
-      if (reparseChanged || update.viewportChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
-        this.scheduleParse(update.view);
-      }
-    }
-  }, { decorations:(value) => value.decorations });
+      if(transaction.selection)revealed=revealed.filter(range=>transaction.state.selection.ranges.some(selection=>selection.from<=range.to&&selection.to>=range.from));
+      return {regions,windows,revealed,decorations:buildCommentDecorations(transaction.state,language,renderPreview,windows,regions,onSeeSource,inset,revealed)};
+    },
+    provide:field=>EditorView.decorations.from(field,value=>value.decorations),
+  });
+  const viewport=ViewPlugin.fromClass(class {
+    tree:unknown;frame:number|null=null;stopped=false;
+    constructor(view:EditorView){this.tree=syntaxTree(view.state);this.schedule(view);}
+    schedule(view:EditorView){if(this.frame!==null)return;this.frame=requestAnimationFrame(()=>{this.frame=null;if(this.stopped)return;this.tree=syntaxTree(view.state);const regions=visibleCommentRanges(view,language,regionOptions);view.dispatch({effects:projection.of({doc:view.state.doc,regions,windows:[view.viewport]}),annotations:Transaction.addToHistory.of(false)});});}
+    update(update:ViewUpdate){if(update.docChanged||update.viewportChanged||syntaxTree(update.state)!==this.tree||update.transactions.some(transaction=>transaction.reconfigured))this.schedule(update.view);}
+    destroy(){this.stopped=true;if(this.frame!==null)cancelAnimationFrame(this.frame);}
+  });
+  return [field,viewport,EditorView.atomicRanges.of(view=>view.state.field(field).decorations)];
 }
+
+// Explicit checks own short-lived diagnostics; edits, selections and grammar
+// reconfiguration clear them rather than mapping results onto different prose.
+const spellingMarks = StateEffect.define<SpellingToken[]>();
+const spellingField = StateField.define<DecorationSet>({
+  create:() => Decoration.none,
+  update(value, transaction) {
+    if (transaction.docChanged || transaction.selection || transaction.reconfigured) value = Decoration.none;
+    for (const effect of transaction.effects) if (effect.is(spellingMarks)) value = Decoration.set(effect.value.map(token => Decoration.mark({ class:'cm-spelling-error', attributes:{ title:'Possible spelling error' } }).range(token.from,token.to)),true);
+    return value;
+  },
+  provide:field => EditorView.decorations.from(field),
+});
 
 const baseTheme = EditorView.theme({
   '&': { height:'100%', color:'var(--fg)', backgroundColor:'transparent', fontSize:'14px' },
   '.cm-scroller': { fontFamily:'var(--font-family, system-ui, sans-serif)', lineHeight:'1.72', overflow:'auto' },
   '.cm-content': { padding:'28px clamp(18px, 5vw, 72px)', caretColor:'var(--accent, #22d3ee)', width:'100%' },
   '.cm-line': { padding:'0 4px' },
+  '.cm-spelling-error': { textDecoration:'underline wavy var(--danger, #dc5757)', textUnderlineOffset:'3px' },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor:'var(--accent, #22d3ee)' },
   '&.cm-focused': { outline:'none' },
   '.cm-selectionBackground, ::selection': { backgroundColor:'color-mix(in srgb, var(--accent, #22d3ee) 25%, transparent) !important' },
@@ -919,7 +839,12 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
     parent, doc = '', label = 'Markdown editor', placeholderText = 'Start writing…', selection,
     onChange, onFocus, onSelection, onScroll, onCommand, renderPreview,
   } = options;
-  const regionOptions = { dialect: options.languageDialect, path: options.languagePath };
+  let languageOverride = options.languageOverride || null;
+  let grammarOptions = { dialect:options.languageDialect, path:options.languagePath, content:String(doc).slice(0, 4096) };
+  let languageMetadata = sourceLanguageMetadata(languageOverride || (options.languagePath && String(options.language).toLowerCase() !== 'markdown' ? undefined : options.language || 'Markdown'), grammarOptions);
+  // Qualification follows the resolved language, never the old filename dialect.
+  let regionOptions = { dialect:languageMetadata.id === 'jsonc' ? 'jsonc' : undefined, path:undefined as string | undefined };
+  const loadLanguage = () => languageMetadata.id === 'markdown' ? Promise.resolve(markdownSupport()) : loadRegisteredSourceLanguage(languageMetadata.id, grammarOptions);
   let silent = false;
   let mode: EditorMode = options.mode === 'source' ? 'source' : 'live';
   let showLineNumbers = options.lineNumbers === true;
@@ -938,15 +863,29 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
   const lineSeparator = String(doc).includes('\r\n') ? '\r\n' : String(doc).includes('\r') ? '\r' : undefined;
   let view: EditorView;
   let runEditorCommand: (name: string) => boolean = () => false;
-  const command = (name: string) => { onCommand?.(name); return true; };
-  const originalSource = String(doc);
+  const command = (name: string) => typeof onCommand === 'function' && onCommand(name) !== false;
+  let originalSource = String(doc);
+  let richComments = options.richComments === true;
   const serializeSource = (value: string) => serializeEditorSource(value, originalSource);
+  const pendingPanel=document.createElement('details');pendingPanel.className='cm-rich-comment-pending';pendingPanel.hidden=true;
+  function syncPendingPanel(){
+    const pending=options.getPendingSourceEdits?.()||[];
+    const open=pendingPanel.open;pendingPanel.replaceChildren();pendingPanel.hidden=!pending.length;pendingPanel.open=open;
+    if(!pending.length)return;
+    const summary=document.createElement('summary');summary.textContent=`${pending.length} pending comment edit${pending.length===1?'':'s'} — review before saving`;pendingPanel.append(summary);
+    for(const edit of pending){
+      const body=document.createElement('pre');body.textContent=edit.body;
+      const discard=document.createElement('button');discard.type='button';discard.textContent='Discard this pending edit';discard.addEventListener('click',()=>{edit.discard?.();options.removePendingSourceEdit?.(edit.id);syncPendingPanel();});
+      const copy=document.createElement('button');copy.type='button';copy.textContent='Copy pending body';copy.addEventListener('click',()=>{void navigator.clipboard?.writeText(edit.body);});
+      pendingPanel.append(body,copy,discard);
+    }
+  }
   const state = EditorState.create({
     doc,
     selection:cmSelection,
     extensions:[
       gutterCompartment.of(showLineNumbers ? [lineNumbers()] : []),
-      highlightSpecialChars(), history(), foldGutter(), drawSelection(), dropCursor(),
+      highlightSpecialChars(), ...(options.historyOwner ? [] : [history({ minDepth:2000 })]), foldGutter(), drawSelection(), dropCursor(), spellingField,
       EditorState.allowMultipleSelections.of(true), indentOnInput(),
       ...(lineSeparator ? [EditorState.lineSeparator.of(lineSeparator)] : []),
       // Open Clank is the owned highlighter. CodeMirror's default remains only as
@@ -954,10 +893,13 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
       // both styles are registered as fallbacks, the default can win the facet and
       // prevent the live --hl-* theme variables from reaching token spans.
       syntaxHighlighting(openClankHighlightStyle), syntaxHighlighting(defaultHighlightStyle, { fallback:true }), bracketMatching(), rectangularSelection(),
-      highlightActiveLine(), languageCompartment.of(initialLanguage(options.language || 'markdown')), ...(lineWrapping ? [EditorView.lineWrapping] : []), placeholder(placeholderText),
-      modeCompartment.of(mode === 'live' ? [createStructuralDecorations(renderPreview), createLivePreviewPlugin(renderPreview)] : options.richComments === true && isRichCommentLanguageQualified(options.language, regionOptions) ? [createRichCommentPlugin(options.language || '', renderPreview, regionOptions, options.onSeeSource)] : []),
+      highlightActiveLine(), languageCompartment.of(initialLanguage(languageMetadata.id)), ...(lineWrapping ? [EditorView.lineWrapping] : []), placeholder(placeholderText),
+      modeCompartment.of(mode === 'live' && languageMetadata.id === 'markdown' ? [createStructuralDecorations(renderPreview), createLivePreviewPlugin(renderPreview)] : []),
       widthCompartment.of(widthExtension(readableLineWidth)),
       keymap.of([
+        { key:'Mod-z', run:() => options.historyOwner ? options.historyOwner.undo() : undo(view), preventDefault:true },
+        { key:'Mod-Shift-z', run:() => options.historyOwner ? options.historyOwner.redo() : redo(view), preventDefault:true },
+        { key:'Ctrl-y', run:() => options.historyOwner ? options.historyOwner.redo() : redo(view), preventDefault:true },
         { key:'Mod-s', run:() => command('save') },
         { key:'Mod-o', run:() => command('quick-open') },
         { key:'Mod-p', run:() => command('palette') },
@@ -965,8 +907,8 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
         // Shared platform map: Mod is Cmd on macOS and Ctrl elsewhere.
         // Mod-d selects the next occurrence, Mod-Shift-l selects all, and
         // Mod-Alt-arrow adds a cursor vertically. Escape collapses extras.
-        { key:'Mod-d', run:() => runEditorCommand('select-next-match') },
-        { key:'Mod-Shift-l', run:() => runEditorCommand('select-all-matches') },
+        { key:'Mod-d', run:() => { runEditorCommand('select-next-match'); return true; } },
+        { key:'Mod-Shift-l', run:() => { runEditorCommand('select-all-matches'); return true; } },
         { key:'Mod-Alt-ArrowUp', run:() => runEditorCommand('add-cursor-above') },
         { key:'Mod-Alt-ArrowDown', run:() => runEditorCommand('add-cursor-below') },
         { key:'Mod-Alt-\\', run:() => runEditorCommand('indent') },
@@ -974,12 +916,18 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
         { key:'Escape', run:() => runEditorCommand('collapse-selections') },
         indentWithTab, ...defaultKeymap, ...historyKeymap,
       ]),
-      EditorView.contentAttributes.of({ 'aria-label':label, spellcheck:'true' }),
+      EditorView.domEventHandlers({ beforeinput:(event) => {
+        if (!options.historyOwner || !['historyUndo', 'historyRedo'].includes(event.inputType)) return false;
+        event.preventDefault();
+        event.inputType === 'historyUndo' ? options.historyOwner.undo() : options.historyOwner.redo();
+        return true;
+      } }),
+      EditorView.contentAttributes.of({ 'aria-label':label, spellcheck:'false' }),
       EditorView.updateListener.of((update) => {
         if (update.focusChanged && update.view.hasFocus) onFocus?.();
-        if (update.docChanged && !silent) onChange?.(serializeSource(update.state.doc.toString()), update);
+        if (update.docChanged && !silent) onChange?.(serializeSource(documentSource(update.state)), update, { origin:update.transactions.every(transaction => transaction.isUserEvent('input.type')) ? 'typing' : 'transaction' });
         if (update.selectionSet || update.docChanged) {
-          onSelection?.(selectionSnapshot(update.state));
+          onSelection?.(selectionSnapshot(update.state), update);
         }
       }),
       baseTheme,
@@ -987,47 +935,128 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
   });
   parent.dataset.mode = mode;
   view = new EditorView({ state, parent });
-  const sourceReadiness = mode === 'source';
-  if (sourceReadiness) {
-    parent.dataset.syntaxReady = 'loading';
-    parent.setAttribute('aria-busy', 'true');
-    parent.style.visibility = 'hidden';
+  parent.insertBefore(pendingPanel,view.dom);syncPendingPanel();
+  let sourceReadiness = mode === 'source';
+  let syntaxStatus = { state:sourceReadiness ? 'loading' : 'ready', message:sourceReadiness ? 'Loading syntax…' : 'Syntax ready', retryable:false };
+  let syntaxGeneration = 0;
+  let grammarLoaded = !sourceReadiness;
+  let syntaxFrame: number | null = null;
+  let syntaxDeadline: ReturnType<typeof setTimeout> | null = null;
+  let focusPending = false;
+  let resolveSyntax: ((value:boolean) => void) | null = null;
+  const syntaxLabel = document.createElement('div');
+  syntaxLabel.setAttribute('role', 'status'); syntaxLabel.setAttribute('aria-live', 'polite');
+  syntaxLabel.className = 'cm-syntax-status';
+  syntaxLabel.style.cssText = 'padding:8px 12px;font:inherit';
+  if (sourceReadiness) { parent.insertBefore(syntaxLabel, view.dom); view.dom.style.visibility = 'hidden'; }
+  function reportSyntax(next: typeof syntaxStatus) {
+    if (destroyed) return;
+    syntaxStatus = next; parent.dataset.syntaxReady = next.state;
+    parent.setAttribute('aria-busy', String(next.state === 'loading'));
+    syntaxLabel.textContent = next.message;
+    syntaxLabel.hidden = next.state === 'ready';
+    if (next.retryable) {
+      const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = 'Retry syntax';
+      retry.addEventListener('click', () => { void retrySyntax(); }); syntaxLabel.append(' ', retry);
+    }
+    options.onSyntaxStatus?.({ ...next });
   }
-  const reveal = (ready: boolean) => {
-    if (destroyed || !sourceReadiness) return;
-    const show = () => {
-      if (destroyed) return;
-      parent.dataset.syntaxReady = ready ? 'ready' : 'plain';
-      parent.setAttribute('aria-busy', 'false');
-      parent.style.visibility = '';
-      // A source view can finish parsing while its host is still hidden. A
-      // direct DOM focus attempt during that window is discarded by the
-      // browser; restore focus only when the user has not moved focus to a
-      // different control in the meantime.
-      if (typeof document !== 'undefined'
-        && (document.activeElement === document.body || parent.contains(document.activeElement))) {
-        view.focus();
-      }
+  function revealSyntax(next: typeof syntaxStatus) {
+    if (destroyed) return;
+    if (syntaxDeadline != null) clearTimeout(syntaxDeadline); syntaxDeadline = null;
+    view.dom.style.visibility = ''; reportSyntax(next);
+    resolveSyntax?.(next.state === 'ready'); resolveSyntax = null;
+    if (focusPending && view.dom.isConnected && (document.activeElement === document.body || parent.contains(document.activeElement))) { focusPending = false; view.focus(); }
+  }
+  function checkSyntax() {
+    if (destroyed || !grammarLoaded || syntaxStatus.state === 'ready' || syntaxFrame != null) return;
+    syntaxFrame = requestAnimationFrame(() => {
+      syntaxFrame = null;
+      if (destroyed || !view.dom.isConnected || !grammarLoaded) return;
+      // Visibility preserves geometry. Measure the mounted/restored viewport,
+      // then let CM publish its incremental tree before the reveal frame.
+      const generation = syntaxGeneration;
+      view.requestMeasure({ read:() => view.viewport.to, write:(to) => {
+        if (destroyed || generation !== syntaxGeneration || !grammarLoaded) return;
+        if (syntaxTreeAvailable(view.state, to)) revealSyntax({ state:'ready', message:'Syntax ready', retryable:false });
+      } });
+    });
+  }
+  const syntaxObserver = EditorView.updateListener.of(() => checkSyntax());
+  view.dispatch({ effects:StateEffect.appendConfig.of(syntaxObserver) });
+  function presentationExtensions() {
+    if (!grammarLoaded) return [];
+    const markdownPresentation=mode==='live'&&(languageMetadata.id==='markdown'||languageMetadata.parser.startsWith('markdown:'))?[createStructuralDecorations(renderPreview),createLivePreviewPlugin(renderPreview)]:[];
+    const commentRender=options.renderComment||renderPreview;
+    const inset:CommentInsetOptions={
+      render:(body,editBody)=>commentRender?.(body,editBody)||null,
+      createBodyEditor:(parent,body,onChange)=>createOpenClankEditor({parent,doc:body,language:'Markdown',mode:'live',lineNumbers:false,readableLineWidth:false,richComments:false,renderPreview,onChange:value=>onChange(value),onCommand:name=>{if(name==='save')return command('save');return false;}}),
+      capture:target=>({expectedSource:serializeSource(documentSource(target.state)),expectedLocalRevision:options.getLocalRevision?.()||0}),
+      apply:(target,region,body,capture)=>{
+        const serialized=serializeCommentBody(documentSource(target.state),region,body);
+        if(serialized.ok===false)return {ok:false,error:serialized.error};
+        try {
+          if(options.applySourceTransaction){
+            const result:any=options.applySourceTransaction(raw=>{
+              const logical=raw.replace(/\r\n?|\n/g,'\n');
+              const edit=serializeCommentBody(logical,region,body);if(edit.ok===false)throw new Error(edit.error);
+              // Translate logical UTF-16 offsets to raw offsets; only this region changes.
+              const rawOffset=(offset:number)=>{let logicalOffset=0,index=0;while(index<raw.length&&logicalOffset<offset){if(raw[index]==='\r'&&raw[index+1]==='\n')index++;index++;logicalOffset++;}return index;};
+              const from=rawOffset(edit.change.from),to=rawOffset(edit.change.to);
+              return raw.slice(0,from)+serializeEditorSource(edit.change.insert,raw.slice(from,to))+raw.slice(to);
+            },{...capture,origin:'comment'});
+            if(result?.outcome==='failed')return {ok:false,error:result.message||'The comment source changed. Your pending body is retained.'};
+            if(typeof result?.content==='string'&&!destroyed)applyValue(result.content);
+          } else {
+            if(capture.expectedSource!==serializeSource(documentSource(target.state))||capture.expectedLocalRevision!==(options.getLocalRevision?.()||0))return {ok:false,error:'The source changed. Review your retained comment body before applying.'};
+            target.dispatch({changes:serialized.change,annotations:Transaction.userEvent.of('input.comment')});
+          }
+          syncPendingPanel();return {ok:true};
+        } catch(error){return {ok:false,error:error instanceof Error?error.message:String(error)};}
+      },
+      getPending:id=>options.getPendingSourceEdit?.(id) as any,
+      registerPending:options.registerPendingSourceEdit?edit=>{options.registerPendingSourceEdit?.(edit);syncPendingPanel();}:undefined,
+      removePending:id=>{options.removePendingSourceEdit?.(id);syncPendingPanel();},
+      reveal:(target,region)=>target.dispatch({effects:commentSourceReveal.of([{from:region.from,to:region.to}]),selection:EditorSelection.range(region.from,region.to),scrollIntoView:true}),
+      seeSource:(region,event)=>options.onSeeSource?.({from:region.from,to:region.to,source:region.sourceText,markdown:region.body},event),
     };
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(show);
-    else setTimeout(show, 0);
-  };
-  const languageReady = mode === 'source'
-    ? loadSourceLanguage(options.language, regionOptions).then((language) => {
-      if (destroyed) return false;
+    return [...markdownPresentation,...(richComments&&isRichCommentLanguageQualified(languageMetadata.id,regionOptions)?[createRichCommentPlugin(languageMetadata.id,commentRender,regionOptions,options.onSeeSource,inset)]:[])];
+  }
+  function clearSyntax() {
+    grammarLoaded = false;
+    visibleCommentProjections.delete(view);
+    view.dispatch({ effects:[languageCompartment.reconfigure([]), modeCompartment.reconfigure([]), view.scrollSnapshot()], annotations:Transaction.addToHistory.of(false) });
+  }
+  function retrySyntax() {
+    if (destroyed) return Promise.resolve(false);
+    const generation = ++syntaxGeneration;
+    resolveSyntax?.(false);
+    const result = new Promise<boolean>(resolve => { resolveSyntax = resolve; });
+    clearSyntax();
+    if (syntaxFrame != null) cancelAnimationFrame(syntaxFrame); syntaxFrame = null;
+    if (syntaxDeadline != null) clearTimeout(syntaxDeadline);
+    // Operational failure bound, never an artificial delay before ready paint.
+    syntaxDeadline = setTimeout(() => {
+      if (!destroyed && generation === syntaxGeneration) { clearSyntax(); revealSyntax({ state:'degraded', message:'Syntax loading timed out; editing plain source', retryable:true }); }
+    }, 4000);
+    if (!syntaxLabel.isConnected) parent.insertBefore(syntaxLabel, view.dom);
+    view.dom.style.visibility = 'hidden'; reportSyntax({ state:'loading', message:'Loading syntax…', retryable:false });
+    void loadLanguage().then(language => {
+      if (destroyed || generation !== syntaxGeneration) return false;
       const hasLanguage = Array.isArray(language) ? language.length > 0 : Boolean(language);
-      if (hasLanguage) {
-        view.dispatch({ effects:languageCompartment.reconfigure(language) });
-        forceParsing(view, view.viewport.to, 120);
-      }
-      const ready = !hasLanguage || syntaxTreeAvailable(view.state, view.viewport.to);
-      reveal(ready);
-      return ready;
+      if (!hasLanguage) { revealSyntax({ state:'plain', message:'Plain text; no syntax grammar', retryable:false }); return false; }
+      grammarLoaded = true;
+      view.dispatch({ effects:[languageCompartment.reconfigure(language), modeCompartment.reconfigure(presentationExtensions()), view.scrollSnapshot()], annotations:Transaction.addToHistory.of(false) });
+      forceParsing(view, view.viewport.to, 8);
+      checkSyntax();
+      return true;
     }).catch(() => {
-      reveal(false);
+      if (!destroyed && generation === syntaxGeneration) { clearSyntax(); revealSyntax({ state:'degraded', message:'Syntax unavailable; editing plain source', retryable:true }); }
       return false;
-    })
-    : Promise.resolve(true);
+    });
+    return result;
+  }
+  const languageReady = sourceReadiness ? retrySyntax() : Promise.resolve(true);
   if (Number.isFinite(options.scrollTop)) view.scrollDOM.scrollTop = Math.max(0, Number(options.scrollTop));
   const reportScroll = () => onScroll?.(view.scrollDOM.scrollTop);
   view.scrollDOM.addEventListener('scroll', reportScroll, { passive:true });
@@ -1046,12 +1075,15 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
 
   function setValue(value: string, nextSelection?: SelectionInput | null) {
     const next = String(value ?? '');
-    const nextLength = logicalDocumentLength(next);
+    const logicalNext = next.replace(/\r\n?|\n/g, '\n');
+    const nextLength = logicalNext.length;
     const normalized = normalizeEditorSelection(nextSelection || selectionForLength(nextLength), nextLength);
-    if (next === view.state.doc.toString()) {
+    if (logicalNext === documentSource(view.state)) {
+      originalSource = next;
       if (nextSelection) setSelection(normalized);
       return;
     }
+    originalSource = next;
     silent = true;
     view.dispatch({
       changes:{ from:0, to:view.state.doc.length, insert:next },
@@ -1059,6 +1091,13 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
       annotations:Transaction.addToHistory.of(false),
     });
     silent = false;
+  }
+
+  function applyChanges(changes: any) {
+    if (!changes || changes.empty) return;
+    silent = true;
+    try { view.dispatch({ changes, annotations:Transaction.addToHistory.of(false) }); }
+    finally { silent = false; }
   }
 
   function applyValue(value: string, nextSelection?: SelectionInput | null) {
@@ -1148,42 +1187,108 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
     return true;
   }
 
-  function selectNextMatch(query?: string) {
-    const needle = String(query ?? selectedTexts()[view.state.selection.mainIndex] ?? '');
-    if (!needle) return false;
-    const text = view.state.doc.toString();
-    const existing = new Set(view.state.selection.ranges.map((range) => `${range.from}:${range.to}`));
-    const main = view.state.selection.main;
-    let index = text.indexOf(needle, Math.max(main.to, main.from + (main.empty ? 1 : 0)));
-    if (index < 0) index = text.indexOf(needle, 0);
-    while (index >= 0 && existing.has(`${index}:${index + needle.length}`)) {
-      index = text.indexOf(needle, index + Math.max(1, needle.length));
+  function* literalMatches(needle: string, from = 0, to = view.state.doc.length): Generator<number> {
+    let offset = from, tail = '';
+    const iterator = view.state.doc.iterRange(from, to);
+    while (!iterator.next().done) {
+      const chunk = tail + iterator.value;
+      const base = offset - tail.length;
+      for (let at = chunk.indexOf(needle); at >= 0; at = chunk.indexOf(needle, at + needle.length)) if (base + at >= from && base + at + needle.length <= to) yield base + at;
+      offset += iterator.value.length;
+      tail = chunk.slice(Math.max(0, chunk.length - needle.length + 1));
     }
-    if (index < 0) return false;
-    const ranges = view.state.selection.ranges.map((range) => EditorSelection.range(range.anchor, range.head));
-    ranges.push(EditorSelection.range(index, index + needle.length));
-    view.dispatch({ selection:EditorSelection.create(ranges), scrollIntoView:true });
-    view.focus();
-    return true;
+  }
+  let commandNotice = '';
+  const spellingOwner = {};
+  let spellingGeneration = 0;
+  function captureSpelling() {
+    return { owner:spellingOwner, state:view.state, visible:view.visibleRanges.map(range => ({ ...range })), syntaxGeneration, grammarReady:grammarLoaded };
+  }
+  type SpellingCapture = ReturnType<typeof captureSpelling>;
+  function spellingCurrent(capture:SpellingCapture) {
+    return !destroyed && view.dom.isConnected && capture?.owner === spellingOwner && view.state.doc === capture.state.doc && view.state.selection.eq(capture.state.selection) && syntaxGeneration === capture.syntaxGeneration;
+  }
+  function spellingScope(capture:SpellingCapture) {
+    const language = languageMetadata.id === 'markdown' || languageMetadata.parser.startsWith('markdown:') ? 'markdown' : languageMetadata.id;
+    return collectSpellingScope(capture.state,language,capture.visible,capture.grammarReady);
+  }
+  function isSpellingSelectionEligible(capture = captureSpelling()) {
+    if (!spellingCurrent(capture) || capture.state.selection.ranges.length !== 1 || capture.state.selection.main.empty || capture.state.selection.main.to-capture.state.selection.main.from > 64) return false;
+    const scope = spellingScope(capture), range = capture.state.selection.main;
+    return !scope.truncated && scope.tokens.length === 1 && scope.tokens[0].from === range.from && scope.tokens[0].to === range.to;
+  }
+  async function checkSpelling(service:any = (globalThis as any).openClankSpelling, capture = captureSpelling()) {
+    const request = ++spellingGeneration;
+    const globalService = (globalThis as any).openClankSpelling;
+    const revision = service?.revision?.();
+    const stale = () => !spellingCurrent(capture) || request !== spellingGeneration || globalService !== (globalThis as any).openClankSpelling || revision !== service?.revision?.();
+    const staleResult = () => ({ state:'stale' as const,message:'The spelling target changed; check the current prose again.',diagnostics:[] as SpellingToken[],truncated:false });
+    if (stale()) return staleResult();
+    function report(message:string, diagnostics:SpellingToken[], truncated:boolean, state:'checked'|'unavailable' = 'checked') {
+      commandNotice = message;
+      view.dispatch({ effects:[spellingMarks.of(diagnostics),EditorView.announce.of(message)] });
+      options.onSyntaxStatus?.({ ...syntaxStatus,message });
+      return { state,message,diagnostics,truncated };
+    }
+    try {
+      view.dispatch({ effects:spellingMarks.of([]) });
+      const scope = spellingScope(capture);
+      if (!scope.tokens.length) return report(scope.message,[],scope.truncated);
+      if (typeof service?.checkBatch !== 'function') return report('Offline spelling is unavailable. Reload the spelling service and try again.',[],scope.truncated,'unavailable');
+      const words = [...new Set(scope.tokens.map(token => token.word))];
+      const batch = words.slice(0,256), correct = await service.checkBatch(batch);
+      if (stale()) return staleResult();
+      if (!Array.isArray(correct) || correct.length !== batch.length || correct.some(value => typeof value !== 'boolean')) throw new Error('Offline spelling returned an invalid batch.');
+      const checked = new Map(batch.map((word,index) => [word,correct[index]]));
+      const errors = scope.tokens.filter(token => checked.get(token.word) === false);
+      const diagnostics = errors.slice(0,100);
+      const truncated = scope.truncated || words.length > batch.length || errors.length > diagnostics.length;
+      const locale = service.locale?.();
+      const fallback = locale?.fallback ? `; ${locale.requested} uses the en-US fallback` : '';
+      const message = `${errors.length} possible spelling ${errors.length === 1 ? 'error' : 'errors'} in ${scope.selection ? 'selected' : 'visible'} prose (en-US${fallback}).${truncated ? ' Bounded check; select a smaller range to check more.' : ''}${scope.skipped ? ' Paths, identifiers and long words were skipped.' : ''}`;
+      return report(message,diagnostics,truncated);
+    } catch (error) {
+      if (stale()) return staleResult();
+      return report(`Offline spelling failed: ${error instanceof Error ? error.message : String(error)}`,[],false,'unavailable');
+    }
   }
 
-  function selectAllMatches(query?: string) {
-    const needle = String(query ?? selectedTexts()[view.state.selection.mainIndex] ?? '');
+  function selectNextMatch(query?: string) {
+    commandNotice = '';
+    const main = view.state.selection.main;
+    if (query === undefined && main.empty) {
+      const word = view.state.wordAt(main.head);
+      if (!word) return false;
+      view.dispatch({ selection:EditorSelection.range(word.from, word.to), userEvent:'select' }); return true;
+    }
+    const needle = String(query ?? view.state.doc.sliceString(main.from, main.to));
     if (!needle) return false;
-    const text = view.state.doc.toString();
-    const ranges: Array<ReturnType<typeof EditorSelection.range>> = [];
-    for (let index = 0; index <= text.length - needle.length;) {
-      const found = text.indexOf(needle, index);
-      if (found < 0) break;
-      ranges.push(EditorSelection.range(found, found + needle.length));
-      index = found + Math.max(1, needle.length);
+    const ranges = view.state.selection.ranges;
+    const available = (index: number) => !ranges.some(range => range.from < index + needle.length && range.to > index);
+    let found: number | undefined;
+    for (const index of literalMatches(needle, main.to)) if (available(index)) { found = index; break; }
+    if (found === undefined) for (const index of literalMatches(needle, 0, main.from)) if (available(index)) { found = index; break; }
+    if (found === undefined) return false;
+    const next = [...ranges, EditorSelection.range(found, found + needle.length)];
+    view.dispatch({ selection:EditorSelection.create(next, next.length - 1), scrollIntoView:true, userEvent:'select' });
+    view.focus(); return true;
+  }
+  function selectAllMatches(query?: string) {
+    const main = view.state.selection.main;
+    const word = main.empty ? view.state.wordAt(main.head) : main;
+    const needle = String(query ?? (word ? view.state.doc.sliceString(word.from, word.to) : ''));
+    if (!needle) return false;
+    const ranges: SelectionRange[] = [];
+    commandNotice = '';
+    for (const index of literalMatches(needle)) {
+      if (ranges.length === 1000) { commandNotice = 'Selected the first 1,000 matches; narrow the selection for more'; break; }
+      if (!ranges.length || index >= ranges[ranges.length - 1].to) ranges.push(EditorSelection.range(index, index + needle.length));
     }
     if (!ranges.length) return false;
-    const current = view.state.selection.main;
-    const mainIndex = Math.max(0, ranges.findIndex((range) => range.from === current.from && range.to === current.to));
-    view.dispatch({ selection:EditorSelection.create(ranges, mainIndex), scrollIntoView:true });
-    view.focus();
-    return true;
+    const mainIndex = Math.max(0, ranges.findIndex(range => range.from === main.from && range.to === main.to));
+    view.dispatch({ selection:EditorSelection.create(ranges, mainIndex), scrollIntoView:true, userEvent:'select', ...(commandNotice ? { effects:EditorView.announce.of(commandNotice) } : {}) });
+    options.onSyntaxStatus?.({ ...syntaxStatus, message:commandNotice || syntaxStatus.message });
+    view.focus(); return true;
   }
 
   function duplicateLines() {
@@ -1210,6 +1315,11 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
   }
 
   runEditorCommand = (name) => {
+    if (name === 'spellcheck' || name === 'check-spelling') { void checkSpelling(); return true; }
+    if (name === 'undo') return options.historyOwner ? options.historyOwner.undo() : undo(view);
+    if (name === 'redo') return options.historyOwner ? options.historyOwner.redo() : redo(view);
+    if (name === 'select-all') { view.dispatch({ selection:EditorSelection.range(0, view.state.doc.length), userEvent:'select' }); return true; }
+    if (name === 'save' || name === 'quick-open' || name === 'palette' || name === 'search') return command(name);
     if (name === 'add-cursor-above') return addCursorAbove(view);
     if (name === 'add-cursor-below') return addCursorBelow(view);
     if (name === 'select-next-match') return selectNextMatch();
@@ -1226,14 +1336,51 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
     return false;
   };
 
+  /** Per-open-buffer grammar choice; no document/history/view reconstruction. */
+  function setLanguage(idOrAuto: string): Promise<boolean> {
+    if (destroyed) return Promise.resolve(false);
+    const id = String(idOrAuto || '').trim().toLowerCase();
+    const entry = id === 'auto' ? null : LANGUAGE_REGISTRY.find(entry => entry.id === id);
+    if (id !== 'auto' && !entry) return Promise.reject(new RangeError(`Unknown registry language: ${id}`));
+    languageOverride = entry?.id || null;
+    const content = view.state.doc.sliceString(0, Math.min(4096, view.state.doc.length));
+    grammarOptions = languageOverride ? { dialect:undefined, path:undefined, content }
+      : { dialect:options.languageDialect, path:options.languagePath, content };
+    languageMetadata = sourceLanguageMetadata(languageOverride || undefined, grammarOptions);
+    regionOptions = { dialect:languageMetadata.id === 'jsonc' ? 'jsonc' : undefined, path:undefined };
+    commandNotice = '';
+    // The readiness generation also invalidates captured spelling and async maps.
+    spellingGeneration += 1;
+    return retrySyntax();
+  }
+
+  function peekCommentSourceRange(offset: number): CommentSourceRange | null {
+    if (destroyed || !grammarLoaded || !Number.isFinite(offset)) return null;
+    const cached = visibleCommentProjections.get(view);
+    if (!cached || cached.doc !== view.state.doc || cached.tree !== syntaxTree(view.state) || cached.language !== languageMetadata.displayName) return null;
+    if (!view.visibleRanges.some(range => range.from <= offset && offset <= range.to)) return null;
+    const range = cached.ranges.find(range => range.from <= offset && offset < range.to);
+    return range ? { ...range, contentRanges:range.contentRanges.map(span => ({ ...span })) } : null;
+  }
+
   function setMode(next: EditorMode) {
     const safe = next === 'source' ? 'source' : 'live';
     if (safe === mode) return;
     mode = safe;
     parent.dataset.mode = mode;
-    view.dispatch({ effects:modeCompartment.reconfigure(mode === 'live'
-      ? [createStructuralDecorations(renderPreview), createLivePreviewPlugin(renderPreview)]
-      : options.richComments === true && isRichCommentLanguageQualified(options.language, regionOptions) ? [createRichCommentPlugin(options.language || '', renderPreview, regionOptions, options.onSeeSource)] : []) });
+    if (mode === 'source' && !sourceReadiness) {
+      sourceReadiness = true; parent.insertBefore(syntaxLabel, view.dom); void retrySyntax();
+    } else if (mode === 'live' && sourceReadiness) {
+      sourceReadiness = false; // A pending language choice still owns readiness.
+    }
+    view.dispatch({ effects:[modeCompartment.reconfigure(presentationExtensions()), view.scrollSnapshot()], annotations:Transaction.addToHistory.of(false) });
+  }
+
+  function setRichComments(next: boolean) {
+    if (richComments === next) return;
+    richComments = next;
+    visibleCommentProjections.delete(view);
+    view.dispatch({ effects:[modeCompartment.reconfigure(presentationExtensions()), view.scrollSnapshot()], annotations:Transaction.addToHistory.of(false) });
   }
 
   function setLineNumbers(next: boolean) {
@@ -1251,7 +1398,7 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
   function find(query: string, backwards = false) {
     const needle = String(query || '');
     if (!needle) return false;
-    const text = view.state.doc.toString();
+    const text = documentSource(view.state);
     const cursor = view.state.selection.main;
     let index = backwards ? text.lastIndexOf(needle, Math.max(0, cursor.from - 1)) : text.indexOf(needle, cursor.to);
     if (index < 0) index = backwards ? text.lastIndexOf(needle) : text.indexOf(needle);
@@ -1264,7 +1411,7 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
   function replace(query: string, replacement: string, all = false) {
     const needle = String(query || '');
     if (!needle) return 0;
-    const text = view.state.doc.toString();
+    const text = documentSource(view.state);
     if (all) {
       const changes: Array<{ from:number; to:number; insert:string }> = [];
       for (let index = text.indexOf(needle); index >= 0; index = text.indexOf(needle, index + Math.max(1, needle.length))) {
@@ -1295,24 +1442,33 @@ function createOpenClankEditor(options: MarkdownEditorOptions) {
   }
 
   return {
-    view,
-    getValue:() => serializeSource(view.state.doc.toString()), setValue, applyValue, setSelection, insertText, replaceSelections, formatSelections,
+    view, captureSpelling, checkSpelling, isSpellingSelectionEligible,
+    getValue:() => serializeSource(documentSource(view.state)), setValue, applyValue, applyChanges, setSelection, insertText, replaceSelections, formatSelections,
     pasteText, replaceRange, selectedTexts, getSelectedText:() => selectedTexts().join('\n'), selectNextMatch, selectAllMatches,
-    duplicateLines, runCommand:runEditorCommand, setMode, setLineNumbers, setReadableLineWidth,
+    duplicateLines, runCommand:runEditorCommand, setMode, setLanguage, peekCommentSourceRange, setRichComments, setLineNumbers, setReadableLineWidth,
     getScrollTop:() => view.scrollDOM.scrollTop,
-    focus:() => view.focus(), focusLine,
-    undo:() => undo(view), redo:() => redo(view), find, replace,
+    focus:() => { if (syntaxStatus.state === 'loading') focusPending = true; else view.focus(); }, focusLine,
+    undo:() => options.historyOwner ? options.historyOwner.undo() : undo(view), redo:() => options.historyOwner ? options.historyOwner.redo() : redo(view), find, replace,
     getSelection:() => selectionSnapshot(view.state),
-    wrapMarkdownAsComment:(markdown: string, indent = '') => wrapMarkdownAsComment(markdown, options.language || '', indent, regionOptions),
-    safeCommentInsertion:(offset: number) => safeCommentInsertion(view.state.doc.toString(), options.language || '', offset, regionOptions),
+    wrapMarkdownAsComment:(markdown: string, indent = '') => wrapSourceComment(view.state,view.state.selection.main.from,markdown,indent),
+    safeCommentInsertion:(offset: number) => safeSourceCommentInsertion(view.state,languageMetadata.id,offset),
     revealCommentSource:(from: number, to: number) => {
-      view.dispatch({ selection:EditorSelection.range(from, to), scrollIntoView:true });
+      view.dispatch({ effects:commentSourceReveal.of([{from,to}]),selection:EditorSelection.range(from, to), scrollIntoView:true });
       view.focus();
     },
-    getCommentSourceMap:() => mapParserComments(view.state, options.language || '', undefined, regionOptions),
-    getCommentSourceMapAsync:() => parserCommentSourceRangesAsync(view.state, options.language || '', regionOptions).then((ranges) => ranges.map((range) => ({ ...range, markdown:range.contentRanges.map((span) => view.state.doc.sliceString(span.from, span.to)).join('\n') }))),
+    getCommentSourceMap:() => visibleCommentRanges(view, languageMetadata.displayName, regionOptions).map(range => ({ ...range, markdown:range.contentRanges.map(span => view.state.doc.sliceString(span.from, span.to)).join('\n') })),
+    getCommentSourceMapAsync:async () => {
+      const state = view.state, generation = syntaxGeneration;
+      await languageReady;
+      if (!forceParsing(view,state.doc.length,20) || !syntaxTreeAvailable(view.state,state.doc.length)) throw new Error('Comment syntax is still loading; retry the source map.');
+      const ranges = sourceCommentRegions(view.state,languageMetadata.id,[{from:0,to:state.doc.length}]);
+      if (destroyed || view.state.doc !== state.doc || generation !== syntaxGeneration) throw new Error('The source changed while comment syntax loaded');
+      return ranges.map(range => ({ ...range, markdown:range.contentRanges.map(span => state.doc.sliceString(span.from, span.to)).join('\n') }));
+    },
+    getSyntaxStatus:() => ({ ...syntaxStatus, message:commandNotice || syntaxStatus.message }), retrySyntax,
+    getStatus:() => ({ language:{ id:languageMetadata.id, name:languageMetadata.displayName, supportLevel:languageMetadata.supportLevel, mode:languageOverride ? 'override' : 'auto', override:languageOverride }, syntax:{ ...syntaxStatus, message:commandNotice || syntaxStatus.message }, selection:selectionSnapshot(view.state), canUndo:options.historyOwner ? options.historyOwner.state().canUndo : undoDepth(view.state) > 0, canRedo:options.historyOwner ? options.historyOwner.state().canRedo : redoDepth(view.state) > 0, notice:commandNotice || options.historyOwner?.state().historyNotice || '' }),
     languageReady,
-    destroy:() => { destroyed = true; view.destroy(); },
+    destroy:() => { destroyed = true; syntaxGeneration += 1; spellingGeneration += 1; resolveSyntax?.(false); resolveSyntax = null; if (syntaxDeadline != null) clearTimeout(syntaxDeadline); if (syntaxFrame != null) cancelAnimationFrame(syntaxFrame); syntaxLabel.remove();pendingPanel.remove(); view.destroy(); },
   };
 }
 
@@ -1330,6 +1486,7 @@ export function createMarkdownEditor(options: MarkdownEditorOptions) {
 export function createSourceEditor(options: MarkdownEditorOptions) {
   return createOpenClankEditor({
     ...options,
+    language:options.language || 'Plain text',
     mode:'source',
     readableLineWidth:false,
     lineWrapping:false,
@@ -1340,7 +1497,6 @@ export function createSourceEditor(options: MarkdownEditorOptions) {
 // Code Editor, Copal Editor and image-paste insertion share one authority for
 // comment boundaries, docstrings and safe insertion points.
 export {
-  ADVERTISED_LANGUAGE_LABELS,
   advertisedLabel,
   dialectForPath,
   documentationRegions,
@@ -1353,3 +1509,5 @@ export {
   wrapMarkdownAsComment,
 } from './openclank-doc-regions';
 export type { ContentSpan, DelimiterKind, DocumentationRegion, SafeInsertionResult, CommentWrapResult } from './openclank-doc-regions';
+
+export { LANGUAGE_REGISTRY, ADVERTISED_LANGUAGE_LABELS, sourceLanguageMetadata } from './openclank-source-languages';

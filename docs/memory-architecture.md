@@ -1,8 +1,14 @@
 # Memory architecture
 
-One memory engine, two hosts, one bank. frankenmemory (`fm-mcp`, Rust +
-SQLite FTS5) is the only memory store; Odysseus and MiMo each consume it
-through their own native idioms and never learn they're sharing.
+This is an implementation reference, not an installation or recovery guide.
+For daily use read the shared handbook through **Settings → Help**; for
+recovery read [backup coverage](backup-restore.md).
+
+Frankenmemory (`fm-mcp`, Rust + SQLite FTS5) is the default intended memory/RAG
+bank shared by Open Clank and its MiMo engine. Native provider compatibility
+selection remains in source; the retired Chroma vector path is not an optional
+live backend. The architecture below describes the Frankenmemory path and
+retains implementation/historical names where they identify actual interfaces.
 
 ## The engine
 
@@ -150,16 +156,27 @@ question-form even as a fragment.
   force layout, no CDN).
 - `GET /api/memory/digest-preview` — the byte-identical injected blocks
   (raw digest + trusted/untrusted split with the caller's own prefs).
-- Audit trail: `.clankers/robonotes/memory-trust-brain-audit-2026-07-17.md`.
+- The July 17, 2026 memory audit is historical private operator evidence.
 
-## Provider-always
+## Provider selection and retired Chroma
 
-`app_initializer` always constructs an active provider —
-`FrankenmemoryProvider` (default) or `NativeMemoryProvider`
-(`MEMORY_PROVIDER=native`, JSON store + optional Chroma vector, same
-interface). Routes, tools, and the preface talk to the provider only; the
-old native fallback branches are gone. `mcp_servers/memory_server.py` (the
-standalone memory MCP server) keeps its own native path — separate process.
+`src/app_initializer.py` defaults `MEMORY_PROVIDER` to `frankenmemory`,
+constructing `FrankenmemoryProvider` and a disabled native provider. Its remaining
+compatibility branch still constructs `NativeMemoryProvider` for an alternate
+selection. That code has not been removed, and these docs do not promise its
+removal or recommend a second deployment authority.
+
+The initializer sets the historical `memory_vector` slot to `None`; no
+environment toggle restores Chroma as a second live vector/RAG authority.
+Preserve old Chroma payloads for reviewed explicit conversion under
+private operator recovery material, rather than treating them as an
+optional current service. The standalone `mcp_servers/memory_server.py` retains
+its separate native-process path; it is not the default hosted authority.
+
+`FM_DB_PATH` defaults to `frankenmemory.db` under the resolved data root and can
+be independently overridden. Memory recall/graph projection is not a complete
+backup: app auth/keys, Copal documents/assets, History and host workspace files
+have their own storage/recovery boundaries.
 
 ## Scope plumbing
 

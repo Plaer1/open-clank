@@ -1,3 +1,5 @@
+import { recordPresentation } from './achievementProducer.js';
+import { uiIcon } from './uiIcons.js';
 // Memory Management Functions
 // This module handles all memory-related operations
 
@@ -58,10 +60,10 @@ const categoryLabel = (cat) => CATEGORY_LABELS[cat] || cat;
 // once it reuses the same markup). Each value maps to a 13px Feather-style
 // SVG so the icon visually distinguishes Newest / Oldest / A-Z / Most used.
 const _MEMORY_SORT_ICONS = {
-  newest: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
-  oldest: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><polyline points="3 3 3 8 8 8"/><polyline points="12 7 12 12 16 14"/></svg>',
-  alpha:  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h6"/><path d="M3 10h6"/><path d="M3 16h4"/><path d="M14 4l4 12"/><path d="M16 12h4"/><polyline points="17 18 21 14 17 10"/><line x1="21" y1="14" x2="13" y2="14"/></svg>',
-  uses:   '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>',
+  newest: uiIcon("clock", 13),
+  oldest: uiIcon("refresh", 13),
+  alpha:  uiIcon("sort-alpha", 13),
+  uses:   uiIcon("skills", 13),
 };
 
 function _memorySortIcon(value) {
@@ -1313,8 +1315,8 @@ export async function loadMemoryInspect() {
 
 // ---- Bulk select mode ----
 
-const _SELECT_BTN_DOT_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>';
-const _SELECT_BTN_X_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:3px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+const _SELECT_BTN_DOT_SVG = uiIcon("select", 11, {"className":"memory-select-btn-icon","style":"vertical-align:-2px;margin-right:3px;"});
+const _SELECT_BTN_X_SVG = uiIcon("close", 11, {"className":"memory-select-btn-icon","style":"vertical-align:-2px;margin-right:3px;"});
 
 function enterSelectMode() {
   selectMode = true;
@@ -1479,7 +1481,7 @@ export async function tidyMemories() {
       tidyBtn.disabled = false;
       tidyBtn.style.border = '';
       tidyBtn.style.background = '';
-      tidyBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:2px;color:var(--accent, var(--red));"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg> Tidy';
+      tidyBtn.innerHTML = uiIcon("sparkles", 11, {"style":"vertical-align:-1px;margin-right:2px;color:var(--accent, var(--red));"}) + " Tidy";
     }
   }
 }
@@ -2440,18 +2442,14 @@ export function renderMemoryList() {
     if (!selectMode) {
       const menuBtn = document.createElement('button');
       menuBtn.className = 'memory-menu-btn';
-      menuBtn.innerHTML = '\u22EE';
+      menuBtn.innerHTML = uiIcon('more', 14);
       menuBtn.title = 'Actions';
 
       const dropdown = document.createElement('div');
       dropdown.className = 'memory-item-dropdown';
 
-      // Pin / Unpin — bookmark icon matches the chat-session "Favorite" SVG.
-      // Filled when pinned, outlined when not.
-      const _bookmarkPath = '<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>';
-      const _pinSvg = memory.pinned
-        ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${_bookmarkPath}</svg>`
-        : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${_bookmarkPath}</svg>`;
+      // Pin state carries both a bookmark silhouette and a check mark.
+      const _pinSvg = uiIcon(memory.pinned ? 'bookmark-filled' : 'bookmark', 14);
       const pinItem = document.createElement('div');
       pinItem.className = 'dropdown-item-compact';
       pinItem.innerHTML = `<span class="dropdown-icon">${_pinSvg}</span><span>${memory.pinned ? 'Unpin' : 'Pin'}</span>`;
@@ -2459,7 +2457,7 @@ export function renderMemoryList() {
 
       const editItem = document.createElement('div');
       editItem.className = 'dropdown-item-compact';
-      editItem.textContent = '✎ Edit';
+      editItem.innerHTML = uiIcon('edit', 14) + '<span>Edit</span>';
       editItem.addEventListener('click', () => { dropdown.style.display = 'none'; startInlineEdit(item, memory); });
 
       // Details drawer (T2): every stored signal reachable — tags, scene,
@@ -2472,6 +2470,9 @@ export function renderMemoryList() {
         const existing = item.querySelector('.memory-details-drawer');
         if (existing) { existing.remove(); return; }
         item.appendChild(_buildMemoryDetails(memory));
+        if (item.isConnected && item.getClientRects().length) void recordPresentation('memory.record.opened', {
+          recordId: String(memory.id), authorized: true,
+        }, { workspaceId: memory.workspace_id || null });
       });
 
       // Answer open questions by revising their stable block, never deleting it.
@@ -2489,14 +2490,14 @@ export function renderMemoryList() {
 
       const deleteItem = document.createElement('div');
       deleteItem.className = 'dropdown-item-compact memory-dropdown-delete';
-      deleteItem.textContent = '✕ Delete';
+      deleteItem.innerHTML = uiIcon('trash', 14) + '<span>Delete</span>';
       deleteItem.addEventListener('click', () => { dropdown.style.display = 'none'; deleteMemory(memory.id); });
 
       // Select — enters bulk-select mode and pre-selects this memory. Same
       // pattern as the email/documents/skills Select item.
       const selectItem = document.createElement('div');
       selectItem.className = 'dropdown-item-compact';
-      selectItem.innerHTML = '<span class="dropdown-icon"><span style="font-size:16px;line-height:1;">●</span></span><span>Select</span>';
+      selectItem.innerHTML = uiIcon('select', 14) + '<span>Select</span>';
       selectItem.addEventListener('click', (e) => {
         e.stopPropagation();
         if (dropdown.parentNode) dropdown.remove();
@@ -2511,7 +2512,7 @@ export function renderMemoryList() {
       // dismisses cleanly.
       const cancelItem = document.createElement('div');
       cancelItem.className = 'dropdown-item-compact dropdown-cancel-mobile';
-      cancelItem.textContent = '✕ Cancel';
+      cancelItem.innerHTML = uiIcon('close', 14) + '<span>Cancel</span>';
       cancelItem.addEventListener('click', (e) => { e.stopPropagation(); if (dropdown.parentNode) dropdown.remove(); });
 
       dropdown.appendChild(pinItem);

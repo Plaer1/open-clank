@@ -1,3 +1,6 @@
+import { createExplorerLayout, showExplorerCustomization } from './editor/explorerLayout.js';
+import { isChatResource, dispatchFilesDestination, destinationLabel } from './copal/resourceDestinations.js';
+import { acknowledgeVisible } from './achievementProducer.js';
 import { filesServiceClient } from './filesServiceClient.js';
 import { filesFacadeClient } from './filesFacadeClient.js';
 import { createOpenClankWindow } from './copal/windows.js';
@@ -13,6 +16,7 @@ import {
   normalizeSortSpec,
 } from './editor/entryModel.js';
 import { isPreviewable, previewKind, readBoundedTextResponse } from './editor/previewModel.js';
+import { isTextPath, EDITOR_BINARY_SUFFIX_PATTERN } from './editor/languageRegistry.js';
 import uiModule from './ui.js';
 import * as Modals from './modalManager.js';
 import {
@@ -29,12 +33,14 @@ import {
 } from './filesSelectionModel.js';
 import { createWindowNavigation } from './copal/navigation.js';
 import { createFilesCanvasImagePayload, FILES_CANVAS_IMAGE_MIME } from './editor/clipboard-and-drop.js';
+import { openResourceHistory } from './historyView.js';
 import { registerAdapter } from './custom-context-menu.js';
 import { safeExternalDropSegment, safeExternalDropPath, applyRectangleSelection } from './filesDropModel.js';
 
 const FILES_FAVORITES_KEY = 'odysseus-files-favorites';
 const FILES_VIEW_PREFS_KEY = 'odysseus-files-view-preferences';
-const MAX_FAVORITES = 24;
+
+const EDITOR_BINARY_SUFFIX = new RegExp(EDITOR_BINARY_SUFFIX_PATTERN, 'i');
 const FILE_SORT_OPTIONS = Object.freeze([
   ['name:asc', 'Name ↑'],
   ['name:desc', 'Name ↓'],
@@ -51,7 +57,7 @@ const FILE_DETAIL_COLUMNS = Object.freeze([
   ['size', 'Size'],
   ['modified', 'Modified'],
 ]);
-const DEFAULT_FILES_MODE = 'list';
+const DEFAULT_FILES_MODE = 'details';
 const DEFAULT_FILES_SORT = Object.freeze({
   key: 'name',
   direction: 'asc',
@@ -60,7 +66,35 @@ const DEFAULT_FILES_SORT = Object.freeze({
 });
 const MAX_EXTERNAL_DROP_ENTRIES = FILES_MAX_DRAG_ITEMS * 5;
 const MAX_EXTERNAL_DROP_DEPTH = 16;
+const CLANKER_HOME_PROVIDER = 'clanker';
+const LIBRARY_COLLECTION_VIEWS = Object.freeze({
+  documents: 'documents:active',
+  published: 'published',
+  chats: 'chats:active',
+  research: 'research:active',
+  archive: 'archive',
+});
+const CLANKER_COLLECTION_LABELS = Object.freeze({
+  'documents:active': 'Documents',
+  published: 'Downloads',
+  'chats:active': 'Chats',
+  'research:active': 'Research',
+  archive: 'Archive',
+});
 
+const browsers = new Map();
+let browserSequence = 0;
+let activeBrowser = null;
+let filesClipboard = null;
+
+export function createFilesBrowser(options = {}) {
+  if (!document.querySelector('[data-files-workbench-style]')) { const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = new URL('../css/filesWorkbench.css', import.meta.url).href; link.dataset.filesWorkbenchStyle = ''; document.head.append(link); }
+  let localMenu = null;
+  let browserResize = null;
+  const id = options.id || `files-window-${++browserSequence}`;
+  const hooks = {};
+  const listeners = new AbortController();
+  const listen = (target, type, callback, config = {}) => target.addEventListener(type, callback, { ...(typeof config === 'boolean' ? { capture: config } : config), signal: listeners.signal });
 const state = {
   shell: null,
   nativeWindow: null,
@@ -69,7 +103,9 @@ const state = {
   entries: [],
   nextCursor: null,
   mode: DEFAULT_FILES_MODE,
-  provider: 'host',
+  smallIconSize: 20,
+  largeIconSize: 64,
+  provider: CLANKER_HOME_PROVIDER,
   selected: new Set(),
   contentGeneration: 0,
   contentController: null,
@@ -116,6 +152,38 @@ const state = {
   contextAdapterDispose: null,
 };
 
+const explorerLayout = createExplorerLayout({
+  getScope:() => options.getLayoutScope?.() || {owner:state.owner,workspace:state.currentWorkspaceId || copalWorkspace(),surface:options.surface || 'files'},
+  onApplied:() => filterTree(state.treeFilter),
+});
+let categoryObserver = null;
+const collectionCollapseApplied=new Map();
+function syncCollectionLayout(tree = state.collectionTree) {
+  if (!tree?.container) return;
+  for (const node of tree.snapshot().nodes.filter(item => item.parentId == null)) {
+    const provider = node.data?.provider;
+    if (!['copal','library','files'].includes(provider)) continue;
+    const id = `collection:${provider}`;
+    const find = () => [...tree.container.querySelectorAll('[data-explorer-id]')].find(item => item.dataset.explorerId === node.id);
+    const label = {copal:'Copal collections',library:'Library · documents, research and downloads',files:'Gallery collections'}[provider];
+    explorerLayout.register({id,label,group:'application-collections',element:find,
+      content:() => find()?.querySelector(':scope > [role="group"]'),
+      getCollapsed:() => tree.getNode(node.id)?.expanded !== true,
+      setCollapsed:(collapsed, configured) => {
+        const current = tree.getNode(node.id);
+        if (!configured || !current || current.loading) return;
+        const prior=collectionCollapseApplied.get(id);
+        if(prior?.tree===tree && prior.collapsed===collapsed)return;
+        collectionCollapseApplied.set(id,{tree,collapsed});
+        if(current.expanded===!collapsed)return;
+        if (collapsed) tree.collapse(node.id); else void tree.expand(node.id);
+      },
+      reset:() => { if(tree.getNode(node.id)?.expanded)tree.collapse(node.id); },
+    });
+  }
+}
+function customizeExplorer() { return showExplorerCustomization([explorerLayout], {title:'Customize Files Explorer'}); }
+
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
@@ -157,11 +225,21 @@ function isDirectory(entry) {
 }
 
 function isTextualEntry(entry) {
+  const name = String(entry?.name || '');
+  if (EDITOR_BINARY_SUFFIX.test(name)) return false;
   const capabilities = new Set(Array.isArray(entry?.capabilities) ? entry.capabilities : []);
   if (capabilities.has('open_editor') || capabilities.has('edit') || capabilities.has('text')) return true;
+  if (entry?.open_target?.app === 'editor') return true;
   const mime = String(entry?.mime_type || entry?.media_type || '').toLowerCase();
   if (mime.startsWith('text/') || /(?:json|javascript|typescript|xml|yaml|toml|sql|markdown)/.test(mime)) return true;
-  return /\.(?:txt|md|markdown|mdx|json|jsonl|ya?ml|toml|xml|html?|css|scss|less|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|c|h|cpp|hpp|sql|sh|bash|zsh|ini|cfg|conf|log)$/i.test(String(entry?.name || ''));
+  return isTextPath(name);
+}
+
+function editorResourceAllowed(resource) { return options.surface !== 'editor' || !isChatResource(resource); }
+function confirmPickerEntry(entry) {
+  if (!editorResourceAllowed(entry)) { setStatus('Chats belong in Chats or Library, outside Editor.', true); return false; }
+  const intent = state.openIntent || 'current'; state.openIntent = 'current';
+  return options.onConfirm?.(entry, { intent });
 }
 
 function facadeEntry(resource) {
@@ -176,6 +254,7 @@ function facadeEntry(resource) {
     media_type: String(resource?.mime_type || ''),
     sort_kind: String(resource?.sort_kind || resource?.preview_kind || resource?.mime_type || resource?.kind || 'file'),
     sort_keys: normalizeSortKeys(resource?.sort_keys),
+    navigationRole: resource?.navigationRole || resource?.navigation_role || ({ 'documents:active':'documents',published:'download','chats:active':'chat','research:active':'research',archive:'archive' }[resource?.provenance?.view]) || (String(resource?.kind || '').includes('root') ? ({host:'locations',copal:'workspace',files:'gallery',library:'library'}[resource?.provider]) : undefined),
   };
   if (capabilities.includes('download')) {
     entry.download_url = filesFacadeClient.contentUrl(entry.resource_ref, { purpose: 'download' });
@@ -193,11 +272,20 @@ function facadeEntry(resource) {
       scale: Math.min(3, Math.max(1, Number(window.devicePixelRatio) || 1)),
     });
   }
+  if (entry.provider === 'host' && capabilities.includes('preview') && entry.native_icon_available === true) {
+    entry.native_icon_url = filesFacadeClient.thumbnailUrl(entry.resource_ref, {
+      width: 64, height: 64, icon: true,
+      scale: Math.min(3, Math.max(1, Number(window.devicePixelRatio) || 1)),
+    });
+  }
   return entry;
 }
 
 function managedLabel() {
-  if (!state.columns.length) return state.provider === 'all' ? 'All sources' : state.provider;
+  if (!state.columns.length) {
+    if (state.provider === CLANKER_HOME_PROVIDER) return 'Clanker home';
+    return state.provider === 'all' ? 'All sources' : state.provider;
+  }
   const path = state.columns.map((column) => column.name || displayName(column.path)).join(' › ');
   return state.searchQuery ? `${path} · Search: ${state.searchQuery}` : path;
 }
@@ -317,7 +405,10 @@ function copalWorkspace() {
 }
 
 function setStatus(message, bad = false) {
-  state.nativeWindow?.setStatus(message, bad);
+  const paneStatus = state.shell?.querySelector('.files-pane-status');
+  if (paneStatus) { paneStatus.textContent = message || ''; paneStatus.classList.toggle('error', !!bad); }
+  const split = splits.get(id);
+  if (!split || activeBrowser === api) state.nativeWindow?.setStatus(message, bad);
 }
 
 function clearKeepBothRetry() {
@@ -334,6 +425,8 @@ function offerKeepBothRetry(payload, destination, response) {
   });
   if (!collision) return;
   clearKeepBothRetry();
+  const sourceModel = browsers.get(payload.pane)?.getTransferModel(payload);
+  if (sourceModel) payload = { ...payload, selection_epoch:sourceModel.epoch };
   state.pendingKeepBoth = { payload, destination, response };
   const toolbar = state.shell?.querySelector('.files-toolbar');
   if (!toolbar) return;
@@ -342,7 +435,7 @@ function offerKeepBothRetry(payload, destination, response) {
     const pending = state.pendingKeepBoth;
     if (!pending) return;
     button.disabled = true;
-    const result = await window.__openClankFilesRetryKeepBoth(pending.payload, pending.destination, pending.response);
+    const result = await hooks.__openClankFilesRetryKeepBoth(pending.payload, pending.destination, pending.response);
     if ((result?.items || []).every((item) => ['committed', 'unchanged'].includes(item?.outcome))) clearKeepBothRetry();
     else button.disabled = false;
   });
@@ -422,7 +515,7 @@ function readFavoritePaths() {
     const key = favoritesStorageKey();
     const parsed = key ? JSON.parse(localStorage.getItem(key) || '[]') : [];
     return Array.isArray(parsed)
-      ? parsed.filter((path) => typeof path === 'string' && path.trim()).slice(0, MAX_FAVORITES)
+      ? parsed.filter((path) => typeof path === 'string' && path.trim())
       : [];
   } catch { return []; }
 }
@@ -430,7 +523,7 @@ function readFavoritePaths() {
 function saveFavoritePaths() {
   try {
     const key = favoritesStorageKey();
-    if (key) localStorage.setItem(key, JSON.stringify([...state.favoritePaths].slice(0, MAX_FAVORITES)));
+    if (key) localStorage.setItem(key, JSON.stringify([...state.favoritePaths]));
   } catch (_) { /* Favorites are optional owner-scoped UI state, never authority. */ }
 }
 
@@ -449,30 +542,38 @@ function readViewPreferences() {
 function saveViewPreferences() {
   try {
     const key = viewPreferencesStorageKey();
-    if (key) localStorage.setItem(key, JSON.stringify(state.viewPreferences));
+    if (key) {
+      const latest = readViewPreferences();
+      latest[state.provider] = state.viewPreferences[state.provider];
+      state.viewPreferences = latest;
+      localStorage.setItem(key, JSON.stringify(latest));
+    }
   } catch (_) { /* presentation preferences are optional */ }
 }
 
 function applyViewPreferences(provider = state.provider) {
   const allowedModes = new Set(['list', 'grid', 'details', 'columns', 'gallery']);
+  state.viewPreferences = readViewPreferences();
   const preference = state.viewPreferences?.[provider] || {};
   // Preferences are owner-scoped. Start from product defaults so a user with
   // no saved value cannot inherit the prior account's live mode or sort.
   state.mode = DEFAULT_FILES_MODE;
   state.sort = normalizeSortSpec(DEFAULT_FILES_SORT);
+  state.smallIconSize = [16,20,24,32].includes(preference.smallIconSize) ? preference.smallIconSize : 20;
+  state.largeIconSize = [32,64,96,128].includes(preference.largeIconSize) ? preference.largeIconSize : 64;
   if (allowedModes.has(preference.mode)) state.mode = preference.mode;
   if (preference.sort && typeof preference.sort === 'object') state.sort = normalizeSortSpec(preference.sort);
   const mode = state.shell?.querySelector('.files-mode-select');
   const sort = state.shell?.querySelector('.files-sort-select');
   const foldersFirst = state.shell?.querySelector('[data-files-folders-first]');
-  if (mode) mode.value = state.mode;
+  if (mode) { mode.value = state.mode; mode.dispatchEvent(new Event('files-mode-sync')); }
   if (sort) sort.value = `${state.sort.key}:${state.sort.direction}`;
   updateFoldersFirstControl(foldersFirst, state.sort);
 }
 
 function rememberViewPreferences() {
   if (!state.owner) return;
-  state.viewPreferences[state.provider] = { mode: state.mode, sort: { ...state.sort } };
+  state.viewPreferences[state.provider] = { mode: state.mode, sort: { ...state.sort }, smallIconSize: state.smallIconSize, largeIconSize: state.largeIconSize };
   saveViewPreferences();
 }
 
@@ -496,6 +597,9 @@ async function authenticatedOwner(signal = null) {
 function destroyExplorerTree() {
   state.explorerTree?.destroy?.();
   state.explorerTree = null;
+  state.collectionTree?.destroy?.(); state.collectionTree = null;
+  state.favoriteTree?.destroy?.(); state.favoriteTree = null;
+  state.workspaceTree?.destroy?.(); state.workspaceTree = null;
 }
 
 function explorerEntry(entry, parentPath = '') {
@@ -503,7 +607,7 @@ function explorerEntry(entry, parentPath = '') {
     const managed = facadeEntry(entry);
     return {
       ...managed,
-      tree_id: managed.resource_id || managed.resource_ref,
+      tree_id: entry.tree_id || managed.resource_id || managed.resource_ref,
       name: String(managed.name || 'Untitled'),
       kind: String(managed.kind || 'file').toLowerCase(),
     };
@@ -515,25 +619,43 @@ function explorerEntry(entry, parentPath = '') {
     // Rust directory page does not yet expose handles, so the Files adapter
     // supplies its already-authorized canonical path; the neutral controller
     // itself never derives, authorizes, or persists it.
-    tree_id: String(entry?.id || path),
+    tree_id: String(entry?.tree_id || entry?.id || path || entry?.name),
     path,
     name: String(entry?.name || displayName(path)),
     kind: String(entry?.kind || 'file').toLowerCase(),
   };
 }
 
-function mountExplorerTree(roots = state.navigationRoots) {
-  const container = state.shell?.querySelector('[data-files-tree]');
+function filterTree(query = '') {
+  state.treeFilter = String(query || '').trim().toLowerCase();
+  const input = state.sidebar?.querySelector('.files-tree-filter');
+  if (input && input.value !== String(query || '')) input.value = String(query || '');
+  for (const tree of [state.explorerTree, state.workspaceTree, state.favoriteTree, state.collectionTree]) {
+    if (!tree?.container) continue;
+    const nodes = tree.snapshot().nodes;
+    const allowed = new Set();
+    const byId = new Map(nodes.map(node => [node.id, node]));
+    for (const node of nodes) if (!state.treeFilter || String(node.data?.provenance?.logical_path || node.data?.name || "").toLowerCase().includes(state.treeFilter)) {
+      let current = node;
+      while (current) { allowed.add(current.id); current = byId.get(current.parentId); }
+    }
+    for (const item of tree.container.querySelectorAll('[data-files-tree-presentation]')) item.hidden = !allowed.has(item.dataset.filesTreePresentation) || explorerLayout.records().some(record => record.id === item.dataset.explorerCategory && record.hidden);
+  }
+  return state.treeFilter;
+}
+
+function mountExplorerTree(roots = state.navigationRoots, alternateContainer = null, treeOptions = {}) {
+  const container = alternateContainer || state.sidebar?.querySelector('[data-files-tree]');
   if (!container) return null;
-  destroyExplorerTree();
-  state.explorerTree = createExplorerTree({
+  if (!alternateContainer) destroyExplorerTree();
+  const controller = createExplorerTree({
     container,
-    roots: roots.map(root => explorerEntry(root)),
-    getId: entry => entry.tree_id,
-    getLabel: entry => entry.name,
-    isBranch: isDirectory,
+    roots: roots.filter(editorResourceAllowed).map(root => explorerEntry(root)),
+    getId: entry => entry.tree_namespace ? entry.tree_namespace + ':' + entry.tree_id : entry.tree_id,
+    getLabel: entry => entry.name + (entry.unavailable ? ' · unavailable' : ''),
+    isBranch: node => !node.unavailable && isDirectory(node),
     ariaLabel: 'Available host files and folders',
-    emptyLabel: 'No host locations available',
+    emptyLabel: treeOptions.emptyLabel || 'No locations available',
     loadPage: async (node, { cursor, signal }) => {
       const resourceRef = String(node.resource_ref || '').trim();
       if (!resourceRef) throw new Error('Refresh the authorized Files roots before browsing.');
@@ -542,12 +664,20 @@ function mountExplorerTree(roots = state.navigationRoots) {
         sort: managedSortRequest({ key: 'name', direction: 'asc', directoriesFirst: true }),
         signal,
       });
-      return {
-        items: (response?.entries || []).map(entry => explorerEntry(entry)),
-        nextCursor: response?.next_cursor || null,
-      };
+      requestAnimationFrame(() => { if (!listeners.signal.aborted) filterTree(state.treeFilter); });
+      const resources = (response?.entries || []).map(explorerEntry).filter(editorResourceAllowed);
+      const previous = cursor ? (controller.getNode(node.tree_namespace ? node.tree_namespace + ':' + node.tree_id : node.tree_id)?.children || []).map(id => controller.getNode(id)?.data).filter(Boolean).map(({ tree_ancestors, ...entry }) => entry) : [];
+      const pages = new Map([...previous, ...resources].map(entry => [entry.resource_id, entry]));
+      const parent = { ...node, tree_ancestors:undefined, tree_entries:[...pages.values()], tree_cursor:response?.next_cursor || null };
+      parent.tree_sort = { key:'name', direction:'asc', directoriesFirst:true };
+      const ancestors = [...(node.tree_ancestors || []), parent];
+      return { items:resources.map(entry => ({ ...entry, tree_namespace:node.tree_namespace, tree_ancestors:ancestors })), nextCursor:response?.next_cursor || null };
+
     },
     onActivate: async (node, context) => {
+      cancelReveal();
+      state.treeSelection = node; options.onSelection?.(node);
+      if (node.unavailable) { setStatus('This saved location is unavailable. Retry or remove its shortcut.',true); return; }
       if (isDirectory(node)) {
         if (node.resource_ref) await openManagedDirectory(node, null);
         else setStatus('Refresh the authorized Files roots before opening this folder.', true);
@@ -555,13 +685,25 @@ function mountExplorerTree(roots = state.navigationRoots) {
       // Preserve Files' desktop convention: a pointer click selects a worktree
       // file, double-click downloads it, while keyboard Enter activates it.
       else if (context.trigger === 'keyboard') {
-        if (node.download_url) await downloadEntry(node);
+        if (options.pickerMode) confirmPickerEntry(node);
+        else if (node.resource_ref && node.capabilities?.includes('open')) await openManagedEntry(node);
+        else if (isPreviewable(node, entryPath(node))) await previewEntry(node, entryPath(node));
         else setStatus('Refresh the authorized Files roots before downloading this file.', true);
       }
     },
+    onContextMenu: (event, node, context) => {
+      cancelReveal();
+      // Runs on the row before the document context adapter captures it.
+      // Use the controller descriptor, never a DOM-derived locator.
+      state.treeSelection = node;
+      controller.setActive(context.id);
+      options.onSelection?.(node);
+    },
     onDoubleActivate: node => {
       if (!isDirectory(node)) {
-        if (node.download_url) return downloadEntry(node);
+        if (options.pickerMode) return confirmPickerEntry(node);
+        if (node.resource_ref && node.capabilities?.includes('open')) return openManagedEntry(node);
+        if (isPreviewable(node, entryPath(node))) return previewEntry(node, entryPath(node));
         setStatus('Refresh the authorized Files roots before downloading this file.', true);
       }
       return null;
@@ -572,6 +714,7 @@ function mountExplorerTree(roots = state.navigationRoots) {
       { className: 'files-tree-glyph' },
     ),
     onError: error => setStatus(error.message || 'Folder unavailable', true),
+    actions:treeOptions.actions, onAction:treeOptions.onAction,
     classes: {
       item: 'files-tree-item',
       row: 'files-tree-row',
@@ -587,12 +730,33 @@ function mountExplorerTree(roots = state.navigationRoots) {
     },
     itemAttributes: node => ({
       'data-tree-resource-id': node.resource_id || null,
+      'data-files-tree-presentation': node.tree_namespace ? node.tree_namespace + ':' + node.tree_id : node.tree_id,
       'data-tree-path': node.path || null,
     }),
-    rowAttributes: node => ({ title: node.resource_ref ? node.name : node.path }),
+    rowAttributes: node => ({ title: node.resource_ref ? `${node.provenance?.logical_path || node.name}${node.open_target?.app ? ' · Open in ' + destinationLabel(node.open_target.app) : ''}` : node.path }),
   });
+  const tree = { ...controller, container };
+  if (!alternateContainer) state.explorerTree = tree;
+  const presentationKey = state.owner ? `files-tree:${options.surface || "files"}:${state.owner}:${state.currentWorkspaceId}:${treeOptions.persistenceKey || (alternateContainer ? 'collections' : 'locations')}` : '';
+  const treeLifetime = new AbortController();
+  const savePresentation = () => { if (!presentationKey) return; try { localStorage.setItem(presentationKey,JSON.stringify(tree.snapshot().nodes.filter(node => node.expanded).map(node => node.id))); } catch (_) {} };
+  const persistAfterInteraction = () => requestAnimationFrame(() => { if (!treeLifetime.signal.aborted) { savePresentation(); filterTree(state.treeFilter); } });
+  container.addEventListener('pointerdown',cancelReveal,{signal:treeLifetime.signal});
+  container.addEventListener('click',persistAfterInteraction,{signal:treeLifetime.signal});
+  container.addEventListener('keydown',persistAfterInteraction,{signal:treeLifetime.signal});
+  tree.destroy = () => { savePresentation(); treeLifetime.abort(); controller.destroy(); };
+  if (state.owner) {
+    let expanded = [];
+    try { expanded = JSON.parse(localStorage.getItem(`files-tree:${options.surface || "files"}:${state.owner}:${state.currentWorkspaceId}:${treeOptions.persistenceKey || (alternateContainer ? 'collections' : 'locations')}`) || '[]'); } catch (_) {}
+    void (async () => { for (const identity of expanded) { if (listeners.signal.aborted) break; await tree.expand(identity); } })();
+  }
+  if (alternateContainer?.matches('[data-files-collections]')) {
+    container.addEventListener('contextmenu',event=>{
+      if (event.target.closest('.files-tree-toggle') || event.target === container) {event.preventDefault();event.stopPropagation();customizeExplorer();}
+    },{signal:treeLifetime.signal});
+  }
   updateTreeHighlight();
-  return state.explorerTree;
+  return tree;
 }
 
 async function loadFavorites(serverFavorites = [], savedPlaces = []) {
@@ -608,8 +772,8 @@ async function loadFavorites(serverFavorites = [], savedPlaces = []) {
     .filter((item) => item?.resource_ref || item?.ref)
     .map((item) => ({ ...explorerEntry(item), pinned: true }));
   const places = (Array.isArray(savedPlaces) ? savedPlaces : [])
-    .filter((item) => item?.place_id && (item?.resource_ref || item?.ref))
-    .map((item) => ({ ...explorerEntry(item), placeId: String(item.place_id), pinned: false }));
+    .filter((item) => item?.place_id)
+    .map((item) => ({ ...explorerEntry(item), placeId: String(item.place_id), pinned: false, unavailable: !(item?.resource_ref || item?.ref) }));
   const opaqueIds = new Set(pinned.map(item => item.resource_id).filter(Boolean));
   const opaque = [...pinned];
   for (const place of places) {
@@ -622,8 +786,8 @@ async function loadFavorites(serverFavorites = [], savedPlaces = []) {
   renderFavorites();
   // Path-only favorites predate the Files facade. Drop them from the mounted
   // projection instead of statting browser paths through the legacy service.
-  state.favoritePaths = new Set();
-  saveFavoritePaths();
+  for (const path of state.favoritePaths) state.favorites.push({ name: displayName(path), path, kind: 'directory', unavailable: true, pinned: false });
+  renderFavorites();
   updateFavoriteButton();
   return;
 
@@ -668,7 +832,7 @@ async function loadFavorites(serverFavorites = [], savedPlaces = []) {
     if (signal.aborted || lifecycle !== state.lifecycleGeneration) return;
     state.favoritePaths = new Set(validated.map((item) => item.path));
     saveFavoritePaths();
-    state.favorites = [...opaque, ...validated].slice(0, MAX_FAVORITES);
+    state.favorites = [...opaque, ...validated];
     renderFavorites();
     updateFavoriteButton();
   } finally {
@@ -687,8 +851,11 @@ async function loadLegacyNavigationRoots({ force = false } = {}) {
       fetch('/api/odysseus-files/navigation-roots', { credentials: 'same-origin', signal: controller.signal }),
       authenticatedOwner(controller.signal),
     ]);
-    const owner = identity.status === 'confirmed' ? identity.owner
-      : identity.status === 'unavailable' ? state.owner : '';
+    if (identity.status !== 'confirmed' || !identity.owner) {
+      clearFilesAuthorityContent('Files owner could not be verified');
+      throw new Error('Files owner could not be verified');
+    }
+    const owner = identity.owner;
     if (!response.ok) {
       const error = new Error('Available files could not be loaded (' + response.status + ')');
       error.status = response.status;
@@ -704,7 +871,11 @@ async function loadLegacyNavigationRoots({ force = false } = {}) {
       owner: state.owner,
       roots: state.navigationRoots.map(root => [root?.id, root?.path, root?.kind, root?.capabilities]),
     });
-    if (state.owner && owner !== state.owner) closePreview();
+    if (state.owner && owner !== state.owner) {
+      // Keep the newly fetched roots alive, but remove every old-owner
+      // selection, column, and preview before the reopen path can preserve it.
+      clearFilesAuthorityContent('Account file access changed');
+    }
     state.owner = owner;
     state.navigation?.setScope({ account: owner, workspace: copalWorkspace() }, { clear: false });
     state.viewPreferences = readViewPreferences();
@@ -718,6 +889,7 @@ async function loadLegacyNavigationRoots({ force = false } = {}) {
       state.navigationRoots = roots.map(root => explorerEntry(root));
       state.navigationGeneration = data?.generation ?? null;
       mountExplorerTree();
+    state.collectionTree = mountExplorerTree(managedRoots.filter(root => root.provider !== 'host'), state.sidebar?.querySelector('[data-files-collections]'));
       if (state.navigationRoots.length === 1 && isDirectory(state.navigationRoots[0])) {
         await state.explorerTree?.expand(state.navigationRoots[0].tree_id);
       }
@@ -733,6 +905,7 @@ async function loadLegacyNavigationRoots({ force = false } = {}) {
 }
 
 async function loadOpaqueNavigationRoots({ force = false } = {}) {
+  const startingContent = state.contentGeneration;
   state.navigationController?.abort();
   const controller = new AbortController();
   state.navigationController = controller;
@@ -741,37 +914,44 @@ async function loadOpaqueNavigationRoots({ force = false } = {}) {
       filesFacadeClient.roots({ copalWorkspace: copalWorkspace(), signal: controller.signal }),
       authenticatedOwner(controller.signal),
     ]);
-    const owner = identity.status === 'confirmed' ? identity.owner
-      : identity.status === 'unavailable' ? state.owner : '';
-    const managedRoots = (rootsResponse?.entries || []).map(facadeEntry);
+    if (identity.status !== 'confirmed' || !identity.owner) {
+      clearFilesAuthorityContent('Files owner could not be verified');
+      throw new Error('Files owner could not be verified');
+    }
+    const owner = identity.owner;
+    const managedRoots = (rootsResponse?.entries || []).map(facadeEntry).filter(editorResourceAllowed);
     const hostRoot = managedRoots.find(entry => entry.provider === 'host' && isDirectory(entry));
-    if (!hostRoot) throw new Error('The opaque Host provider is unavailable');
-    const [hostResponse, placesResponse, workspacesResponse] = await Promise.all([
-      filesFacadeClient.children(hostRoot.resource_ref, {
+    const hostNavigation = hostRoot
+      ? filesFacadeClient.children(hostRoot.resource_ref, {
         limit: 200,
         sort: managedSortRequest({ key: 'name', direction: 'asc', directoriesFirst: true }),
         signal: controller.signal,
-      }),
+      }).catch((error) => ({ error }))
+      : Promise.resolve({ error: new Error('The opaque Host provider is unavailable') });
+    const [hostResponse, placesResponse, workspacesResponse] = await Promise.all([
+      hostNavigation,
       filesFacadeClient.places({ signal: controller.signal }).catch(error => {
         // Places were added after the first ResourceRef deployment. A server
         // lacking only this preference endpoint may still provide the secure
         // opaque worktree and pinned Home anchor.
-        if (error?.status === 404) return { entries: [] };
-        throw error;
+        return { entries: [], error };
       }),
       filesFacadeClient.workspaces({ signal: controller.signal }).catch(error => {
-        if (error?.status === 404) return { entries: [] };
-        throw error;
+        return { entries: [], error };
       }),
     ]);
     if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    const roots = (hostResponse?.entries || []).map(explorerEntry);
+    const roots = hostResponse?.error ? [] : (hostResponse?.entries || []).map(explorerEntry).filter(editorResourceAllowed);
     const pinned = roots.filter(item => item.provenance?.favorite);
-    if (state.owner && owner !== state.owner) closePreview();
+    if (state.owner && owner !== state.owner) {
+      // The current roots have already been authenticated for the new owner;
+      // invalidate only stale projected content, not this roots load.
+      clearFilesAuthorityContent('Account file access changed');
+    }
     state.owner = owner;
     state.navigation?.setScope({ account: owner, workspace: copalWorkspace() }, { clear: false });
     state.viewPreferences = readViewPreferences();
-    applyViewPreferences('host');
+    if (state.contentGeneration === startingContent) applyViewPreferences(state.provider);
     state.pane?.refresh?.();
     state.defaultPath = '';
     state.managedRoots = managedRoots;
@@ -782,16 +962,21 @@ async function loadOpaqueNavigationRoots({ force = false } = {}) {
     const workspace = await import('./workspace.js');
     if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
     state.currentWorkspaceId = workspace.getWorkspaceId();
+    explorerLayout.apply();
     state.navigationGeneration = rootsResponse?.policy_generation ?? null;
     // Refreshing the projection also refreshes every expiring ResourceRef.
     // Rebuild only on this policy/navigation event; ordinary current-folder
     // navigation never calls this function and cannot reshape the worktree.
     mountExplorerTree();
+    state.collectionTree = mountExplorerTree(managedRoots.filter(root => root.provider !== 'host'), state.sidebar?.querySelector('[data-files-collections]'));
     if ((force || roots.length === 1) && roots.length === 1 && isDirectory(roots[0])) {
       await state.explorerTree?.expand(roots[0].tree_id);
     }
     await loadFavorites(pinned, placesResponse?.entries || []);
     renderWorkspaces();
+    if (hostResponse?.error || placesResponse?.error || workspacesResponse?.error) {
+      setStatus('Some Host navigation data is unavailable; managed Files remain available.', true);
+    }
     return {
       version: rootsResponse?.version,
       generation: rootsResponse?.policy_generation,
@@ -810,60 +995,28 @@ async function loadNavigationRoots(options = {}) {
 }
 
 function renderFavorites() {
-  const container = state.shell?.querySelector('[data-files-favorites]');
+  const container = state.sidebar?.querySelector('[data-files-favorites]');
   if (!container) return;
-  container.replaceChildren();
-  if (!state.favorites.length) {
-    container.append(el('div', { class: 'files-sidebar-empty', text: 'No favorites yet' }));
-    return;
-  }
-  for (const favorite of state.favorites) {
-    const row = el('div', { class: 'files-favorite-row' });
-    const opaque = Boolean(favorite.resource_ref);
-    const button = el('button', {
-      type: 'button',
-      class: 'files-favorite-link',
-      title: opaque ? favorite.name : favorite.path,
-      'data-files-favorite-id': favorite.resource_id || null,
-      'data-files-favorite-path': opaque ? null : favorite.path,
+  const visible = state.favoriteVisibleCount || 50;
+  const roots = state.favorites.slice(0,visible).map(item => ({ ...item, tree_id:item.resource_id || item.placeId || item.path, tree_namespace:'favorite', favoriteRoot:true }));
+  if (state.favoriteTree) state.favoriteTree.setRoots(roots.map(explorerEntry));
+  else {
+    container.replaceChildren();
+    state.favoriteTree = mountExplorerTree(roots,container,{ persistenceKey:'favorites', emptyLabel:'No favorites yet',
+      actions:node => node.favoriteRoot ? [...(node.unavailable ? [{id:'retry',label:'Retry',icon:glyphIcon('refresh',12)}] : []), ...(!node.pinned ? [{id:'remove',label:'Remove Favorite shortcut',icon:glyphIcon('close',12)}] : [])] : [],
+      onAction:async (action,node) => {
+        if (action === 'retry') return loadNavigationRoots({force:true});
+        const item = state.favorites.find(item => (item.resource_id || item.placeId || item.path) === node.tree_id);
+        if (!item || item.pinned) return;
+        try { if (item.placeId) await filesFacadeClient.removePlace(item.placeId); else { state.favoritePaths.delete(item.path); saveFavoritePaths(); }
+          state.favorites = state.favorites.filter(candidate => candidate !== item); renderFavorites(); updateFavoriteButton();
+          window.dispatchEvent(new CustomEvent('openclank:files-places-changed',{detail:{owner:state.owner,source:id}}));
+        } catch(error) { setStatus(error.message || 'Favorite could not be removed',true); }
+      },
     });
-    button.append(
-      iconNode({ name: favorite.name, kind: favorite.kind }, { size: 15, className: 'files-tree-icon' }),
-      el('span', { class: 'files-tree-label', text: favorite.name }),
-    );
-    button.addEventListener('click', async () => {
-      if (isDirectory(favorite)) {
-        if (opaque) await openManagedDirectory(favorite, null);
-        else setStatus('This saved Files location has expired; choose it again from the authorized roots.', true);
-      } else if (opaque) {
-        if (favorite.capabilities?.includes('open')) await openManagedEntry(favorite);
-        else await downloadEntry(favorite);
-      } else await openTreeFile(favorite.path);
-    });
-    row.append(button);
-    if (!favorite.pinned) {
-      row.append(iconButton({
-        glyph: 'close',
-        title: 'Remove ' + favorite.name + ' from Favorites',
-        className: 'files-favorite-remove',
-        onClick: async () => {
-          try {
-            if (favorite.placeId) await filesFacadeClient.removePlace(favorite.placeId);
-            else {
-              state.favoritePaths.delete(favorite.path);
-              saveFavoritePaths();
-            }
-            state.favorites = state.favorites.filter((item) => item !== favorite);
-            renderFavorites();
-            updateFavoriteButton();
-          } catch (error) {
-            setStatus(error.message || 'Favorite could not be removed', true);
-          }
-        },
-      }));
-    }
-    container.append(row);
   }
+  container.querySelector('[data-files-favorites-more]')?.remove();
+  if (state.favorites.length > visible) container.append(el('button',{type:'button','data-files-favorites-more':'',text:'Load more Favorites',onclick:() => { state.favoriteVisibleCount = visible + 50; renderFavorites(); }}));
   updateTreeHighlight();
 }
 
@@ -925,55 +1078,38 @@ async function archiveWorkspace(item) {
   }
 }
 
+function showTreeActions(choices) {
+  const anchor = document.activeElement;
+  const rect = anchor?.getBoundingClientRect?.();
+  closeManagedActionMenu();
+  const owner = state.owner; const lifecycle = state.lifecycleGeneration;
+  const menu = state.actionMenu = el('div',{class:'files-tree-actions-menu',role:'menu'});
+  menu.style.left = Math.min(rect?.left || 0,window.innerWidth - 210) + 'px'; menu.style.top = (rect?.bottom || 0) + 'px';
+  for (const choice of choices) menu.append(el('button',{type:'button',role:'menuitem',text:choice.label,disabled:choice.disabled ? 'true' : null,onclick:() => { closeManagedActionMenu(); if (owner !== state.owner || lifecycle !== state.lifecycleGeneration) return; void choice.run(); }}));
+  menu.addEventListener('keydown',event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeManagedActionMenu(); anchor?.focus(); } });
+  document.body.append(menu); menu.querySelector('button:not(:disabled)')?.focus();
+}
 function renderWorkspaces() {
-  const container = state.shell?.querySelector('[data-files-workspaces]');
+  const container = state.sidebar?.querySelector('[data-files-workspaces]');
   if (!container) return;
+  const roots = state.workspaces.map(item => {
+    const resource = item.resource ? facadeEntry(item.resource) : {};
+    return { ...resource, name:item.workspace.name, tree_id:item.workspace.id, tree_namespace:'workspace:' + item.workspace.id,
+      workspaceRootId:item.workspace.id, navigationRole:'workspace', kind:'folder', unavailable:item.availability !== 'available' || !resource.resource_ref };
+  });
+  if (state.workspaceTree) { state.workspaceTree.setRoots(roots.map(explorerEntry)); return; }
   container.replaceChildren();
-  if (!state.workspaces.length) {
-    container.append(el('div', { class: 'files-sidebar-empty', text: 'No Workspaces yet' }));
-    return;
-  }
-  for (const item of state.workspaces) {
-    const workspace = item.workspace;
-    const resource = item.resource ? facadeEntry(item.resource) : null;
-    const available = item.availability === 'available' && resource && isDirectory(resource);
-    const row = el('div', { class: 'files-favorite-row files-workspace-row' });
-    const open = el('button', {
-      type: 'button',
-      class: 'files-favorite-link',
-      title: available ? `Open Workspace ${workspace.name}` : `${workspace.name} is unavailable`,
-      disabled: available ? null : 'true',
-      'data-files-workspace-id': workspace.id,
-      'aria-current': state.currentWorkspaceId === workspace.id ? 'true' : null,
-    });
-    open.append(
-      iconNode({ name: workspace.name, kind: 'folder' }, { size: 15, className: 'files-tree-icon' }),
-      el('span', { class: 'files-tree-label', text: workspace.name }),
-    );
-    open.addEventListener('click', () => { if (available) void openManagedDirectory(resource, null); });
-    row.append(open);
-    if (available) {
-      row.append(iconButton({
-        glyph: 'workspace',
-        title: state.currentWorkspaceId === workspace.id ? 'Current agent Workspace' : `Use ${workspace.name} as workspace`,
-        className: 'files-favorite-remove files-workspace-action',
-        onClick: () => { void useWorkspace(workspace.id); },
-      }));
-    }
-    row.append(
-      iconButton({
-        glyph: 'edit', title: `Rename ${workspace.name}`,
-        className: 'files-favorite-remove files-workspace-action',
-        onClick: () => { void renameWorkspace(item); },
-      }),
-      iconButton({
-        glyph: 'archive', title: `Archive ${workspace.name}`,
-        className: 'files-favorite-remove files-workspace-action',
-        onClick: () => { void archiveWorkspace(item); },
-      }),
-    );
-    container.append(row);
-  }
+  state.workspaceTree = mountExplorerTree(roots,container,{ persistenceKey:'workspaces', emptyLabel:'No Workspaces yet',
+    actions:node => node.workspaceRootId ? [{id:'workspace-actions',label:'Workspace actions',icon:glyphIcon('more',12)}] : [],
+    onAction:(action,node) => {
+      const item = state.workspaces.find(item => item.workspace.id === node.workspaceRootId); if (!item) return;
+      showTreeActions([
+        {label:'Use as workspace',disabled:node.unavailable,run:() => useWorkspace(node.workspaceRootId)},
+        {label:'Rename workspace',run:() => renameWorkspace(item)},
+        {label:'Archive workspace',run:() => archiveWorkspace(item)},
+      ]);
+    },
+  });
 }
 
 async function loadWorkspaceCatalog({ signal = null } = {}) {
@@ -990,6 +1126,7 @@ async function loadWorkspaceCatalog({ signal = null } = {}) {
     const workspace = await import('./workspace.js');
     if (signal?.aborted || lifecycle !== state.lifecycleGeneration) return;
     state.currentWorkspaceId = workspace.getWorkspaceId();
+    explorerLayout.apply();
     state.workspaces = Array.isArray(response?.entries) ? response.entries : [];
     renderWorkspaces();
   } catch (error) {
@@ -1011,18 +1148,12 @@ async function openTreeFile(path) {
 
 function updateTreeHighlight() {
   const column = activeColumn();
-  const activeResource = state.provider === 'host' ? String(column?.resourceId || '') : '';
+  const activeResource = String(column?.resourceId || '');
   const activePath = state.provider === 'host' && !activeResource ? state.hostPath : '';
-  const activeNode = state.explorerTree?.snapshot().nodes.find(node => (
-    activeResource ? node.data.resource_id === activeResource : node.data.path === activePath
-  ));
-  state.explorerTree?.setActive(activeNode?.id || null);
-  for (const favorite of state.shell?.querySelectorAll('[data-files-favorite-id], [data-files-favorite-path]') || []) {
-    const selected = activeResource
-      ? favorite.dataset.filesFavoriteId === activeResource
-      : favorite.dataset.filesFavoritePath === activePath;
-    if (selected) favorite.setAttribute('aria-current', 'page');
-    else favorite.removeAttribute('aria-current');
+  for (const tree of [state.explorerTree, state.workspaceTree, state.favoriteTree, state.collectionTree]) {
+    const node = tree?.snapshot().nodes.find(node => activeResource
+      ? node.data.resource_id === activeResource : activePath && node.data.path === activePath);
+    tree?.setActive(node?.id || null);
   }
 }
 
@@ -1060,10 +1191,11 @@ async function toggleCurrentFavorite() {
       } else {
         const response = await filesFacadeClient.savePlace(activeRef);
         const place = { ...explorerEntry(response?.resource || {}), placeId: String(response?.resource?.place_id || ''), pinned: false };
-        state.favorites = [...state.favorites.filter(item => item.resource_id !== place.resource_id), place].slice(0, MAX_FAVORITES);
+        state.favorites = [...state.favorites.filter(item => item.resource_id !== place.resource_id), place];
       }
       renderFavorites();
       updateFavoriteButton();
+      window.dispatchEvent(new CustomEvent('openclank:files-places-changed', {detail:{ owner:state.owner, source:id }}));
     } catch (error) {
       setStatus(error.message || 'Favorite could not be changed', true);
     }
@@ -1165,7 +1297,9 @@ function clearFilesSelection(column = activeColumn(), columnIndex = state.active
 }
 
 function applyModelSelection(model, { render = true } = {}) {
+  state.treeSelection = null;
   state.selected = new Set(model.selectedKeys());
+  options.onSelection?.(model.selectedEntries()[0] || null);
   if (state.mode === 'columns') {
     const index = state.columns.findIndex((column) => selectionScope(column, state.columns.indexOf(column)).owner === model.scope.owner
       && selectionScope(column, state.columns.indexOf(column)).provider === model.scope.provider
@@ -1174,6 +1308,9 @@ function applyModelSelection(model, { render = true } = {}) {
     if (index >= 0) state.columns[index].selection = new Set(model.selectedKeys());
   }
   if (render) renderEntries();
+  const entries = model.selectedEntries();
+  const bytes = entries.reduce((total,entry) => total + (Number(entry.size) || 0),0);
+  setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items · ${entries.length} selected${bytes ? ' · ' + formatBytes(bytes) : ''}`);
 }
 
 function syncVisibleSelection(model, body = state.shell?.querySelector('[data-files-body]')) {
@@ -1190,7 +1327,7 @@ function filesGestureTarget(target) {
 }
 
 function blockedGestureTarget(target) {
-  return target instanceof Element && !!target.closest('input, textarea, select, [contenteditable="true"], .files-entry, .files-column-entry, [draggable="true"]');
+  return target instanceof Element && !!target.closest('button, a, summary, input, textarea, select, [contenteditable="true"], .files-entry, .files-column-entry, [draggable="true"]');
 }
 
 function transferCapabilities(entry) {
@@ -1254,7 +1391,7 @@ function canvasPayloadForEntry(entry, model, commandId = operationId('files-canv
   const generic = buildInternalDragPayload({
     scope: model.scope, generation: filesPolicyGeneration(), policyGeneration: filesPolicyGeneration(),
     owner: state.owner, pane: state.nativeWindow?.id || 'files-window', selectionEpoch: model.epoch,
-    kind: 'copy', entries: model.selectedEntries(), selectedKeys: model.selectedKeys(),
+    kind: 'copy', entries: transferEntries(model), selectedKeys: model.selectedKeys(),
   });
   const source = generic?.sources?.[0];
   if (!source) return null;
@@ -1266,21 +1403,20 @@ function canvasPayloadForEntry(entry, model, commandId = operationId('files-canv
   });
 }
 
-function currentCanvasMenuModel(entry, request) {
+function currentCanvasMenuSelection(entry, request) {
   const captured = request?.adapterContext;
   if (!captured?.filesScope) return null;
-  const model = state.selectionModels.get(String(captured.filesScope));
+  const model = validateFilesSelectionGuard(captured, { targetKey:entrySelectionKey(entry) });
   if (!model) return null;
   const selected = model.selectedEntries();
-  const keys = model.selectedKeys();
-  const capturedKeys = Array.isArray(captured.selectedKeys) ? captured.selectedKeys.map(String) : [];
-  const currentGeneration = filesPolicyGeneration();
-  const exactSelection = keys.length === capturedKeys.length && keys.every((key, index) => key === capturedKeys[index]);
-  if (model.snapshot().scopeKey !== captured.filesScope || model.epoch !== Number(captured.filesEpoch)
-    || currentGeneration !== Number(captured.filesGeneration) || state.owner !== captured.filesOwner
-    || (state.nativeWindow?.id || 'files-window') !== captured.filesPane || !exactSelection
-    || selected.length !== 1 || entrySelectionKey(selected[0]) !== entrySelectionKey(entry)) return null;
-  return model;
+  if (!selected.length) return null;
+  return { model, entries:selected, guard:captured };
+}
+
+function currentCanvasMenuModel(entry, request) {
+  const selection = currentCanvasMenuSelection(entry, request);
+  if (!selection || selection.entries.length !== 1 || entrySelectionKey(selection.entries[0]) !== entrySelectionKey(entry)) return null;
+  return selection.model;
 }
 
 function creationDestinationForNode(node, entry = contextEntryForNode(node)) {
@@ -1298,10 +1434,13 @@ function creationDestinationForEntry(target, index = state.activeColumnIndex) {
   const revision = target.revision && typeof target.revision === 'object' ? { ...target.revision } : null;
   return Object.freeze({
     creationDestinationRef: ref,
+    creationDestinationId: String(target.resource_id || target.resourceId || ''),
     creationDestinationRevision: revision ? Object.freeze(revision) : null,
     creationDestinationIndex: index,
     creationCommandId: operationId('files-create-command'),
     creationGeneration: filesPolicyGeneration(),
+    creationContent: state.contentGeneration,
+    creationNavigating: Boolean(state.contentController),
     creationLifecycle: state.lifecycleGeneration,
     creationOwner: String(state.owner),
     creationWorkspace: String(state.currentWorkspaceId || copalWorkspace()),
@@ -1324,6 +1463,8 @@ function creationCaptureForNode(node) {
 }
 
 async function createFilesResource(kind, captured) {
+  if (options.pickerMode) { setStatus("This dialog selects resources; creating items is unavailable.", true); return false; }
+  if (state.contentController) { setStatus('Wait for folder navigation to finish before choosing New.', true); return false; }
   if (!captured?.creationDestinationRef) captured = await pickCreationDestination();
   if (!captured?.creationDestinationRef) {
     setStatus('Choose an authorized writable folder before creating an item.', true);
@@ -1331,11 +1472,15 @@ async function createFilesResource(kind, captured) {
   }
   const generation = Number(captured.creationGeneration);
   const lifecycle = Number(captured.creationLifecycle);
+  const content = Number(captured.creationContent);
   const owner = String(captured.creationOwner);
-  if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) {
+  if (captured.creationNavigating || state.contentController || state.contentGeneration !== content
+      || state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle
+      || String(state.currentWorkspaceId || copalWorkspace()) !== captured.creationWorkspace) {
     setStatus('The Files destination or access changed; choose New again.', true);
     return true;
   }
+  let expiredRetried = false;
   let proposed = kind === 'file' ? 'Untitled.md' : 'Untitled folder';
   let commandId = String(captured.creationCommandId || operationId(`files-create-${kind}`));
   while (true) {
@@ -1345,23 +1490,38 @@ async function createFilesResource(kind, captured) {
     );
     if (value == null) return false;
     try { proposed = creationName(value, kind); } catch (error) { setStatus(error.message, true); continue; }
-    if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) {
+    if (captured.creationNavigating || state.contentController || state.contentGeneration !== content
+      || state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle
+      || String(state.currentWorkspaceId || copalWorkspace()) !== captured.creationWorkspace) {
       setStatus('The Files destination or access changed; choose New again.', true);
       return true;
     }
     const operation = commandId;
     try {
       let response;
+      const create = () => kind === 'folder'
+        ? filesFacadeClient.createDirectory(captured.creationDestinationRef, {
+          name: proposed, operationId: operation, generation,
+          expectedRevision: captured.creationDestinationRevision, collision: 'fail',
+        })
+        : filesFacadeClient.createFile(captured.creationDestinationRef, {
+          name: proposed, operationId: operation, itemId: operation, generation, collision: 'fail',
+        });
       try {
-        if (kind === 'folder') {
-          response = await filesFacadeClient.createDirectory(captured.creationDestinationRef, {
-            name: proposed, operationId: operation, generation,
-            expectedRevision: captured.creationDestinationRevision, collision: 'fail',
-          });
-        } else {
-          response = await filesFacadeClient.createFile(captured.creationDestinationRef, {
-            name: proposed, operationId: operation, itemId: operation, generation, collision: 'fail',
-          });
+        try { response = await create(); } catch (error) {
+          // This exact admission denial precedes provider work. Other errors
+          // may describe a committed operation and must never trigger create.
+          if (kind !== 'folder' || expiredRetried || !isExpiredFilesReference(error)) throw error;
+          expiredRetried = true;
+          const renewed = await renewManagedDirectoryAuthority({
+            resource_id: captured.creationDestinationId,
+            resource_ref: captured.creationDestinationRef,
+            provider: captured.creationProvider,
+          }, Number(captured.creationDestinationIndex));
+          if (!renewed.resource.capabilities.includes('write')) throw new Error('This folder is no longer writable.');
+          state.columns = renewed.columns;
+          captured = { ...captured, creationDestinationRef: renewed.resource.resource_ref };
+          response = await create();
         }
       } catch (error) {
         // A lost response is reconciled by the same operation ID. Retrying the
@@ -1380,15 +1540,21 @@ async function createFilesResource(kind, captured) {
         }
         if (receiptError) throw error;
       }
-      if (state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle) {
-        setStatus('Creation completed, but Files access changed before refresh.', true);
+      if (captured.creationNavigating || state.contentController || state.contentGeneration !== content
+      || state.owner !== owner || filesPolicyGeneration() !== generation || state.lifecycleGeneration !== lifecycle
+      || String(state.currentWorkspaceId || copalWorkspace()) !== captured.creationWorkspace) {
+        setStatus('Files access changed before the creation result could be confirmed here; do not submit it again.', true);
         return true;
       }
       const receiptItem = response?.items?.find?.((item) => item?.outcome === 'committed' || item?.outcome === 'unchanged');
       const failedItem = response?.items?.find?.((item) => item && !['committed', 'unchanged'].includes(String(item.outcome || '').toLowerCase()));
       if (failedItem) {
         const collision = ['collision', 'resource_changed', 'conflict'].includes(String(failedItem.code || failedItem.outcome || '').toLowerCase());
-        throw Object.assign(new Error(collision ? `${proposed} already exists. Choose another name.` : 'File creation was not committed.'), { code: collision ? 'collision' : String(failedItem.code || failedItem.outcome || 'creation_failed') });
+        const pending = String(response?.state || '').toLowerCase() === 'pending'
+          || String(failedItem.outcome || '').toLowerCase() === 'pending';
+        const message = collision ? `${proposed} already exists. Choose another name.`
+          : pending ? 'Creation outcome is not yet confirmed; do not submit it again.' : 'File creation was not committed.';
+        throw Object.assign(new Error(message), { code: collision ? 'collision' : String(failedItem.code || failedItem.outcome || 'creation_failed') });
       }
       const ref = String(response?.resource?.ref || receiptItem?.resource_ref || '');
       const resourceResponse = ref && kind === 'file' ? await filesFacadeClient.stat(ref) : null;
@@ -1437,31 +1603,172 @@ async function pickCreationDestination() {
   return null;
 }
 
+function captureFilesPasteDestination(node) {
+  const captured = creationCaptureForNode(node);
+  if (!captured) return null;
+  const column = state.columns[captured.creationDestinationIndex];
+  return Object.freeze({ ...captured, content: state.contentGeneration,
+    columnRef: destinationResourceRef(column) });
+}
+
+function currentFilesPasteDestination(captured) {
+  if (!captured || options.pickerMode || listeners.signal.aborted || !state.nativeWindow?.visible
+    || captured.creationOwner !== state.owner
+    || captured.creationWorkspace !== String(state.currentWorkspaceId || copalWorkspace())
+    || captured.creationGeneration !== filesPolicyGeneration()
+    || captured.creationLifecycle !== state.lifecycleGeneration || captured.content !== state.contentGeneration) return null;
+  const column = state.columns[captured.creationDestinationIndex];
+  if (!column || destinationResourceRef(column) !== captured.columnRef) return null;
+  const target = captured.creationDestinationRef === captured.columnRef ? column
+    : column.entries?.find(entry => entry.resource_id === captured.creationDestinationId
+      && entry.resource_ref === captured.creationDestinationRef);
+  if (!target || String(target.provider || state.provider) !== captured.creationProvider
+    || !isDirectory(target) || !target.capabilities?.includes('write')) return null;
+  return { ...target, resource_ref: captured.creationDestinationRef, kind: 'folder' };
+}
+
+function filesCopyListingMetadata(entry) {
+  return JSON.stringify([entry?.kind ?? null, entry?.size ?? null, entry?.modified_unix_ms ?? null]);
+}
+
+function currentContextCopySources(captured) {
+  if (!captured?.filesParentId || !captured.filesSources?.length || listeners.signal.aborted
+    || !state.nativeWindow?.visible || captured.filesPane !== (state.nativeWindow?.id || 'files-window')
+    || captured.filesOwner !== state.owner || captured.filesGeneration !== filesPolicyGeneration()
+    || captured.filesWorkspace !== String(state.currentWorkspaceId || copalWorkspace())
+    || captured.filesLifecycle !== state.lifecycleGeneration || captured.filesContent !== state.contentGeneration) return null;
+  const column = state.columns[captured.filesColumnIndex];
+  if (!column || String(column.resource_id || column.resourceId || '') !== captured.filesParentId
+    || String(column.provider || state.provider) !== captured.filesSourceProvider
+    || String(column.query || '') !== captured.filesQuery) return null;
+  const model = ensureSelectionModel(column, captured.filesColumnIndex);
+  const entries = captured.filesSources.map(source => {
+    const entry = model.item(source.key);
+    if (!entry || String(entry.resource_id || entry.resourceId || '') !== source.id
+      || String(entry.provider || model.scope.provider) !== captured.filesSourceProvider || !entry.resource_ref
+      || filesCopyListingMetadata(entry) !== source.metadata || !transferCapabilities(entry).copy) return null;
+    if (source.revision) {
+      if (!entry.revision || entry.revision.kind !== source.revision.kind || entry.revision.value !== source.revision.value) return null;
+    } else if (entry !== source.entry || entry.resource_ref !== source.ref || entry.revision) return null;
+    return entry;
+  });
+  if (entries.some(entry => !entry) || !captured.filesSources.some(source => source.key === captured.targetKey)) return null;
+  return { model, entries };
+}
+
+function setFilesClipboard(model, kind, current, capturedEntries = null, verifiedRevisions = null) {
+  if (!current()) throw new Error('The source Files selection changed; copy the files again.');
+  const entries = capturedEntries || model?.selectedEntries() || [];
+  if (!entries.length || entries.length > FILES_MAX_DRAG_ITEMS
+    || !entries.every(entry => transferCapabilities(entry)[kind])) throw new Error('The selection cannot be copied or cut.');
+  // Choosing a Paste target changes the visible selection. Keep the copied
+  // selection private, while retaining the original scope and source authority.
+  const sourceScope = model.snapshot().scopeKey;
+  const sourceKeys = entries.map(entry => resourceKey(entry, model.scope.provider, model.scope));
+  const owner = state.owner, workspace = String(state.currentWorkspaceId || copalWorkspace());
+  const policy = filesPolicyGeneration(), lifecycle = state.lifecycleGeneration, content = state.contentGeneration;
+  const pane = state.nativeWindow?.id || 'files-window';
+  const observed = entries.map(entry => ({ ref: entry.resource_ref, metadata: filesCopyListingMetadata(entry),
+    revision: entry.revision ? { ...entry.revision } : null }));
+  const copiedEntries = entries.map((entry, index) => ({ ...entry, capabilities: [...(entry.capabilities || [])],
+    revision: verifiedRevisions?.[index] ? { ...verifiedRevisions[index] } : observed[index].revision }));
+  const copiedModel = createFilesSelectionModel({ scope: model.scope });
+  copiedModel.setItems(copiedEntries);
+  copiedModel.replaceSelection(sourceKeys);
+  const payload = transferPayloadForModel(copiedModel, kind);
+  if (!payload) throw new Error('The selection cannot be encoded for transfer.');
+  const sourceCurrent = () => !listeners.signal.aborted && state.nativeWindow?.visible
+    && (state.nativeWindow?.id || 'files-window') === pane && state.owner === owner
+    && String(state.currentWorkspaceId || copalWorkspace()) === workspace
+    && filesPolicyGeneration() === policy && state.lifecycleGeneration === lifecycle && state.contentGeneration === content
+    && state.selectionModels.get(sourceScope) === model && model.snapshot().scopeKey === sourceScope
+    && sourceKeys.every((key, index) => {
+      const entry = model.item(key), original = observed[index];
+      return entry === entries[index] && entry.resource_ref === original.ref
+        && filesCopyListingMetadata(entry) === original.metadata
+        && (entry.revision?.kind || '') === (original.revision?.kind || '')
+        && (entry.revision?.value || '') === (original.revision?.value || '')
+        && transferCapabilities(entry)[kind];
+    });
+  filesClipboard = { payload, model: copiedModel, source: api, current: sourceCurrent };
+  setStatus(`${entries.length} item${entries.length === 1 ? '' : 's'} ready to ${kind}`);
+  return true;
+}
+
+async function pasteFilesClipboard(destination, destinationIndex, current) {
+  const clipboard = filesClipboard;
+  if (!current()) throw new Error('The destination folder changed; choose Paste again.');
+  if (!clipboard?.current()) throw new Error('The copied source changed. Copy the files again.');
+  if (!destination?.capabilities?.includes('children') || !destination.capabilities.includes('write')
+    || clipboard.payload.provider !== destination.provider) throw new Error('Paste requires a writable folder in the same provider.');
+  const response = await executeFilesTransfer(clipboard.payload, destination, 'fail', destinationIndex, { model: clipboard.model });
+  clipboard.source.updateTransferSelection(clipboard.model);
+  if ((response?.items || []).length && response.items.every(item => ['committed','unchanged'].includes(item.outcome))) await clipboard.source.refresh();
+  if (filesClipboard === clipboard && response) filesClipboard = null;
+  return true;
+}
+
 function canvasMenuAdapter() {
   return {
-    capture: target => creationCaptureForNode(target),
+    capture: target => ({ ...creationCaptureForNode(target), pasteDestination: captureFilesPasteDestination(target) }),
     commands: request => {
       const entry = contextEntryForNode(request?.objectTarget || request?.target);
       const commands = [];
       commands.push({ id: 'files-new-folder', label: 'New Folder…' });
       commands.push({ id: 'files-new-file', label: 'New File…' });
-      const model = entry && currentCanvasMenuModel(entry, request);
-      if (!entry || !model) return commands;
-      const capabilities = new Set(entry.capabilities || []);
-      if (isDirectory(entry) && capabilities.has('children') && capabilities.has('stat')) {
-        commands.push({ id: 'files-use-as-workspace', label: 'Use as workspace' });
+      if (filesClipboard) {
+        const destination = currentFilesPasteDestination(request?.adapterContext?.pasteDestination);
+        commands.push({ id: 'files-paste', label: 'Paste', disabled: !destination
+          || !filesClipboard.current() || filesClipboard.payload.provider !== destination.provider });
       }
-      if (isCanvasImageEntry(entry)) commands.push({ id: 'files-open-in-canvas', label: 'Open in Canvas' });
+      const selection = entry && currentCanvasMenuSelection(entry, request);
+      if (!entry || !selection) return commands;
+      const choices = selection.entries.length === 1
+        ? entryActionChoices(entry)
+        : commonActionChoices(selection.entries);
+      for (const choice of choices) {
+        // The typed file-object commands below already expose these same
+        // operations, with their captured-selection fence and split-open
+        // variants. Keep the Files Actions menu and item menu complementary.
+        if (['code.open', 'rename', 'trash', 'restore', 'transfer.move', 'transfer.copy'].includes(choice.action)) continue;
+        const label = selection.entries.length > 1 ? `${choice.label} (${selection.entries.length})` : choice.label;
+        if (commands.some(command => command.id === `files-action:${encodeURIComponent(JSON.stringify([choice.action, choice.value ?? null]))}`)) continue;
+        commands.push({
+          id: `files-action:${encodeURIComponent(JSON.stringify([choice.action, choice.value ?? null]))}`,
+          label,
+        });
+      }
+      if (selection.entries.length === 1 && isCanvasImageEntry(entry)) commands.push({ id: 'files-open-in-canvas', label: 'Open in Canvas' });
       return commands;
     },
     execute: async (command, request) => {
+      // Object Copy/Move belongs to the guarded file handler, including
+      // multi-selection; do not consume it as an image-specific command.
+      if (!['files-paste', 'files-new-folder', 'files-new-file', 'files-open-in-canvas'].includes(command)
+        && !command.startsWith('files-action:')) return false;
+      if (command === 'files-paste') {
+        const captured = request?.adapterContext?.pasteDestination;
+        const destination = currentFilesPasteDestination(captured);
+        return pasteFilesClipboard(destination, Number(captured?.creationDestinationIndex),
+          () => Boolean(currentFilesPasteDestination(captured)));
+      }
       if (command === 'files-new-folder' || command === 'files-new-file') {
         return createFilesResource(command === 'files-new-folder' ? 'folder' : 'file', request?.adapterContext);
       }
       const entry = contextEntryForNode(request?.objectTarget || request?.target);
+      const selection = currentCanvasMenuSelection(entry, request);
+      if (!entry || !selection) { setStatus('The Files selection changed; choose the command again.', true); return true; }
+      if (command.startsWith('files-action:')) {
+        let identity;
+        try { identity = JSON.parse(decodeURIComponent(command.slice('files-action:'.length))); } catch (_) { return false; }
+        const choices = selection.entries.length === 1 ? entryActionChoices(entry) : commonActionChoices(selection.entries);
+        const choice = choices.find(candidate => candidate.action === identity?.[0] && (candidate.value ?? null) === (identity?.[1] ?? null));
+        if (!choice) { setStatus('That action is no longer available for this item.', true); return true; }
+        if (selection.entries.length > 1) return performSelectedBulkAction(selection.entries, choice, selection.guard);
+        return performManagedAction(entry, choice);
+      }
       const model = currentCanvasMenuModel(entry, request);
-      if (!entry || !model) { setStatus('The Files selection changed; choose the command again.', true); return true; }
-      if (command === 'files-use-as-workspace') return performManagedAction(entry, { action: 'workspace.use', label: 'Use as workspace' });
+      if (!model) { setStatus('Canvas requires one selected image. Keep only one item selected and try again.', true); return true; }
       if (command !== 'files-open-in-canvas') return false;
       return openEntryInCanvas(entry, model);
     },
@@ -1473,7 +1780,7 @@ async function openEntryInCanvas(entry, model, commandId = operationId('files-ca
   if (!handoff) { setStatus('Select one authorized image to open in Canvas.', true); return false; }
   // Imps owns the canvas host after the Gallery retirement — no Gallery
   // modal is opened. The editor self-mounts its container.
-  const editor = window.galleryEditorModule || await import('./galleryEditor.js');
+  const editor = window.impsModule || await import('./imps.js');
   await editor.openEditor?.(null, null, { w: 1024, h: 1024 }, `Canvas · ${entry.name || 'Files image'}`);
   window.dispatchEvent(new CustomEvent('openclank-files-image-to-canvas', {
     detail: Object.freeze({ payload: handoff.payload, context: handoff.context }),
@@ -1650,6 +1957,7 @@ async function collectExternalDropFiles(dataTransfer) {
 }
 
 async function handleExternalDrop(dataTransfer, destination, destinationIndex) {
+  if (options.pickerMode) return;
   const collected = await collectExternalDropFiles(dataTransfer);
   if (!collected.files.length && !collected.directories.length) {
     setStatus(`Nothing was imported (${collected.failures[0]?.code || 'directory_read_failed'}).`, true);
@@ -1781,6 +2089,7 @@ function installFilesGestures(body) {
     requestAnimationFrame(() => { body.dataset.filesVirtualFrame = ''; renderEntries(); });
   }, { passive: true });
   body.addEventListener('pointerdown', (event) => {
+    if (options.pickerMode && !event.target?.closest?.('[data-files-selection-key]')) { clearFilesSelection(); options.onSelection?.(null); return; }
     if (event.isPrimary === false || event.button !== 0) return;
     if (event.target?.closest?.('[data-files-selection-key]')) return;
     beginSelectionRectangle(event, body);
@@ -1794,9 +2103,13 @@ function installFilesGestures(body) {
     // toolbar can follow on the next frame so pointerup stays responsive.
     requestAnimationFrame(() => updateManagedActionControl());
   });
-  body.addEventListener('pointercancel', () => cancelFilesGesture('pointercancel'));
-  body.addEventListener('lostpointercapture', () => cancelFilesGesture('lost-capture'));
+  // Native HTML drag takes over the pointer stream and may cancel pointer
+  // capture. Keep its registry handoff alive until dragend so sibling panes
+  // can validate protected drag data during dragover.
+  body.addEventListener('pointercancel', () => { if (state.gesture?.type !== 'drag') cancelFilesGesture('pointercancel'); });
+  body.addEventListener('lostpointercapture', () => { if (state.gesture?.type !== 'drag') cancelFilesGesture('lost-capture'); });
   body.addEventListener('dragstart', (event) => {
+    if (options.pickerMode) { event.preventDefault(); return; }
     const node = event.target?.closest?.('[data-files-selection-key]');
     if (!node || !event.dataTransfer) return;
     const key = node.dataset.filesSelectionKey;
@@ -1817,7 +2130,7 @@ function installFilesGestures(body) {
       policyGeneration: filesPolicyGeneration(), owner: state.owner,
       selectionEpoch: model.epoch,
       pane: state.nativeWindow?.id || 'files-window', kind: intent.intent,
-      entries: model.selectedEntries(), selectedKeys: model.selectedKeys(),
+      entries: transferEntries(model), selectedKeys: model.selectedKeys(),
     });
     if (!payload?.sources?.length) {
       event.preventDefault();
@@ -1862,10 +2175,11 @@ function installFilesGestures(body) {
     if (state.gesture?.type === 'drag') cancelFilesGesture('completed');
   });
   body.addEventListener('dragover', (event) => {
+    if (options.pickerMode) { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'none'; return; }
     if (!event.dataTransfer) return;
     const target = event.target?.closest?.('[data-files-selection-key]');
     const entry = target && contextEntryForNode(target);
-    const payload = state.gesture?.payload || (() => {
+    const payload = state.gesture?.payload || [...browsers.values()].map(browser => browser.getDragPayload()).find(Boolean) || (() => {
       try { return parseInternalDragPayload(event.dataTransfer.getData(FILES_TRANSFER_MIME)); } catch (_) { return null; }
     })();
     if (!payload) {
@@ -1875,7 +2189,7 @@ function installFilesGestures(body) {
       const targetEntry = target && contextEntryForNode(target);
       const targetInfo = destinationForTarget(event.target);
       const destination = targetEntry && isDirectory(targetEntry) ? targetEntry : targetInfo.column;
-      const acceptsImport = Boolean(destination?.resource_ref && (destination.capabilities || []).includes('children') && (destination.capabilities || []).includes('write'));
+      const acceptsImport = Boolean(destinationResourceRef(destination) && (destination.capabilities || []).includes('children') && (destination.capabilities || []).includes('write'));
       const directory = [...(event.dataTransfer.items || [])].some((item) => {
         try { return item.webkitGetAsEntry?.()?.isDirectory === true; } catch (_) { return false; }
       });
@@ -1897,11 +2211,18 @@ function installFilesGestures(body) {
       setStatus(`${intent.intent === 'move' ? 'Move' : 'Copy'} is unavailable for these items.`, true);
       return;
     }
+    const sourceModel = browsers.get(payload.pane)?.resolveTransferModel(payload);
+    if (!sourceModel) { event.dataTransfer.dropEffect = 'none'; return; }
+    if (!sourceModel.selectedEntries().every(item => transferCapabilities(item)[intent.intent])) {
+      event.dataTransfer.dropEffect = 'none';
+      setStatus(`${intent.intent === 'move' ? 'Move' : 'Copy'} is unavailable for these items.`, true);
+      return;
+    }
     const effectivePayload = { ...payload, kind: intent.intent };
-    const validation = validateDropTarget(effectivePayload, { resource_ref: destination.resource_ref, resource_key: entrySelectionKey(destination) }, {
+    const validation = validateDropTarget(effectivePayload, { resource_ref: destinationResourceRef(destination), resource_key: entrySelectionKey(destination) }, {
       generation: filesPolicyGeneration(),
       policyGeneration: filesPolicyGeneration(),
-      owner: state.owner, workspace: state.currentWorkspaceId || copalWorkspace(), pane: state.nativeWindow?.id || 'files-window',
+      owner: state.owner, workspace: state.currentWorkspaceId || copalWorkspace(), pane: effectivePayload.pane,
       provider: destination.provider, allowMove: capabilities.has('children') && capabilities.has('write'), allowCopy: capabilities.has('children') && capabilities.has('write'),
     });
     if (!validation.ok) { event.dataTransfer.dropEffect = 'none'; return; }
@@ -1909,6 +2230,7 @@ function installFilesGestures(body) {
     setStatus(`${validation.count} item${validation.count === 1 ? '' : 's'} · ${intent.intent} to ${destination.name || 'this folder'}`);
   });
   body.addEventListener('drop', (event) => {
+    if (options.pickerMode) { event.preventDefault(); return; }
     const target = event.target?.closest?.('[data-files-selection-key]');
     const entry = target && contextEntryForNode(target);
     const raw = event.dataTransfer?.getData(FILES_TRANSFER_MIME);
@@ -1933,13 +2255,13 @@ function installFilesGestures(body) {
     }
     state.gesture = null;
   });
-  window.addEventListener('blur', () => cancelFilesGesture('window-hidden'));
-  document.addEventListener('visibilitychange', () => { if (document.hidden) cancelFilesGesture('window-hidden'); });
+  listen(window, 'blur', () => cancelFilesGesture('window-hidden'));
+  listen(document, 'visibilitychange', () => { if (document.hidden) cancelFilesGesture('window-hidden'); });
 }
 
 // Disposable fixture/diagnostic hook: reports only whether this window owns a
 // live gesture frame, never selection authority or resource references.
-window.__openClankFilesGestureSnapshot = () => Object.freeze({
+hooks.__openClankFilesGestureSnapshot = () => Object.freeze({
   active: Boolean(state.gesture),
   frame: Number(state.gesture?.frame || 0),
   autoFrame: Number(state.gesture?.autoFrame || 0),
@@ -1949,7 +2271,7 @@ window.__openClankFilesGestureSnapshot = () => Object.freeze({
 // flight. It contains only immutable identity keys and boolean capabilities;
 // sealed source refs remain inside the typed drag payload and never enter this
 // cross-surface getter.
-window.__openClankFilesTransferContext = () => {
+hooks.__openClankFilesTransferContext = () => {
   const gesture = state.gesture;
   if (!gesture || gesture.type !== 'drag') return null;
   const model = state.selectionModels.get(String(gesture.scopeKey));
@@ -1975,6 +2297,12 @@ window.__openClankFilesTransferContext = () => {
     allowCopy: Boolean(gesture.allowedCopy), allowMove: Boolean(gesture.allowedMove),
   });
 };
+
+// Item receipt IDs are bounded independently from scoped resource identities.
+// Long owner/workspace keys must never become the receipt ID.
+function transferEntries(model) {
+  return model.selectedEntries().map(entry => ({ ...entry, item_id: operationId('files-item') }));
+}
 
 function operationId(prefix = 'files-transfer') {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
@@ -2015,11 +2343,26 @@ function reconcileTransferReceipt(receipt, expectedItemIds, { operationId = '', 
   };
 }
 
+function transferFailureStatus(receipt) {
+  const labels = {
+    resource_changed: 'Source changed or destination name already exists.',
+    resource_unavailable: 'Resource access is unavailable.',
+    resource_ref_stale: 'File access changed; select the source again.',
+    invalid_destination: 'The destination cannot receive this item.',
+    provider_unavailable: 'The provider could not complete the transfer.',
+    unsupported_operation: 'This provider does not support the operation.',
+    policy_generation_changed: 'File access changed during the transfer.',
+  };
+  const reasons = [...new Set(receipt.failed.map(item => labels[item.code] || item.message || item.reason || item.code || item.outcome))];
+  return `${receipt.committed.size} completed · ${receipt.failed.length} need attention${reasons.length ? ' · ' + reasons.join(' ') : ''}`;
+}
+
 function updateSelectionAfterTransfer(model, payload, receipt) {
   if (!model || !receipt?.ok) return;
   const committedKeys = new Set(payload.sources.filter((source) => receipt.committed.has(String(source.item_id))).map((source) => String(source.resource_key)));
   if (!committedKeys.size) return;
   model.replaceSelection(model.selectedKeys().filter((key) => !committedKeys.has(key)));
+  if (![...state.selectionModels.values()].includes(model) || model.scope.column === 'tree') return;
   state.selected = new Set(model.selectedKeys());
   const column = state.columns.find((candidate) => candidate && candidate.resourceRef === model.scope.parentRef);
   if (column) column.selection = new Set(model.selectedKeys());
@@ -2030,7 +2373,7 @@ function transferPayloadForModel(model, kind) {
   return buildInternalDragPayload({
     scope: model.scope, generation: filesPolicyGeneration(), policyGeneration: filesPolicyGeneration(),
     owner: state.owner, pane: state.nativeWindow?.id || 'files-window', selectionEpoch: model.epoch,
-    kind, entries: model.selectedEntries(), selectedKeys: model.selectedKeys(),
+    kind, entries: transferEntries(model), selectedKeys: model.selectedKeys(),
   });
 }
 
@@ -2046,6 +2389,7 @@ function payloadScopeKey(payload) {
 }
 
 async function executeFilesTransfer(payload, destination, collision = 'fail', destinationIndex = state.columns.length - 1, { model: suppliedModel = null, selectionKeys = null, batchId = '', operationIdOverride = '', refresh = true } = {}) {
+  if (options.pickerMode) { setStatus("This dialog selects resources; transfers are unavailable.", true); return null; }
   const destinationRef = destinationResourceRef(destination);
   if (!payload?.provider || !destination?.provider || !destinationRef || payload.provider !== destination.provider) {
     setStatus('Transfers between providers are unavailable.', true);
@@ -2053,8 +2397,13 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
   }
   const sameProvider = payload.provider === destination.provider;
   const gesture = state.gesture?.type === 'drag' ? state.gesture : null;
-  const capturedModel = suppliedModel || (gesture ? state.selectionModels.get(String(gesture.scopeKey)) : null);
+  const sourceBrowser = browsers.get(payload.pane);
+  const capturedModel = suppliedModel || sourceBrowser?.resolveTransferModel(payload) || null;
+  if (!capturedModel) { setStatus('The source Files selection or access changed.',true); return null; }
   const transferLifecycle = state.lifecycleGeneration;
+  const transferContent = state.contentGeneration;
+  const sourceLifetime = sourceBrowser?.captureLifetime();
+  const sourceIsCurrent = () => !sourceBrowser || sourceBrowser.isLifetimeCurrent(sourceLifetime);
   if (capturedModel) {
     const expectedKeys = payload.sources.map((source) => String(source.resource_key));
     const actualKeys = capturedModel?.selectedKeys?.() || [];
@@ -2077,7 +2426,7 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
     generation: filesPolicyGeneration(),
     policyGeneration: filesPolicyGeneration(),
     selectionEpoch: capturedModel ? capturedModel.epoch : null,
-    owner: state.owner, workspace: state.currentWorkspaceId || copalWorkspace(), pane: state.nativeWindow?.id || 'files-window', provider: destination.provider,
+    owner: state.owner, workspace: state.currentWorkspaceId || copalWorkspace(), pane: payload.pane, provider: destination.provider,
     allowMove: sameProvider && (destination.capabilities || []).includes('children') && (destination.capabilities || []).includes('write'),
     allowCopy: sameProvider && (destination.capabilities || []).includes('children') && (destination.capabilities || []).includes('write'),
   });
@@ -2087,7 +2436,7 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
   try {
     setStatus(`${sources.length} item${sources.length === 1 ? '' : 's'} · ${payload.kind}…`);
     const response = await filesFacadeClient.transferResources({ operationId: operation, generation: Number(payload.generation), kind: payload.kind, sources, destinationRef, collision });
-    if (transferLifecycle !== state.lifecycleGeneration || (capturedModel && (capturedModel.epoch !== Number(payload.selection_epoch)
+    if (!sourceIsCurrent() || transferLifecycle !== state.lifecycleGeneration || transferContent !== state.contentGeneration || (capturedModel && (capturedModel.epoch !== Number(payload.selection_epoch)
       || state.owner !== payload.owner || filesPolicyGeneration() !== Number(payload.policy_generation)
       || capturedModel.snapshot().scopeKey !== payloadScopeKey(payload)))) {
       setStatus('File access, window, or selection changed while the transfer was running; reconcile the receipt before continuing.', true);
@@ -2099,8 +2448,9 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
       return response;
     }
     updateSelectionAfterTransfer(capturedModel, payload, reconciled);
+    if (sourceBrowser && (sourceBrowser !== api || capturedModel.scope.column === "tree")) sourceBrowser.updateTransferSelection(capturedModel);
     if (reconciled.failed.length) {
-      setStatus(`${reconciled.committed.size} completed · ${reconciled.failed.length} need attention`, true);
+      setStatus(transferFailureStatus(reconciled), true);
       offerKeepBothRetry(payload, destination, response);
     } else {
       clearKeepBothRetry();
@@ -2123,7 +2473,7 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
       }
       try {
         const receipt = await filesFacadeClient.operationReceipt(operation, { signal: null, generation: Number(payload.generation) });
-        if (transferLifecycle !== state.lifecycleGeneration || (capturedModel && (capturedModel.epoch !== Number(payload.selection_epoch)
+        if (!sourceIsCurrent() || transferLifecycle !== state.lifecycleGeneration || transferContent !== state.contentGeneration || (capturedModel && (capturedModel.epoch !== Number(payload.selection_epoch)
           || state.owner !== payload.owner || filesPolicyGeneration() !== Number(payload.policy_generation)
           || capturedModel.snapshot().scopeKey !== payloadScopeKey(payload)))) {
           setStatus('File access, window, or selection changed; the transfer receipt was retained for reconciliation.', true);
@@ -2135,13 +2485,14 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
           return receipt;
         }
         updateSelectionAfterTransfer(capturedModel, payload, reconciled);
+    if (sourceBrowser && (sourceBrowser !== api || capturedModel.scope.column === "tree")) sourceBrowser.updateTransferSelection(capturedModel);
         if (refresh && reconciled.committed.size && transferLifecycle === state.lifecycleGeneration) {
           await reloadManagedColumn(destinationIndex);
           if (transferLifecycle !== state.lifecycleGeneration || state.owner !== payload.owner || filesPolicyGeneration() !== Number(payload.policy_generation)) {
             setStatus('File access changed while refreshing the transfer result.', true);
           }
         }
-        setStatus(reconciled.pending ? 'Transfer status is still pending reconciliation.' : `${reconciled.committed.size} transfer item${reconciled.committed.size === 1 ? '' : 's'} reconciled.`, reconciled.pending || reconciled.failed.length > 0);
+        setStatus(reconciled.pending ? 'Transfer status is still pending reconciliation.' : reconciled.failed.length ? transferFailureStatus(reconciled) : `${reconciled.committed.size} transfer item${reconciled.committed.size === 1 ? '' : 's'} reconciled.`, reconciled.pending || reconciled.failed.length > 0);
         if (reconciled.failed.length) offerKeepBothRetry(payload, destination, receipt);
         return receipt;
       } catch (_) { setStatus(error.message || 'Files transfer failed', true); }
@@ -2150,7 +2501,7 @@ async function executeFilesTransfer(payload, destination, collision = 'fail', de
   }
 }
 
-window.__openClankFilesRetryKeepBoth = async (payload, destination, response) => {
+hooks.__openClankFilesRetryKeepBoth = async (payload, destination, response) => {
   const retryable = new Set((response?.items || []).filter((item) => {
     const outcome = String(item?.outcome || '').toLowerCase();
     const code = String(item?.code || item?.error_code || item?.reason || '').toLowerCase();
@@ -2316,6 +2667,7 @@ async function prepareImportedDirectories(files, destination, batchId, generatio
 }
 
 async function importDroppedFiles(files, destination, destinationIndex = state.columns.length - 1, { skipped = [], directories = [] } = {}) {
+  if (options.pickerMode) return;
   const destinationRef = destinationResourceRef(destination);
   if (!destinationRef || !(destination.capabilities || []).includes('children') || !(destination.capabilities || []).includes('write')) { setStatus('This folder does not accept imported files.', true); return; }
   const allFiles = [...files]
@@ -2417,7 +2769,7 @@ async function importDroppedFiles(files, destination, destinationIndex = state.c
 
 // Identifier-only context consumed by contextualHelp.js. Keep host paths out
 // of this handoff: the Files provider owns authorization and resource refs.
-window.__odysseusGetActiveFilesContext = () => {
+hooks.__odysseusGetActiveFilesContext = () => {
   const column = activeColumn();
   const activeModel = ensureSelectionModel(column, state.activeColumnIndex);
   const selected = state.entries.find((entry) => state.selected.has(entrySelectionKey(entry)));
@@ -2483,14 +2835,22 @@ function observeNativeThumbnail(img, item) {
     identity,
     entry.modified_unix_ms ?? entry.modified ?? '',
     entry.size ?? '',
-    '192x192',
+    item.icon ? 'native-icon:64x64' : 'content-thumbnail:192x192',
     Math.min(3, Math.max(1, Number(window.devicePixelRatio) || 1)),
   ].join(':');
   loader.attach(img, {
     key,
     url: item.url,
     root: state.shell?.querySelector('[data-files-body]') || null,
-    renderFallback: () => item.visual.replaceChildren(iconNode(item.entry, { size: 24 })),
+    renderFallback: () => {
+      if (!item.icon && entry.native_icon_url) {
+        const image = el('img', { class: 'files-thumbnail', alt: '', decoding: 'async' });
+        item.visual.replaceChildren(image);
+        queueMicrotask(() => observeNativeThumbnail(image, { ...item, img: image, icon: true, url: entry.native_icon_url }));
+      } else {
+        item.visual.replaceChildren(iconNode(item.entry, { size: 24 }));
+      }
+    },
   });
 }
 
@@ -2521,6 +2881,10 @@ function entryVisual(entry, directory) {
       visual.replaceChildren(iconNode(entry, { size: 24 }));
     }, { once: true });
     visual.append(thumbnail);
+  } else if (entry.native_icon_url && !directory) {
+    const image = el('img', { class: 'files-thumbnail', alt: '', decoding: 'async' });
+    visual.append(image);
+    queueMicrotask(() => observeNativeThumbnail(image, { img: image, visual, entry, icon: true, url: entry.native_icon_url }));
   } else {
     visual.append(iconNode(entry, { size: 24 }));
   }
@@ -2592,7 +2956,45 @@ function renderDetailsHeader() {
   return header;
 }
 
+function layoutMetrics() {
+  const large = ['grid', 'gallery'].includes(state.mode);
+  const size = large ? state.largeIconSize : state.smallIconSize;
+  const gap = state.mode === 'gallery' ? 8 : 4;
+  const previewHeight = state.mode === 'gallery' ? Math.max(86, size) : large ? size : Math.max(28, size);
+  return { size, previewHeight, tileWidth: Math.max(110, size + 40), rowStride: large ? previewHeight + 68 + gap : Math.max(32, previewHeight + 12), gap };
+}
+function syncPagingControl() {
+  const button = state.loadMoreButton;
+  if (!button) return;
+  button.hidden = !state.nextCursor || state.mode === 'columns' || Boolean(options.navigationOnly && !activeColumn()?.query);
+  button.disabled = Boolean(state.pagingController);
+  button.textContent = state.pagingController ? 'Loading more…' : 'Load more';
+}
+
 function renderEntries() {
+  syncPagingControl();
+  if (options.navigationOnly) {
+    const column = activeColumn();
+    const query = String(column?.query || '');
+    const input = state.sidebar?.querySelector('.files-folder-search');
+    if (input) {
+      input.disabled = !column?.resourceRef;
+      input.title = column?.resourceRef ? 'Search names in the current authorized folder, including unloaded entries.' : 'Open an authorized folder before searching.';
+      if (document.activeElement !== input) input.value = query;
+    }
+    const main = state.shell?.querySelector('.files-main');
+    if (main) main.hidden = !query;
+    state.shell?.classList.toggle('files-navigation-search-active', Boolean(query));
+    if (!query) { state.shell?.querySelector('[data-files-body]')?.replaceChildren(); return; }
+    // The compact navigation result surface shares Files rows and callbacks.
+    state.mode = 'list';
+    syncPagingControl();
+  }
+  const metrics = layoutMetrics();
+  state.shell?.style.setProperty('--files-icon-size', metrics.size + 'px');
+  state.shell?.style.setProperty('--files-preview-size', metrics.previewHeight + 'px');
+  state.shell?.style.setProperty('--files-tile-width', metrics.tileWidth + 'px');
+  state.shell?.style.setProperty('--files-row-height', (metrics.rowStride - (['grid','gallery'].includes(state.mode) ? metrics.gap : 0)) + 'px');
   const body = state.shell?.querySelector('[data-files-body]');
   if (!body) return;
   state.renderEpoch += 1;
@@ -2618,7 +3020,10 @@ function renderEntries() {
     body.append(entriesHost);
   }
   if (!state.entries.length) {
-    const message = state.provider === 'host' ? 'This folder is empty.' : 'No items in this source.';
+    const hasActiveQuery = Boolean(state.searchQuery || activeColumn()?.query);
+    const message = hasActiveQuery
+      ? 'No matches found in the searched locations.'
+      : (state.provider === 'host' ? 'This folder is empty.' : 'No items in this source.');
     const empty = details
       ? el('div', { class: 'files-empty', role: 'row' }, el('span', { role: 'gridcell', text: message }))
       : el('div', { class: 'files-empty', text: message });
@@ -2630,8 +3035,8 @@ function renderEntries() {
   const virtualized = state.mode !== 'columns' && allEntries.length > 500;
   const gridMode = state.mode === 'grid' || state.mode === 'gallery';
   const gridGap = state.mode === 'gallery' ? 8 : 4;
-  const gridColumns = gridMode ? Math.max(1, Math.floor(((body.clientWidth || 640) + gridGap) / (130 + gridGap))) : 1;
-  const rowHeight = state.mode === 'gallery' ? 150 : state.mode === 'grid' ? 132 : 42;
+  const gridColumns = gridMode ? Math.max(1, Math.floor(((body.clientWidth || 640) - 16 + gridGap) / (layoutMetrics().tileWidth + gridGap))) : 1;
+  const rowHeight = layoutMetrics().rowStride;
   const windowSize = 240;
   const startRow = virtualized ? Math.max(0, Math.floor(savedScrollTop / rowHeight) - 2) : 0;
   const start = gridMode ? startRow * gridColumns : startRow;
@@ -2649,8 +3054,9 @@ function renderEntries() {
     const row = el(details ? 'div' : 'button', {
       type: details ? null : 'button',
       class: `files-entry ${directory ? 'directory' : 'file'}${selected ? ' selected' : ''}`,
-      title: isFacadeEntry(entry) ? `${entry.provider || state.provider} · ${entry.name}` : path,
-      'data-copal-context-object': 'file',
+      title: String(entry.provenance?.logical_path || entry.name || path),
+      'aria-label': String(entry.name || path),
+      'data-copal-context-object': options.pickerMode ? null : 'file',
       'data-resource-ref': entry.resource_ref || '',
       'data-path': isFacadeEntry(entry) ? '' : String(entry?.path || path),
       'data-file-name': entry.name,
@@ -2661,7 +3067,7 @@ function renderEntries() {
       role: details ? 'row' : null,
       tabindex: details ? '0' : null,
       'aria-selected': selected ? 'true' : 'false',
-      draggable: canDragEntry(entry) ? 'true' : null,
+      draggable: !options.pickerMode && canDragEntry(entry) ? 'true' : null,
       'data-files-selection-key': selectionKey,
     });
     const cellAttrs = details ? { role: 'gridcell' } : {};
@@ -2680,6 +3086,7 @@ function renderEntries() {
         setStatus('Refresh the authorized Files roots before opening this folder.', true);
         return undefined;
       }
+      if (options.pickerMode) return confirmPickerEntry(entry);
       if (entry.resource_ref && entry.capabilities?.includes('open')) return openManagedEntry(entry);
       if (isPreviewable(entry, path)) return previewEntry(entry, path);
       if (entry.download_url) return downloadEntry(entry);
@@ -2690,8 +3097,16 @@ function renderEntries() {
     row.addEventListener('click', (event) => {
       if (event.detail === 0) return;
       const model = ensureSelectionModel(activeColumn());
-      model.select(selectionKey, event);
-      applyModelSelection(model);
+      model.select(selectionKey, options.pickerMode ? {} : event);
+      // Keep this row mounted between click and dblclick. Remounting also
+      // restarts expired thumbnails, whose policy refresh can cancel the open.
+      applyModelSelection(model, { render: false });
+      syncVisibleSelection(model, entriesHost);
+      const capabilities = model.selectedEntries().map(transferCapabilities);
+      for (const node of entriesHost.querySelectorAll('[data-files-selection-key]')) {
+        node.dataset.fileTransferMove = capabilities.length > 0 && capabilities.every(capability => capability.move) ? 'true' : 'false';
+        node.dataset.fileTransferCopy = capabilities.length > 0 && capabilities.every(capability => capability.copy) ? 'true' : 'false';
+      }
       row.focus({ preventScroll: true });
     });
     row.addEventListener('contextmenu', (event) => {
@@ -2700,24 +3115,37 @@ function renderEntries() {
       // appears; explicit toolbar/action buttons still open our menu.
     });
     row.addEventListener('keydown', (event) => {
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End') {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End' || event.key === 'PageDown' || event.key === 'PageUp') {
         event.preventDefault();
         const model = ensureSelectionModel(activeColumn());
         const index = model.orderedKeys().indexOf(selectionKey);
         const body = state.shell?.querySelector('[data-files-body]');
         const grid = state.mode === 'grid' || state.mode === 'gallery';
         const gap = state.mode === 'gallery' ? 8 : 4;
-        const columns = grid ? Math.max(1, Math.floor(((body?.clientWidth || 640) + gap) / (130 + gap))) : 1;
-        const delta = event.key === 'ArrowDown' ? columns : event.key === 'ArrowUp' ? -columns : event.key === 'ArrowRight' ? 1 : -1;
+        const columns = grid ? Math.max(1, Math.floor(((body?.clientWidth || 640) - 16 + gap) / (layoutMetrics().tileWidth + gap))) : 1;
+        const page = Math.max(1, Math.floor((body?.clientHeight || 640) / layoutMetrics().rowStride)) * columns;
+        const delta = event.key === 'PageDown' ? page : event.key === 'PageUp' ? -page : event.key === 'ArrowDown' ? columns : event.key === 'ArrowUp' ? -columns : event.key === 'ArrowRight' ? 1 : -1;
         const target = event.key === 'Home' ? 0 : event.key === 'End' ? model.orderedKeys().length - 1 : index + delta;
         const key = model.orderedKeys()[Math.max(0, Math.min(model.orderedKeys().length - 1, target))];
-        model.select(key, event);
+        model.select(key, options.pickerMode ? {} : event);
         if (body && state.entries.length > 500) {
-          const rowHeight = grid ? (state.mode === 'gallery' ? 150 : 132) : 42;
+          const rowHeight = layoutMetrics().rowStride;
           body.scrollTop = Math.floor(Math.max(0, Math.min(model.orderedKeys().length - 1, target)) / columns) * rowHeight;
         }
         applyModelSelection(model);
-        requestAnimationFrame(() => state.shell?.querySelector(`[data-files-selection-key="${CSS.escape(key)}"]`)?.focus({ preventScroll: true }));
+        requestAnimationFrame(() => {
+          const targetRow = state.shell?.querySelector(`[data-files-selection-key="${CSS.escape(key)}"]`);
+          if (!targetRow || !body?.contains(targetRow)) return;
+          // Scroll only the Files viewport; native scrollIntoView can move the
+          // floating window or the outer page as well as this nested body.
+          const viewport = body.getBoundingClientRect();
+          const bounds = targetRow.getBoundingClientRect();
+          const top = viewport.top + body.clientTop;
+          const bottom = top + body.clientHeight;
+          if (bounds.top < top) body.scrollTop -= top - bounds.top;
+          else if (bounds.bottom > bottom) body.scrollTop += bounds.bottom - bottom;
+          targetRow.focus({ preventScroll: true });
+        });
         return;
       }
       if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -2726,8 +3154,10 @@ function renderEntries() {
         if (isFacadeEntry(entry)) void openManagedDirectory(entry);
         else setStatus('Refresh the authorized Files roots before opening this folder.', true);
       }
+      else if (options.pickerMode) confirmPickerEntry(entry);
       else if (entry.resource_ref && entry.capabilities?.includes('open')) openManagedEntry(entry);
       else if (isPreviewable(entry, path)) previewEntry(entry, path);
+      else if (options.pickerMode) confirmPickerEntry(entry);
       else if (entry.download_url) downloadEntry(entry);
       else if (state.provider === 'host') setStatus('Refresh the authorized Files roots before downloading this file.', true);
     });
@@ -2736,14 +3166,6 @@ function renderEntries() {
   if (virtualized && end < allEntries.length) {
     const remainingRows = gridMode ? Math.ceil((allEntries.length - end) / gridColumns) : allEntries.length - end;
     entriesHost.append(el('div', { class: 'files-virtual-spacer', 'aria-hidden': 'true', style: `height:${remainingRows * rowHeight}px` }));
-  }
-  if (state.nextCursor) {
-    const more = el('button', { type: 'button', class: 'files-content-more' });
-    more.append(namedGlyph('chevron-down', { size: 14 }), el('span', { text: 'Load more' }));
-    more.addEventListener('click', () => usesFacadeListing()
-      ? loadManagedMore()
-      : setStatus('Refresh the authorized Files roots before loading more items.', true));
-    body.append(more);
   }
   updateManagedActionControl();
   body.scrollTop = savedScrollTop;
@@ -2806,7 +3228,7 @@ function renderColumns() {
       const item = el('button', {
         type: 'button',
         class: `files-column-entry${directory ? ' directory' : ''}${selected ? ' selected' : ''}`,
-        'data-copal-context-object': 'file',
+        'data-copal-context-object': options.pickerMode ? null : 'file',
         'data-resource-ref': entry.resource_ref || '',
         'data-path': isFacadeEntry(entry) ? '' : String(entry?.path || path),
         'data-file-name': entry.name,
@@ -2818,23 +3240,24 @@ function renderColumns() {
         'aria-label': entry.name,
         'aria-selected': selected ? 'true' : 'false',
         'data-column-entry-index': actualEntryIndex,
-        title: path,
-        draggable: canDragEntry(entry) ? 'true' : null,
+        title: String(entry.provenance?.logical_path || entry.name || path),
+        draggable: !options.pickerMode && canDragEntry(entry) ? 'true' : null,
         'data-files-selection-key': selectionKey,
       });
       item.append(iconNode(entry, { size: 17, className: 'files-column-icon', open: directory }), el('span', { class: 'files-column-name', text: entry.name }));
       item.addEventListener('click', (event) => {
         state.activeColumnIndex = index;
-        columnModel.select(selectionKey, event);
+        columnModel.select(selectionKey, options.pickerMode ? {} : event);
         column.selection = new Set(columnModel.selectedKeys());
         state.selected = new Set(column.selection);
+        state.treeSelection = null; options.onSelection?.(columnModel.selectedEntries()[0] || null);
         markColumnEntryActive(index, item, entry.name);
         renderEntries();
         if (directory) {
           if (isFacadeEntry(entry)) void openManagedDirectory(entry, index);
           else setStatus('Refresh the authorized Files roots before opening this folder.', true);
         }
-        else if (!directory && isPreviewable(entry, path)) void previewEntry(entry, path);
+        else if (!options.pickerMode && !directory && isPreviewable(entry, path)) void previewEntry(entry, path);
       });
       item.addEventListener('contextmenu', (event) => {
         // See the list view handler above: browser context menus remain the
@@ -2894,6 +3317,7 @@ function focusColumnEntry(columnIndex, target = 'first') {
   state.activeColumnIndex = columnIndex;
   state.entries = column.entries || [];
   state.selected = new Set(model.selectedKeys());
+  state.treeSelection = null; options.onSelection?.(model.selectedEntries()[0] || null);
   renderEntries();
   requestAnimationFrame(() => state.shell?.querySelector(`.files-column[data-column-index="${columnIndex}"] [data-column-entry-index="${targetIndex}"]`)?.focus({ preventScroll: true }));
   return true;
@@ -2905,6 +3329,7 @@ async function handleColumnEntryKeydown(event, { columnIndex, entryIndex, entry,
     ArrowDown: entryIndex + 1,
     Home: 0,
     End: Number.MAX_SAFE_INTEGER,
+    PageUp: entryIndex - 20, PageDown: entryIndex + 20,
   };
   if (Object.prototype.hasOwnProperty.call(movement, event.key)) {
     event.preventDefault();
@@ -2912,12 +3337,19 @@ async function handleColumnEntryKeydown(event, { columnIndex, entryIndex, entry,
     const model = selectedColumn.model;
     const keys = model.orderedKeys();
     const currentIndex = Math.max(0, keys.indexOf(model.focusKey || resourceKey(entry, selectedColumn.column?.provider || state.provider)));
-    const targetIndex = event.key === 'Home' ? 0 : event.key === 'End' ? keys.length - 1 : Math.max(0, Math.min(keys.length - 1, currentIndex + (event.key === 'ArrowDown' ? 1 : -1)));
+    const targetIndex = event.key === 'Home' ? 0 : event.key === 'End' ? keys.length - 1 : Math.max(0, Math.min(keys.length - 1, currentIndex + (event.key === 'PageDown' ? Math.max(1, Math.floor((event.currentTarget?.closest('.files-column-list')?.clientHeight || 680) / 34)) : event.key === 'PageUp' ? -Math.max(1, Math.floor((event.currentTarget?.closest('.files-column-list')?.clientHeight || 680) / 34)) : event.key === 'ArrowDown' ? 1 : -1)));
     const targetKey = keys[targetIndex];
-    model.select(targetKey, event);
+    model.select(targetKey, options.pickerMode ? {} : event);
     selectedColumn.column.selection = new Set(model.selectedKeys());
     state.selected = new Set(model.selectedKeys());
+    state.treeSelection = null; options.onSelection?.(model.selectedEntries()[0] || null);
     focusColumnEntry(columnIndex, targetIndex);
+    return;
+  }
+  if (options.pickerMode && (event.key === 'Enter' || event.key === ' ')) {
+    event.preventDefault();
+    if (directory) await openManagedDirectory(entry, columnIndex);
+    else confirmPickerEntry(entry);
     return;
   }
   if (event.key === 'ArrowLeft' && columnIndex > 0) {
@@ -2929,7 +3361,8 @@ async function handleColumnEntryKeydown(event, { columnIndex, entryIndex, entry,
   if (event.key === 'ArrowRight' && directory) {
     event.preventDefault();
     const selectedColumn = activateColumn(columnIndex);
-    selectedColumn.model.select(resourceKey(entry, selectedColumn.column?.provider || state.provider), event);
+    selectedColumn.model.select(resourceKey(entry, selectedColumn.column?.provider || state.provider), options.pickerMode ? {} : event);
+    state.treeSelection = null; options.onSelection?.(entry);
     selectedColumn.column.selection = new Set(selectedColumn.model.selectedKeys());
     state.selected = new Set(selectedColumn.model.selectedKeys());
     if (!isFacadeEntry(entry)) {
@@ -3417,17 +3850,19 @@ function managedColumn(resource, response, spec = state.sort, query = '') {
     resourceId: String(resource?.resource_id || resource?.id || ''),
     provider: String(resource?.provider || state.provider || ''),
     capabilities: Array.isArray(resource?.capabilities) ? [...resource.capabilities] : [],
+    provenance: resource?.provenance && typeof resource.provenance === 'object' ? { ...resource.provenance } : {},
     revision: resource?.revision && typeof resource.revision === 'object' ? { ...resource.revision } : null,
     name: String(resource?.name || 'Files'),
     // The sealed cursor is bound to the provider's ordering. Never reorder an
     // individual page in the browser or page N can jump ahead of page N-1.
-    entries: (response?.entries || []).map(facadeEntry),
+    entries: (response?.entries || []).map(facadeEntry).filter(editorResourceAllowed),
     nextCursor: response?.next_cursor || null,
     sort: appliedSort,
     sortKeys,
     serverOrdered: true,
     activeName: '',
     query: String(query || ''),
+    searchComplete: typeof response?.search_complete === 'boolean' ? response.search_complete : null,
   };
 }
 
@@ -3507,20 +3942,41 @@ function commitManagedColumn(column, { provider = state.provider, columns = [col
   const providerSelect = state.shell?.querySelector('.files-provider-select');
   if (providerSelect) providerSelect.value = provider;
   const label = state.shell?.querySelector('[data-files-path]');
-  if (label) label.textContent = managedLabel();
+  if (label) { label.replaceChildren(); for (const [index, parent] of state.columns.entries()) { if (index) label.append(document.createTextNode(' / ')); const crumb = el('button', { type:'button', class:'files-breadcrumb', text:parent.name || parent.path || 'Files' }); crumb.addEventListener('click', () => openManagedDirectory({ ...parent, resource_ref:parent.resourceRef, resource_id:parent.resourceId, kind:'folder' }, index - 1)); label.append(crumb); } }
   syncSearchControl();
   syncPrimarySortControls();
   renderEntries();
   updateTreeHighlight();
   updateFavoriteButton();
-  setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`);
-  syncActiveFolderWatch();
+  const partialSearch = Boolean(column.query) && column.searchComplete === false;
+  const searchNotice = state.shell?.querySelector('[data-files-search-notice]');
+  if (searchNotice) searchNotice.hidden = !partialSearch;
+  if (partialSearch) {
+    setStatus('Partial search', true);
+  } else {
+    setStatus(`${state.entries.length}${state.nextCursor ? '+' : ''} items`);
+  }
+  if (!options.navigationOnly) syncActiveFolderWatch();
   commitFilesHistory();
+  state.treeSelection = null;
+  options.onSelection?.(null);
+  options.onDirectory?.(column.resourceRef ? { ...column, resource_ref:column.resourceRef, resource_id:column.resourceId, kind:'folder' } : null);
 }
 
-async function openManagedDirectory(entry, parentIndex = state.columns.length - 1) {
+function cancelReveal() {
+  state.revealGeneration += 1;
+  if (state.revealController) { state.revealController.abort(); state.navigationController?.abort(); }
+  state.revealController = null;
+}
+
+async function openManagedDirectory(entry, parentIndex = state.columns.length - 1, navigation = {}) {
+  if (!editorResourceAllowed(entry)) throw new Error('Chats belong in Chats or Library, outside Editor.');
+  if (navigation.reveal != null) { if (navigation.reveal !== state.revealGeneration) return false; }
+  else cancelReveal();
+  options.onSelection?.(null);
   const resourceRef = String(entry?.resource_ref || entry?.ref || '');
   if (!resourceRef || !isDirectory(entry)) return false;
+  if (entry.provider && entry.provider !== state.provider) applyViewPreferences(entry.provider);
   state.contentController?.abort();
   const controller = new AbortController();
   state.contentController = controller;
@@ -3529,18 +3985,27 @@ async function openManagedDirectory(entry, parentIndex = state.columns.length - 
   const requestedSort = constrainSortSpec(state.sort, sortKeys);
   setStatus(`Loading ${entry.name || 'folder'}…`);
   try {
-    const response = await filesFacadeClient.children(resourceRef, {
-      sort: managedSortRequest(requestedSort),
-      query: '',
-      signal: controller.signal,
-    });
-    if (generation !== state.contentGeneration || controller.signal.aborted || !state.nativeWindow?.visible) return false;
     const nested = Number.isInteger(parentIndex) && parentIndex >= 0;
-    if (nested && state.columns[parentIndex]) state.columns[parentIndex].activeName = entry.name;
-    const column = managedColumn(entry, response, requestedSort, '');
+    let resource = entry;
+    let parents = state.columns.slice(0, nested ? parentIndex + 1 : 0);
+    const read = () => filesFacadeClient.children(destinationResourceRef(resource), {
+      sort: managedSortRequest(requestedSort), query: '', signal: controller.signal,
+    });
+    let response;
+    try { response = await read(); } catch (error) {
+      if (!isExpiredFilesReference(error)) throw error;
+      const renewed = await renewManagedDirectoryAuthority(entry, nested ? parentIndex : -1, controller.signal);
+      resource = renewed.resource;
+      parents = renewed.columns.slice(0, nested ? parentIndex + 1 : 0);
+      response = await read();
+    }
+    if (generation !== state.contentGeneration || controller.signal.aborted || !state.nativeWindow?.visible) return false;
+    if (nested && parents[parentIndex]) parents[parentIndex].activeName = resource.name;
+    const column = managedColumn(resource, response, requestedSort, '');
+    const ancestors = !nested && Array.isArray(entry.tree_ancestors) ? entry.tree_ancestors.map(parent => managedColumn(parent,{entries:parent.tree_entries || [],next_cursor:parent.tree_cursor || null},parent.tree_sort || requestedSort)) : [];
     commitManagedColumn(column, {
-      provider: entry?.provider || state.provider,
-      columns: nested ? [...state.columns.slice(0, parentIndex + 1), column] : [column],
+      provider: resource?.provider || state.provider,
+      columns: nested ? [...parents, column] : [...ancestors,column],
     });
     return true;
   } catch (error) {
@@ -3551,6 +4016,76 @@ async function openManagedDirectory(entry, parentIndex = state.columns.length - 
   } finally {
     if (state.contentController === controller) state.contentController = null;
   }
+}
+
+function isExpiredFilesReference(error) {
+  return error?.status === 409 && error?.code === 'resource_ref_stale'
+    && error?.message === 'resource reference expired';
+}
+
+async function renewManagedDirectoryAuthority(target, index, signal = null) {
+  const identity = entry => ({ id: String(entry?.resource_id || entry?.resourceId || ''), provider: String(entry?.provider || '') });
+  const matches = (entry, wanted) => Boolean(wanted.id) && identity(entry).id === wanted.id && identity(entry).provider === wanted.provider;
+  const owner = state.owner;
+  const workspace = state.currentWorkspaceId;
+  const policy = filesPolicyGeneration();
+  const lifecycle = state.lifecycleGeneration;
+  const content = state.contentGeneration;
+  const columns = state.columns.slice(0, index + 1);
+  const chain = columns.map(identity);
+  const wanted = identity(target);
+  if (!chain.length || !matches(columns.at(-1), wanted)) chain.push(wanted);
+  const current = () => {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (state.owner !== owner || state.currentWorkspaceId !== workspace || filesPolicyGeneration() !== policy
+      || state.lifecycleGeneration !== lifecycle || state.contentGeneration !== content) {
+      throw new Error('The Files destination or access changed; choose it again.');
+    }
+  };
+  await loadNavigationRoots({ force: true });
+  current();
+  // These are newly authenticated projections, never paths or decoded refs.
+  const roots = [...state.managedRoots, ...state.navigationRoots, ...state.favorites];
+  let resource;
+  let anchor = -1;
+  for (let cursor = chain.length - 1; cursor >= 0; cursor -= 1) {
+    resource = roots.find(entry => matches(entry, chain[cursor]) && isDirectory(entry));
+    if (resource) { anchor = cursor; break; }
+  }
+  if (anchor < 0) throw new Error('Choose this folder again from the authorized Files roots.');
+  const refreshed = columns.slice();
+  const remember = position => {
+    if (position < refreshed.length) refreshed[position] = { ...refreshed[position],
+      resourceRef: resource.resource_ref, path: resource.resource_ref,
+      capabilities: [...resource.capabilities], revision: resource.revision || null,
+      provenance: resource.provenance || {}, name: resource.name,
+    };
+  };
+  remember(anchor);
+  for (let position = anchor + 1; position < chain.length; position += 1) {
+    let cursor = null;
+    let child;
+    const seen = new Set();
+    for (let page = 0; page < 100; page += 1) {
+      current();
+      const response = await filesFacadeClient.children(resource.resource_ref, { limit: 200, cursor, signal });
+      current();
+      child = (response?.entries || []).map(facadeEntry).find(entry => matches(entry, chain[position]) && isDirectory(entry));
+      if (child) break;
+      cursor = response?.next_cursor || null;
+      if (!cursor || seen.has(cursor)) break;
+      seen.add(cursor);
+    }
+    if (!child) throw new Error('This folder is no longer available under the authorized Files roots.');
+    resource = child;
+    remember(position);
+  }
+  const checked = await filesFacadeClient.stat(resource.resource_ref, { signal });
+  current();
+  resource = facadeEntry(checked?.resource || checked);
+  if (!matches(resource, wanted) || !resource.resource_ref || !isDirectory(resource)) throw new Error('The Files folder identity changed.');
+  remember(chain.length - 1);
+  return { resource, columns: refreshed };
 }
 
 async function reloadManagedColumn(index) {
@@ -3564,22 +4099,30 @@ async function reloadManagedColumn(index) {
   const requestedSort = constrainSortSpec(column.sort || state.sort, column.sortKeys || SORT_KEYS);
   column.sort = requestedSort;
   try {
-    const response = await filesFacadeClient.children(column.resourceRef, {
-      sort: managedSortRequest(requestedSort),
-      query: column.query || '',
-      signal: controller.signal,
+    let resource = column;
+    let columns = state.columns.slice(0, index);
+    const read = () => filesFacadeClient.children(destinationResourceRef(resource), {
+      sort: managedSortRequest(requestedSort), query: column.query || '', signal: controller.signal,
     });
+    let response;
+    try { response = await read(); } catch (error) {
+      if (!isExpiredFilesReference(error)) throw error;
+      const renewed = await renewManagedDirectoryAuthority(column, index, controller.signal);
+      resource = renewed.resource;
+      columns = renewed.columns.slice(0, index);
+      response = await read();
+    }
     if (generation !== state.contentGeneration || controller.signal.aborted || !state.nativeWindow?.visible) return false;
     const refreshed = managedColumn({
-      resource_ref: column.resourceRef,
-      resource_id: column.resourceId,
-      provider: column.provider,
-      name: column.name,
-      capabilities: column.capabilities,
-      revision: column.revision,
+      resource_ref: destinationResourceRef(resource),
+      resource_id: resource.resource_id || resource.resourceId,
+      provider: resource.provider,
+      name: resource.name,
+      capabilities: resource.capabilities,
+      provenance: resource.provenance,
+      revision: resource.revision,
     }, response, requestedSort, column.query || '');
-    const columns = [...state.columns.slice(0, index), refreshed];
-    commitManagedColumn(refreshed, { columns });
+    commitManagedColumn(refreshed, { columns: [...columns, refreshed] });
     return true;
   } catch (error) {
     if (error?.name !== 'AbortError') setStatus(error.message || 'Folder could not be sorted', true);
@@ -3592,9 +4135,13 @@ async function reloadManagedColumn(index) {
 async function loadManagedColumnMore(index) {
   const column = state.columns[index];
   if (!column?.resourceRef || !column.nextCursor) return false;
+  if (state.pagingController) return false;
   const controller = new AbortController();
   state.contentController?.abort();
   state.contentController = controller;
+  state.pagingController = controller;
+  syncPagingControl();
+  setStatus('Loading more items…');
   const generation = state.contentGeneration;
   const cursor = column.nextCursor;
   try {
@@ -3606,7 +4153,7 @@ async function loadManagedColumnMore(index) {
     });
     if (generation !== state.contentGeneration || controller.signal.aborted || cursor !== column.nextCursor) return false;
     const combined = new Map(column.entries.map((item) => [item.resource_id, item]));
-    for (const item of (response?.entries || []).map(facadeEntry)) combined.set(item.resource_id, item);
+    for (const item of (response?.entries || []).map(facadeEntry).filter(editorResourceAllowed)) combined.set(item.resource_id, item);
     column.entries = [...combined.values()];
     column.nextCursor = response?.next_cursor || null;
     if (index === state.columns.length - 1) {
@@ -3622,6 +4169,8 @@ async function loadManagedColumnMore(index) {
     return false;
   } finally {
     if (state.contentController === controller) state.contentController = null;
+    if (state.pagingController === controller) state.pagingController = null;
+    syncPagingControl();
   }
 }
 
@@ -3648,7 +4197,7 @@ async function searchAllSources(query) {
       path: 'all-search',
       resourceRef: '',
       name: 'All sources',
-      entries: (response?.entries || []).map(facadeEntry),
+      entries: (response?.entries || []).map(facadeEntry).filter(editorResourceAllowed),
       nextCursor: null,
       sort: constrainSortSpec(response?.sort || state.sort, response?.sort_keys || SORT_KEYS),
       sortKeys: sortKeysFor(response?.sort_keys || SORT_KEYS),
@@ -3671,6 +4220,7 @@ async function searchAllSources(query) {
 }
 
 async function searchActive(value) {
+  cancelReveal();
   const query = String(value || '').trim();
   const column = activeColumn();
   if (state.provider === 'all' && (!column?.resourceRef || column.globalSearch)) {
@@ -3691,6 +4241,48 @@ async function searchActive(value) {
   return false;
 }
 
+async function refreshBrowser({ hierarchyProvider = null } = {}) {
+  const refreshLifecycle = state.lifecycleGeneration;
+  const refreshContent = state.contentGeneration;
+  // Explicit refresh also replaces expired navigation/Place projections with
+  // newly authorized roots. Refreshing a virtual All sources column alone
+  // leaves Home/Favorites tree refs from the previous projection untouched.
+  try {
+    await loadNavigationRoots({ force: true });
+  } catch (error) {
+    if (error?.name !== 'AbortError' && refreshLifecycle === state.lifecycleGeneration) setStatus(error.message || 'Files roots unavailable', true);
+    return false;
+  }
+  if (refreshLifecycle !== state.lifecycleGeneration || refreshContent !== state.contentGeneration) return false;
+  const selectedId = state.treeSelection?.resource_id;
+  const directoryId = activeColumn()?.resourceId;
+  const branches = [];
+  for (const tree of [state.workspaceTree, state.favoriteTree, state.explorerTree, state.collectionTree]) {
+    if (!tree) continue;
+    const nodes = tree.snapshot().nodes;
+    if (hierarchyProvider) {
+      const byId = new Map(nodes.map(node => [node.id, node]));
+      const roots = nodes.filter(node => node.branch && node.data.provider === hierarchyProvider
+        && byId.get(node.parentId)?.data.provider !== hierarchyProvider);
+      for (const root of roots) branches.push({ tree, id: root.id, recursive: true });
+      if (roots.length) continue;
+    }
+    const selected = nodes.find(node => node.data.resource_id === selectedId);
+    const ids = new Set(nodes.filter(node => node.branch && node.data.resource_id === directoryId).map(node => node.id));
+    if (selected?.parentId) ids.add(selected.parentId);
+    if (selected?.branch) ids.add(selected.id);
+    for (const id of ids) branches.push({ tree, id });
+  }
+  const lifecycle = state.lifecycleGeneration;
+  const result = await reloadManagedColumn(state.columns.length - 1);
+  if (lifecycle !== state.lifecycleGeneration) return false;
+  for (const { tree, id, recursive = false } of branches) {
+    if (lifecycle !== state.lifecycleGeneration) return false;
+    await tree.refresh(id, { recursive });
+  }
+  return result;
+}
+
 async function managedUp() {
   if (state.searchQuery) return searchActive('');
   if (state.provider === 'host' && !usesFacadeListing()) {
@@ -3703,11 +4295,86 @@ async function managedUp() {
     commitManagedColumn(column, { columns });
     return true;
   }
-  if (state.provider !== 'all') return openProvider('all');
-  return false;
+  const column = activeColumn();
+  if (!column?.resourceRef) return false;
+  const generation = state.contentGeneration;
+  const lifecycle = state.lifecycleGeneration;
+  const controller = new AbortController();
+  state.contentController?.abort();
+  state.contentController = controller;
+  try {
+    const response = await filesFacadeClient.reveal(column.resourceRef, { signal: controller.signal });
+    if (controller.signal.aborted || generation !== state.contentGeneration || lifecycle !== state.lifecycleGeneration) return false;
+    const parent = facadeEntry(response?.parent);
+    if (!parent.resource_ref || !isDirectory(parent) || parent.resource_id === column.resourceId) {
+      setStatus('This folder has no available parent.');
+      return false;
+    }
+    return await openManagedDirectory(parent, null);
+  } catch (error) {
+    if (error?.name !== 'AbortError' && generation === state.contentGeneration) setStatus(error.message || 'Parent folder unavailable', true);
+    return false;
+  } finally {
+    if (state.contentController === controller) state.contentController = null;
+  }
+}
+
+function libraryCollectionView(entry) {
+  return String(entry?.provenance?.view || '').trim().toLowerCase();
+}
+
+function isPublishedLibraryEntry(entry) {
+  return String(entry?.provenance?.domain || '').trim().toLowerCase() === 'published'
+    || libraryCollectionView(entry) === LIBRARY_COLLECTION_VIEWS.published;
+}
+
+function clankerHomeEntry(entry) {
+  const view = libraryCollectionView(entry);
+  if (!view) return entry;
+  const label = CLANKER_COLLECTION_LABELS[view] || entry.name;
+  return {
+    ...entry,
+    name: label,
+    provenance: { ...(entry.provenance || {}), clanker_home: true },
+  };
+}
+
+async function openClankerHome(controller, generation) {
+  const library = state.managedRoots.find((entry) => entry.provider === 'library' && isDirectory(entry));
+  const sources = state.managedRoots.filter((entry) => (
+    entry.provider === 'copal' || entry.provider === 'files' || entry.provider === 'host'
+  ));
+  let collections = [];
+  if (library?.resource_ref) {
+    const response = await filesFacadeClient.children(library.resource_ref, {
+      sort: managedSortRequest(constrainSortSpec(state.sort, library.sort_keys || SORT_KEYS)),
+      signal: controller.signal,
+    });
+    if (generation !== state.contentGeneration || !state.nativeWindow?.visible) return false;
+    collections = (response?.entries || []).map(facadeEntry).filter(editorResourceAllowed)
+      .filter((entry) => Object.values(LIBRARY_COLLECTION_VIEWS).includes(libraryCollectionView(entry)))
+      .map(clankerHomeEntry);
+  }
+  const column = {
+    path: CLANKER_HOME_PROVIDER,
+    resourceRef: '',
+    resourceId: '',
+    name: 'Clanker home',
+    entries: sortEntries([...sources, ...collections], constrainSortSpec(state.sort, ['name'])),
+    nextCursor: null,
+    sort: constrainSortSpec(state.sort, ['name']),
+    sortKeys: ['name'],
+    activeName: '',
+    query: '',
+    clankerHome: true,
+  };
+  commitManagedColumn(column, { provider: CLANKER_HOME_PROVIDER, columns: [column] });
+  return true;
 }
 
 async function openProvider(provider) {
+  cancelReveal();
+  state.treeSelection = null; options.onSelection?.(null); options.onDirectory?.(null);
   stopActiveFolderWatch();
   if (provider !== state.provider) closePreview();
   state.provider = provider;
@@ -3735,7 +4402,8 @@ async function openProvider(provider) {
       signal: controller.signal,
     });
     if (generation !== state.contentGeneration || !state.nativeWindow?.visible) return false;
-    state.managedRoots = (data?.entries || []).map(facadeEntry);
+    state.managedRoots = (data?.entries || []).map(facadeEntry).filter(editorResourceAllowed);
+    if (provider === CLANKER_HOME_PROVIDER) return await openClankerHome(controller, generation);
     if (provider === 'all') {
       // Once Host is present in the opaque facade, it is the single unified
       // namespace entry. Keep raw compatibility anchors only as a measured
@@ -3843,6 +4511,11 @@ function selectedActionEntry() {
   return selected.length === 1 ? selected[0] : null;
 }
 
+function selectedActionEntries() {
+  const model = ensureSelectionModel(activeColumn(), state.activeColumnIndex);
+  return model?.selectedEntries?.() || state.entries.filter((entry) => state.selected.has(entrySelectionKey(entry)));
+}
+
 function isHostInteropEntry(entry) {
   const provider = String(entry?.provider || (state.provider === 'host' ? 'host' : '')).toLowerCase();
   if (provider !== 'host') return false;
@@ -3861,6 +4534,19 @@ function isNativeHostOpenEntry(entry) {
     && !['symlink', 'special', 'other'].includes(String(entry?.kind || '').toLowerCase());
 }
 
+function isLibraryDocumentsView() {
+  const column = activeColumn();
+  return String(column?.provider || '') === 'library'
+    && libraryCollectionView(column) === LIBRARY_COLLECTION_VIEWS.documents;
+}
+
+function selectedLibraryDocumentEntries() {
+  if (!isLibraryDocumentsView()) return [];
+  return state.entries.filter((entry) => (
+    state.selected.has(entrySelectionKey(entry)) && !isDirectory(entry) && Boolean(entry.resource_ref)
+  ));
+}
+
 function entryActionChoices(entry) {
   const capabilities = new Set(entry?.capabilities || []);
   const choices = [];
@@ -3869,6 +4555,9 @@ function entryActionChoices(entry) {
   }
   if (isHostInteropEntry(entry) && !isDirectory(entry) && isTextualEntry(entry) && !['symlink', 'special', 'other'].includes(String(entry?.kind || '').toLowerCase())) {
     choices.push({ action: 'code.open', label: 'Open in Editor', glyph: 'code', local: true });
+  }
+  if (entry?.provider === 'host' && !isDirectory(entry) && String(entry.resource_id || '').trim()) {
+    choices.push({ action: 'history.open', label: 'History', glyph: 'restore', local: true });
   }
   if (isNativeHostOpenEntry(entry)) {
     choices.push({ action: 'host.default', label: 'Open with default app', glyph: 'external', local: true });
@@ -3886,6 +4575,10 @@ function entryActionChoices(entry) {
   if (entry?.provenance?.domain === 'copal' && transfer.copy) choices.push({ action: 'transfer.copy', label: 'Copy', glyph: 'copy' });
   if (entry?.provenance?.domain === 'copal' && capabilities.has('trash')) choices.push({ action: 'trash', label: 'Move to trash', glyph: 'trash' });
   if (entry?.provenance?.domain === 'copal' && capabilities.has('restore')) choices.push({ action: 'restore', label: 'Restore', glyph: 'restore' });
+  if (isLibraryDocumentsView() && !isDirectory(entry)) {
+    choices.push({ action: 'library.clone', label: 'Clone to current session', glyph: 'copy', local: true });
+    choices.push({ action: 'library.delete', label: 'Delete', glyph: 'trash', local: true, danger: true });
+  }
   return choices;
 }
 
@@ -3913,24 +4606,143 @@ function chooseHostApplication(applications) {
     panel.append(title, message, list, cancel);
     overlay.append(panel);
     overlay.addEventListener('click', (event) => { if (event.target === overlay) finish(null); });
-    document.addEventListener('keydown', onKey);
+    listen(document, 'keydown', onKey);
     document.body.append(overlay);
     list.querySelector('button')?.focus();
   });
 }
 
 function updateManagedActionControl() {
+  updateLibraryCommandControls();
   const button = state.shell?.querySelector('[data-files-actions]');
   if (!button) return;
-  const entry = selectedActionEntry();
+  const selectedEntries = selectedActionEntries();
+  const entry = selectedEntries.length === 1 ? selectedEntries[0] : null;
+  const libraryEntries = selectedLibraryDocumentEntries();
+  if (libraryEntries.length > 1 && libraryEntries.length === selectedEntries.length) {
+    button.disabled = false;
+    setActionButtonLabel(button, libraryEntries.length);
+    button.title = `Actions for ${libraryEntries.length} selected Library documents`;
+    return;
+  }
+  if (selectedEntries.length > 1) {
+    const common = commonActionChoices(selectedEntries);
+    button.disabled = common.length === 0;
+    setActionButtonLabel(button, selectedEntries.length);
+    button.title = common.length ? `Actions available for all ${selectedEntries.length} selected items` : 'No action is available for every selected item';
+    return;
+  }
   const count = entry ? entryActionChoices(entry).length : 0;
   button.disabled = count === 0;
+  setActionButtonLabel(button, 0);
   button.title = count ? `Actions for ${entry.name}` : 'Select one actionable item';
 }
 
+function setActionButtonLabel(button, count) {
+  const label = button.querySelector('.files-actions-label');
+  if (!label) return;
+  label.textContent = count ? `Actions (${count})` : 'Actions';
+}
+
+function commonActionChoices(entries) {
+  if (!entries.length) return [];
+  const batchable = new Set(['archive.set', 'favorite.set', 'transfer.move', 'transfer.copy']);
+  const choices = entryActionChoices(entries[0]);
+  return choices.filter((choice) => batchable.has(choice.action) && entries.slice(1).every((entry) =>
+    entryActionChoices(entry).some((candidate) => candidate.action === choice.action && (candidate.value ?? null) === (choice.value ?? null))));
+}
+
+function captureFilesSelectionGuard(model, destinationIndex = state.activeColumnIndex) {
+  if (!model) return null;
+  const columnIndex = Number.isInteger(destinationIndex) && destinationIndex >= 0
+    ? destinationIndex : Math.max(0, state.columns.length - 1);
+  const column = state.columns[columnIndex] || activeColumn();
+  return Object.freeze({
+    filesScope: model.snapshot().scopeKey,
+    filesEpoch: model.epoch,
+    filesGeneration: filesPolicyGeneration(),
+    filesOwner: String(state.owner),
+    filesWorkspace: String(state.currentWorkspaceId || copalWorkspace()),
+    filesPane: state.nativeWindow?.id || 'files-window',
+    selectedKeys: Object.freeze(model.selectedKeys()),
+    filesDestinationIndex: columnIndex,
+    filesDestinationRef: String(destinationResourceRef(column) || ''),
+  });
+}
+
+function validateFilesSelectionGuard(guard, { targetKey = '' } = {}) {
+  if (!guard?.filesScope) return null;
+  const model = state.selectionModels.get(String(guard.filesScope));
+  if (!model) return null;
+  const currentKeys = model.selectedKeys();
+  const capturedKeys = Array.isArray(guard.selectedKeys) ? guard.selectedKeys.map(String) : [];
+  const exactSelection = currentKeys.length === capturedKeys.length && currentKeys.every((key, index) => key === capturedKeys[index]);
+  if (model.snapshot().scopeKey !== guard.filesScope || model.epoch !== Number(guard.filesEpoch)
+    || filesPolicyGeneration() !== Number(guard.filesGeneration) || state.owner !== guard.filesOwner
+    || String(state.currentWorkspaceId || copalWorkspace()) !== String(guard.filesWorkspace)
+    || (state.nativeWindow?.id || 'files-window') !== guard.filesPane || !exactSelection
+    || (targetKey && !currentKeys.includes(targetKey))) return null;
+  return model;
+}
+
+function updateLibraryCommandControls() {
+  const enabled = !options.pickerMode && isLibraryDocumentsView();
+  for (const selector of ['[data-files-library-create]', '[data-files-library-import]', '[data-files-library-select]']) {
+    const control = state.shell?.querySelector(selector);
+    if (control) control.hidden = !enabled;
+  }
+  const selected = selectedLibraryDocumentEntries();
+  const select = state.shell?.querySelector('[data-files-library-select]');
+  const newButton = state.shell?.querySelector('[data-files-new]');
+  if (newButton) newButton.hidden = options.pickerMode || enabled;
+  if (select) {
+    select.textContent = selected.length ? 'Clear' : 'Select';
+    select.title = selected.length ? 'Clear Library document selection' : 'Select all Library documents';
+  }
+}
+
 async function performManagedAction(entry, choice) {
+  if (options.pickerMode) { setStatus('This dialog selects resources; file changes are unavailable.', true); return false; }
+  const menuTrigger = document.activeElement;
   closeManagedActionMenu();
   if (!entry || !choice) return false;
+  if (choice.action === 'history.open') {
+    const target = createFilesHistoryTarget(entry);
+    if (!target) {
+      setStatus('History is available only for a registered Host file.', true);
+      return false;
+    }
+    const trigger = menuTrigger?.isConnected
+      ? menuTrigger
+      : state.shell?.querySelector('[data-files-actions]') || null;
+    const opened = openResourceHistory(target, trigger);
+    if (!opened) setStatus('History could not open for this resource.', true);
+    return opened;
+  }
+  if (choice.action === 'library.clone' || choice.action === 'library.delete') {
+    if (choice.action === 'library.delete' && !await uiModule.styledConfirm(
+      'Delete this document?', { title: 'Delete document', confirmText: 'Delete', danger: true },
+    )) return false;
+    try {
+      const actions = await import('./filesLibraryActions.js');
+      if (choice.action === 'library.clone') {
+        const clone = await actions.cloneLibraryDocument(entry.resource_ref, {
+          sessionId: window.sessionModule?.getCurrentSessionId?.() || null,
+        });
+        if (clone?.id && typeof window.documentModule?.loadDocument === 'function') {
+          await window.documentModule.loadDocument(clone.id);
+        }
+      } else {
+        await actions.deleteLibraryDocument(entry.resource_ref);
+      }
+      await reloadManagedColumn(state.columns.length - 1);
+      setStatus(choice.label + ': ' + entry.name);
+      return true;
+    } catch (error) {
+      setStatus(error?.message || choice.label + ' failed', true);
+      return false;
+    }
+  }
   if (choice.action === 'transfer.move' || choice.action === 'transfer.copy') {
     const model = ensureSelectionModel(activeColumn(), state.activeColumnIndex);
     const kind = choice.action === 'transfer.copy' ? 'copy' : 'move';
@@ -3991,7 +4803,7 @@ async function performManagedAction(entry, choice) {
     let actionArgs = {};
     if (choice.action === 'rename' || choice.action === 'move') {
       const name = await uiModule.styledPrompt(choice.action === 'rename' ? 'Choose a new file name.' : 'Choose the destination name for this document.', {
-        title: choice.action === 'rename' ? 'Rename document' : 'Move document', defaultValue: entry.name,
+        title: choice.action === 'rename' ? 'Rename document' : 'Move document', defaultValue: entry.provenance?.logical_path || entry.name,
       });
       if (name == null) return false;
       if (!String(name).trim()) throw new Error('A name is required.');
@@ -4007,9 +4819,38 @@ async function performManagedAction(entry, choice) {
     if (controller.signal.aborted || generation !== state.contentGeneration) return false;
     clearFilesSelection();
     if (activeColumn()?.globalSearch) await searchAllSources(state.searchQuery);
-    else if (usesFacadeListing()) await reloadManagedColumn(state.columns.length - 1);
+    else if (usesFacadeListing()) {
+      // A logical-path rename can remove the last leaf of the current virtual
+      // folder. Reauthorize the new ancestry before refreshing retained trees.
+      if (entry.provider === 'copal' && ['rename', 'move'].includes(choice.action) && response?.resource?.ref) {
+        await revealResource(response.resource.ref);
+      }
+      await refreshBrowser({ hierarchyProvider: entry.provider === 'copal' ? 'copal' : null });
+    }
     window.dispatchEvent(new CustomEvent('openclank-files-resource-mutated', { detail: { resourceRef: entry.resource_ref, action: choice.action, resource: response?.resource || null, history: response?.history || null } }));
-    setStatus(`${choice.label}: ${entry.name}`);
+    const recoveryUnavailable = response?.history && response.history.status !== "complete" && response.history.status !== "unconfigured";
+    setStatus(recoveryUnavailable ? `Saved; recovery copy unavailable: ${entry.name}` : `${choice.label}: ${entry.name}`);
+    if (recoveryUnavailable && response.history.action_id) {
+      const repairActionId = String(response.history.action_id);
+      const repairOwner = state.owner;
+      const button = el('button', { type: 'button', text: 'Repair recovery copy', title: 'Capture the original saved revision without repeating this operation' });
+      button.addEventListener('click', async () => {
+        if (listeners.signal.aborted || state.owner !== repairOwner) return;
+        button.disabled = true;
+        try {
+          const repaired = await fetch('/api/history/capture-repair/' + encodeURIComponent(repairActionId), { method: 'POST', credentials: 'same-origin', signal: listeners.signal });
+          const payload = await repaired.json();
+          if (!repaired.ok) throw new Error(payload?.detail?.message || 'Recovery copy is unavailable; the gap remains.');
+          if (listeners.signal.aborted || state.owner !== repairOwner) return;
+          setStatus(payload.message || 'Recovery copy repaired. The saved operation was not repeated.');
+        } catch (error) {
+          if (error?.name !== 'AbortError' && state.owner === repairOwner) {
+            setStatus(`Saved; recovery gap remains. ${error.message || 'Recovery repair unavailable.'} Action: ${repairActionId}`, true);
+          }
+        }
+      }, { signal: listeners.signal });
+      state.shell?.querySelector('.files-pane-status')?.append(` · Action: ${repairActionId} `, button);
+    }
     return true;
   } catch (error) {
     if (error?.name !== 'AbortError') setStatus(error.message || `${choice.label} failed`, true);
@@ -4017,6 +4858,92 @@ async function performManagedAction(entry, choice) {
   } finally {
     if (state.contentController === controller) state.contentController = null;
   }
+}
+
+function sameFileHistoryKeys(left, right) {
+  return left.length === right.length && left.every((key, index) => key === right[index]);
+}
+
+function createFilesHistoryTarget(entry) {
+  const resourceId = String(entry?.resource_id || '').trim();
+  if (!resourceId || entry?.provider !== 'host' || isDirectory(entry)) return null;
+  const columnIndex = state.activeColumnIndex;
+  const column = state.columns[columnIndex] || activeColumn();
+  const model = ensureSelectionModel(column, columnIndex);
+  if (!model) return null;
+  const scopeKey = String(model.snapshot().scopeKey || '');
+  let capturedModel = model;
+  const targetKey = entrySelectionKey(entry);
+  const captured = {
+    owner: String(state.owner || ''),
+    workspace: String(state.currentWorkspaceId || copalWorkspace()),
+    provider: String(state.provider || ''),
+    policyGeneration: filesPolicyGeneration(),
+    contentGeneration: Number(state.contentGeneration || 0),
+    lifecycleGeneration: Number(state.lifecycleGeneration || 0),
+    pane: String(state.nativeWindow?.id || 'files-window'),
+    columnIndex,
+    parentRef: String(column?.resourceRef || ''),
+    parentId: String(column?.resourceId || ''),
+    scopeKey,
+    selectionEpoch: Number(model.epoch || 0),
+    selectionKeys: model.selectedKeys(),
+    targetKey,
+  };
+  const parentContextIsCurrent = () => {
+    const liveColumn = state.columns[captured.columnIndex] || null;
+    return String(state.owner || '') === captured.owner
+      && String(state.currentWorkspaceId || copalWorkspace()) === captured.workspace
+      && String(state.provider || '') === captured.provider
+      && filesPolicyGeneration() === captured.policyGeneration
+      && Number(state.lifecycleGeneration || 0) === captured.lifecycleGeneration
+      && String(state.nativeWindow?.id || 'files-window') === captured.pane
+      && state.activeColumnIndex === captured.columnIndex
+      && String(liveColumn?.resourceRef || '') === captured.parentRef
+      && String(liveColumn?.resourceId || '') === captured.parentId;
+  };
+  const contextIsCurrent = () => {
+    const liveColumn = state.columns[captured.columnIndex] || null;
+    const liveModel = state.selectionModels.get(captured.scopeKey);
+    const liveEntries = liveColumn?.entries || state.entries;
+    return parentContextIsCurrent()
+      && Number(state.contentGeneration || 0) === captured.contentGeneration
+      && liveModel === capturedModel
+      && Number(capturedModel.epoch || 0) === captured.selectionEpoch
+      && sameFileHistoryKeys(capturedModel.selectedKeys(), captured.selectionKeys)
+      && captured.selectionKeys.includes(captured.targetKey)
+      && liveEntries.some((candidate) => String(candidate?.resource_id || '') === resourceId
+        && entrySelectionKey(candidate) === captured.targetKey);
+  };
+  return {
+    resourceId,
+    name: String(entry.name || 'Selected file'),
+    provider: 'host',
+    isContextCurrent: contextIsCurrent,
+    onRestored: async () => {
+      if (!contextIsCurrent()) return { status: 'context_changed' };
+      const expectedRefreshGeneration = captured.contentGeneration + 1;
+      const refreshed = await reloadManagedColumn(captured.columnIndex);
+      if (!refreshed) return { status: 'refresh_failed' };
+      if (!parentContextIsCurrent() || Number(state.contentGeneration || 0) !== expectedRefreshGeneration) {
+        return { status: 'context_changed' };
+      }
+      const refreshedColumn = state.columns[captured.columnIndex];
+      const refreshedModel = ensureSelectionModel(refreshedColumn, captured.columnIndex);
+      const available = new Set((refreshedColumn?.entries || []).map(entrySelectionKey));
+      const preservedKeys = captured.selectionKeys.filter((key) => available.has(key));
+      if (!preservedKeys.includes(captured.targetKey)) {
+        return { status: 'refresh_failed', message: 'The source file is no longer in the refreshed folder.' };
+      }
+      refreshedModel.replaceSelection(preservedKeys);
+      applyModelSelection(refreshedModel);
+      capturedModel = refreshedModel;
+      captured.contentGeneration = Number(state.contentGeneration || 0);
+      captured.selectionEpoch = Number(refreshedModel.epoch || 0);
+      captured.selectionKeys = refreshedModel.selectedKeys();
+      return { status: 'refreshed' };
+    },
+  };
 }
 
 function showEntryActionMenu(entry, { x = null, y = null, anchor = null } = {}) {
@@ -4045,6 +4972,139 @@ function showEntryActionMenu(entry, { x = null, y = null, anchor = null } = {}) 
   return true;
 }
 
+async function performLibraryBulkAction(entries, action) {
+  if (action === 'delete' && !await uiModule.styledConfirm(
+    'Delete ' + entries.length + ' documents?', { title: 'Delete documents', confirmText: 'Delete', danger: true },
+  )) return false;
+  const actions = await import('./filesLibraryActions.js');
+  let completed = 0;
+  let failed = 0;
+  for (const entry of entries) {
+    try {
+      if (action === 'clone') {
+        await actions.cloneLibraryDocument(entry.resource_ref, {
+          sessionId: window.sessionModule?.getCurrentSessionId?.() || null,
+        });
+      } else if (action === 'delete') {
+        await actions.deleteLibraryDocument(entry.resource_ref);
+      } else {
+        await filesFacadeClient.action(entry.resource_ref, 'archive.set', { value: action === 'archive' }, {
+          actionId: operationId('files-library-' + action),
+        });
+      }
+      completed += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  clearFilesSelection();
+  await reloadManagedColumn(state.columns.length - 1);
+  setStatus((action === 'archive' ? 'Archived' : action === 'restore' ? 'Restored' : action === 'clone' ? 'Cloned' : 'Deleted')
+    + ' ' + completed + (failed ? ' · ' + failed + ' failed' : ''));
+  return failed === 0;
+}
+
+function showLibraryBulkActionMenu(entries, anchor) {
+  closeManagedActionMenu();
+  const menu = el('div', { class: 'files-action-menu', role: 'menu', 'aria-label': 'Bulk Library document actions' });
+  const choices = [
+    ...(entries.every((entry) => entry.capabilities?.includes('archive')) ? [['archive', 'Archive', 'archive']] : []),
+    ...(entries.every((entry) => entry.capabilities?.includes('restore')) ? [['restore', 'Restore', 'restore']] : []),
+    ['clone', 'Clone to current session', 'copy'], ['delete', 'Delete', 'trash'],
+  ];
+  for (const [action, label, glyph] of choices) {
+    const item = el('button', { type: 'button', class: 'files-action-menu-item', role: 'menuitem' });
+    item.append(namedGlyph(glyph, { size: 14 }), el('span', { text: label }));
+    item.addEventListener('click', () => {
+      closeManagedActionMenu();
+      void performLibraryBulkAction(entries, action);
+    });
+    menu.append(item);
+  }
+  document.body.append(menu);
+  const box = anchor?.getBoundingClientRect?.();
+  menu.style.left = Math.max(6, Math.min(Number(box?.left || 8), window.innerWidth - menu.offsetWidth - 6)) + 'px';
+  menu.style.top = Number(box?.bottom || 8) + 4 + 'px';
+  state.actionMenu = menu;
+  menu.querySelector('button')?.focus();
+}
+
+function showSelectedBulkActionMenu(entries, choices, anchor, guard) {
+  closeManagedActionMenu();
+  const menu = el('div', { class: 'files-action-menu', role: 'menu', 'aria-label': `Actions for ${entries.length} selected items` });
+  for (const choice of choices) {
+    const item = el('button', { type: 'button', class: 'files-action-menu-item', role: 'menuitem' });
+    item.append(namedGlyph(choice.glyph, { size: 14 }), el('span', { text: `${choice.label} (${entries.length})` }));
+    item.addEventListener('click', () => { closeManagedActionMenu(); void performSelectedBulkAction(entries, choice, guard); });
+    menu.append(item);
+  }
+  document.body.append(menu);
+  const box = anchor?.getBoundingClientRect?.();
+  menu.style.left = `${Math.max(6, Math.min(Number(box?.left || 8), window.innerWidth - menu.offsetWidth - 6))}px`;
+  menu.style.top = `${Math.max(6, Math.min(Number(box?.bottom || 8) + 4, window.innerHeight - menu.offsetHeight - 6))}px`;
+  state.actionMenu = menu;
+  menu.querySelector('button')?.focus();
+}
+
+async function performSelectedBulkAction(entries, choice, guard) {
+  const model = validateFilesSelectionGuard(guard);
+  if (!model) {
+    setStatus('The Files selection or access changed; choose the action again.', true);
+    return false;
+  }
+  const capturedKeys = Array.isArray(guard.selectedKeys) ? guard.selectedKeys.map(String) : [];
+  const expectedEntries = model.selectedEntries();
+  if (expectedEntries.length !== entries.length || expectedEntries.some((entry, index) =>
+    entrySelectionKey(entry) !== String(capturedKeys[index]) || entrySelectionKey(entries[index]) !== String(capturedKeys[index]))) {
+    setStatus('The Files selection changed; choose the action again.', true);
+    return false;
+  }
+  if (choice.action === 'transfer.move' || choice.action === 'transfer.copy') {
+    const destinationIndex = Number(guard.filesDestinationIndex);
+    const capturedColumn = Number.isInteger(destinationIndex) && destinationIndex >= 0
+      ? state.columns[destinationIndex] || null : null;
+    const destinationRef = String(guard.filesDestinationRef || capturedColumn?.resourceRef || '').trim();
+    if (!capturedColumn || !destinationRef || destinationResourceRef(capturedColumn) !== destinationRef) {
+      setStatus('The destination folder changed; choose the transfer again.', true);
+      return false;
+    }
+    const destination = destinationRef
+      ? { ...(capturedColumn || {}), resource_ref:destinationRef, kind:'folder', capabilities:[...new Set([...(capturedColumn?.capabilities || []), 'children'])] }
+      : null;
+    if (!destination || !isDirectory(destination)) {
+      setStatus('Choose an authorized destination folder before transferring the selection.', true);
+      return false;
+    }
+    return executeSelectedFilesTransfer(choice.action === 'transfer.copy' ? 'copy' : 'move', {
+      model, destination, destinationIndex,
+    });
+  }
+  if (choice.action !== 'archive.set' && choice.action !== 'favorite.set') return false;
+  let completed = 0;
+  let failed = 0;
+  for (const entry of entries) {
+    if (!validateFilesSelectionGuard(guard)) {
+      setStatus(`${completed} of ${entries.length} completed; the Files selection or access changed, so remaining actions were stopped.`, true);
+      return false;
+    }
+    if (!entry.resource_ref) { failed += 1; continue; }
+    try {
+      await filesFacadeClient.action(entry.resource_ref, choice.action,
+        { value: choice.value }, { actionId: operationId('files-bulk-action') });
+      completed += 1;
+    } catch (_) { failed += 1; }
+  }
+  if (!validateFilesSelectionGuard(guard)) {
+    setStatus(`${completed} of ${entries.length} completed; the Files selection or access changed before refresh.`, true);
+    return false;
+  }
+  clearFilesSelection();
+  if (activeColumn()?.globalSearch) await searchAllSources(state.searchQuery);
+  else if (usesFacadeListing()) await reloadManagedColumn(state.columns.length - 1);
+  setStatus(`${choice.label}: ${completed} of ${entries.length}${failed ? ` · ${failed} failed` : ''}`);
+  return failed === 0;
+}
+
 function showFilesNewMenu({ anchor = null } = {}) {
   closeManagedActionMenu();
   const captured = creationDestinationForNode(null);
@@ -4067,8 +5127,22 @@ function showFilesNewMenu({ anchor = null } = {}) {
 }
 
 function openSelectedActions() {
-  const entry = selectedActionEntry();
+  const selectedEntries = selectedActionEntries();
+  const entry = selectedEntries.length === 1 ? selectedEntries[0] : null;
   const button = state.shell?.querySelector('[data-files-actions]');
+  const libraryEntries = selectedLibraryDocumentEntries();
+  if (libraryEntries.length > 1 && libraryEntries.length === selectedEntries.length) {
+    showLibraryBulkActionMenu(libraryEntries, button);
+    return;
+  }
+  if (selectedEntries.length > 1) {
+    const choices = commonActionChoices(selectedEntries);
+    if (choices.length) {
+      const model = ensureSelectionModel(activeColumn(), state.activeColumnIndex);
+      showSelectedBulkActionMenu(selectedEntries, choices, button, captureFilesSelectionGuard(model));
+    }
+    return;
+  }
   if (entry) showEntryActionMenu(entry, { anchor: button });
 }
 
@@ -4099,25 +5173,9 @@ async function launchManagedSourceApp(app, { resourceRef = '', exact = false } =
     return;
   }
   if (target === 'imps') {
-    // Imps (Image Processing Suite) owns image open after the Gallery
-    // retirement. Open the editor directly rather than the retired Gallery
-    // applet; legacy gallery callers resolve here too.
-    const editor = window.galleryEditorModule || await import('./galleryEditor.js');
-    if (exact && resourceRef) {
-      if (typeof editor?.openResource === 'function') {
-        await editor.openResource(resourceRef);
-        return;
-      }
-    }
-    if (typeof editor?.openEditor === 'function') {
-      await editor.openEditor(null, null, null, 'Imps');
-      return;
-    }
-    throw new Error('Imps is unavailable');
-  }
-  if (target === 'gallery') {
-    // Legacy gallery open target: resolve to Imps after the retirement.
-    const editor = window.galleryEditorModule || await import('./galleryEditor.js');
+    // Imps (Image Processing Suite) owns image open. Open the editor
+    // directly; legacy /gallery links resolve to Files before reaching here.
+    const editor = window.impsModule || await import('./imps.js');
     if (exact && resourceRef) {
       if (typeof editor?.openResource === 'function') {
         await editor.openResource(resourceRef);
@@ -4140,9 +5198,7 @@ async function launchManagedSourceApp(app, { resourceRef = '', exact = false } =
       window.sessionModule.openLibrary('documents');
       return;
     }
-    const launcher = document.getElementById('tool-library-btn');
-    if (!launcher) throw new Error('Library is unavailable');
-    launcher.click();
+    await openLibraryCollection('documents');
     return;
   }
   if (target === 'chat') {
@@ -4176,11 +5232,18 @@ async function launchManagedSourceApp(app, { resourceRef = '', exact = false } =
 }
 
 async function openManagedEntry(entry) {
+  if (options.pickerMode) return confirmPickerEntry(entry);
+  if (isPublishedLibraryEntry(entry)) {
+    if (entry.capabilities?.includes('preview')) await previewEntry(entry, entryPath(entry));
+    else if (entry.capabilities?.includes('download')) await downloadEntry(entry);
+    else setStatus('This published resource can no longer be previewed or downloaded.', true);
+    return;
+  }
   try {
     const response = await filesFacadeClient.open(entry.resource_ref);
     const app = response?.target?.app;
     const refreshedRef = String(response?.resource?.ref || entry.resource_ref || '');
-    await launchManagedSourceApp(app, { resourceRef: refreshedRef, exact: response?.exact === true });
+    await dispatchFilesDestination(response, { resourceRef:refreshedRef, surface:options.surface || 'files' });
     if (response?.resource) {
       const refreshed = facadeEntry(response.resource);
       const index = state.entries.findIndex((candidate) => entrySelectionKey(candidate) === entrySelectionKey(entry));
@@ -4299,7 +5362,7 @@ async function executeSelectedFilesTransfer(kind, { model = null, destination = 
   return committedKeys.size === initialKeys.length;
 }
 
-window.__openClankFilesContextCapture = (node) => {
+hooks.__openClankFilesContextCapture = (node) => {
   supersedeFilesRefreshForContext();
   const entry = contextEntryForNode(node);
   if (!entry) return null;
@@ -4326,11 +5389,21 @@ window.__openClankFilesContextCapture = (node) => {
     filesDestinationIndex: destinationIndex,
     filesDestinationRef: destinationResourceRef(destination),
     selectedKeys: Object.freeze(model.selectedKeys()), targetKey: key,
+    filesParentId: String(destination?.resource_id || destination?.resourceId || ''),
+    filesSourceProvider: String(model.scope.provider || ''), filesQuery: String(destination?.query || ''),
+    filesLifecycle: state.lifecycleGeneration, filesContent: state.contentGeneration,
+    filesSources: Object.freeze(model.selectedEntries().map(source => Object.freeze({
+      key: resourceKey(source, model.scope.provider, model.scope),
+      id: String(source.resource_id || source.resourceId || ''), ref: source.resource_ref,
+      entry: source, metadata: filesCopyListingMetadata(source),
+      revision: source.revision ? Object.freeze({ ...source.revision }) : null,
+    }))),
     ...creationCaptureForNode(node),
+    pasteDestination: captureFilesPasteDestination(node),
   });
 };
 
-window.__openClankFilesContextCapabilities = (_node, request = null) => {
+hooks.__openClankFilesContextCapabilities = (_node, request = null) => {
   const captured = request?.adapterContext;
   const model = captured?.filesScope
     ? state.selectionModels.get(String(captured.filesScope))
@@ -4342,7 +5415,43 @@ window.__openClankFilesContextCapabilities = (_node, request = null) => {
   };
 };
 
-window.__openClankFilesContextCommand = async (command, node, request = null) => {
+hooks.__openClankFilesContextCommand = async (command, node, request = null) => {
+  if (options.pickerMode) { setStatus('This dialog selects resources; file commands are unavailable.', true); return true; }
+  if (command === 'open-workspace-hexes') {
+    const workspaceId = String(node?.dataset?.workspaceId || '').trim();
+    const workspace = state.workspaces.find(item => String(item?.workspace?.id || '') === workspaceId);
+    if (!workspaceId || !workspace || workspace.availability !== 'available' || !workspace.resource) {
+      setStatus('This Workspace is no longer available. Refresh Files and try again.', true);
+      return true;
+    }
+    window.dispatchEvent(new CustomEvent('hex-open', { detail: Object.freeze({ workspaceId }) }));
+    return true;
+  }
+  // Copy is an in-memory capture of the originally requested identities.
+  // A refreshed listing may rotate refs/reset visual selection without
+  // changing those resources. Never substitute the current selected set.
+  if (['copy-files', 'copy-file'].includes(command) && request?.adapterContext?.filesParentId) {
+    const captured = request.adapterContext;
+    const sources = currentContextCopySources(captured);
+    if (!sources) { setStatus('The copied source or file access changed; choose Copy again.', true); return true; }
+    const revisions = [];
+    // Host listing rows omit fingerprints. Acquire the baseline through the
+    // existing authenticated stat before preparing a version-bound clipboard.
+    for (const entry of sources.entries) {
+      if (entry.revision) { revisions.push(entry.revision); continue; }
+      const response = await filesFacadeClient.stat(entry.resource_ref);
+      const verified = facadeEntry(response?.resource || response || {});
+      const current = currentContextCopySources(captured);
+      if (!current || current.model !== sources.model || current.entries.some((item, index) => item !== sources.entries[index])
+        || verified.resource_id !== entry.resource_id || verified.provider !== entry.provider
+        || filesCopyListingMetadata(verified) !== filesCopyListingMetadata(entry)
+        || !transferCapabilities(verified).copy || !verified.revision?.kind || !verified.revision?.value) {
+        setStatus('The copied source or file access changed; choose Copy again.', true); return true;
+      }
+      revisions.push(verified.revision);
+    }
+    return setFilesClipboard(sources.model, 'copy', () => Boolean(currentContextCopySources(captured)), sources.entries, revisions);
+  }
   const entry = contextEntryForNode(node);
   if (!entry) return false;
   let capturedModel = null;
@@ -4377,8 +5486,15 @@ window.__openClankFilesContextCommand = async (command, node, request = null) =>
       setStatus(`${kind === 'move' ? 'Move' : 'Copy'} is unavailable for the selected items.`, true);
       return true;
     }
+    if (kind === 'copy') {
+      const guard = request?.adapterContext || captureFilesSelectionGuard(selectedModel);
+      const lifecycle = state.lifecycleGeneration;
+      const content = state.contentGeneration;
+      return setFilesClipboard(selectedModel, kind, () => !listeners.signal.aborted && state.nativeWindow?.visible
+        && lifecycle === state.lifecycleGeneration && content === state.contentGeneration && Boolean(validateFilesSelectionGuard(guard)));
+    }
     // The typed executor owns authorization, receipts and collision policy.
-    // Context commands use the current folder as the destination; a folder
+    // Context Move uses the current folder as the destination; a folder
     // target is used only when it was already the captured selection target.
     const capturedDestinationIndex = request?.adapterContext?.filesDestinationIndex;
     const capturedColumn = capturedDestinationIndex >= 0
@@ -4413,6 +5529,10 @@ window.__openClankFilesContextCommand = async (command, node, request = null) =>
       return true;
     }
     const intent = command === 'open-in-editor-split-right' ? 'splitRight' : command === 'open-in-editor-split-below' ? 'splitBelow' : undefined;
+    // The exact-open callback selects a shared buffer/leaf; the Editor shell
+    // owns visibility, foreground focus and routing separately.
+    const editor = window.copalModule || await import('./copal.js');
+    await (editor.default || editor).open('notes');
     const opener = window.__openClankOpenResourceHandle;
     if (typeof opener === 'function') await opener({ resourceRef: entry.resource_ref, resourceKey: entrySelectionKey(entry), name: entry.name, ...(intent ? { intent } : {}) });
     else await openManagedEntry(entry);
@@ -4429,7 +5549,7 @@ window.__openClankFilesContextCommand = async (command, node, request = null) =>
     await navigator.clipboard.writeText(value);
     return true;
   }
-  const capabilityByCommand = { 'reveal-file':'reveal', 'rename-file':'rename', 'trash-file':'trash', 'restore-file':'restore' };
+  const capabilityByCommand = { 'reveal-file':'stat', 'rename-file':'rename', 'trash-file':'trash', 'restore-file':'restore' };
   const required = capabilityByCommand[command];
   if (!required || !capabilities.has(required)) return false;
   if (command === 'reveal-file') return Boolean(await revealResource(entry.resource_ref));
@@ -4449,7 +5569,20 @@ async function openSelected() {
     return;
   }
   const entry = entries[0];
-  if (isDirectory(entry) || !entry.resource_ref || !entry.capabilities?.includes('open')) {
+  if (options.pickerMode) { if (isDirectory(entry)) await openManagedDirectory(entry); else confirmPickerEntry(entry); return; }
+  if (isDirectory(entry) || !entry.resource_ref) {
+    setStatus('Select a file to open.', true);
+    return;
+  }
+  // Published Library resources remain an exact, read-only Files experience:
+  // preview or download them instead of reopening the retired Library modal.
+  if (isPublishedLibraryEntry(entry)) {
+    if (entry.capabilities?.includes('preview')) await previewEntry(entry, entryPath(entry));
+    else if (entry.capabilities?.includes('download')) await downloadEntry(entry);
+    else setStatus('This published resource can no longer be previewed or downloaded.', true);
+    return;
+  }
+  if (!entry.capabilities?.includes('open')) {
     setStatus('This item does not expose a source-app action.', true);
     return;
   }
@@ -4469,6 +5602,10 @@ async function addHostLocation() {
 }
 
 function handleWindowClosed() {
+  categoryObserver?.disconnect();
+  cancelReveal();
+  const splitPair = splits.get(id);
+  if (splitPair) { splits.delete(id); restoreSplit(splitPair); }
   cancelFilesGesture('window-hidden');
   abortFilesImports();
   clearKeepBothRetry();
@@ -4490,6 +5627,10 @@ function handleWindowClosed() {
   closeManagedActionMenu();
   closePreview();
   destroyExplorerTree();
+  if (id !== 'files-window' && !options.container) {
+    listeners.abort(); localMenu?.dispose(); browserResize?.disconnect(); state.navigation?.dispose(); state.pane?.destroy();
+    state.nativeWindow?.destroy(); browsers.delete(id); if (activeBrowser === api) activeBrowser = browsers.get('files-window') || null;
+  }
 }
 
 function confirmedFilesPolicyFailure(error) {
@@ -4550,6 +5691,7 @@ function supersedeFilesRefreshForContext() {
 }
 
 function clearFilesAuthorityContent(message = 'File access changed') {
+  cancelReveal();
   cancelFilesGesture('policy-change');
   clearKeepBothRetry();
   state.contentGeneration += 1;
@@ -4566,6 +5708,9 @@ function clearFilesAuthorityContent(message = 'File access changed') {
   state.columns = [];
   state.selectionModels.clear();
   state.selected = new Set();
+  state.treeSelection = null;
+  options.onSelection?.(null);
+  options.onDirectory?.(null);
   state.searchQuery = '';
   const label = state.shell?.querySelector('[data-files-path]');
   if (label) label.textContent = '';
@@ -4647,6 +5792,23 @@ function freshManagedResource(resourceId, provider) {
 }
 
 async function refreshManagedFilesProjection(snapshot, lifecycle) {
+  if (snapshot.provider === CLANKER_HOME_PROVIDER && !snapshot.columns.some(column => column.resourceId)) {
+    const controller = new AbortController();
+    state.contentController = controller;
+    try {
+      const resolved = await openClankerHome(controller, state.contentGeneration);
+      if (lifecycle !== state.lifecycleGeneration || controller.signal.aborted || !state.nativeWindow?.visible) {
+        return { status: 'stale' };
+      }
+      return resolved ? { status: 'resolved' } : { status: 'invalid' };
+    } catch (error) {
+      if (error?.name === 'AbortError') return { status: 'stale' };
+      return { status: confirmedFilesPolicyFailure(error) ? 'invalid' : 'unavailable', error };
+    } finally {
+      if (state.contentController === controller) state.contentController = null;
+    }
+  }
+
   if (snapshot.provider === 'all' && !snapshot.columns.some(column => column.resourceId)) {
     try {
       if (snapshot.searchQuery) {
@@ -4657,7 +5819,7 @@ async function refreshManagedFilesProjection(snapshot, lifecycle) {
         if (lifecycle !== state.lifecycleGeneration || !state.nativeWindow?.visible) return { status: 'stale' };
         const column = {
           path: 'all-search', resourceRef: '', resourceId: '', name: 'All sources',
-          entries: (response?.entries || []).map(facadeEntry), nextCursor: null,
+          entries: (response?.entries || []).map(facadeEntry).filter(editorResourceAllowed), nextCursor: null,
           sort: constrainSortSpec(response?.sort || snapshot.sort, response?.sort_keys || SORT_KEYS),
           sortKeys: sortKeysFor(response?.sort_keys || SORT_KEYS), activeName: '',
           query: snapshot.searchQuery, globalSearch: true,
@@ -4679,21 +5841,39 @@ async function refreshManagedFilesProjection(snapshot, lifecycle) {
     }
   }
 
+  const fromClankerHome = snapshot.columns[0]?.name === 'Clanker home' && !snapshot.columns[0]?.resourceId;
   const priorColumns = snapshot.columns.filter(column => column.resourceId);
   if (!priorColumns.length) return { status: 'invalid' };
-  let current = freshManagedResource(priorColumns[0].resourceId, priorColumns[0].provider || snapshot.provider);
-  if (!current) return { status: 'invalid' };
   const controller = new AbortController();
   state.contentController = controller;
   const contentGeneration = state.contentGeneration;
   const columns = [];
   try {
+    let current;
+    if (fromClankerHome) {
+      // The first saved column is a Library child of the synthetic home, not
+      // a provider root. Rebuild home first so its fresh child ref becomes
+      // the anchor for the normal managed descent below.
+      const homeResolved = await openClankerHome(controller, contentGeneration);
+      if (!homeResolved || controller.signal.aborted || lifecycle !== state.lifecycleGeneration || !state.nativeWindow?.visible) {
+        return { status: controller.signal.aborted ? 'stale' : 'invalid' };
+      }
+      const home = state.columns.at(-1);
+      current = home?.entries?.find((entry) => entry.resource_id === priorColumns[0].resourceId) || null;
+      if (!current) return { status: 'invalid' };
+      home.activeName = current.name;
+      columns.push(home);
+    } else {
+      current = freshManagedResource(priorColumns[0].resourceId, priorColumns[0].provider || snapshot.provider);
+      if (!current) return { status: 'invalid' };
+    }
     for (let index = 0; index < priorColumns.length; index += 1) {
       const prior = priorColumns[index];
       if (index > 0) {
-        current = columns[index - 1].entries.find(entry => entry.resource_id === prior.resourceId) || null;
+        const parent = columns.at(-1);
+        current = parent?.entries.find(entry => entry.resource_id === prior.resourceId) || null;
         if (!current) return { status: 'invalid' };
-        columns[index - 1].activeName = current.name;
+        parent.activeName = current.name;
       }
       const requestedSort = constrainSortSpec(prior.sort || snapshot.sort, prior.sortKeys || SORT_KEYS);
       const response = await filesFacadeClient.children(current.resource_ref, {
@@ -4725,6 +5905,7 @@ async function handleFilesPolicyChanged() {
   if (!state.nativeWindow?.visible) return false;
   const snapshot = captureFilesProjection();
   const lifecycle = abortFilesAuthorityRequests();
+  const startingContent = state.contentGeneration;
   setStatus('Revalidating file access…');
   try {
     await loadNavigationRoots({ force: true });
@@ -4734,7 +5915,7 @@ async function handleFilesPolicyChanged() {
     }
     return false;
   }
-  if (lifecycle !== state.lifecycleGeneration || !state.nativeWindow?.visible) return false;
+  if (lifecycle !== state.lifecycleGeneration || state.contentGeneration !== startingContent || !state.nativeWindow?.visible) return false;
 
   if (snapshot.owner && state.owner !== snapshot.owner) {
     clearFilesAuthorityContent('Account file access changed');
@@ -4813,6 +5994,9 @@ async function handleAuthUserReady(event) {
   state.columns = [];
   state.selectionModels.clear();
   state.selected = new Set();
+  state.treeSelection = null;
+  options.onSelection?.(null);
+  options.onDirectory?.(null);
   state.provider = 'host';
   state.searchQuery = '';
   state.viewPreferences = {};
@@ -4840,24 +6024,55 @@ async function handleAuthUserReady(event) {
   }
 }
 
+function toggleNavigation() {
+  state.navigationExpanded = !state.shell.classList.contains('files-navigation-open');
+  syncNavigationLayout();
+}
+
+function syncNavigationLayout() {
+  const shell = state.shell;
+  if (!shell || options.navigationOnly) return;
+  const pair = [...splits.values()].find(pair => pair.primary === api || pair.browser === api);
+  const width = shell.getBoundingClientRect().width;
+  shell.classList.toggle('files-compact', width > 0 && width < 600);
+  const targetWidth = pair ? pair.primary.window.body.getBoundingClientRect().width : width;
+  const open = state.navigationExpanded ?? (targetWidth >= (pair ? 700 : 600));
+  shell.classList.toggle('files-navigation-open', Boolean(open));
+  shell.classList.toggle('files-navigation-collapsed', !open);
+  if (pair && activeBrowser === api) pair.navigation.hidden = !open;
+  state.navigationToggle?.setAttribute('aria-expanded', String(Boolean(open)));
+}
+
 function mount() {
   if (state.nativeWindow) return state.nativeWindow;
-  state.nativeWindow = createOpenClankWindow({
-    id: 'files-window',
+  const navigation = state.navigation = createWindowNavigation({
+    scope: { account: state.owner, workspace: copalWorkspace() }, restore: restoreFilesHistory,
+    onChange: () => state.nativeWindow?.updateNavigationButtons?.(),
+  });
+  state.nativeWindow = options.container ? {
+    id, root: options.container, body: options.container,
+    get visible() { return !listeners.signal.aborted && (options.parentWindow ? options.parentWindow.visible : options.container.isConnected); },
+    show() {}, requestClose() { api.dispose(); },
+    setStatus(message, bad) { status.textContent = message || ''; status.classList.toggle('error', !!bad); },
+    updateNavigationButtons() {}, navigation,
+  } : createOpenClankWindow({
+    id,
     label: 'Files',
     subtitle: 'Copal · Host and library',
     className: 'files-window',
     minWidth: 620,
     minHeight: 440,
-    navigation: state.navigation = createWindowNavigation({
-      scope: { account: state.owner, workspace: copalWorkspace() },
-      restore: restoreFilesHistory,
-      onChange: () => state.nativeWindow?.updateNavigationButtons?.(),
-    }),
+    navigation,
+    onActivate: () => { if (activeBrowser?.window !== state.nativeWindow && activeBrowser?.parentWindow !== state.nativeWindow) activate(); },
     onClosed: handleWindowClosed,
   });
-  state.shell = el('div', { class: 'files-shell' });
-  const sidebar = el('aside', { class: 'files-sidebar', 'aria-label': 'Files navigation' });
+  state.shell = el('div', { class: 'files-shell', 'data-files-browser-id': id });
+  const status = el('div', { class: 'files-pane-status', role: 'status' });
+  state.shell.addEventListener('pointerdown', event => { state.openIntent = event.altKey ? 'splitBelow' : event.shiftKey ? 'splitRight' : (event.metaKey || event.ctrlKey) ? 'newTab' : 'current'; activate(); }, true);
+  listen(state.shell, 'keydown', event => { if (event.key === 'Enter') state.openIntent = event.altKey ? 'splitBelow' : event.shiftKey ? 'splitRight' : (event.metaKey || event.ctrlKey) ? 'newTab' : 'current'; }, {capture:true});
+  state.shell.addEventListener('focusin', () => activate());
+  const sidebar = state.sidebar = el('aside', { class: 'files-sidebar', 'aria-label': 'Files navigation', 'data-files-browser-id':id });
+  sidebar.addEventListener('pointerdown',activate,true); sidebar.addEventListener('focusin',activate);
   const favoritesSection = el('section', { class: 'files-sidebar-section files-favorites-section' });
   favoritesSection.append(
     el('h2', { class: 'files-sidebar-heading', text: 'Favorites' }),
@@ -4870,7 +6085,7 @@ function mount() {
   );
   const worktreeSection = el('section', { class: 'files-sidebar-section files-worktree-section' });
   worktreeSection.append(
-    el('h2', { class: 'files-sidebar-heading', text: 'Available worktree' }),
+    el('h2', { class: 'files-sidebar-heading', text: 'Locations' }),
     el('div', {
       class: 'files-tree',
       role: 'tree',
@@ -4878,11 +6093,43 @@ function mount() {
       'data-files-tree': '',
     }),
   );
-  sidebar.append(favoritesSection, workspacesSection, worktreeSection);
-  const separator = el('div', { class: 'oc-explorer-separator', role: 'separator', tabindex: '0', 'aria-orientation': 'vertical', 'aria-label': 'Resize Files navigation' });
+  const collectionsSection = el('section', { class: 'files-sidebar-section' }, el('h2', { class: 'files-sidebar-heading', text: 'Open Clank' }), el('div', { 'data-files-collections': '', class: 'files-tree', role: 'tree', 'aria-label': 'Open Clank collections' }));
+  sidebar.append(favoritesSection, workspacesSection, worktreeSection, collectionsSection);
+  for (const [index,section] of [...sidebar.children].entries()) {
+    const ids = ['favorites','workspaces','locations','applications'];
+    const heading=section.querySelector('h2'), content=heading.nextElementSibling;
+    const label=heading.textContent, categoryId=ids[index]; section.dataset.filesCategory=categoryId;
+    const toggle=el('button',{type:'button',class:'files-category-toggle','aria-expanded':'true',text:'▾ '+label}); heading.replaceChildren(toggle);
+    explorerLayout.register({id:categoryId,label,group:'places',element:()=>section,content:()=>content,
+      sync:record=>{toggle.setAttribute('aria-expanded',String(!record.collapsed));const text=(record.collapsed?'▸ ':'▾ ')+label;if(toggle.textContent!==text)toggle.textContent=text;},
+    });
+    toggle.addEventListener('click',()=>{const record=explorerLayout.records().find(item=>item.id===categoryId);explorerLayout.update(categoryId,{collapsed:!record.collapsed});});
+    heading.addEventListener('contextmenu',event=>{event.preventDefault();event.stopPropagation();customizeExplorer();});
+  }
+  categoryObserver?.disconnect();
+  categoryObserver = new MutationObserver(()=>{syncCollectionLayout();explorerLayout.apply();});
+  categoryObserver.observe(sidebar,{childList:true,subtree:true});
+
+  if (options.navigationOnly) {
+    const filter = el('input',{ type:'search', class:'files-folder-search', placeholder:'Search this folder', 'aria-label':'Search this folder', disabled:true });
+    let searchTimer;
+    const run = (expectedRef = activeColumn()?.resourceRef) => { clearTimeout(searchTimer); if (!expectedRef || expectedRef !== activeColumn()?.resourceRef || listeners.signal.aborted) return; void searchActive(filter.value); };
+    filter.addEventListener('input', () => { clearTimeout(searchTimer); const expectedRef = activeColumn()?.resourceRef; searchTimer = setTimeout(() => run(expectedRef),120); });
+    filter.addEventListener('search', () => run());
+    filter.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); run(); } });
+    listeners.signal.addEventListener('abort', () => clearTimeout(searchTimer), {once:true});
+    sidebar.prepend(filter);
+  }
+  const separator = state.sidebarSeparator = el('div', { class: 'oc-explorer-separator', role: 'separator', tabindex: '0', 'aria-orientation': 'vertical', 'aria-label': 'Resize Files navigation' });
 
   const main = el('main', { class: 'files-main' });
   const toolbar = el('div', { class: 'files-toolbar' });
+  const navigationToggle = state.navigationToggle = el('button', { type:'button', class:'files-navigation-toggle', text:'Navigation', 'aria-expanded':'true' });
+  navigationToggle.addEventListener('click', toggleNavigation);
+  toolbar.append(navigationToggle, iconButton({ glyph: 'back', title: 'Back in folder history', onClick: () => state.navigation.back() }),
+    iconButton({ glyph: 'forward', title: 'Forward in folder history', onClick: () => state.navigation.forward() }),
+    iconButton({ glyph: 'home', title: 'Home', onClick: () => openProvider(CLANKER_HOME_PROVIDER) }),
+    iconButton({ glyph: 'refresh', title: 'Refresh folder', onClick: () => reloadManagedColumn(state.columns.length - 1) }));
   const up = iconButton({
     glyph: 'up',
     title: 'Parent folder',
@@ -4890,18 +6137,63 @@ function mount() {
   });
   const newButton = iconButton({ glyph: 'plus', text: 'New', title: 'Create a file or folder', onClick: () => showFilesNewMenu({ anchor: newButton }) });
   newButton.dataset.filesNew = '';
+  const libraryCreate = iconButton({
+    glyph: 'plus', text: 'Create', title: 'Create a Library document',
+    onClick: () => { if (options.pickerMode) return; void (async () => {
+      try {
+        const actions = await import('./filesLibraryActions.js');
+        const created = await actions.createLibraryDocument({ sessionId: window.sessionModule?.getCurrentSessionId?.() || null });
+        if (created?.id && typeof window.documentModule?.loadDocument === 'function') await window.documentModule.loadDocument(created.id);
+        await reloadManagedColumn(state.columns.length - 1);
+        setStatus('Created Library document');
+      } catch (error) { setStatus(error?.message || 'Library document could not be created', true); }
+    })(); },
+  });
+  libraryCreate.dataset.filesLibraryCreate = '';
+  libraryCreate.hidden = true;
+  const libraryImport = iconButton({
+    glyph: 'folder-plus', text: 'Import', title: 'Import Library documents',
+    onClick: () => { if (!options.pickerMode) state.shell?.querySelector('[data-files-library-input]')?.click(); },
+  });
+  libraryImport.dataset.filesLibraryImport = '';
+  libraryImport.hidden = true;
+  const libraryInput = el('input', { type: 'file', multiple: 'true', hidden: 'true', 'data-files-library-input': '' });
+  libraryInput.addEventListener('change', () => { void (async () => {
+    const files = Array.from(libraryInput.files || []);
+    libraryInput.value = '';
+    if (options.pickerMode || !files.length) return;
+    try {
+      const actions = await import('./filesLibraryActions.js');
+      const results = await actions.importLibraryDocuments(files);
+      await reloadManagedColumn(state.columns.length - 1);
+      setStatus('Imported ' + Number(results?.imported || 0)
+        + (results?.failed ? ' · ' + results.failed + ' failed' : ''));
+    } catch (error) { setStatus(error?.message || 'Library import failed', true); }
+  })(); });
+  const librarySelect = iconButton({
+    glyph: 'check', text: 'Select', title: 'Select all Library documents',
+    onClick: () => {
+      const model = ensureSelectionModel(activeColumn(), state.activeColumnIndex);
+      if (selectedLibraryDocumentEntries().length) model.clear();
+      else model.selectAll();
+      applyModelSelection(model);
+    },
+  });
+  librarySelect.dataset.filesLibrarySelect = '';
+  librarySelect.hidden = true;
   const add = iconButton({ glyph: 'folder-plus', text: 'Add location', title: 'Add host location', onClick: addHostLocation });
   const openButton = iconButton({ glyph: 'folder-open', text: 'Open', title: 'Open selected in source app', onClick: openSelected });
   const downloadButton = iconButton({ glyph: 'download', text: 'Download', title: 'Download selected', onClick: downloadSelected });
   const actionsButton = iconButton({ glyph: 'archive', text: 'Actions', title: 'Select one actionable managed item', onClick: openSelectedActions });
   actionsButton.dataset.filesActions = '';
+  actionsButton.querySelector('span:not(.files-button-glyph)')?.classList.add('files-actions-label');
   actionsButton.disabled = true;
   const favoriteButton = iconButton({ glyph: 'star', title: 'Add current folder to Favorites', onClick: toggleCurrentFavorite });
   favoriteButton.classList.add('files-favorite-toggle');
   favoriteButton.dataset.filesFavoriteToggle = '';
   favoriteButton.setAttribute('aria-pressed', 'false');
   const provider = el('select', { class: 'files-provider-select', 'aria-label': 'Files source' });
-  for (const [value, label] of [['host', 'Host locations'], ['all', 'All sources'], ['copal', 'Copal'], ['gallery', 'Gallery'], ['library', 'Library']]) provider.append(el('option', { value, text: label }));
+  for (const [value, label] of [[CLANKER_HOME_PROVIDER, 'Clanker home'], ['host', 'Host locations'], ['all', 'All sources'], ['copal', 'Copal'], ['files', 'Images'], ['library', 'Library']]) provider.append(el('option', { value, text: label }));
   provider.addEventListener('change', () => openProvider(provider.value));
   const searchInput = el('input', {
     type: 'search',
@@ -4954,32 +6246,58 @@ function mount() {
   foldersFirst.dataset.filesFoldersFirst = '';
   updateFoldersFirstControl(foldersFirst, state.sort);
   const previewButton = iconButton({ glyph: 'image', text: 'Preview', title: 'Preview selected', onClick: () => { const entry = state.entries.find(item => state.selected.has(entrySelectionKey(item))); if (entry) previewEntry(entry, entryPath(entry)); } });
-  toolbar.append(up, provider, favoriteButton, newButton, add, openButton, downloadButton, previewButton, actionsButton, searchGroup, sort, foldersFirst, el('span', { class: 'files-toolbar-spacer' }), modes);
+  const operationShelf = el('div', { class: 'files-operation-shelf', hidden: 'true' }, newButton, libraryCreate, libraryImport, librarySelect, libraryInput, add, openButton, downloadButton, previewButton, actionsButton, foldersFirst);
+  toolbar.append(up, provider, favoriteButton, searchGroup, el('span', { class: 'files-toolbar-spacer' }), modes);
+  const size = el('select', { 'aria-label': 'Icon size', class: 'files-size-select' });
+  const updateSizes = () => { const large = ['grid', 'gallery'].includes(state.mode); size.replaceChildren(); for (const value of large ? [32,64,96,128] : [16,20,24,32]) size.append(el('option', { value, text: value + ' px' })); size.value = String(large ? state.largeIconSize : state.smallIconSize); };
+  size.addEventListener('change', () => { const body = state.shell.querySelector('[data-files-body]'); const row = body.scrollTop / layoutMetrics().rowStride; if (['grid','gallery'].includes(state.mode)) state.largeIconSize = Number(size.value); else state.smallIconSize = Number(size.value); body.scrollTop = row * layoutMetrics().rowStride; rememberViewPreferences(); renderEntries(); });
+  modes.addEventListener('change', updateSizes); modes.addEventListener('files-mode-sync', updateSizes); updateSizes();
+  toolbar.append(el('label', { class: 'files-size-label', text: 'Icon size' }, size));
+  main.append(operationShelf);
+  if (!options.pickerMode) toolbar.append(iconButton({ glyph: 'more', title: 'File and view actions', onClick: () => { operationShelf.hidden = !operationShelf.hidden; } }));
   const pathLabel = el('div', { class: 'files-path', 'data-files-path': '', text: '/' });
+  const searchNotice = el('div', {
+    class: 'files-empty files-search-partial-notice',
+    'data-files-search-notice': '',
+    role: 'status',
+    hidden: 'true',
+    text: 'Some folders could not be searched, or search limits were reached. Results may be incomplete. Refine the query or search a narrower folder.',
+  });
   const previewPanel = el('section', { class: 'files-preview', 'data-files-preview': '', hidden: 'true', 'aria-label': 'File preview' });
-  const body = el('div', { class: 'files-browser-body files-mode-list', 'data-files-body': '' });
+  const body = el('div', { class: 'files-browser-body files-mode-list', 'data-files-body': '', tabindex:'0', 'aria-label':'Files content' });
   installFilesGestures(body);
-  state.contextAdapterDispose = registerAdapter(body, canvasMenuAdapter());
-  main.append(toolbar, pathLabel, previewPanel, body);
+  if (!options.pickerMode) state.contextAdapterDispose = registerAdapter(body, canvasMenuAdapter());
+  main.append(toolbar, pathLabel, searchNotice, previewPanel, body);
+  if (options.pickerMode) favoriteButton.hidden = true;
+  const more = state.loadMoreButton = el('button', { type: 'button', class: 'files-content-more', hidden: true, text: 'Load more' });
+  more.addEventListener('click', () => void loadManagedMore());
+  main.append(more, status);
+  if (options.navigationOnly) { state.shell.classList.add('files-navigation-only'); main.hidden = true; separator.hidden = true; }
   state.shell.append(sidebar, separator, main);
   state.nativeWindow.body.append(state.shell);
   state.pane = createResizablePane({ container: state.shell, sidebar, main, separator, cssVar: '--files-sidebar-width', storageKey: 'odysseus-files-pane-width', defaultWidth: 220, minWidth: 170, maxWidth: 420, mainMin: 360, getOwner: () => state.owner });
-  window.addEventListener('modal-dismissed', (event) => {
+  listen(window, 'modal-dismissed', (event) => {
     if (event.detail?.id === state.nativeWindow.id) state.nativeWindow.requestClose();
   });
-  window.addEventListener('odysseus:modal-minimized', (event) => {
-    if (event.detail?.id === state.nativeWindow.id) cancelFilesGesture('window-hidden');
+  listen(window, 'odysseus:modal-minimized', (event) => {
+    if (event.detail?.id === (options.parentWindow?.id || state.nativeWindow.id)) { cancelFilesGesture('window-hidden'); stopActiveFolderWatch(); resetNativeThumbnails(); closeManagedActionMenu(); }
   });
-  window.addEventListener('odysseus:modal-opened', (event) => {
-    if (event.detail?.id && event.detail.id !== state.nativeWindow.id) cancelFilesGesture('modal-interruption');
+  listen(window, 'odysseus:modal-opened', (event) => {
+    if (event.detail?.id === (options.parentWindow?.id || state.nativeWindow.id)) syncActiveFolderWatch();
+    else if (event.detail?.id) cancelFilesGesture('modal-interruption');
   });
-  document.addEventListener('openclank:auth-user-ready', (event) => {
+  listen(document, 'openclank:auth-user-ready', (event) => {
     void handleAuthUserReady(event);
   });
-  document.addEventListener('openclank:file-policy-changed', () => {
+  listen(document, 'openclank:file-policy-changed', () => {
     void handleFilesPolicyChanged();
   });
-  window.addEventListener('workspace-change', (event) => {
+  listen(window, 'openclank:files-places-changed', event => {
+    if (event.detail?.owner !== state.owner || event.detail?.source === id) return;
+    const lifecycle = state.lifecycleGeneration;
+    void filesFacadeClient.places({signal:listeners.signal}).then(response => { if (lifecycle !== state.lifecycleGeneration) return; return loadFavorites(state.favorites.filter(item => item.pinned), response.entries || []); }).catch(error => { if (error.name !== 'AbortError') setStatus('Favorites could not be refreshed.', true); });
+  });
+  listen(window, 'workspace-change', (event) => {
     const nextWorkspace = String(event?.detail?.workspaceId || '');
     const workspaceChanged = nextWorkspace !== state.currentWorkspaceId;
     if (workspaceChanged) {
@@ -4993,10 +6311,10 @@ function mount() {
     renderWorkspaces();
     if (workspaceChanged) void handleFilesPolicyChanged();
   });
-  document.addEventListener('pointerdown', (event) => {
+  listen(document, 'pointerdown', (event) => {
     if (state.actionMenu && !state.actionMenu.contains(event.target)) closeManagedActionMenu();
   });
-  state.nativeWindow.root.addEventListener('keydown', (event) => {
+  state.shell.addEventListener('keydown', (event) => {
     const preview = state.shell?.querySelector('[data-files-preview]');
     if (event.key === 'Escape' && state.gesture) {
       event.preventDefault();
@@ -5006,6 +6324,7 @@ function mount() {
     }
     const inputTarget = event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]');
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !inputTarget) {
+      if (options.pickerMode) return;
       const model = ensureSelectionModel(activeColumn());
       model.selectAll();
       applyModelSelection(model);
@@ -5037,22 +6356,45 @@ function mount() {
     event.preventDefault();
     void previewEntry(entry, entryPath(entry));
   });
+  browserResize = new ResizeObserver(() => { syncNavigationLayout(); if (state.nativeWindow?.visible && state.entries.length > 500) renderEntries(); });
+  browserResize.observe(body);
+  browserResize.observe(state.shell);
+  if (!options.container) void import('./workbenchMenu.js').then(module => {
+    if (listeners.signal.aborted || !module.mountWorkbenchMenu || localMenu) return;
+    localMenu = module.mountWorkbenchMenu({ host: state.nativeWindow.root, container: state.nativeWindow.content, before: state.nativeWindow.body, id, kind: 'files', label: 'Files', surface: {
+      kind: 'files',
+      capture: () => { const current = activeBrowser && (activeBrowser.window === state.nativeWindow || activeBrowser.window?.root === state.nativeWindow.root || activeBrowser.parentWindow === state.nativeWindow) ? activeBrowser : api; return current.captureCommands(); },
+      isCurrent: snapshot => snapshot.browser.isCommandCaptureCurrent(snapshot),
+      commands: snapshot => snapshot.browser.commandDescriptors(snapshot),
+    } });
+    state.shell.querySelector('[aria-label="File and view actions"]')?.setAttribute('hidden','');
+  });
   return state.nativeWindow;
 }
 
 async function open() {
   const windowApi = mount();
   windowApi.show();
+  activate();
+  if (!options.pickerMode) acknowledgeVisible(state.shell, 'surface.visited', { surface:'files', visited:true });
+  if (!options.pickerMode && !state.contextAdapterDispose) state.contextAdapterDispose = registerAdapter(state.shell.querySelector('[data-files-body]'), canvasMenuAdapter());
   const lifecycle = ++state.lifecycleGeneration;
+  const priorProjection = captureFilesProjection();
+  const startingContent = state.contentGeneration;
   setStatus('Loading available files…');
   try {
     await loadNavigationRoots();
-    if (lifecycle !== state.lifecycleGeneration || !windowApi.visible) return windowApi;
-    if (state.provider !== 'host') {
-      await openProvider(state.provider);
-      return windowApi;
+    if (lifecycle !== state.lifecycleGeneration || state.contentGeneration !== startingContent || !windowApi.visible) return windowApi;
+    // A new Files window starts at Clanker home. Reopening first resolves the
+    // retained projection against current owner-bound refs, rather than
+    // displaying expired rows from a previous window lifetime.
+    if (state.columns.length && priorProjection.owner === state.owner) {
+      const refreshed = await refreshManagedFilesProjection(priorProjection, lifecycle);
+      if (refreshed.status === 'resolved') return windowApi;
+      if (refreshed.status === 'stale') return windowApi;
+      clearFilesAuthorityContent('The previous Files folder is no longer available');
     }
-    const opaqueOpened = await openProvider('host');
+    const opaqueOpened = await openProvider(CLANKER_HOME_PROVIDER);
     if (opaqueOpened) return windowApi;
     state.entries = [];
     state.nextCursor = null;
@@ -5068,14 +6410,37 @@ async function open() {
   return windowApi;
 }
 
-/** Reveal one Workspace-relative resource without receiving its host path. */
-export async function revealWorkspaceResource(workspaceId, relativePath = '') {
+/**
+ * Open a Library collection through its managed Files reference. This is the
+ * canonical handoff for the retired Documents tab; chats, research, and
+ * archive retain their legacy exact readers while their migrations finish.
+ */
+async function openLibraryCollection(view = 'documents') {
+  const requested = String(view || 'documents').trim().toLowerCase();
+  const expectedView = LIBRARY_COLLECTION_VIEWS[requested] || LIBRARY_COLLECTION_VIEWS.documents;
   const windowApi = mount();
   windowApi.show();
-  const reveal = ++state.revealGeneration;
+  await loadNavigationRoots();
+  const opened = await openProvider(CLANKER_HOME_PROVIDER);
+  if (!opened) return false;
+  const collection = state.entries.find((entry) => libraryCollectionView(entry) === expectedView);
+  if (!collection) {
+    setStatus('This Library collection is unavailable.', true);
+    return false;
+  }
+  return openManagedDirectory(collection, 0);
+}
+
+/** Reveal one Workspace-relative resource without receiving its host path. */
+async function revealWorkspaceResource(workspaceId, relativePath = '') {
+  const windowApi = mount();
+  windowApi.show();
+  cancelReveal();
+  const reveal = state.revealGeneration;
+  const revealController = state.revealController = new AbortController();
   setStatus('Locating Workspace resource…');
   try {
-    const response = await filesFacadeClient.workspaceResource(workspaceId, relativePath);
+    const response = await filesFacadeClient.workspaceResource(workspaceId, relativePath, {signal:revealController.signal});
     if (reveal !== state.revealGeneration) return false;
     await loadNavigationRoots();
     if (reveal !== state.revealGeneration) return false;
@@ -5085,7 +6450,10 @@ export async function revealWorkspaceResource(workspaceId, relativePath = '') {
     if (!parent.resource_ref || !isDirectory(parent) || !target.resource_id) {
       throw new Error('Workspace resource is unavailable');
     }
-    const opened = await openManagedDirectory(parent, null);
+    const revealed = await filesFacadeClient.reveal(target.resource_ref || parent.resource_ref, {signal:revealController.signal});
+    if (reveal !== state.revealGeneration) return false;
+    await expandRevealTrees((revealed.ancestors || [revealed.parent]).filter(Boolean).map(facadeEntry).filter(editorResourceAllowed),target,reveal);
+    const opened = await openManagedDirectory(parent, null, {reveal});
     if (!opened || reveal !== state.revealGeneration || !windowApi.visible) return false;
     if (target.resource_id !== parent.resource_id) {
       const listed = state.entries.find((entry) => entry.resource_id === target.resource_id);
@@ -5095,6 +6463,7 @@ export async function revealWorkspaceResource(workspaceId, relativePath = '') {
       model.select(entrySelectionKey(listed));
       state.selected = new Set(model.selectedKeys());
       if (column) column.activeName = listed.name;
+      state.treeSelection = null; options.onSelection?.(listed);
       renderEntries();
       setStatus(`Shown in Files: ${listed.name}`);
     } else {
@@ -5106,26 +6475,79 @@ export async function revealWorkspaceResource(workspaceId, relativePath = '') {
       setStatus(error.message || 'Workspace resource could not be shown', true);
     }
     return false;
+  } finally { if (state.revealController === revealController) state.revealController = null; }
+}
+
+async function expandRevealTrees(ancestors, target, reveal) {
+  const chain = [...ancestors];
+  if (chain.at(-1)?.resource_id !== target.resource_id) chain.push(target);
+  let chosen = null;
+  const trees = [state.workspaceTree, state.favoriteTree, state.explorerTree, state.collectionTree];
+  // Prefer the deepest registered presentation root. Workspace/Favorites win
+  // equal-depth ties; a physical ancestor is never expanded alongside it.
+  for (const tree of trees) {
+    if (!tree) continue;
+    const snapshot = tree.snapshot();
+    for (const id of snapshot.roots) {
+      const node = snapshot.nodes.find(node => node.id === id);
+      const index = chain.findIndex(resource => resource.resource_id === node?.data.resource_id);
+      if (index >= 0 && (!chosen || index > chosen.index)) chosen = { tree, node, index };
+    }
   }
+  if (!chosen) {
+    for (const tree of trees) {
+      if (!tree) continue;
+      for (const node of tree.snapshot().nodes) {
+        const index = chain.findIndex(resource => resource.resource_id === node.data.resource_id);
+        if (index >= 0 && (!chosen || index > chosen.index)) chosen = { tree, node, index };
+      }
+    }
+  }
+  const start = chosen?.index || 0;
+  if (chosen) {
+    const { tree } = chosen;
+    let node = chosen.node;
+    for (let index = start; index < chain.length; index += 1) {
+      if (reveal !== state.revealGeneration) return [];
+      if (node.branch) await tree.expand(node.id);
+      if (index === chain.length - 1) { tree.setActive(node.id); break; }
+      const nextId = chain[index + 1].resource_id;
+      let current = tree.getNode(node.id);
+      let next = current?.children.map(id => tree.getNode(id)).find(child => child?.data.resource_id === nextId);
+      // Page only this necessary branch, and only while the desired child is
+      // absent. Use the controller's sealed cursor, never a path lookup.
+      for (let page = 0; !next && current?.nextCursor && page < 100; page += 1) {
+        if (reveal !== state.revealGeneration || !(await tree.loadMore(node.id))) return [];
+        current = tree.getNode(node.id);
+        next = current?.children.map(id => tree.getNode(id)).find(child => child?.data.resource_id === nextId);
+      }
+      if (!next) break;
+      node = next;
+    }
+  }
+  const navigation = chain.slice(start, chain.length - 1);
+  return navigation.length ? navigation : isDirectory(target) ? [target] : ancestors;
 }
 
 /** Reveal an already-authorized provider resource in its canonical parent. */
-export async function revealResource(resourceRef) {
+async function revealResource(resourceRef) {
   const windowApi = mount();
   windowApi.show();
-  Modals.restore('files-window');
-  const reveal = ++state.revealGeneration;
+  Modals.restore(state.nativeWindow.id);
+  cancelReveal();
+  const reveal = state.revealGeneration;
+  const revealController = state.revealController = new AbortController();
   setStatus('Locating resource…');
   try {
     let response;
     try {
-      response = await filesFacadeClient.reveal(resourceRef);
+      response = await filesFacadeClient.reveal(resourceRef, {signal:revealController.signal});
     } catch (error) {
       if (error?.code !== 'resource_ref_stale') throw error;
-      const renewed = await filesFacadeClient.reissue(resourceRef);
+      const renewed = await filesFacadeClient.reissue(resourceRef, {signal:revealController.signal});
       const renewedRef = String(renewed?.resource?.ref || '');
       if (!renewedRef) throw new Error('Resource could not be renewed');
-      response = await filesFacadeClient.reveal(renewedRef);
+      response = await filesFacadeClient.reveal(renewedRef, {signal:revealController.signal});
     }
     if (reveal !== state.revealGeneration) return false;
     await loadNavigationRoots();
@@ -5135,8 +6557,8 @@ export async function revealResource(resourceRef) {
       Array.isArray(response?.ancestors) && response.ancestors.length
         ? response.ancestors
         : [response?.parent]
-    ).filter(Boolean).map(facadeEntry);
-    const parent = ancestors.at(-1);
+    ).filter(Boolean).map(facadeEntry).filter(editorResourceAllowed);
+    let parent = ancestors.at(-1);
     const target = facadeEntry(response?.resource);
     if (
       !parent?.resource_ref
@@ -5145,8 +6567,11 @@ export async function revealResource(resourceRef) {
     ) {
       throw new Error('Resource is unavailable');
     }
-    for (let index = 0; index < ancestors.length; index += 1) {
-      const opened = await openManagedDirectory(ancestors[index], index === 0 ? null : index - 1);
+    const navigation = await expandRevealTrees(ancestors,target,reveal);
+    if (reveal !== state.revealGeneration || !navigation.length) return false;
+    parent = navigation.at(-1);
+    for (let index = 0; index < navigation.length; index += 1) {
+      const opened = await openManagedDirectory(navigation[index], index === 0 ? null : index - 1, {reveal});
       if (!opened || reveal !== state.revealGeneration || !windowApi.visible) return false;
     }
     if (target.resource_id !== parent.resource_id) {
@@ -5157,6 +6582,7 @@ export async function revealResource(resourceRef) {
       model.select(entrySelectionKey(listed));
       state.selected = new Set(model.selectedKeys());
       if (column) column.activeName = listed.name;
+      state.treeSelection = null; options.onSelection?.(listed);
       renderEntries();
       setStatus(`Shown in Files: ${listed.name}`);
     } else {
@@ -5168,7 +6594,204 @@ export async function revealResource(resourceRef) {
       setStatus(error.message || 'Resource could not be shown', true);
     }
     return false;
-  }
+  } finally { if (state.revealController === revealController) state.revealController = null; }
 }
 
-export default { open, revealResource, revealWorkspaceResource, close: () => state.nativeWindow?.requestClose() };
+function captureCommands() {
+  const treeEntry = state.treeSelection || null;
+  const treeParent = treeEntry?.tree_ancestors?.at(-1) || null;
+  let model;
+  if (treeEntry) {
+    const scope = { owner:state.owner, workspace:state.currentWorkspaceId || copalWorkspace(),
+      provider:treeEntry.provider, parentRef:treeParent?.resource_ref || '', query:'', column:'tree' };
+    const identity = scopeKey(scope);
+    model = state.selectionModels.get(identity);
+    if (!model) { model = createFilesSelectionModel({scope}); state.selectionModels.set(identity, model); }
+    model.setItems([treeEntry]);
+    model.replaceSelection([resourceKey(treeEntry,scope.provider,scope)]);
+  } else model = ensureSelectionModel(activeColumn());
+  const selection = captureFilesSelectionGuard(model);
+  const destination = treeEntry ? (isDirectory(treeEntry) ? treeEntry : treeParent) : activeColumn();
+  const directory = destination ? { ...destination, resourceRef:destinationResourceRef(destination), resourceId:destination.resource_id || destination.resourceId } : null;
+  return Object.freeze({ browser: api, lifecycle: state.lifecycleGeneration, content: state.contentGeneration, navigating: Boolean(state.contentController),
+    owner: state.owner, policy: filesPolicyGeneration(), selection, treeEntry,
+    entries: Object.freeze([...model.selectedEntries()]), directory,
+    creation: directory ? creationDestinationForEntry({ ...directory, kind:'folder' }, state.activeColumnIndex) : null });
+}
+function isCommandCaptureCurrent(snapshot) {
+  const treeEntry = state.treeSelection || null;
+  const destination = treeEntry ? (isDirectory(treeEntry) ? treeEntry : treeEntry.tree_ancestors?.at(-1)) : activeColumn();
+  const destinationId = String(destination?.resource_id || destination?.resourceId || '');
+  const capturedId = String(snapshot?.directory?.resource_id || snapshot?.directory?.resourceId || '');
+  return !snapshot?.navigating && !state.contentController
+    && destinationResourceRef(destination) === String(snapshot?.directory?.resourceRef || '')
+    && destinationId === capturedId && snapshot?.browser === api && !listeners.signal.aborted && state.nativeWindow?.visible
+    && snapshot.lifecycle === state.lifecycleGeneration && snapshot.content === state.contentGeneration
+    && snapshot.owner === state.owner && snapshot.policy === filesPolicyGeneration()
+    && snapshot.treeEntry === (state.treeSelection || null)
+    && Boolean(validateFilesSelectionGuard(snapshot.selection));
+}
+function commandDescriptors(snapshot) {
+  const descriptors = [];
+  const add = (name, label, menu, run, reason = '', checked = undefined) => descriptors.push({ id: 'files.' + name, label, menu, run, disabledReason: snapshot.navigating ? 'Wait for folder navigation to finish; reopen this menu.' : reason, checked });
+  const entries = snapshot.entries;
+  const single = entries.length === 1 ? entries[0] : null;
+  const requiredSingle = single ? '' : 'Select one item.';
+  add('new-file', 'New file…', 'File', () => createFilesResource('file', snapshot.creation), snapshot.creation ? '' : 'This folder does not support creating files.');
+  add('new-folder', 'New folder…', 'File', () => createFilesResource('folder', snapshot.creation), snapshot.creation ? '' : 'This folder does not support creating folders.');
+  add('open', 'Open', 'File', () => isDirectory(single) ? openManagedDirectory(single) : options.pickerMode ? confirmPickerEntry(single) : openManagedEntry(single), requiredSingle || (!single?.capabilities?.includes('open') && !isDirectory(single) ? 'This provider cannot open this item.' : ''));
+  add('download', 'Download', 'File', async () => { for (const entry of entries) await downloadEntry(entry); }, entries.length && entries.every(entry => entry.capabilities?.includes('download')) ? '' : 'Select downloadable files.');
+  add('information', 'Resource information', 'File', () => uiModule.styledConfirm([single.name, 'Type: ' + (single.kind || single.media_type || 'File'), 'Provider: ' + (single.provider || state.provider), ...(single.size != null ? ['Size: ' + formatBytes(single.size)] : []), ...(single.modified_unix_ms ? ['Modified: ' + formatModified(single.modified_unix_ms)] : [])].join('\n'), { title:'Resource information',confirmText:'Done',cancelText:'Close' }), requiredSingle);
+  add('customize-explorer', 'Customize Explorer…', 'View', customizeExplorer);
+  add('preview', 'Preview', 'View', () => previewEntry(single, entryPath(single)), requiredSingle || (isPreviewable(single, entryPath(single)) ? '' : 'No preview is available.'));
+  const caps = entries.map(transferCapabilities);
+  for (const [kind,label] of [['copy','Copy'],['move','Cut']]) add(kind === 'move' ? 'cut' : kind, label, 'Edit', () => {
+    const model = validateFilesSelectionGuard(snapshot.selection);
+    return setFilesClipboard(model, kind, () => isCommandCaptureCurrent(snapshot));
+  }, snapshot.treeEntry && !validateFilesSelectionGuard(snapshot.selection)?.scope.parentRef ? 'This tree resource has no authorized parent; open its containing folder first.' : entries.length && entries.length <= FILES_MAX_DRAG_ITEMS && caps.every(cap => cap[kind]) ? '' : `Select up to ${FILES_MAX_DRAG_ITEMS} transferable items.`);
+  add('paste', 'Paste', 'Edit', async () => {
+    const destination = { ...snapshot.directory, resource_ref:snapshot.directory.resourceRef, kind:'folder' };
+    return pasteFilesClipboard(destination, destinationColumnIndex(destination), () => isCommandCaptureCurrent(snapshot));
+  }, filesClipboard && snapshot.directory?.capabilities?.includes('write') && filesClipboard.payload.provider === snapshot.directory?.provider ? '' : 'Copy or cut files from the same provider into a writable folder.');
+  add('select-all', 'Select all', 'Edit', () => { const model = ensureSelectionModel(activeColumn()); model.selectAll(); applyModelSelection(model); });
+  const choices = single ? entryActionChoices(single) : commonActionChoices(entries);
+  for (const choice of choices) {
+    if (choice.action.startsWith('transfer.')) continue;
+    add('action-' + choice.action, choice.label, ['rename','trash','restore','archive.set'].includes(choice.action) ? 'Edit' : 'File', () => entries.length > 1 ? performSelectedBulkAction(entries, choice, snapshot.selection) : performManagedAction(single, choice));
+  }
+  for (const mode of ['list','grid','details','columns','gallery']) add('view-' + mode, mode[0].toUpperCase() + mode.slice(1), 'View', () => { const control = state.shell.querySelector('.files-mode-select'); control.value = mode; control.dispatchEvent(new Event('change')); }, '', state.mode === mode);
+  for (const [value,label] of FILE_SORT_OPTIONS) add('sort-' + value, 'Sort: ' + label, 'View', () => { const [key,direction] = value.split(':'); return applyPrimarySort({ ...state.sort,key,direction }); });
+  add('folders-first', 'Folders first', 'View', () => applyPrimarySort({ ...state.sort, directoriesFirst: !state.sort.directoriesFirst }), '', state.sort.directoriesFirst);
+  for (const value of ['grid','gallery'].includes(state.mode) ? [32,64,96,128] : [16,20,24,32]) add('size-' + value, 'Icon size: ' + value + ' px', 'View', () => { const size = state.shell.querySelector('.files-size-select'); size.value = value; size.dispatchEvent(new Event('change')); });
+  add('navigation', 'Navigation sidebar', 'View', toggleNavigation, '', state.shell.classList.contains('files-navigation-open'));
+  add('refresh', 'Refresh folder', 'View', () => api.refresh());
+  add('back', 'Back in folder history', 'Go', () => state.navigation.back(), state.navigation.canGoBack() ? '' : 'No previous folder.');
+  add('forward', 'Forward in folder history', 'Go', () => state.navigation.forward(), state.navigation.canGoForward() ? '' : 'No next folder.');
+  add('up', 'Parent folder', 'Go', managedUp);
+  add('home', 'Home', 'Go', () => openProvider(CLANKER_HOME_PROVIDER));
+  add('favorite', 'Favorite current folder', 'Go', toggleCurrentFavorite, state.provider === 'host' && snapshot.directory?.resourceRef ? '' : 'Open a Host folder to save a Favorite.');
+  add('new-window-file', 'New Files Window', 'File', newWindow);
+  add('new-window', 'New Files Window', 'Window', newWindow);
+  add('split-right', 'Split right', 'Window', () => split('right', options.parentWindow?.id || id));
+  add('split-below', 'Split below', 'Window', () => split('below', options.parentWindow?.id || id));
+  add('focus-other', 'Focus other pane', 'Window', () => { api.activate(); return focusOtherPane(); });
+  add('close-split', 'Close split', 'Window', () => { api.activate(); return closeSplit(); });
+  return options.pickerMode ? descriptors.filter(item => item.menu === "Go" && item.id !== "files.favorite" || item.menu === "View" || ["files.open", "files.information"].includes(item.id)) : descriptors;
+}
+function activate() {
+  activeBrowser = api;
+  const splitPair = [...splits.values()].find(pair => pair.primary === api || pair.browser === api);
+  if (splitPair && state.sidebar.parentElement !== splitPair.navigation) {
+    for (const pane of [splitPair.primary, splitPair.browser]) {
+      if (pane.sidebar?.parentElement === splitPair.navigation) pane.element.prepend(pane.sidebar);
+      pane.sidebar.hidden = pane !== api;
+    }
+    splitPair.navigation.replaceChildren(state.sidebar);
+  }
+  for (const browser of browsers.values()) browser.element?.classList.toggle('files-pane-active', browser === api);
+  options.parentWindow?.setNavigationAdapter?.(state.navigation);
+  syncNavigationLayout();
+}
+const api = {
+  captureLifetime: () => ({ lifecycle:state.lifecycleGeneration, owner:state.owner, policy:filesPolicyGeneration() }),
+  isLifetimeCurrent: captured => !listeners.signal.aborted && browsers.get(id) === api && state.nativeWindow?.visible && captured?.lifecycle === state.lifecycleGeneration && captured.owner === state.owner && captured.policy === filesPolicyGeneration(),
+  getTransferModel: payload => state.selectionModels.get(payloadScopeKey(payload)) || null,
+  updateTransferSelection: model => {
+    if (![...state.selectionModels.values()].includes(model)) return;
+    if (model.scope.column === 'tree') {
+      if (!model.selectedKeys().length) { state.treeSelection = null; options.onSelection?.(null); }
+      updateTreeHighlight();
+    } else applyModelSelection(model);
+  },
+  getDragPayload: () => state.gesture?.type === 'drag' ? state.gesture.payload : null,
+  resolveTransferModel: payload => {
+    if (listeners.signal.aborted || !state.nativeWindow?.visible || payload.owner !== state.owner || Number(payload.policy_generation) !== filesPolicyGeneration()) return null;
+    const model = state.selectionModels.get(payloadScopeKey(payload));
+    if (!model || model.epoch !== Number(payload.selection_epoch) || !payload.sources.every(source => model.has(String(source.resource_key)))) return null;
+    return model;
+  },
+  explorerLayout, customizeExplorer,
+  id, hooks, parentWindow: options.parentWindow, captureCommands, isCommandCaptureCurrent, commandDescriptors, open, openLibraryCollection, revealResource, revealWorkspaceResource,
+  get element() { return state.shell; }, get sidebar() { return state.sidebar; }, get sidebarSeparator() { return state.sidebarSeparator; }, get window() { return state.nativeWindow; },
+  getCurrentDirectory: () => { const column = activeColumn(); return column?.resourceRef ? { ...column, resource_ref:column.resourceRef, resource_id:column.resourceId, kind:'folder' } : null; },
+  getSelection: () => state.treeSelection ? [state.treeSelection] : ensureSelectionModel(activeColumn()).selectedEntries(),
+  getContext: () => hooks.__odysseusGetActiveFilesContext(),
+  openDirectory: entry => openManagedDirectory(facadeEntry(entry), null),
+  newFile: () => createFilesResource('file', creationDestinationForNode(null)),
+  refresh: refreshBrowser, cancelReveal, filterTree, clearFilter: () => filterTree(''), search: searchActive,
+  activate,
+  invoke: (command, node = null, request = null) => hooks.__openClankFilesContextCommand(command, node, request),
+  dispose() { categoryObserver?.disconnect(); handleWindowClosed(); listeners.abort(); localMenu?.dispose(); browserResize?.disconnect(); state.navigation?.dispose(); state.pane?.destroy?.(); state.shell?.remove(); browsers.delete(id); if (activeBrowser === api) activeBrowser = browsers.values().next().value || null; },
+};
+browsers.set(id, api);
+return api;
+}
+
+function browserFor(node, request) {
+  const pane = request?.adapterContext?.filesPane;
+  return browsers.get(pane || node?.closest?.('[data-files-browser-id]')?.dataset.filesBrowserId) || activeBrowser || defaultBrowser();
+}
+function defaultBrowser() {
+  let browser = browsers.get('files-window');
+  if (!browser) browser = createFilesBrowser({ id: 'files-window' });
+  activeBrowser ||= browser;
+  return browser;
+}
+for (const name of ['__openClankFilesGestureSnapshot','__openClankFilesTransferContext','__openClankFilesRetryKeepBoth','__odysseusGetActiveFilesContext','__openClankFilesContextCapture','__openClankFilesContextCapabilities','__openClankFilesContextCommand']) {
+  window[name] = (...args) => {
+    const captured = args.find(arg => arg?.adapterContext?.filesPane);
+    const node = args.find(arg => arg?.closest);
+    const pane = name === '__openClankFilesRetryKeepBoth' ? args[0]?.pane : null;
+    const browser = name === '__openClankFilesTransferContext' ? [...browsers.values()].find(item => item.hooks[name]?.()) : browsers.get(pane) || browserFor(node, captured);
+    return browser?.hooks[name]?.(...args) ?? null;
+  };
+}
+/** Open standalone Files and reuse its authorized destination/name/Editor flow. */
+export async function newFile() {
+  const browser = defaultBrowser();
+  await browser.open();
+  return browser.newFile();
+}
+export const openLibraryCollection = (...args) => defaultBrowser().openLibraryCollection(...args);
+export const revealResource = (...args) => defaultBrowser().revealResource(...args);
+export const revealWorkspaceResource = (...args) => defaultBrowser().revealWorkspaceResource(...args);
+const splits = new Map();
+export async function newWindow() { const browser = createFilesBrowser(); await browser.open(); browser.activate(); return browser.window; }
+export async function split(direction = 'right', windowId = activeBrowser?.window?.id) {
+  const primary = browsers.get(windowId) || activeBrowser || defaultBrowser();
+  const hostWindow = primary.window;
+  if (!hostWindow || splits.has(hostWindow.id)) return false;
+  const container = document.createElement('section'); container.className = 'files-split-pane';
+  const panesHost = document.createElement('div'); panesHost.className = 'files-split-host'; panesHost.dataset.splitDirection = direction;
+  const navigation = document.createElement('aside'); navigation.className = 'files-shared-navigation';
+  hostWindow.body.classList.add('files-workbench-split');
+  hostWindow.body.append(navigation,panesHost); panesHost.append(primary.element);
+  primary.element.classList.add('files-pane-with-shared-navigation'); primary.sidebarSeparator.hidden = true;
+  const divider = document.createElement('div'); divider.className = 'files-split-divider'; divider.tabIndex = 0; divider.setAttribute('role','separator'); divider.setAttribute('aria-label','Resize Files split'); divider.setAttribute('aria-orientation',direction === 'below' ? 'horizontal' : 'vertical');
+  const applySplit = value => { primary.element.style.flex = `0 0 ${Math.max(20,Math.min(80,value))}%`; };
+  divider.addEventListener('pointerdown', event => {
+    event.preventDefault(); divider.setPointerCapture(event.pointerId);
+    const move = moveEvent => { const box = panesHost.getBoundingClientRect(); applySplit(direction === 'below' ? (moveEvent.clientY-box.top)/box.height*100 : (moveEvent.clientX-box.left)/box.width*100); };
+    const end = () => { divider.removeEventListener('pointermove',move); divider.removeEventListener('pointerup',end); divider.removeEventListener('pointercancel',end); };
+    divider.addEventListener('pointermove',move); divider.addEventListener('pointerup',end); divider.addEventListener('pointercancel',end);
+  });
+  divider.addEventListener('keydown', event => { if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)) return; event.preventDefault(); const current = parseFloat(primary.element.style.flexBasis) || 50; applySplit(current + (['ArrowLeft','ArrowUp'].includes(event.key) ? -5 : 5)); });
+  panesHost.append(divider,container);
+  const browser = createFilesBrowser({ container, parentWindow: hostWindow });
+  splits.set(hostWindow.id, { primary, browser, container, divider, navigation, panesHost });
+  await browser.open(); browser.element.classList.add('files-pane-with-shared-navigation'); browser.sidebarSeparator.hidden = true; browser.activate(); return browser;
+}
+function restoreSplit(pair) {
+  pair.primary.element.prepend(pair.primary.sidebar); pair.primary.sidebar.hidden = false;
+  pair.primary.sidebarSeparator.hidden = false; pair.primary.element.classList.remove('files-pane-with-shared-navigation'); pair.primary.element.style.flex = '';
+  pair.primary.window.body.append(pair.primary.element);
+  pair.browser.dispose(); pair.navigation.remove(); pair.panesHost.remove(); pair.primary.window.body.classList.remove('files-workbench-split');
+}
+export function closeSplit() {
+  const pair = [...splits.values()].find(pair => pair.primary === activeBrowser || pair.browser === activeBrowser);
+  if (!pair) return false;
+  splits.delete(pair.primary.window.id); restoreSplit(pair); pair.primary.activate(); return true;
+}
+export function getActiveBrowser() { return activeBrowser || defaultBrowser(); }
+export function focusOtherPane() { const pair = [...splits.values()].find(pair => pair.primary === activeBrowser || pair.browser === activeBrowser); if (!pair) return false; const target = activeBrowser === pair.primary ? pair.browser : pair.primary; target.activate(); target.element.querySelector('[data-files-body]')?.focus(); return true; }
+export default { open: () => defaultBrowser().open(), newFile, newWindow, split, closeSplit, focusOtherPane, getActiveBrowser, createFilesBrowser, openLibraryCollection, revealResource, revealWorkspaceResource, close: () => activeBrowser?.window?.requestClose() };

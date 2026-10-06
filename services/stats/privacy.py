@@ -21,6 +21,7 @@ IDENTITY_DIMENSIONS = frozenset({
     "requested_model",
     "actual_model",
     "session_id",
+    "operation_id",
 })
 
 _LABELS = {
@@ -31,6 +32,7 @@ _LABELS = {
     "requested_model": "Requested model",
     "actual_model": "Model",
     "session_id": "Session",
+    "operation_id": "Operation",
 }
 
 
@@ -72,7 +74,7 @@ class PublicIdentity:
 class IdentityCatalog:
     """A deterministic result-local label catalog with owner-bound handles."""
 
-    def __init__(self, owner: str, dimension: str, values: Iterable[str | None]):
+    def __init__(self, owner: str, dimension: str, values: Iterable[str | None], *, labels: dict[str, str] | None = None):
         if dimension not in IDENTITY_DIMENSIONS:
             raise StatsIdentityError(f"unsupported identity dimension: {dimension}")
         self.owner = str(owner or "").strip().lower()
@@ -81,8 +83,26 @@ class IdentityCatalog:
         self.dimension = dimension
         normalized = sorted({str(value).strip() for value in values if str(value or "").strip()})
         stem = _LABELS[dimension]
+        def display_label(raw):
+            label = (labels or {}).get(raw)
+            # Managed observed model names may be connection-qualified. The
+            # suffix is presentation only; the complete value still hashes.
+            model = raw.rsplit("/", 1)[-1] if raw.startswith("pcn_") else raw
+            if dimension in {"actual_model", "requested_model"}:
+                return str(label or (labels or {}).get(model) or model)
+            return str(label or f"{stem} unavailable")
+        display_names = {raw: display_label(raw) for raw in normalized}
+        if dimension in {"actual_model", "requested_model"}:
+            from collections import Counter
+            repeated = Counter(display_names.values())
+            for raw, label in display_names.items():
+                if repeated[label] > 1:
+                    model_id = raw.rsplit("/", 1)[-1] if raw.startswith("pcn_") else raw
+                    connection = (labels or {}).get(raw.split("/", 1)[0]) if raw.startswith("pcn_") else None
+                    qualifier = f"{model_id} · {connection}" if connection else model_id
+                    display_names[raw] = f"{label} ({qualifier})"
         self._by_raw = {
-            raw: PublicIdentity(identity_handle(self.owner, dimension, raw), f"{stem} {index}")
+            raw: PublicIdentity(identity_handle(self.owner, dimension, raw), display_names[raw])
             for index, raw in enumerate(normalized, start=1)
         }
         self._by_handle = {public.handle: raw for raw, public in self._by_raw.items()}
@@ -112,6 +132,11 @@ def safe_scope(owner: str, scope: dict | None, *, catalogs: dict[str, IdentityCa
         if key in IDENTITY_DIMENSIONS and value not in (None, ""):
             catalog = (catalogs or {}).get(key)
             projected = catalog.project(value) if catalog else None
+            if projected is None and catalog:
+                try:
+                    projected = catalog.project(catalog.resolve(value))
+                except StatsIdentityError:
+                    pass
             if projected is None:
                 raise StatsIdentityError(f"missing public identity catalog for {key}")
             safe_filters[key] = projected

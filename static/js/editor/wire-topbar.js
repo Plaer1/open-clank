@@ -72,7 +72,7 @@ export function wireTopbar(deps) {
   // original IDs so the standalone handlers below wire to them
   // unchanged.
   {
-    const editorRoot = document.getElementById('gallery-editor-container') || document;
+    const editorRoot = document.getElementById('imps-editor-container') || document;
     const saveBtn = editorRoot.querySelector('#ge-save-menu-btn');
     const saveWrap = saveBtn?.closest('.ge-save-wrap');
     const saveMenu = saveWrap?.querySelector('#ge-save-menu');
@@ -82,7 +82,7 @@ export function wireTopbar(deps) {
         if (menu !== saveMenu) menu.remove();
       });
       // Reparent the menu to <body>. Without this, the menu inherits
-      // the gallery modal's containing block (the modal applies a
+      // the editor overlay's containing block (the overlay applies a
       // `transform: scale(...)` for its enter animation — and any
       // non-`none` transform on an ancestor makes that ancestor the
       // containing block for `position: fixed` descendants, even after

@@ -48,6 +48,10 @@ keyring>=25,<26
 # src/openclank/mcp_tool_server.py carries a 1.x/2.x decorator shim so the
 # pin is satisfiable either way.
 mcp<2
+# SQLite remains the default, but a configured PostgreSQL DATABASE_URL needs
+# the SQLAlchemy psycopg2 dialect at native-install time. The binary wheel
+# avoids requiring libpq headers and a compiler during bare-metal setup.
+psycopg2-binary
 pyotp
 qrcode[pil]
 # Pre-alpha Memory photo admission/metadata normalization (JPEG/PNG/WebP).
@@ -59,3 +63,12 @@ pytest-asyncio
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+
+# Native Windows desktop OCR projections (CPython 3.9-3.14, x64/ARM64 wheels).
+winrt-runtime==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Foundation==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Foundation.Collections==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Media.Ocr==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Graphics.Imaging==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Storage.Streams==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Globalization==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"

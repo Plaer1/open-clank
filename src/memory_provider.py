@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import hashlib
@@ -374,6 +376,35 @@ class NativeMemoryProvider(MemoryProvider):
             metadata=metadata,
             pinned=bool(entry.get("pinned", metadata.get("pinned", False))),
         )
+
+    async def mark_conversation_source_removed(self, *, owner: str, session_id: str) -> Dict[str, Any]:
+        """Retain independent native memories and mark exact removed sources."""
+        if not owner or not session_id:
+            raise MemoryScopeError("owner and exact conversation id required")
+        def detach():
+            from services.memory.skill_lifecycle import locked
+            with locked(self.memory_manager.memory_file):
+                entries = self.memory_manager.load_all()
+                changed, already = 0, 0
+                for entry in entries:
+                    if entry.get("owner") != owner:
+                        continue
+                    original_metadata = entry.get("metadata")
+                    metadata = dict(original_metadata) if isinstance(original_metadata, dict) else ({"previous_metadata": original_metadata} if original_metadata is not None else {})
+                    marker = metadata.get("conversation_source_removed") or {}
+                    if entry.get("session_id") == session_id:
+                        entry["session_id"] = None
+                        metadata["conversation_source_removed"] = {"session_id": session_id}
+                        entry["metadata"] = metadata
+                        changed += 1
+                    elif isinstance(marker, dict) and marker.get("session_id") == session_id:
+                        already += 1
+                if changed:
+                    self.memory_manager.save(entries)
+            return {"complete": True, "owner": owner, "session_id": session_id,
+                    "detached": {"native": changed + already}, "already_applied": changed == 0 and already > 0,
+                    "independent_content_retained": True}
+        return await asyncio.to_thread(detach)
 
     async def remember(
         self,

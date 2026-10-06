@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from fractions import Fraction
 from datetime import datetime, timezone
 from collections.abc import Iterable, Mapping
@@ -37,6 +38,7 @@ class InclusionProfile:
     output_includes_reasoning: bool = False
     reasoning_billing: str = "unsupported"
     billable_categories: frozenset[str] = frozenset(PRICE_CATEGORIES)
+    metric_profiles: Mapping[str, "InclusionProfile"] | None = None
 
     def __post_init__(self):
         if (not self.version or not self.included_categories.issubset(PRICE_CATEGORIES)
@@ -48,10 +50,28 @@ class InclusionProfile:
 def resolve_profile(event: StatsEvent, profiles: Mapping[str, InclusionProfile]) -> InclusionProfile | None:
     """Resolve normalization only from persisted producer/adapter evidence."""
     metadata = event.event_metadata if isinstance(event.event_metadata, Mapping) else {}
+    provenance = metadata.get("metric_provenance") or {}
+    versions = {key: entry.get("normalization_profile") for key, entry in provenance.items() if key in PRICE_CATEGORIES}
+    if len(set(versions.values())) > 1:
+        selections = {key: resolve_profile(SimpleNamespace(event_metadata={"normalization_profile": version}), profiles)
+                      for key, version in versions.items()}
+        return InclusionProfile("reconciled-per-metric-v1", frozenset(PRICE_CATEGORIES),
+                                metric_profiles={key: value for key, value in selections.items() if value is not None})
     version = metadata.get("normalization_profile")
     if not isinstance(version, str) or not version:
         return None
     profile = profiles.get(version)
+    if profile is None:
+        categories = frozenset(PRICE_CATEGORIES)
+        known = {
+            "sdk-embedding-input-v1": InclusionProfile("sdk-embedding-input-v1", frozenset({"input_tokens"})),
+            "acp-inclusive-input-separated-output-v1": InclusionProfile("acp-inclusive-input-separated-output-v1", categories, True, True, False, "separate"),
+            "acp-separated-v1": InclusionProfile("acp-separated-v1", categories, reasoning_billing="separate"),
+            "managed-sdk-inclusive-v1": InclusionProfile("managed-sdk-inclusive-v1", categories, True, True, True, "separate"),
+            "openai-wire-inclusive-v1": InclusionProfile("openai-wire-inclusive-v1", frozenset({"input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens"}), True, False, True, "included_in_output"),
+            "anthropic-wire-separated-v1": InclusionProfile("anthropic-wire-separated-v1", frozenset({"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"})),
+        }
+        profile = known.get(version)
     return profile if isinstance(profile, InclusionProfile) else None
 
 
@@ -216,6 +236,10 @@ def _normalized_counts(event: StatsEvent, profile: InclusionProfile | None) -> d
         result[category] = (value, state, None)
     if profile is None:
         return result
+    if profile.metric_profiles is not None:
+        for category in PRICE_CATEGORIES:
+            if result[category][0] is not None and category not in profile.metric_profiles:
+                result[category] = (None, "unpriced", "missing_inclusion_profile")
     def subtract(base, parts, category):
         if base is None or result[category][1] not in {"reported", "estimated"} or any(result[item][0] is None or result[item][1] not in {"reported", "estimated"} for item in parts):
             return (None, "unpriced", "missing_required_subset")
@@ -224,14 +248,21 @@ def _normalized_counts(event: StatsEvent, profile: InclusionProfile | None) -> d
             return (None, "unpriced", "negative_normalized_count")
         state = "estimated" if result[category][1] == "estimated" or any(result[item][1] == "estimated" for item in parts) else "reported"
         return (remainder, state, None)
-    if profile.input_includes_cache_read or profile.input_includes_cache_write:
+    input_profile = profile.metric_profiles.get("input_tokens") if profile.metric_profiles is not None else profile
+    output_profile = profile.metric_profiles.get("output_tokens") if profile.metric_profiles is not None else profile
+    reasoning_profile = profile.metric_profiles.get("reasoning_tokens") if profile.metric_profiles is not None else profile
+    provenance = (event.event_metadata or {}).get("metric_provenance") or {}
+    def compatible(parts, category):
+        coverage = provenance.get(category, {}).get("covered_dispatch_ids")
+        return coverage is None or all(provenance.get(part, {}).get("covered_dispatch_ids") == coverage for part in parts)
+    if input_profile and (input_profile.input_includes_cache_read or input_profile.input_includes_cache_write):
         parts = []
-        if profile.input_includes_cache_read: parts.append("cache_read_tokens")
-        if profile.input_includes_cache_write: parts.append("cache_write_tokens")
-        result["input_tokens"] = subtract(result["input_tokens"][0], parts, "input_tokens")
-    if profile.output_includes_reasoning and profile.reasoning_billing == "separate":
-        result["output_tokens"] = subtract(result["output_tokens"][0], ["reasoning_tokens"], "output_tokens")
-    if profile.reasoning_billing == "included_in_output":
+        if input_profile.input_includes_cache_read: parts.append("cache_read_tokens")
+        if input_profile.input_includes_cache_write: parts.append("cache_write_tokens")
+        result["input_tokens"] = subtract(result["input_tokens"][0], parts, "input_tokens") if compatible(parts,"input_tokens") else (None,"unpriced","incomplete_subset_dispatch_coverage")
+    if output_profile and output_profile.output_includes_reasoning and output_profile.reasoning_billing == "separate":
+        result["output_tokens"] = subtract(result["output_tokens"][0], ["reasoning_tokens"], "output_tokens") if compatible(["reasoning_tokens"],"output_tokens") else (None,"unpriced","incomplete_subset_dispatch_coverage")
+    if reasoning_profile and reasoning_profile.reasoning_billing == "included_in_output":
         result["reasoning_tokens"] = (None, "not_applicable", "included_in_output")
     return result
 
@@ -244,17 +275,28 @@ def price_event(event: StatsEvent, schedules: Iterable[StatsPriceSchedule] | Map
         if billed is not None:
             components.append(billed)
             continue
+    if not present and not components:
+        return ()
     if present and inclusion_profile is None:
         return tuple(components) + tuple(PriceComponent(category, None, "unpriced", None, reason="missing_inclusion_profile") for category in present if category not in {component.category for component in components})
     normalized = _normalized_counts(event, inclusion_profile)
-    blocked = set() if inclusion_profile is None else (present - inclusion_profile.included_categories)
-    if inclusion_profile is not None:
-        if inclusion_profile.reasoning_billing in {"included_in_output", "unsupported"}: blocked.add("reasoning_tokens")
-        blocked.update(set(PRICE_CATEGORIES) - inclusion_profile.billable_categories)
+    blocked = set()
+    missing_profiles = set()
+    for category in present:
+        selected_profile = inclusion_profile.metric_profiles.get(category) if inclusion_profile and inclusion_profile.metric_profiles is not None else inclusion_profile
+        if selected_profile is None:
+            missing_profiles.add(category)
+        elif category not in selected_profile.included_categories or category not in selected_profile.billable_categories or category == "reasoning_tokens" and selected_profile.reasoning_billing in {"included_in_output", "unsupported"}:
+            blocked.add(category)
     for category in PRICE_CATEGORIES:
         if category in {component.category for component in components}:
             continue
         value, state, normalization_reason = normalized[category]
+        if getattr(event, category + "_state", None) == "not_applicable":
+            continue
+        if category in missing_profiles:
+            components.append(PriceComponent(category, None, "unpriced", None, reason="missing_inclusion_profile"))
+            continue
         if normalization_reason:
             components.append(PriceComponent(category, None, state, None, reason=normalization_reason))
             continue
@@ -300,8 +342,13 @@ def project_cost(events: Iterable[StatsEvent], schedules: Iterable[StatsPriceSch
 
 def cost_envelope(events: Iterable[StatsEvent], schedules: Iterable[StatsPriceSchedule], *, inclusion_profile: InclusionProfile | None = None, profiles: Mapping[str, InclusionProfile] | None = None, scope: Mapping | None = None, cancel_event=None, deadline=None) -> dict:
     """Common versioned cost payload consumed by later Stats resources."""
+    events = tuple(events)
     report = project_cost(events, schedules, profiles=profiles, cancel_event=cancel_event, deadline=deadline) if profiles is not None else project_cost(events, schedules, cancel_event=cancel_event, deadline=deadline) if inclusion_profile is None else _project_with_profile(events, schedules, inclusion_profile)
-    report["coverage"]["state"] = "partial_unpriced" if report["coverage"]["unpriced"] else "complete"
+    measurements_partial = any((event.event_metadata or {}).get("loss_reasons") or
+                               any(value.get("coverage") != "complete" for value in (event.event_metadata or {}).get("metric_coverage", {}).values())
+                               for event in events)
+    report["coverage"]["measurement"] = "partial" if measurements_partial else "complete"
+    report["coverage"]["state"] = "partial_unpriced" if report["coverage"]["unpriced"] else "partial_measurement" if measurements_partial else "complete"
     report.update({"schema": "open-clank.stats.v1", "scope": dict(scope or {}),
                    "formula_revision": "s03-exact-v1", "provenance": {"source": "stats_events", "price_authority": "stats_price_schedules"},
                    "warnings": ["unpriced_categories"] if report["coverage"]["unpriced"] else []})
@@ -320,8 +367,8 @@ def _project_with_profile(events, schedules, profile):
 
 def cache_rate(events: Iterable[StatsEvent], *, inclusion_profile: InclusionProfile | None = None, profiles: Mapping[str, InclusionProfile] | None = None, cancel_event=None, deadline=None) -> dict:
     """Frozen observed formula: cache reads / (cache reads + uncached input)."""
+    events = tuple(event for event in events if not (getattr(event,"input_tokens_state",None) == "not_applicable" and getattr(event,"output_tokens_state",None) == "not_applicable"))
     if profiles is not None:
-        events = tuple(events)
         resolved = []
         for event in events:
             profile = resolve_profile(event, profiles)
@@ -351,6 +398,7 @@ def cache_rate(events: Iterable[StatsEvent], *, inclusion_profile: InclusionProf
 
 def cache_counterfactual(events: Iterable[StatsEvent], schedules: Iterable[StatsPriceSchedule], *, inclusion_profile: InclusionProfile | None = None, profiles: Mapping[str, InclusionProfile] | None = None, cancel_event=None, deadline=None) -> dict:
     """Compare observed cache pricing with uncached input at the same revision."""
+    events = tuple(event for event in events if not (getattr(event,"input_tokens_state",None) == "not_applicable" and getattr(event,"output_tokens_state",None) == "not_applicable"))
     if profiles is not None:
         events = tuple(events)
     elif inclusion_profile is None:

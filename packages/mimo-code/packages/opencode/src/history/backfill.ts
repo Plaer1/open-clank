@@ -8,6 +8,7 @@ import { extract, DEFAULT_KINDS, type Kind } from "./extract"
 import { makeResolver, type Resolver } from "./resolve"
 import { Log } from "../util"
 import type { MessageV2 } from "../session/message-v2"
+import { ManagedProvider } from "@/acp/managed-provider"
 
 const log = Log.create({ service: "history.backfill" })
 
@@ -59,7 +60,9 @@ function scanSession(
             and(
               eq(PartTable.session_id, session.id as any),
               gt(PartTable.id, cursor as any),
-              sql`NOT EXISTS (SELECT 1 FROM history_fts WHERE history_fts.part_id = ${PartTable.id})`,
+              ...(ManagedProvider.enabled()
+                ? []
+                : [sql`NOT EXISTS (SELECT 1 FROM history_fts WHERE history_fts.part_id = ${PartTable.id})`]),
             ),
           )
           .orderBy(asc(PartTable.id))
@@ -82,6 +85,29 @@ function writeBatch(
   enabled: ReadonlySet<Kind>,
 ) {
   return Effect.gen(function* () {
+    if (ManagedProvider.enabled()) {
+      const events: import("@/acp/openclank-protocol").HistoryMutationEvent[] = []
+      for (const part of parts) {
+        const role = yield* resolver.role(part.message_id)
+        events.push({
+          messageID: part.message_id,
+          partID: part.id,
+          role,
+          partType: String((part.data as { type?: unknown }).type ?? "unknown"),
+          content: {
+            id: part.id,
+            sessionID: part.session_id,
+            messageID: part.message_id,
+            ...(part.data as object),
+          },
+          timeCreated: Math.max(0, Math.floor(part.time_created)),
+          timeUpdated: Math.max(0, Math.floor(part.time_created)),
+          eventSequence: Math.max(0, Math.floor(part.time_created)),
+        })
+      }
+      if (events.length > 0) yield* Effect.tryPromise(() => ManagedProvider.historyMutate(parts[0]!.session_id, "replay", events))
+      return
+    }
     type ToWrite = {
       part: (typeof parts)[number]
       kind: Kind

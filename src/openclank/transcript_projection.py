@@ -282,7 +282,7 @@ def save_managed_binding(
         raise ValueError("managed binding writes require an owner")
     required_strings = (
         "owner", "stableChatID", "engineSessionID", "memoryWorkspaceID",
-        "authorityWorkspaceID", "copalWorkspace", "physicalCwd",
+        "copalWorkspace", "physicalCwd",
     )
     if any(
         not isinstance(binding.get(key), str)
@@ -291,6 +291,11 @@ def save_managed_binding(
         for key in required_strings
     ):
         raise ValueError("managed binding is incomplete")
+    # An ordinary chat may have no selected filesystem Workspace.  The
+    # explicit empty string carries no Files authority; omission is invalid.
+    authority_workspace = binding.get("authorityWorkspaceID")
+    if not isinstance(authority_workspace, str) or authority_workspace != authority_workspace.strip():
+        raise ValueError("managed binding authority workspace is invalid")
     if binding.get("owner") != owner or binding.get("stableChatID") != session_id or not os.path.isabs(binding["physicalCwd"]):
         raise ValueError("managed binding owner or cwd is invalid")
     if str(os.path.realpath(binding["physicalCwd"])) != binding["physicalCwd"]:
@@ -328,6 +333,8 @@ def save_managed_binding(
         session = query.first()
         if session is None:
             raise KeyError(f"Canonical session {session_id!r} not found")
+        if not authority_workspace and str(session.workspace_id or "").strip():
+            raise ValueError("managed binding cannot omit the selected workspace authority")
         state = dict(session.mimo_state or {})
         previous = state.get("managed_binding")
         previous = dict(previous) if isinstance(previous, dict) else {}

@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK SERVE SUB-MODULE
 // Serve tab: cached model list, serve panel building,
@@ -1164,7 +1165,7 @@ function _rerenderCachedModels() {
       : _bk === 'diffusers' ? '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 3c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zM6 9c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm0 6c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm6 4c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm4-8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z" fill="currentColor"/></svg>'
       : '<svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 4l8 16 8-16h-4l-4 8-4-8z" fill="currentColor"/></svg>';
     html += `<span class="cookbook-card-backend" data-detected="${_bk}">${_bkIco}</span>`;
-    html += `<div class="memory-item-actions"><button type="button" class="memory-item-btn hwfit-cached-menu-btn" title="Actions" aria-label="Model actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button></div>`;
+    html += `<div class="memory-item-actions"><button type="button" class="memory-item-btn hwfit-cached-menu-btn" title="Actions" aria-label="Model actions">${uiIcon("more", 14)}</button></div>`;
     html += `</div>`;
   }
   if (!visibleCount) html += '<div class="hwfit-loading">No matching models</div>';
@@ -1234,15 +1235,15 @@ function _rerenderCachedModels() {
       // and the Escape arbiter (reassigned to the registry-aware close below).
       let closeDropdown = () => { dropdown.remove(); btn.classList.remove('cookbook-menu-active'); };
       const _di = (svg) => `<span class="dropdown-icon">${svg}</span>`;
-      const _serveIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
-      const _retryIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
-      const _deleteIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
+      const _serveIco = uiIcon("play", 14);
+      const _retryIco = uiIcon("refresh", 14);
+      const _deleteIco = uiIcon("trash", 14);
       const _selectIco = '<span style="font-size:16px;line-height:1;position:relative;top:-2px;">●</span>';
-      const _schedIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>';
+      const _schedIco = uiIcon("calendar", 14);
       const _favNow = _isServeFavorite(repo);
       const _favIco = _favNow
-        ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>'
-        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+        ? uiIcon("bookmark-filled", 14)
+        : uiIcon("bookmark", 14);
       const items = [];
       items.push({ label: _favNow ? 'Unfavorite' : 'Favorite', icon: _favIco, action: 'favorite' });
       if (m && m.status === 'ready') items.push({ label: 'Serve', icon: _serveIco, action: 'serve' });
@@ -1301,7 +1302,7 @@ function _rerenderCachedModels() {
       }
       // Mobile-only Cancel — gives an explicit close on touch devices where
       // outside-tap-to-close is fiddly. Hidden on desktop via CSS.
-      const _cancelIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      const _cancelIco = uiIcon("close", 14);
       const cancelDiv = document.createElement('div');
       cancelDiv.className = 'dropdown-item-compact dropdown-cancel-mobile';
       cancelDiv.innerHTML = _di(_cancelIco) + '<span>Cancel</span>';
@@ -1476,7 +1477,7 @@ function _rerenderCachedModels() {
         ? `${_modelPresets.length} saved launch config${_modelPresets.length === 1 ? '' : 's'} for ${_repoShort} — click ▾ to load or delete`
         : `No saved launch configs for ${_repoShort} yet — click Save to add one`;
       let _slotsHtml = `<div class="cookbook-serve-slots cookbook-saved-split" title="Saved launch configurations for this model — click ▾ to load or delete">`
-        + `<button type="button" class="cookbook-slot-btn cookbook-saved-save" title="Save current preset"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Preset</button>`
+        + `<button type="button" class="cookbook-slot-btn cookbook-saved-save" title="Save current preset">${uiIcon("save", 11)}Preset</button>`
         + `<button type="button" class="cookbook-slot-btn cookbook-saved-arrow" title="${esc(_arrowTitle)}">${_arrowLabel}</button>`
         + `</div>`;
 
@@ -1489,7 +1490,7 @@ function _rerenderCachedModels() {
       // so "vLLM ready on …" reads as panel status instead of a separate
       // block pushing the form down. Hidden until the readiness probe returns.
       panelHtml += `<div class="hwfit-serve-topline">`;
-      panelHtml += `<div class="hwfit-serve-runtime-note" style="display:none;font-size:11px;line-height:1.35;color:var(--fg-muted);margin:0;padding:6px 28px 6px 10px;border-radius:5px;background:color-mix(in srgb, var(--fg) 4%, transparent);border:1px solid color-mix(in srgb, var(--border) 60%, transparent);position:relative;"><span class="hwfit-serve-runtime-text"></span><button type="button" class="hwfit-serve-runtime-close" title="Dismiss" aria-label="Dismiss" style="position:absolute;top:-8px;right:5px;background:none;border:0;color:inherit;cursor:pointer;padding:2px 4px;line-height:1;font-size:13px;opacity:0.6;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>`;
+      panelHtml += `<div class="hwfit-serve-runtime-note" style="display:none;font-size:11px;line-height:1.35;color:var(--fg-muted);margin:0;padding:6px 28px 6px 10px;border-radius:5px;background:color-mix(in srgb, var(--fg) 4%, transparent);border:1px solid color-mix(in srgb, var(--border) 60%, transparent);position:relative;"><span class="hwfit-serve-runtime-text"></span><button type="button" class="hwfit-serve-runtime-close" title="Dismiss" aria-label="Dismiss" style="position:absolute;top:-8px;right:5px;background:none;border:0;color:inherit;cursor:pointer;padding:2px 4px;line-height:1;font-size:13px;opacity:0.6;">${uiIcon("close", 11)}</button></div>`;
       panelHtml += `<div class="hwfit-serve-preset-row">${_slotsHtml}</div>`;
       panelHtml += `</div>`;
       // Warn when serving a model whose download hasn't fully completed —
@@ -1511,7 +1512,7 @@ function _rerenderCachedModels() {
       // stays as the source-of-truth so every existing change handler
       // (updateBackendVisibility, runtime readiness, command builder)
       // still fires via dispatchEvent('change') on selection.
-      panelHtml += `<label>${_l('Engine','Inference engine: MLX, vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<div class="hwfit-backend-picker" data-backend-picker style="position:relative;width:100%;"><select class="hwfit-sf hwfit-backend-source" data-field="backend" style="display:none;">${backendOpts}</select><button type="button" class="hwfit-backend-btn" data-backend-btn aria-haspopup="listbox" aria-expanded="false" style="display:flex;align-items:center;gap:6px;width:100%;height:32px;padding:0 8px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;cursor:pointer;text-align:left;position:relative;top:-4px;"><span class="hwfit-backend-btn-icon" data-backend-icon-slot aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--accent, var(--red));flex-shrink:0;"></span><span class="hwfit-backend-btn-label" data-backend-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.6;flex-shrink:0;"><polyline points="6 9 12 15 18 9"/></svg></button><div class="hwfit-backend-menu" data-backend-menu role="listbox" hidden style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:100;background:var(--panel, var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.22);padding:4px;"></div></div></label>`;
+      panelHtml += `<label>${_l('Engine','Inference engine: MLX, vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<div class="hwfit-backend-picker" data-backend-picker style="position:relative;width:100%;"><select class="hwfit-sf hwfit-backend-source" data-field="backend" style="display:none;">${backendOpts}</select><button type="button" class="hwfit-backend-btn" data-backend-btn aria-haspopup="listbox" aria-expanded="false" style="display:flex;align-items:center;gap:6px;width:100%;height:32px;padding:0 8px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:11px;cursor:pointer;text-align:left;position:relative;top:-4px;"><span class="hwfit-backend-btn-icon" data-backend-icon-slot aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--accent, var(--red));flex-shrink:0;"></span><span class="hwfit-backend-btn-label" data-backend-label style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>${uiIcon("chevron-down", 10, {"style":"opacity:0.6;flex-shrink:0;"})}</button><div class="hwfit-backend-menu" data-backend-menu role="listbox" hidden style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:100;background:var(--panel, var(--bg));border:1px solid var(--border);border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.22);padding:4px;"></div></div></label>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
       // Inference mode pill (llama.cpp only) — lives directly to the
       // RIGHT of Backend in Row 1 so the engine and the GPU/CPU choice
@@ -1801,11 +1802,11 @@ function _rerenderCachedModels() {
       panelHtml += `<summary class="hwfit-serve-cmd-summary">Launch command</summary>`;
       panelHtml += `<div class="hwfit-serve-cmd-wrap">`;
       panelHtml += `<textarea class="hwfit-serve-cmd" spellcheck="false" rows="2"></textarea>`;
-      panelHtml += `<button type="button" class="cookbook-btn hwfit-serve-copy hwfit-serve-copy-inline" title="Copy launch command" aria-label="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>`;
+      panelHtml += `<button type="button" class="cookbook-btn hwfit-serve-copy hwfit-serve-copy-inline" title="Copy launch command" aria-label="Copy">${uiIcon("copy", 13)}</button>`;
       panelHtml += `</div>`;
       panelHtml += `</details>`;
       panelHtml += `<div class="hwfit-serve-actions">`;
-      panelHtml += `<button class="cookbook-btn hwfit-serve-cancel" type="button" title="Close this configuration panel"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;flex-shrink:0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>`;
+      panelHtml += `<button class="cookbook-btn hwfit-serve-cancel" type="button" title="Close this configuration panel">${uiIcon("close", 11, {"style":"vertical-align:-1px;margin-right:5px;flex-shrink:0;"})}Cancel</button>`;
       // Copy moved inside the command textarea (top-right). Spacer then
       // pushes Clear Server + Launch to the right.
       panelHtml += `<span class="hwfit-serve-actions-spacer"></span>`;
@@ -1815,10 +1816,10 @@ function _rerenderCachedModels() {
       // creates a ScheduledTask (action=cookbook_serve), so the schedule
       // ends up in the existing Tasks UI for edit/delete/pause.
       panelHtml += `<span class="hwfit-serve-launch-group">`;
-      panelHtml += `<button class="cookbook-btn hwfit-serve-launch"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;flex-shrink:0;"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Launch</button>`;
+      panelHtml += `<button class="cookbook-btn hwfit-serve-launch">${uiIcon("play", 11, {"style":"vertical-align:-1px;margin-right:4px;flex-shrink:0;"})}Launch</button>`;
       // Chevron points DOWN because the schedule form opens beneath the
       // panel — the arrow signals the direction of motion, not menu state.
-      panelHtml += `<button class="cookbook-btn hwfit-serve-schedule-arrow" type="button" aria-haspopup="menu" aria-label="More launch actions" title="More launch actions"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>`;
+      panelHtml += `<button class="cookbook-btn hwfit-serve-schedule-arrow" type="button" aria-haspopup="menu" aria-label="More launch actions" title="More launch actions">${uiIcon("chevron-down", 10)}</button>`;
       panelHtml += `</span>`;
       panelHtml += `</div>`;
       panelHtml += `</div>`;
@@ -2463,7 +2464,7 @@ function _rerenderCachedModels() {
         const n = _presetsForModel(_loadPresets(), repo).length;
         const t = panel.querySelector('.cookbook-saved-arrow');
         if (!t) return;
-        t.textContent = n > 0 ? `${n} ▾` : '▾';
+        t.innerHTML = (n > 0 ? String(n) + ' ' : '') + uiIcon('chevron-down', 10);
         t.title = n > 0
           ? `${n} saved launch config${n === 1 ? '' : 's'} for ${_repoShort} — click ▾ to load or delete`
           : `No saved launch configs for ${_repoShort} yet — click Save to add one`;
@@ -2544,10 +2545,10 @@ function _rerenderCachedModels() {
           fav.type = 'button';
           fav.className = 'cookbook-saved-fav-btn' + (p.favorite ? ' active' : '');
           fav.title = p.favorite ? 'Unfavorite' : 'Favorite';
-          fav.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+          fav.innerHTML = uiIcon("bookmark-filled", 13);
           const del = document.createElement('button');
           del.type = 'button';
-          del.innerHTML = '×';
+          del.innerHTML = uiIcon('trash', 13); del.setAttribute('aria-label', del.title || 'Delete saved launch configuration');
           del.title = 'Delete';
           del.style.cssText = 'background:none;border:none;color:var(--fg-muted);cursor:pointer;font-size:15px;line-height:1;padding:0 2px;flex-shrink:0;';
           del.addEventListener('mouseenter', () => { del.style.color = '#f44'; });
@@ -2563,7 +2564,7 @@ function _rerenderCachedModels() {
             const badge = document.createElement('span');
             badge.className = 'cookbook-saved-confirmed';
             badge.title = 'Confirmed working — this config launched and registered an endpoint';
-            badge.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#50fa7b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+            badge.innerHTML = uiIcon("check", 11, {"role":"success"});
             it.appendChild(badge);
           }
           it.appendChild(fav);
@@ -2866,7 +2867,7 @@ function _rerenderCachedModels() {
             <div class="cookbook-gpu-popup-head">
               GPU ${gpu.index} · ${esc(gpu.name)}
               <span class="cookbook-gpu-popup-stats">${(gpu.free_mb/1024).toFixed(1)} / ${(gpu.total_mb/1024).toFixed(1)} GB free · util ${gpu.util_pct}%</span>
-              <button type="button" class="cookbook-gpu-popup-close" title="Close">×</button>
+              <button type="button" class="cookbook-gpu-popup-close" title="Close">${uiIcon("close", 14)}</button>
             </div>
             <div class="cookbook-gpu-popup-body">${procHtml}</div>`;
           document.body.appendChild(popup);
@@ -3730,7 +3731,7 @@ function _rerenderCachedModels() {
         _copyText(cmd).then(() => {
           const btn = panel.querySelector('.hwfit-serve-copy');
           const origHtml = btn.innerHTML;
-          btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+          btn.innerHTML = uiIcon("check", 14, {"role":"success"});
           btn.classList.add('copied');
           setTimeout(() => { btn.innerHTML = origHtml; btn.classList.remove('copied'); }, 1500);
         });

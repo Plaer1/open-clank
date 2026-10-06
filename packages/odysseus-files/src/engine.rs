@@ -44,6 +44,8 @@ pub trait MutationCaptureTicket: Send {
     fn action_id(&self) -> &str;
     fn complete(self: Box<Self>, after: Vec<CaptureAfter>) -> Result<(), String>;
     fn abort(self: Box<Self>);
+    /// The live write committed, but its recovery copy could not be read.
+    fn after_unavailable(self: Box<Self>, _error: String) {}
 }
 
 pub trait MutationCaptureHook: Send + Sync {
@@ -336,6 +338,7 @@ pub struct FileEngine {
     // and complete sort signature; mutations invalidate the bounded cache.
     sorted_snapshot_cache: Mutex<SortedSnapshotCache>,
     capture_hook: Option<Arc<dyn MutationCaptureHook>>,
+    capture_required: bool,
 }
 
 const SORTED_SNAPSHOT_CACHE_MAX_ENTRIES: usize = 250_000;
@@ -451,7 +454,13 @@ impl FileEngine {
             registry,
             sorted_snapshot_cache: Mutex::new(SortedSnapshotCache::default()),
             capture_hook: None,
+            capture_required: false,
         }
+    }
+
+    pub fn require_capture(mut self, required: bool) -> Self {
+        self.capture_required = required;
+        self
     }
 
     pub fn with_capture_hook(mut self, hook: Arc<dyn MutationCaptureHook>) -> Self {
@@ -479,6 +488,9 @@ impl FileEngine {
         targets: Vec<CaptureTarget>,
     ) -> Result<Option<Box<dyn MutationCaptureTicket>>, EngineError> {
         let Some(hook) = self.capture_hook.as_ref() else {
+            if self.capture_required {
+                return Err(EngineError::HistoryCapture("required recovery preimage is unavailable; original preserved".into()));
+            }
             return Ok(None);
         };
         match hook.prepare(operation, &targets) {
@@ -492,9 +504,9 @@ impl FileEngine {
         after: Vec<CaptureAfter>,
     ) -> Result<(), EngineError> {
         if let Some(ticket) = ticket {
-            ticket
-                .complete(after)
-                .map_err(EngineError::HistoryCapture)?;
+            // Capture failure belongs to the recovery status, not the already
+            // committed live filesystem operation. Never invite a write retry.
+            let _ = ticket.complete(after);
         }
         Ok(())
     }
@@ -547,7 +559,7 @@ impl FileEngine {
         let root_path = lexical_normalize(Path::new(&root.canonical_path));
         let resolved = lexical_normalize(&resolved);
         let contained = match root.kind {
-            RootKind::ExactFile => resolved == root_path,
+            RootKind::ExactFile => crate::platform_path_equal(&resolved, &root_path),
             RootKind::RecursiveDirectory => component_contains(&root_path, &resolved),
         };
         if !contained {
@@ -590,7 +602,7 @@ impl FileEngine {
         let root_path = lexical_normalize(Path::new(&root.canonical_path));
         let resolved = lexical_normalize(&resolved);
         let contained = match root.kind {
-            RootKind::ExactFile => resolved == root_path,
+            RootKind::ExactFile => crate::platform_path_equal(&resolved, &root_path),
             RootKind::RecursiveDirectory => component_contains(&root_path, &resolved),
         };
         if !contained {
@@ -794,11 +806,15 @@ impl FileEngine {
         cursor: Option<&Cursor>,
         limit: usize,
     ) -> Result<DirectoryPage, EngineError> {
+        #[cfg(windows)]
+        let _parent_pins = crate::windows_fs::pin_parent(path)?;
+        #[cfg(windows)]
+        let _directory_pin = crate::windows_fs::pin_directory(path)?;
         let metadata = fs::metadata(path)?;
         if !metadata.is_dir() {
             return Err(EngineError::NotADirectory);
         }
-        let generation = directory_generation(&metadata);
+        let generation = directory_generation(path, &metadata)?;
         let path_key = directory_path_key(path);
         let offset = if let Some(cursor) = cursor {
             let expected_prefix = format!("dir:{path_key}:{generation}:");
@@ -872,11 +888,15 @@ impl FileEngine {
         sort: &DirectorySort,
         limit: usize,
     ) -> Result<DirectoryPage, EngineError> {
+        #[cfg(windows)]
+        let _parent_pins = crate::windows_fs::pin_parent(path)?;
+        #[cfg(windows)]
+        let _directory_pin = crate::windows_fs::pin_directory(path)?;
         let metadata = fs::metadata(path)?;
         if !metadata.is_dir() {
             return Err(EngineError::NotADirectory);
         }
-        let generation = directory_generation(&metadata);
+        let generation = directory_generation(path, &metadata)?;
         let path_key = directory_path_key(path);
         let sort = sort.normalized();
         let sort_signature = sort.signature();
@@ -1097,10 +1117,14 @@ impl FileEngine {
         length: usize,
         include_fingerprint: bool,
     ) -> Result<FileReadPage, EngineError> {
+        #[cfg(windows)]
+        let _parent_pins = crate::windows_fs::pin_parent(path)?;
         if length > self.config.max_read_bytes {
             return Err(EngineError::LimitExceeded);
         }
         let mut file = File::open(path)?;
+        #[cfg(windows)]
+        crate::windows_fs::validate_opened_path(&file, path)?;
         // Authorization resolves the path before this open.  Re-resolve after
         // opening so a symlink/reparse-point swap between those steps cannot
         // silently turn a scoped read into a different object.
@@ -1169,7 +1193,11 @@ impl FileEngine {
     }
 
     fn read_text_snapshot_resolved(&self, path: &Path) -> Result<TextSnapshot, EngineError> {
+        #[cfg(windows)]
+        let _parent_pins = crate::windows_fs::pin_parent(path)?;
         let mut file = File::open(path)?;
+        #[cfg(windows)]
+        crate::windows_fs::validate_opened_path(&file, path)?;
         if fs::canonicalize(path)? != path {
             return Err(EngineError::Registry(RegistryError::OutsideRoot));
         }
@@ -1242,10 +1270,14 @@ impl FileEngine {
         path: &Path,
         max_bytes: usize,
     ) -> Result<TextPreview, EngineError> {
+        #[cfg(windows)]
+        let _parent_pins = crate::windows_fs::pin_parent(path)?;
         if max_bytes == 0 || max_bytes > self.config.max_read_bytes {
             return Err(EngineError::LimitExceeded);
         }
         let mut file = File::open(path)?;
+        #[cfg(windows)]
+        crate::windows_fs::validate_opened_path(&file, path)?;
         if fs::canonicalize(path)? != path {
             return Err(EngineError::Registry(RegistryError::OutsideRoot));
         }
@@ -1680,6 +1712,8 @@ impl FileEngine {
         staging: &mut File,
         expected_length: u64,
     ) -> Result<ReplaceOutcome, EngineError> {
+        #[cfg(windows)]
+        let _parent_pins = crate::windows_fs::pin_parent(path)?;
         if path.exists() {
             return Err(EngineError::DestinationExists);
         }
@@ -1711,7 +1745,7 @@ impl FileEngine {
             }
             output.sync_all()?;
             drop(output);
-            fs::rename(&temporary, path)?;
+            publish_file(&temporary, path, false)?;
             Ok::<(), io::Error>(())
         })();
         if result.is_err() {
@@ -1765,6 +1799,8 @@ impl FileEngine {
     }
 
     fn make_directory_resolved(&self, path: &Path) -> Result<PathBuf, EngineError> {
+        #[cfg(windows)]
+        let _parent_pins = crate::windows_fs::pin_parent(path)?;
         if path.exists() {
             return Err(EngineError::DestinationExists);
         }
@@ -1786,8 +1822,8 @@ impl FileEngine {
                 }],
             ),
             (Some(ticket), Err(error)) => {
-                ticket.abort();
-                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+                ticket.after_unavailable(format!("after-state read failed: {error}"));
+                Ok(())
             }
             (None, _) => Ok(())
         }?;
@@ -1795,7 +1831,9 @@ impl FileEngine {
     }
 
     fn history_payload(path: &Path) -> io::Result<Vec<u8>> {
-        if path.is_dir() && !path.is_symlink() {
+        if path.is_symlink() {
+            Ok(fs::read_link(path)?.to_string_lossy().as_bytes().to_vec())
+        } else if path.is_dir() {
             crate::history_capture::directory_manifest(path).map_err(io::Error::other)
         } else {
             fs::read(path)
@@ -1808,6 +1846,8 @@ impl FileEngine {
         expected: Option<&Fingerprint>,
         bytes: &[u8],
     ) -> Result<ReplaceOutcome, EngineError> {
+        #[cfg(windows)]
+        let _parent_pins = crate::windows_fs::pin_parent(path)?;
         if bytes.len() > self.config.max_write_bytes {
             return Err(EngineError::LimitExceeded);
         }
@@ -1847,11 +1887,15 @@ impl FileEngine {
             apply_file_mode(&temp, existing_mode)?;
             temp.sync_all()?;
             drop(temp);
-            fs::rename(&temp_path, path)?;
+            publish_file(&temp_path, path, current.is_some())?;
             Ok::<(), io::Error>(())
         })();
         if write_result.is_err() {
-            let _ = fs::remove_file(&temp_path);
+            #[cfg(windows)]
+            let preserve_recovery = write_result.as_ref().err().is_some_and(|error| matches!(error.raw_os_error(), Some(1176 | 1177)));
+            #[cfg(not(windows))]
+            let preserve_recovery = false;
+            if !preserve_recovery { let _ = fs::remove_file(&temp_path); }
         }
         if let Err(error) = write_result {
             if let Some(ticket) = ticket {
@@ -1870,8 +1914,8 @@ impl FileEngine {
                 }],
             ),
             (Some(ticket), Err(error)) => {
-                ticket.abort();
-                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+                ticket.after_unavailable(format!("after-state read failed: {error}"));
+                Ok(())
             }
             (None, _) => Ok(())
         }?;
@@ -1931,6 +1975,10 @@ impl FileEngine {
         source: &Path,
         destination: &Path,
     ) -> Result<CopyOutcome, EngineError> {
+        #[cfg(windows)]
+        let _source_pins = crate::windows_fs::pin_parent(source)?;
+        #[cfg(windows)]
+        let _destination_pins = crate::windows_fs::pin_parent(destination)?;
         if destination.exists() {
             return Err(EngineError::DestinationExists);
         }
@@ -1966,7 +2014,7 @@ impl FileEngine {
             let temporary_file = OpenOptions::new().write(true).open(&temporary)?;
             apply_file_mode(&temporary_file, source_mode)?;
             temporary_file.sync_all()?;
-            fs::rename(&temporary, destination)?;
+            publish_file(&temporary, destination, false)?;
             Ok::<(), io::Error>(())
         })();
         if result.is_err() {
@@ -1999,8 +2047,8 @@ impl FileEngine {
                 ],
             ),
             (Some(ticket), Err(error)) => {
-                ticket.abort();
-                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+                ticket.after_unavailable(format!("after-state read failed: {error}"));
+                Ok(())
             }
             (None, _) => Ok(())
         }?;
@@ -2113,6 +2161,10 @@ impl FileEngine {
         destination: &Path,
         expected: Option<&Fingerprint>,
     ) -> Result<(), EngineError> {
+        #[cfg(windows)]
+        let _source_pins = crate::windows_fs::pin_parent(source)?;
+        #[cfg(windows)]
+        let _destination_pins = crate::windows_fs::pin_parent(destination)?;
         if destination.exists() {
             return Err(EngineError::DestinationExists);
         }
@@ -2134,8 +2186,8 @@ impl FileEngine {
                 },
             ],
         )?;
-        let result = fs::rename(source, destination).map_err(|error| {
-            if error.raw_os_error() == Some(18) {
+        let result = move_without_replace(source, destination).map_err(|error| {
+            if error.raw_os_error() == Some(if cfg!(windows) { 17 } else { 18 }) {
                 EngineError::CrossVolume
             } else {
                 EngineError::Io(error)
@@ -2163,8 +2215,8 @@ impl FileEngine {
                 ],
             ),
             (Some(ticket), Err(error)) => {
-                ticket.abort();
-                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+                ticket.after_unavailable(format!("after-state read failed: {error}"));
+                Ok(())
             }
             (None, _) => Ok(())
         }?;
@@ -2266,8 +2318,8 @@ impl FileEngine {
                 ],
             ),
             (Some(ticket), Err(error)) => {
-                ticket.abort();
-                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+                ticket.after_unavailable(format!("after-state read failed: {error}"));
+                Ok(())
             }
             (None, _) => Ok(())
         }?;
@@ -2311,7 +2363,7 @@ impl FileEngine {
         let root = self.authorize_app_checked(scope, path, &requested, false)?;
         let resolved = resolve_existing_path(path)?;
         let root_path = lexical_normalize(Path::new(&root.canonical_path));
-        if root.kind == RootKind::ExactFile || resolved == root_path {
+        if root.kind == RootKind::ExactFile || crate::platform_path_equal(&resolved, &root_path) {
             return Err(EngineError::CannotTrashRoot);
         }
         self.trash_file_resolved(&resolved, &root.id, &root_path, expected)
@@ -2466,8 +2518,8 @@ impl FileEngine {
                 ],
             ),
             (Some(ticket), Err(error)) => {
-                ticket.abort();
-                Err(EngineError::HistoryCapture(format!("after-state read failed: {error}")))
+                ticket.after_unavailable(format!("after-state read failed: {error}"));
+                Ok(())
             }
             (None, _) => Ok(())
         }?;
@@ -2559,6 +2611,8 @@ fn filename_search_walk(
     let mut pending = vec![(root.to_path_buf(), 0_usize)];
     let mut matches = Vec::new();
     let mut work = WorkCost::default();
+    let mut complete = true;
+    let mut entry_limit_reached = options.max_entries == 0;
     let needle = if options.case_sensitive {
         options.query.clone()
     } else {
@@ -2566,16 +2620,15 @@ fn filename_search_walk(
     };
     while let Some((path, depth)) = pending.pop() {
         check_cancelled(cancelled)?;
-        if work.entries_visited >= options.max_entries {
-            return Ok(SearchResult {
-                matches,
-                complete: false,
-                work,
-            });
-        }
-        let metadata = fs::symlink_metadata(&path)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if depth > 0 && unavailable_search_descendant(&error) => {
+                complete = false;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if metadata.is_file() {
-            work.entries_visited += 1;
             if file_name_matches(&path, &needle, options.case_sensitive) {
                 matches.push(path);
                 if matches.len() >= options.max_results {
@@ -2588,24 +2641,56 @@ fn filename_search_walk(
             }
             continue;
         }
-        if !metadata.is_dir() || depth >= options.max_depth {
+        if !metadata.is_dir() {
             continue;
         }
-        for entry in fs::read_dir(path)? {
+        if depth >= options.max_depth || entry_limit_reached {
+            complete = false;
+            continue;
+        }
+        let directory = match fs::read_dir(&path) {
+            Ok(directory) => directory,
+            Err(error) if depth > 0 && unavailable_search_descendant(&error) => {
+                complete = false;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        for entry in directory {
             check_cancelled(cancelled)?;
-            let entry = entry?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if unavailable_search_descendant(&error) => {
+                    complete = false;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             if !options.include_hidden && name.starts_with('.') {
                 continue;
             }
+            if work.entries_visited >= options.max_entries {
+                complete = false;
+                entry_limit_reached = true;
+                break;
+            }
+            work.entries_visited += 1;
             pending.push((entry.path(), depth + 1));
         }
     }
     Ok(SearchResult {
         matches,
-        complete: true,
+        complete,
         work,
     })
+}
+
+fn unavailable_search_descendant(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    ) || (cfg!(target_os = "macos") && error.raw_os_error() == Some(9))
 }
 
 fn content_search_walk(
@@ -2679,7 +2764,7 @@ fn content_search_walk(
     })
 }
 
-fn directory_generation(metadata: &fs::Metadata) -> u64 {
+fn directory_generation(_path: &Path, metadata: &fs::Metadata) -> io::Result<u64> {
     let modified = metadata
         .modified()
         .ok()
@@ -2698,7 +2783,16 @@ fn directory_generation(metadata: &fs::Metadata) -> u64 {
         generation ^= metadata.dev().rotate_left(37);
         generation ^= metadata.ino().rotate_left(47);
     }
-    generation
+    #[cfg(windows)]
+    {
+        let identity = crate::windows_fs::directory_identity(_path)?;
+        generation ^= identity.volume.rotate_left(37);
+        generation ^= (identity.change_time as u64).rotate_left(7);
+        for chunk in identity.file_id.chunks_exact(8) {
+            generation ^= u64::from_le_bytes(chunk.try_into().unwrap()).rotate_left(47);
+        }
+    }
+    Ok(generation)
 }
 
 fn directory_path_key(path: &Path) -> String {
@@ -2738,6 +2832,8 @@ fn system_time_ms(value: Option<SystemTime>) -> Option<u64> {
 
 fn fingerprint_file(path: &Path) -> Result<Fingerprint, io::Error> {
     let mut file = File::open(path)?;
+    #[cfg(windows)]
+    crate::windows_fs::validate_opened_path(&file, path)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -3002,6 +3098,24 @@ fn apply_file_mode(file: &File, mode: Option<u32>) -> io::Result<()> {
 #[cfg(not(unix))]
 fn apply_file_mode(_file: &File, _mode: Option<u32>) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(windows)]
+fn move_without_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    crate::windows_fs::publish_file(source, destination, false)
+}
+#[cfg(not(windows))]
+fn move_without_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn publish_file(temporary: &Path, destination: &Path, replace: bool) -> io::Result<()> {
+    crate::windows_fs::publish_file(temporary, destination, replace)
+}
+#[cfg(not(windows))]
+fn publish_file(temporary: &Path, destination: &Path, _replace: bool) -> io::Result<()> {
+    fs::rename(temporary, destination)
 }
 
 fn temporary_path(parent: &Path, base: &str) -> PathBuf {

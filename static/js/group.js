@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // static/js/group.js
 // Group Chat — multi-model conversations (parallel or round-robin)
 
@@ -128,8 +129,8 @@ function _initGroupTab() {
 
   // Mode toggle — same style as Compare's parallel button
   if (modeBtn) {
-    const ICON_PAR = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>';
-    const ICON_SEQ = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="8" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor"/><circle cx="4" cy="12" r="1.5" fill="currentColor"/><circle cx="4" cy="18" r="1.5" fill="currentColor"/></svg>';
+    const ICON_PAR = uiIcon("menu", 18);
+    const ICON_SEQ = uiIcon("list", 18);
     modeBtn.addEventListener('click', () => {
       _mode = _mode === 'parallel' ? 'round-robin' : 'parallel';
       modeBtn.classList.toggle('active', _mode === 'parallel');

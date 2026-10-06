@@ -525,7 +525,7 @@ try {
   assert(dark.classes.includes('theme-clanker-dark') && dark.classes.includes('bg-pattern-clanker-routefield'));
   assert.equal(dark.bg.toUpperCase(), '#191A1E');
   assert.match(dark.bodyFont, /Liga Comic Mono/); assert.match(dark.brandFont, /Fredoka/);
-  assert.equal(dark.fontValue, 'liga-comic-mono'); assert.equal(dark.fontLocked, true);
+  assert.equal(dark.fontValue, 'liga-comic-mono'); assert.equal(dark.fontLocked, false);
   assert(dark.liga && dark.fredoka);
   assert.match(dark.favicon, /M16 3 29 27H3Z/); assert.doesNotMatch(dark.favicon, /M16 4L16 22L6 22Z/);
   assert.match(dark.projectMark, /M8\.5 17Q16 7 23\.5 17/);
@@ -994,7 +994,7 @@ try {
   assert.equal(await evaluate("(() => { const sw=document.querySelector('#themeGrid [data-theme=\"dark\"]'); if (!sw) return false; sw.click(); return true; })()"), true);
   const original = await evaluate(`(() => { const saved=(()=>{ for (const key of ['odysseus-theme:scope:theme-test','odysseus-theme']) { try { const raw=localStorage.getItem(key); if (raw) return JSON.parse(raw); } catch {} } return null; })(); return { classes:[...document.body.classList], font:getComputedStyle(document.body).fontFamily, pattern:saved?.bgPattern || 'none', locked:document.getElementById('theme-font-select').disabled }; })()`);
   assert(!original.classes.some(name => name.startsWith('theme-clanker-')));
-  assert.match(original.font, /Fira Code/); assert.equal(original.pattern, 'none'); assert.equal(original.locked, false);
+  assert.match(original.font, /Liga Comic Mono/); assert.equal(original.pattern, 'none'); assert.equal(original.locked, false);
 
   const fontViews = await evaluate(`(() => {
     const select=document.getElementById('theme-font-select');

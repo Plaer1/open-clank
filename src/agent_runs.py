@@ -17,6 +17,7 @@ close / navigation / refresh). It does NOT survive a server restart.
 import asyncio
 import json
 import logging
+import uuid
 from typing import AsyncGenerator, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 class _Run:
     __slots__ = (
         "buffer", "subscribers", "status", "task", "evict_task", "next_seq",
-        "owner",
+        "owner", "run_id",
     )
 
     def __init__(self, owner: str = "") -> None:
@@ -36,6 +37,7 @@ class _Run:
         self.evict_task: Optional[asyncio.Task] = None
         self.next_seq: int = 1
         self.owner: str = str(owner or "").strip().lower()
+        self.run_id: str = uuid.uuid4().hex
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -62,13 +64,16 @@ def _publish(run: _Run, ev: str) -> None:
             pass
 
 
-def _schedule_evict(session_id: str) -> None:
+def _schedule_evict(session_id: str, expected_run: _Run) -> None:
     """(Re)arm a grace-period eviction for a terminal run with no subscribers.
-    Identity-checked so a run that gets replaced/reused is never evicted by a
-    stale timer."""
-    run = _RUNS.get(session_id)
-    if run is None:
+
+    Drains and SSE subscribers outlive the session mapping they began with.
+    Only the current mapping may alter its eviction timer; a replaced run must
+    not cancel, arm, or shorten the replacement's replay grace.
+    """
+    if _RUNS.get(session_id) is not expected_run:
         return
+    run = expected_run
     if run.evict_task and not run.evict_task.done():
         run.evict_task.cancel()
 
@@ -92,6 +97,22 @@ def is_active(session_id: str) -> bool:
 def get_status(session_id: str) -> Optional[str]:
     r = _RUNS.get(session_id)
     return r.status if r else None
+
+
+def get_run_id(session_id: str) -> Optional[str]:
+    """Return the retained run identity for a session, including terminal replay."""
+    run = _RUNS.get(session_id)
+    return run.run_id if run else None
+
+
+def get_run(session_id: str) -> Optional[_Run]:
+    """Return the current retained run so callers can bind a response to it.
+
+    A reconnect must subscribe to the same object whose identity it advertises;
+    looking the run up separately inside ``subscribe`` could otherwise attach a
+    replacement that reused the session between those two operations.
+    """
+    return _RUNS.get(session_id)
 
 
 async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
@@ -139,7 +160,7 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         # Run is terminal — arm the grace timer so it (and its buffer) is
         # eventually freed even if nobody ever reconnects. subscribe() cancels
         # this on connect and re-arms on disconnect.
-        _schedule_evict(session_id)
+        _schedule_evict(session_id, run)
 
 
 def start(
@@ -208,10 +229,13 @@ async def quiesce_owner(owner: str) -> dict[str, object]:
         await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
 
 
-async def subscribe(session_id: str, after_seq: int = 0) -> AsyncGenerator[str, None]:
-    """Replay the run's buffer from the start, then stream live until it ends.
-    Safe to call repeatedly (reconnect) and from multiple clients at once."""
-    run = _RUNS.get(session_id)
+async def subscribe(
+    session_id: str,
+    expected_run: Optional[_Run] = None,
+    after_seq: int = 0,
+) -> AsyncGenerator[str, None]:
+    """Replay one identified run, never a replacement that reused its session."""
+    run = expected_run or _RUNS.get(session_id)
     if run is None:
         return
     q: asyncio.Queue = asyncio.Queue()
@@ -256,12 +280,14 @@ async def subscribe(session_id: str, after_seq: int = 0) -> AsyncGenerator[str, 
         # Last subscriber gone on a finished run — (re)arm eviction so the
         # buffer doesn't linger indefinitely.
         if not run.subscribers and run.status != "running":
-            _schedule_evict(session_id)
+            _schedule_evict(session_id, run)
 
 
-def stop(session_id: str) -> bool:
-    """Cancel an in-flight run (the wrapped generator saves its partial)."""
+def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
+    """Cancel an identified in-flight run without stopping a replacement."""
     run = _RUNS.get(session_id)
+    if expected_run_id and (run is None or run.run_id != expected_run_id):
+        return False
     if run and run.task and not run.task.done():
         run.task.cancel()
         return True

@@ -55,9 +55,10 @@ fn main() -> io::Result<()> {
     // The supervisor may inject an authenticated history endpoint and a
     // server-minted workspace binding. The Files service derives actor and
     // account from its already-authenticated ServiceIdentity; callers cannot
-    // provide those fields through mutation requests. A missing or invalid
-    // history binding leaves ordinary filesystem writes available with no
-    // protected receipt.
+    // provide those fields through mutation requests. A configured endpoint
+    // with a missing or invalid binding blocks mutations; reads remain available.
+    // Explicitly unconfigured capture keeps its optional behavior.
+    let history_required = env::var("OPENCLANK_HISTORY_SOCKET").ok().is_some_and(|socket| !socket.trim().is_empty());
     let history_hook = env::var_os("OPENCLANK_HISTORY_SOCKET").and_then(|socket| {
         let workspace_root = env::var_os("OPENCLANK_HISTORY_WORKSPACE_ROOT")?;
         let workspace_id = env::var("OPENCLANK_HISTORY_WORKSPACE_ID").ok()?;
@@ -89,7 +90,7 @@ fn main() -> io::Result<()> {
         }
     });
     let mut service =
-        FileService::new(FileEngine::new(EngineConfig::default(), registry), identity);
+        FileService::new(FileEngine::new(EngineConfig::default(), registry).require_capture(history_required), identity);
     if let Some(history_hook) = history_hook {
         service = service.with_history_capture(history_hook);
     }
@@ -99,19 +100,28 @@ fn main() -> io::Result<()> {
             .map_err(|error| io::Error::other(error.to_string()))?;
         service = service.with_thumbnail_broker(broker);
     }
+    #[cfg(windows)]
+    if let Some(helper_path) = shell_thumbnail_helper_path()? {
+        let mut icons = ThumbnailBrokerConfig::new(&helper_path);
+        icons.shell_icons = true;
+        let icon_broker = ThumbnailBroker::new(icons).map_err(|error| io::Error::other(error.to_string()))?;
+        let broker = ThumbnailBroker::new(ThumbnailBrokerConfig::new(helper_path))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        service = service.with_thumbnail_broker(broker).with_native_icon_broker(icon_broker);
+    }
     let service = Arc::new(service);
 
     if let Some(socket_path) = env::var_os("ODYSSEUS_FILES_GRPC_SOCKET") {
-        #[cfg(all(feature = "tonic-transport", target_os = "macos"))]
+        #[cfg(all(feature = "tonic-transport", any(target_os = "macos", windows)))]
         {
             return run_grpc(service, socket_path.into());
         }
-        #[cfg(not(all(feature = "tonic-transport", target_os = "macos")))]
+        #[cfg(not(all(feature = "tonic-transport", any(target_os = "macos", windows))))]
         {
             let _ = (service, socket_path);
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Tonic filesystem transport is available only in the feature-enabled macOS build",
+                "Tonic filesystem transport requires a feature-enabled macOS or Windows build",
             ));
         }
     }
@@ -156,7 +166,7 @@ fn quicklook_helper_path() -> io::Result<Option<PathBuf>> {
     Ok(None)
 }
 
-#[cfg(all(feature = "tonic-transport", target_os = "macos"))]
+#[cfg(all(feature = "tonic-transport", any(target_os = "macos", windows)))]
 fn run_grpc(service: Arc<FileService>, socket_path: std::path::PathBuf) -> io::Result<()> {
     let session = odysseus_files::grpc_transport::session_binding_from_env()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -264,4 +274,14 @@ fn run_socket(service: Arc<FileService>, socket_path: String) -> io::Result<()> 
             }
         });
     }
+}
+
+#[cfg(windows)]
+fn shell_thumbnail_helper_path() -> io::Result<Option<PathBuf>> {
+    if let Some(configured) = env::var_os("ODYSSEUS_SHELL_THUMBNAIL_HELPER_BIN") {
+        let path = PathBuf::from(configured);
+        if !path.is_file() { return Err(io::Error::new(io::ErrorKind::NotFound, "configured Shell thumbnail helper unavailable")); }
+        return Ok(Some(path));
+    }
+    Ok(env::current_exe()?.parent().map(|parent| parent.join("odysseus-shell-thumbnail-helper.exe")).filter(|path| path.is_file()))
 }

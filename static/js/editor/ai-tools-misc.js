@@ -177,7 +177,7 @@ export function wireAIToolsMisc({
         'select[data-ge-tool-model="style"]',
       )?.value || '';
       if (selectedRoute) fd.append('model_route_id', selectedRoute);
-      const res = await fetch(`${apiBase}/api/gallery/style-transfer`, { method: 'POST', credentials: 'same-origin', body: fd });
+      const res = await fetch(`${apiBase}/api/imps/style-transfer`, { method: 'POST', credentials: 'same-origin', body: fd });
       if (!res.ok) throw new Error('Server returned ' + res.status);
       const data = await res.json();
       if (data.image) {

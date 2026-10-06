@@ -8,26 +8,6 @@ import { testEffect } from "../lib/effect"
 const it = testEffect(Layer.mergeAll(Auth.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
 describe("Auth account pools", () => {
-  it.live("has an explicit deterministic reader for legacy provider maps", () =>
-    Effect.sync(() => {
-      const migrated = Auth.migrateLegacyStore({
-        "https://gateway.example/": { type: "api", key: "first" },
-        invalid: { type: "api", key: 42 },
-      })
-
-      expect(migrated.version).toBe(2)
-      expect(Object.keys(migrated.pools)).toEqual(["https://gateway.example"])
-      const pool = migrated.pools["https://gateway.example"]!
-      expect(pool.billingLane).toBe("legacy")
-      expect(pool.accounts[Auth.legacyAccountID(pool.connectionID)]?.credential).toEqual({
-        type: "api",
-        key: "first",
-      })
-      expect(Auth.readStoreV2(migrated)?.version).toBe(2)
-      expect(Auth.readStoreV2({ version: 2, revision: 0, pools: { broken: {} } })).toBeUndefined()
-    }),
-  )
-
   it.live("persists multiple ordered accounts without overwriting compatibility behavior", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

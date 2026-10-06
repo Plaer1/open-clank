@@ -24,7 +24,6 @@ from src.embedding_lanes import (
     collection_name,
     dedupe_results,
     lane_count,
-    migrate_legacy_collection,
     query_lanes,
 )
 
@@ -99,7 +98,7 @@ class VectorRAG:
                 self._lanes[0].collection,
             )
             self._model = self._lanes[0].client
-            migrate_legacy_collection(COLLECTION_NAME, self._lanes)
+
             logger.info(
                 "VectorRAG ready (lanes=%s docs=%s)",
                 [lane.name for lane in self._lanes],

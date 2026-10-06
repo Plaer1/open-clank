@@ -1,8 +1,11 @@
 .archive/
 .references/
 references/
-# Canonical local plan and sidecar namespaces (Hex contracts remain trackable).
-**/.clanker/futures/
+# All singular Clanker workspaces are private, including Hexes and local tools.
+**/.clanker/
+# History credentials and their authority/root sidecars are runtime state.
+**/history-credentials*.json
+**/.history-credentials*.tmp
 **/.clankers/robonotes/
 apps/mimo/node_modules/
 apps/mimo/packages/opencode/node_modules/
@@ -104,6 +107,12 @@ output.txt.txt
 !static/themes/clanker/
 !static/themes/clanker/*.png
 
+# Verified handbook captures and delivery images (D02).
+!static/docs/
+!static/docs/media/
+!static/docs/media/**/*.png
+!static/docs/media/**/*.webp
+
 # …except shipped demo assets in docs/ that the README links to.
 !docs/*.jpg
 !docs/*.jpeg
@@ -144,3 +153,21 @@ _scratch/
 /packages/odysseus-files/target/
 /integrations.zip
 /packages/mimo-code/packages/opencode/src.zip
+
+# Local capture harness and personal workstation launcher; never release inputs.
+/.s26-visual/
+/packages/Copal/move-timeline.desktop
+/packages/Copal/worklog.md
+/packages/Copal/public/data/
+
+# Offline artwork is delivered as verified release payloads, never a Git blob.
+/static/vendor/google-emoji/emoji-assets.pack
+**/emoji-assets.pack.part-*
+**/emoji-assets.parts.json
+
+# Local Mimo scheduler coordination, never a publication artifact.
+.mimocode/.cron-lock
+
+# Local scheduler plans and native engine coordination locks.
+.mimocode/
+libexec/openclank/.engine.build.lock

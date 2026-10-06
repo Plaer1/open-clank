@@ -52,6 +52,7 @@ impl Default for ThumbnailLimits {
 #[derive(Clone, Debug)]
 pub struct ThumbnailBrokerConfig {
     pub helper_path: PathBuf,
+    pub shell_icons: bool,
     pub limits: ThumbnailLimits,
 }
 
@@ -59,6 +60,7 @@ impl ThumbnailBrokerConfig {
     pub fn new(helper_path: impl Into<PathBuf>) -> Self {
         Self {
             helper_path: helper_path.into(),
+            shell_icons: false,
             limits: ThumbnailLimits::default(),
         }
     }
@@ -218,7 +220,7 @@ impl ThumbnailBroker {
     }
 
     pub const fn supported_on_this_host() -> bool {
-        cfg!(target_os = "macos")
+        cfg!(any(target_os = "macos", windows))
     }
 
     pub fn stats(&self) -> ThumbnailStats {
@@ -366,6 +368,8 @@ fn map_engine_error(error: EngineError) -> ThumbnailError {
 
 #[derive(Debug, Eq, PartialEq)]
 struct FileIdentity {
+    #[cfg(windows)]
+    native: crate::windows_fs::OpenedIdentity,
     path: PathBuf,
     length: u64,
     modified_ns: i128,
@@ -393,6 +397,12 @@ impl FileIdentity {
         }
         let (modified_ns, created_or_changed_ns, device, inode) = platform_identity(&metadata);
         Ok(Self {
+            #[cfg(windows)]
+            native: {
+                let file = fs::File::open(&canonical).map_err(|_| ThumbnailError::NativeUnavailable)?;
+                crate::windows_fs::validate_opened_path(&file, &canonical).map_err(|_| ThumbnailError::Stale)?;
+                crate::windows_fs::opened_identity(&file).map_err(|_| ThumbnailError::NativeUnavailable)?
+            },
             path: canonical,
             length: metadata.len(),
             modified_ns,
@@ -452,7 +462,7 @@ fn platform_identity(metadata: &fs::Metadata) -> (i128, i128, u64, u64) {
     (modified, created, 0, 0)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod platform {
     use super::*;
     use crate::quicklook_protocol::{
@@ -461,6 +471,7 @@ mod platform {
     };
     use std::fs::File;
     use std::io::Read;
+    #[cfg(unix)]
     use std::os::unix::ffi::OsStrExt;
     use std::process::{Child, ChildStdin, Command, Stdio};
     use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -497,11 +508,12 @@ mod platform {
         ) -> Result<Self, ThumbnailError> {
             let (sender, receiver) = mpsc::sync_channel(config.limits.queue_capacity);
             let helper_path = config.helper_path.clone();
+            let shell_icons = config.shell_icons;
             let limits = config.limits.clone();
             let worker_stats = Arc::clone(&stats);
             let worker = thread::Builder::new()
                 .name("odysseus-quicklook-supervisor".into())
-                .spawn(move || Worker::new(helper_path, limits, worker_stats).run(receiver))
+                .spawn(move || Worker::new(helper_path, shell_icons, limits, worker_stats).run(receiver))
                 .map_err(|_| ThumbnailError::HelperUnavailable)?;
             Ok(Self {
                 sender,
@@ -551,6 +563,7 @@ mod platform {
 
     struct Worker {
         helper_path: PathBuf,
+        shell_icons: bool,
         limits: ThumbnailLimits,
         stats: Arc<StatsInner>,
         child: Option<ChildSession>,
@@ -559,9 +572,10 @@ mod platform {
     }
 
     impl Worker {
-        fn new(helper_path: PathBuf, limits: ThumbnailLimits, stats: Arc<StatsInner>) -> Self {
+        fn new(helper_path: PathBuf, shell_icons: bool, limits: ThumbnailLimits, stats: Arc<StatsInner>) -> Self {
             Self {
                 helper_path,
+                shell_icons,
                 limits,
                 stats,
                 child: None,
@@ -617,6 +631,7 @@ mod platform {
                 if self.child.is_none() {
                     match ChildSession::spawn(
                         &self.helper_path,
+                        self.shell_icons,
                         &self.limits,
                         Arc::clone(&self.stats),
                         deadline,
@@ -821,6 +836,7 @@ mod platform {
     impl ChildSession {
         fn spawn(
             helper_path: &Path,
+            shell_icons: bool,
             limits: &ThumbnailLimits,
             stats: Arc<StatsInner>,
             job_deadline: Instant,
@@ -833,6 +849,7 @@ mod platform {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .env(SESSION_ENV, encode_token(&token))
+                .env("ODYSSEUS_SHELL_IMAGE_KIND", if shell_icons { "icon" } else { "thumbnail" })
                 .spawn()
                 .map_err(|_| ThumbnailError::HelperUnavailable)?;
             let input = child
@@ -902,7 +919,10 @@ mod platform {
                 height: work.request.height,
                 scale: work.request.scale,
                 max_output_bytes: max_output_bytes as u32,
+                #[cfg(unix)]
                 path: work.path.as_os_str().as_bytes().to_vec(),
+                #[cfg(windows)]
+                path: work.path.to_str().ok_or(WireError::Malformed)?.as_bytes().to_vec(),
             }))?;
             wire::write_frame(&mut self.input, &payload, self.max_frame_bytes)
         }
@@ -968,6 +988,10 @@ mod platform {
 
     fn random_token() -> std::io::Result<[u8; wire::SESSION_TOKEN_BYTES]> {
         let mut token = [0_u8; wire::SESSION_TOKEN_BYTES];
+        #[cfg(windows)]
+        getrandom::fill(&mut token)
+            .map_err(|_| std::io::Error::other("secure helper session token unavailable"))?;
+        #[cfg(not(windows))]
         File::open("/dev/urandom")?.read_exact(&mut token)?;
         Ok(token)
     }
@@ -983,7 +1007,7 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod platform {
     use super::*;
 

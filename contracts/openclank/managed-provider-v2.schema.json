@@ -4,85 +4,215 @@
   "title": "Open Clank Managed Provider Protocol v2",
   "description": "Version 2 capability negotiation and secret-bearing callback envelopes exchanged between the Open Clank host and its managed model engine.",
   "oneOf": [
-    { "$ref": "#/$defs/capabilityDeclaration" },
-    { "$ref": "#/$defs/accountSelectionRequest" },
-    { "$ref": "#/$defs/accountBinding" },
-    { "$ref": "#/$defs/accountCommitRequest" },
-    { "$ref": "#/$defs/accountAttemptRequest" },
-    { "$ref": "#/$defs/credentialLeaseRequest" },
-    { "$ref": "#/$defs/credentialLeaseResult" },
-    { "$ref": "#/$defs/credentialReplaceRequest" },
-    { "$ref": "#/$defs/refreshAcquireRequest" },
-    { "$ref": "#/$defs/refreshRenewRequest" },
-    { "$ref": "#/$defs/refreshCommitRequest" },
-    { "$ref": "#/$defs/refreshAbortRequest" },
-    { "$ref": "#/$defs/refreshLease" },
-    { "$ref": "#/$defs/familyCatalogResult" },
-    { "$ref": "#/$defs/connectionValidationRequest" },
-    { "$ref": "#/$defs/connectionValidationResult" },
-    { "$ref": "#/$defs/accountValidationRequest" },
-    { "$ref": "#/$defs/accountValidationResult" },
-    { "$ref": "#/$defs/oauthStartRequest" },
-    { "$ref": "#/$defs/oauthStartResult" },
-    { "$ref": "#/$defs/oauthCompletionRequest" },
-    { "$ref": "#/$defs/oauthCompletionResult" },
-    { "$ref": "#/$defs/oauthCancelResult" },
-    { "$ref": "#/$defs/operationJournalRequest" },
-    { "$ref": "#/$defs/operationJournalResult" },
-    { "$ref": "#/$defs/artifactReadRequest" },
-    { "$ref": "#/$defs/artifactReadResult" },
-    { "$ref": "#/$defs/artifactWriteRequest" },
-    { "$ref": "#/$defs/artifactDescriptor" },
-    { "$ref": "#/$defs/executorInvokeRequest" },
-    { "$ref": "#/$defs/operationExecuteRequest" },
-    { "$ref": "#/$defs/operationCancelRequest" },
-    { "$ref": "#/$defs/operationCancelResult" },
-    { "$ref": "#/$defs/operationExecuteResult" },
-    { "$ref": "#/$defs/sessionCwdChangeRequest" },
-    { "$ref": "#/$defs/sessionCwdChangeResult" },
-    { "$ref": "#/$defs/sessionBindingReadRequest" },
-    { "$ref": "#/$defs/sessionBindingReadResult" }
+    {
+      "$ref": "#/$defs/capabilityDeclaration"
+    },
+    {
+      "$ref": "#/$defs/accountSelectionRequest"
+    },
+    {
+      "$ref": "#/$defs/accountBinding"
+    },
+    {
+      "$ref": "#/$defs/accountCommitRequest"
+    },
+    {
+      "$ref": "#/$defs/accountAttemptRequest"
+    },
+    {
+      "$ref": "#/$defs/credentialLeaseRequest"
+    },
+    {
+      "$ref": "#/$defs/credentialLeaseResult"
+    },
+    {
+      "$ref": "#/$defs/credentialReplaceRequest"
+    },
+    {
+      "$ref": "#/$defs/refreshAcquireRequest"
+    },
+    {
+      "$ref": "#/$defs/refreshRenewRequest"
+    },
+    {
+      "$ref": "#/$defs/refreshCommitRequest"
+    },
+    {
+      "$ref": "#/$defs/refreshAbortRequest"
+    },
+    {
+      "$ref": "#/$defs/refreshLease"
+    },
+    {
+      "$ref": "#/$defs/familyCatalogResult"
+    },
+    {
+      "$ref": "#/$defs/connectionValidationRequest"
+    },
+    {
+      "$ref": "#/$defs/connectionValidationResult"
+    },
+    {
+      "$ref": "#/$defs/accountValidationRequest"
+    },
+    {
+      "$ref": "#/$defs/accountValidationResult"
+    },
+    {
+      "$ref": "#/$defs/oauthStartRequest"
+    },
+    {
+      "$ref": "#/$defs/oauthStartResult"
+    },
+    {
+      "$ref": "#/$defs/oauthCompletionRequest"
+    },
+    {
+      "$ref": "#/$defs/oauthCompletionResult"
+    },
+    {
+      "$ref": "#/$defs/oauthCancelResult"
+    },
+    {
+      "$ref": "#/$defs/operationJournalRequest"
+    },
+    {
+      "$ref": "#/$defs/operationJournalResult"
+    },
+    {
+      "$ref": "#/$defs/artifactReadRequest"
+    },
+    {
+      "$ref": "#/$defs/artifactReadResult"
+    },
+    {
+      "$ref": "#/$defs/artifactWriteRequest"
+    },
+    {
+      "$ref": "#/$defs/artifactDescriptor"
+    },
+    {
+      "$ref": "#/$defs/executorInvokeRequest"
+    },
+    {
+      "$ref": "#/$defs/operationExecuteRequest"
+    },
+    {
+      "$ref": "#/$defs/operationCancelRequest"
+    },
+    {
+      "$ref": "#/$defs/operationCancelResult"
+    },
+    {
+      "$ref": "#/$defs/operationExecuteResult"
+    },
+    {
+      "$ref": "#/$defs/sessionCwdChangeRequest"
+    },
+    {
+      "$ref": "#/$defs/sessionCwdChangeResult"
+    },
+    {
+      "$ref": "#/$defs/sessionBindingReadRequest"
+    },
+    {
+      "$ref": "#/$defs/sessionBindingReadResult"
+    },
+    {
+      "$ref": "#/$defs/historyQueryRequest"
+    },
+    {
+      "$ref": "#/$defs/historyQueryResult"
+    },
+    {
+      "$ref": "#/$defs/historyMutationRequest"
+    },
+    {
+      "$ref": "#/$defs/historyMutationResult"
+    }
   ],
   "$defs": {
     "billingLane": {
       "type": "string",
-      "enum": ["subscription", "metered_api", "local", "custom", "legacy"]
+      "enum": [
+        "subscription",
+        "metered_api",
+        "local",
+        "custom",
+        "legacy"
+      ]
     },
     "authInfo": {
       "oneOf": [
         {
           "type": "object",
-          "required": ["type", "refresh", "access", "expires"],
+          "required": [
+            "type",
+            "refresh",
+            "access",
+            "expires"
+          ],
           "properties": {
-            "type": { "const": "oauth" },
-            "refresh": { "type": "string" },
-            "access": { "type": "string" },
-            "expires": { "type": "number" },
-            "accountId": { "type": "string" },
-            "enterpriseUrl": { "type": "string" }
-          },
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "required": ["type", "key"],
-          "properties": {
-            "type": { "const": "api" },
-            "key": { "type": "string" },
-            "metadata": {
-              "type": "object",
-              "additionalProperties": { "type": "string" }
+            "type": {
+              "const": "oauth"
+            },
+            "refresh": {
+              "type": "string"
+            },
+            "access": {
+              "type": "string"
+            },
+            "expires": {
+              "type": "number"
+            },
+            "accountId": {
+              "type": "string"
+            },
+            "enterpriseUrl": {
+              "type": "string"
             }
           },
           "additionalProperties": false
         },
         {
           "type": "object",
-          "required": ["type", "key", "token"],
+          "required": [
+            "type",
+            "key"
+          ],
           "properties": {
-            "type": { "const": "wellknown" },
-            "key": { "type": "string" },
-            "token": { "type": "string" }
+            "type": {
+              "const": "api"
+            },
+            "key": {
+              "type": "string"
+            },
+            "metadata": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "key",
+            "token"
+          ],
+          "properties": {
+            "type": {
+              "const": "wellknown"
+            },
+            "key": {
+              "type": "string"
+            },
+            "token": {
+              "type": "string"
+            }
           },
           "additionalProperties": false
         }
@@ -90,18 +220,45 @@
     },
     "account": {
       "type": "object",
-      "required": ["id", "label", "enabled", "order", "revision", "credentialRevision", "credential"],
+      "required": [
+        "id",
+        "label",
+        "enabled",
+        "order",
+        "revision",
+        "credentialRevision",
+        "credential"
+      ],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "label": { "type": "string" },
-        "enabled": { "type": "boolean" },
-        "order": { "type": "number" },
-        "revision": { "type": "number", "minimum": 1 },
-        "credentialRevision": { "type": "number", "minimum": 1 },
-        "credential": { "$ref": "#/$defs/authInfo" },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "order": {
+          "type": "number"
+        },
+        "revision": {
+          "type": "number",
+          "minimum": 1
+        },
+        "credentialRevision": {
+          "type": "number",
+          "minimum": 1
+        },
+        "credential": {
+          "$ref": "#/$defs/authInfo"
+        },
         "identity": {
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false
@@ -126,6 +283,985 @@
         "audio.transcribe",
         "embeddings.create"
       ]
+    },
+    "historyQueryRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/historySearchRequest"
+        },
+        {
+          "$ref": "#/$defs/historyAroundRequest"
+        },
+        {
+          "$ref": "#/$defs/historyGetRequest"
+        },
+        {
+          "$ref": "#/$defs/historyMediaRequest"
+        }
+      ]
+    },
+    "historyQueryBase": {
+      "type": "object",
+      "required": [
+        "sessionID",
+        "operation"
+      ],
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "chatID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "historySearchRequest": {
+      "allOf": [
+        {
+          "required": [
+            "sessionID",
+            "operation",
+            "query"
+          ],
+          "properties": {
+            "sessionID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "chatID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "operation": {
+              "const": "search"
+            },
+            "query": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "scope": {
+              "enum": [
+                "chat",
+                "global"
+              ]
+            },
+            "kind": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 6,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "user_text",
+                  "assistant_text",
+                  "tool_input",
+                  "tool_error",
+                  "reasoning",
+                  "tool_output"
+                ]
+              }
+            },
+            "toolName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "timeAfter": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 253402300799999
+            },
+            "timeBefore": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 253402300799999
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "historyAroundRequest": {
+      "allOf": [
+        {
+          "required": [
+            "sessionID",
+            "operation",
+            "messageID"
+          ],
+          "properties": {
+            "sessionID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "chatID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "operation": {
+              "const": "around"
+            },
+            "messageID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "before": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50
+            },
+            "after": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "historyGetRequest": {
+      "allOf": [
+        {
+          "required": [
+            "sessionID",
+            "operation",
+            "messageID",
+            "partID"
+          ],
+          "properties": {
+            "sessionID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "chatID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "operation": {
+              "const": "get"
+            },
+            "messageID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "partID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1048576
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8000
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "historyMediaRequest": {
+      "allOf": [
+        {
+          "required": [
+            "sessionID",
+            "operation",
+            "assetID"
+          ],
+          "properties": {
+            "sessionID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "chatID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "operation": {
+              "const": "media"
+            },
+            "assetID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "messageID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "partID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "historyQueryResult": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/historySearchResult"
+        },
+        {
+          "$ref": "#/$defs/historyAroundResult"
+        },
+        {
+          "$ref": "#/$defs/historyGetResult"
+        },
+        {
+          "$ref": "#/$defs/historyMediaResult"
+        }
+      ]
+    },
+    "historyError": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "historyAttachment": {
+      "type": "object",
+      "required": [
+        "asset_id",
+        "mime_type",
+        "filename",
+        "byte_size"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "mime_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 255
+        },
+        "filename": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024
+        },
+        "byte_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "historySearchHit": {
+      "type": "object",
+      "required": [
+        "part_id",
+        "session_id",
+        "message_id",
+        "project_id",
+        "kind",
+        "tool_name",
+        "snippet",
+        "score",
+        "time_created"
+      ],
+      "properties": {
+        "part_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "message_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "project_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "snippet": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "score": {
+          "type": "number"
+        },
+        "time_created": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyMessagePart": {
+      "type": "object",
+      "required": [
+        "part_id",
+        "type",
+        "role",
+        "tool_name",
+        "text"
+      ],
+      "properties": {
+        "part_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 8000
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyMessageContext": {
+      "type": "object",
+      "required": [
+        "message_id",
+        "matched",
+        "time_created",
+        "parts"
+      ],
+      "properties": {
+        "message_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "matched": {
+          "type": "boolean"
+        },
+        "time_created": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parts": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/historyMessagePart"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyFullPart": {
+      "type": "object",
+      "required": [
+        "part_id",
+        "message_id",
+        "session_id",
+        "type",
+        "role",
+        "tool_name",
+        "text",
+        "has_more",
+        "next_offset",
+        "attachments",
+        "time_created"
+      ],
+      "properties": {
+        "part_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "message_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 8000
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "next_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/historyAttachment"
+          }
+        },
+        "time_created": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "historySearchResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "operation",
+        "result"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "search"
+        },
+        "result": {
+          "type": "object",
+          "required": [
+            "ok",
+            "hits",
+            "limit",
+            "more"
+          ],
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "hits": {
+              "type": "array",
+              "maxItems": 50,
+              "items": {
+                "$ref": "#/$defs/historySearchHit"
+              }
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "more": {
+              "type": "boolean"
+            },
+            "error": {
+              "$ref": "#/$defs/historyError"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyAroundResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "operation",
+        "result"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "around"
+        },
+        "result": {
+          "type": "object",
+          "required": [
+            "ok",
+            "session_id",
+            "messages"
+          ],
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "messages": {
+              "type": "array",
+              "maxItems": 101,
+              "items": {
+                "$ref": "#/$defs/historyMessageContext"
+              }
+            },
+            "error": {
+              "$ref": "#/$defs/historyError"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyGetResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "operation",
+        "result"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "get"
+        },
+        "result": {
+          "type": "object",
+          "required": [
+            "ok"
+          ],
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "part": {
+              "$ref": "#/$defs/historyFullPart"
+            },
+            "error": {
+              "$ref": "#/$defs/historyError"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyMediaResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "operation",
+        "result"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "operation": {
+          "const": "media"
+        },
+        "result": {
+          "type": "object",
+          "required": [
+            "ok",
+            "attachments"
+          ],
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "attachments": {
+              "type": "array",
+              "maxItems": 1,
+              "items": {
+                "$ref": "#/$defs/historyAttachment"
+              }
+            },
+            "error": {
+              "$ref": "#/$defs/historyError"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyMutationRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/historyUpsertRequest"
+        },
+        {
+          "$ref": "#/$defs/historyTombstoneRequest"
+        },
+        {
+          "$ref": "#/$defs/historyReplayRequest"
+        }
+      ]
+    },
+    "historyMutationEvent": {
+      "type": "object",
+      "required": [
+        "messageID",
+        "partID",
+        "role",
+        "partType",
+        "content"
+      ],
+      "properties": {
+        "messageID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "partID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "actorID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "partType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "content": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string",
+              "maxLength": 262144
+            },
+            {
+              "type": "array",
+              "maxItems": 256
+            },
+            {
+              "type": "object",
+              "maxProperties": 128
+            }
+          ]
+        },
+        "timeCreated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timeUpdated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eventSequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyTombstoneEvent": {
+      "type": "object",
+      "required": [
+        "messageID",
+        "partID"
+      ],
+      "properties": {
+        "messageID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "partID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "actorID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "tombstoneReason": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyUpsertRequest": {
+      "type": "object",
+      "required": [
+        "sessionID",
+        "operation",
+        "events"
+      ],
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "operation": {
+          "const": "upsert"
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/historyMutationEvent"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyReplayRequest": {
+      "type": "object",
+      "required": [
+        "sessionID",
+        "operation",
+        "events"
+      ],
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "operation": {
+          "const": "replay"
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/historyMutationEvent"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyTombstoneRequest": {
+      "type": "object",
+      "required": [
+        "sessionID",
+        "operation",
+        "events"
+      ],
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "operation": {
+          "const": "tombstone"
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/historyTombstoneEvent"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "historyMutationResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "operation",
+        "accepted",
+        "duplicate",
+        "enqueued"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "operation": {
+          "enum": [
+            "upsert",
+            "tombstone",
+            "replay"
+          ]
+        },
+        "accepted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duplicate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "enqueued": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "goalCompletionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionID",
+        "journalID",
+        "goalID",
+        "goalRevision",
+        "evidenceRefs",
+        "verifiedAt"
+      ],
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "journalID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "goalID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "goalRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "verifiedAt": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "goalCompletionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "replayed"
+      ],
+      "properties": {
+        "accepted": {
+          "const": true
+        },
+        "replayed": {
+          "type": "boolean"
+        }
+      }
     },
     "managedMethod": {
       "type": "string",
@@ -153,8 +1289,13 @@
         "_openclank/operations/v1/execute",
         "_openclank/operations/v1/cancel",
         "_openclank/session/v1/cwd/change",
-        "_openclank/session/v1/binding/read"
-        ,"_openclank/session/v1/settings/effective"
+        "_openclank/session/v1/binding/read",
+        "_openclank/session/v1/settings/effective",
+        "_openclank/history/v1/query",
+        "_openclank/history/v1/mutate",
+        "_openclank/logging/v1/admit",
+        "_openclank/logging/v1/events",
+        "_openclank/session/v1/goal/completed"
       ]
     },
     "capabilityDeclaration": {
@@ -172,24 +1313,45 @@
         "localExecutor"
       ],
       "properties": {
-        "protocolVersion": { "const": 1 },
-        "providerStoreVersion": { "const": 1 },
-        "operationRouterVersion": { "const": 1 },
-        "schemaID": { "const": "https://openclank.dev/contracts/managed-provider/v2" },
-        "schemaVersion": { "const": 2 },
-        "schemaHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "protocolVersion": {
+          "const": 1
+        },
+        "providerStoreVersion": {
+          "const": 1
+        },
+        "operationRouterVersion": {
+          "const": 1
+        },
+        "schemaID": {
+          "const": "https://openclank.dev/contracts/managed-provider/v2"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "schemaHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
         "methods": {
           "type": "array",
-          "items": { "$ref": "#/$defs/managedMethod" },
+          "items": {
+            "$ref": "#/$defs/managedMethod"
+          },
           "uniqueItems": true
         },
         "operations": {
           "type": "array",
-          "items": { "$ref": "#/$defs/operation" },
+          "items": {
+            "$ref": "#/$defs/operation"
+          },
           "uniqueItems": true
         },
-        "artifactTransfer": { "const": true },
-        "localExecutor": { "const": true }
+        "artifactTransfer": {
+          "const": true
+        },
+        "localExecutor": {
+          "const": true
+        }
       },
       "additionalProperties": false
     },
@@ -197,19 +1359,52 @@
       "oneOf": [
         {
           "type": "object",
-          "required": ["type", "key", "message"],
+          "required": [
+            "type",
+            "key",
+            "message"
+          ],
           "properties": {
-            "type": { "const": "text" },
-            "key": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "message": { "type": "string", "minLength": 1, "maxLength": 512 },
-            "placeholder": { "type": "string", "maxLength": 256 },
+            "type": {
+              "const": "text"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "placeholder": {
+              "type": "string",
+              "maxLength": 256
+            },
             "when": {
               "type": "object",
-              "required": ["key", "op", "value"],
+              "required": [
+                "key",
+                "op",
+                "value"
+              ],
               "properties": {
-                "key": { "type": "string", "minLength": 1, "maxLength": 128 },
-                "op": { "enum": ["eq", "neq"] },
-                "value": { "type": "string", "maxLength": 256 }
+                "key": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "op": {
+                  "enum": [
+                    "eq",
+                    "neq"
+                  ]
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 256
+                }
               },
               "additionalProperties": false
             }
@@ -218,33 +1413,77 @@
         },
         {
           "type": "object",
-          "required": ["type", "key", "message", "options"],
+          "required": [
+            "type",
+            "key",
+            "message",
+            "options"
+          ],
           "properties": {
-            "type": { "const": "select" },
-            "key": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "type": {
+              "const": "select"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
             "options": {
               "type": "array",
               "minItems": 1,
               "maxItems": 128,
               "items": {
                 "type": "object",
-                "required": ["label", "value"],
+                "required": [
+                  "label",
+                  "value"
+                ],
                 "properties": {
-                  "label": { "type": "string", "minLength": 1, "maxLength": 256 },
-                  "value": { "type": "string", "maxLength": 256 },
-                  "hint": { "type": "string", "maxLength": 512 }
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "value": {
+                    "type": "string",
+                    "maxLength": 256
+                  },
+                  "hint": {
+                    "type": "string",
+                    "maxLength": 512
+                  }
                 },
                 "additionalProperties": false
               }
             },
             "when": {
               "type": "object",
-              "required": ["key", "op", "value"],
+              "required": [
+                "key",
+                "op",
+                "value"
+              ],
               "properties": {
-                "key": { "type": "string", "minLength": 1, "maxLength": 128 },
-                "op": { "enum": ["eq", "neq"] },
-                "value": { "type": "string", "maxLength": 256 }
+                "key": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "op": {
+                  "enum": [
+                    "eq",
+                    "neq"
+                  ]
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 256
+                }
               },
               "additionalProperties": false
             }
@@ -255,96 +1494,289 @@
     },
     "providerAuthMethod": {
       "type": "object",
-      "required": ["id", "type", "label"],
+      "required": [
+        "id",
+        "type",
+        "label"
+      ],
       "properties": {
-        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "type": { "enum": ["api", "oauth", "none"] },
-        "label": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "type": {
+          "enum": [
+            "api",
+            "oauth",
+            "none"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
         "prompts": {
           "type": "array",
           "maxItems": 32,
-          "items": { "$ref": "#/$defs/providerPrompt" }
+          "items": {
+            "$ref": "#/$defs/providerPrompt"
+          }
         }
       },
       "additionalProperties": false
     },
     "providerFamily": {
       "type": "object",
-      "required": ["id", "displayName", "adapters", "kinds", "billingLanes", "authMethods", "modelCount"],
+      "required": [
+        "id",
+        "displayName",
+        "adapters",
+        "kinds",
+        "billingLanes",
+        "authMethods",
+        "modelCount"
+      ],
       "properties": {
-        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "displayName": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "adapters": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-        "kinds": { "type": "array", "minItems": 1, "items": { "enum": ["official", "subscription", "custom_gateway", "local"] }, "uniqueItems": true },
-        "billingLanes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/billingLane" }, "uniqueItems": true },
-        "authMethods": { "type": "array", "items": { "$ref": "#/$defs/providerAuthMethod" } },
-        "modelCount": { "type": "integer", "minimum": 0 }
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "adapters": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "kinds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "official",
+              "subscription",
+              "custom_gateway",
+              "local"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "billingLanes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/billingLane"
+          },
+          "uniqueItems": true
+        },
+        "authMethods": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/providerAuthMethod"
+          }
+        },
+        "modelCount": {
+          "type": "integer",
+          "minimum": 0
+        }
       },
       "additionalProperties": false
     },
     "familyCatalogResult": {
       "type": "object",
-      "required": ["schemaVersion", "families"],
+      "required": [
+        "schemaVersion",
+        "families"
+      ],
       "properties": {
-        "schemaVersion": { "const": 1 },
-        "families": { "type": "array", "items": { "$ref": "#/$defs/providerFamily" } }
+        "schemaVersion": {
+          "const": 1
+        },
+        "families": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/providerFamily"
+          }
+        }
       },
       "additionalProperties": false
     },
     "connectionValidationRequest": {
       "type": "object",
-      "required": ["familyID", "adapterID", "kind", "billingLane", "settings"],
+      "required": [
+        "familyID",
+        "adapterID",
+        "kind",
+        "billingLane",
+        "settings"
+      ],
       "properties": {
-        "familyID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "adapterID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "kind": { "enum": ["official", "subscription", "custom_gateway", "local"] },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "url": { "type": ["string", "null"], "maxLength": 2048 },
-        "settings": { "type": "object" }
+        "familyID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "adapterID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "kind": {
+          "enum": [
+            "official",
+            "subscription",
+            "custom_gateway",
+            "local"
+          ]
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2048
+        },
+        "settings": {
+          "type": "object"
+        }
       },
       "additionalProperties": false
     },
     "providerModelRoute": {
       "type": "object",
-      "required": ["modelID", "displayName", "operations", "capabilities", "provenance"],
+      "required": [
+        "modelID",
+        "displayName",
+        "operations",
+        "capabilities",
+        "provenance"
+      ],
       "properties": {
-        "modelID": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s\\u0000]+$" },
-        "displayName": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "modelID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\s\\u0000]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
         "operations": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/operation" }
+          "items": {
+            "$ref": "#/$defs/operation"
+          }
         },
-        "capabilities": { "type": "object" },
-        "provenance": { "type": "object" }
+        "capabilities": {
+          "type": "object"
+        },
+        "provenance": {
+          "type": "object"
+        }
       },
       "additionalProperties": false
     },
     "connectionValidationResult": {
       "type": "object",
-      "required": ["familyID", "adapterID", "kind", "billingLane", "settings", "credentialRequired", "modelRoutes"],
+      "required": [
+        "familyID",
+        "adapterID",
+        "kind",
+        "billingLane",
+        "settings",
+        "credentialRequired",
+        "modelRoutes"
+      ],
       "properties": {
-        "familyID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "adapterID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "kind": { "enum": ["official", "subscription", "custom_gateway", "local"] },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "normalizedURL": { "type": "string", "maxLength": 2048 },
-        "settings": { "type": "object" },
-        "credentialRequired": { "type": "boolean" },
-        "modelRoutes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/providerModelRoute" } }
+        "familyID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "adapterID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "kind": {
+          "enum": [
+            "official",
+            "subscription",
+            "custom_gateway",
+            "local"
+          ]
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "normalizedURL": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "settings": {
+          "type": "object"
+        },
+        "credentialRequired": {
+          "type": "boolean"
+        },
+        "modelRoutes": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/providerModelRoute"
+          }
+        }
       },
       "additionalProperties": false
     },
     "accountValidationRequest": {
       "type": "object",
-      "required": ["connection", "authMethod", "credential", "accountID", "credentialRevision"],
+      "required": [
+        "connection",
+        "authMethod",
+        "credential",
+        "accountID",
+        "credentialRevision"
+      ],
       "properties": {
-        "connection": { "$ref": "#/$defs/connectionValidationRequest" },
-        "authMethod": { "enum": ["api_key", "oauth"] },
-        "credential": { "$ref": "#/$defs/authInfo" },
-        "accountID": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "credentialRevision": { "type": "integer", "minimum": 1 }
+        "connection": {
+          "$ref": "#/$defs/connectionValidationRequest"
+        },
+        "authMethod": {
+          "enum": [
+            "api_key",
+            "oauth"
+          ]
+        },
+        "credential": {
+          "$ref": "#/$defs/authInfo"
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialRevision": {
+          "type": "integer",
+          "minimum": 1
+        }
       },
       "additionalProperties": false
     },
@@ -361,14 +1793,45 @@
         "discovery"
       ],
       "properties": {
-        "authMethod": { "enum": ["api_key", "oauth"] },
-        "authClass": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "credential": { "$ref": "#/$defs/authInfo" },
-        "accountID": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "credentialRevision": { "type": "integer", "minimum": 1 },
-        "safeIdentity": { "type": "object", "additionalProperties": { "type": "string" } },
-        "modelRoutes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/providerModelRoute" } },
-        "discovery": { "$ref": "#/$defs/accountDiscovery" }
+        "authMethod": {
+          "enum": [
+            "api_key",
+            "oauth"
+          ]
+        },
+        "authClass": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "credential": {
+          "$ref": "#/$defs/authInfo"
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "safeIdentity": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "modelRoutes": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/providerModelRoute"
+          }
+        },
+        "discovery": {
+          "$ref": "#/$defs/accountDiscovery"
+        }
       },
       "additionalProperties": false
     },
@@ -384,191 +1847,736 @@
         "freshness"
       ],
       "properties": {
-        "status": { "enum": ["complete", "unavailable", "partial", "reauth_required"] },
-        "accountID": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "credentialRevision": { "type": "integer", "minimum": 1 },
-        "models": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/providerModelRoute" } },
-        "authoritative": { "type": "boolean" },
+        "status": {
+          "enum": [
+            "complete",
+            "unavailable",
+            "partial",
+            "reauth_required"
+          ]
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "credentialRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "models": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/providerModelRoute"
+          }
+        },
+        "authoritative": {
+          "type": "boolean"
+        },
         "provenance": {
           "type": "object",
-          "required": ["source", "observedAt"],
+          "required": [
+            "source",
+            "observedAt"
+          ],
           "properties": {
-            "source": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "observedAt": { "type": "integer", "minimum": 1 },
-            "adapterVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "requestID": { "type": "string", "minLength": 1, "maxLength": 256 }
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observedAt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "adapterVersion": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "requestID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
           },
           "additionalProperties": false
         },
-        "freshness": { "enum": ["fresh", "stale", "unknown"] },
+        "freshness": {
+          "enum": [
+            "fresh",
+            "stale",
+            "unknown"
+          ]
+        },
         "errorCode": {
-          "enum": ["discovery_unavailable", "discovery_partial", "reauth_required"]
+          "enum": [
+            "discovery_unavailable",
+            "discovery_partial",
+            "reauth_required"
+          ]
         }
       },
       "allOf": [
         {
-          "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
-          "then": { "properties": { "authoritative": { "const": true } } },
-          "else": { "properties": { "authoritative": { "const": false } } }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "authoritative": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "authoritative": {
+                "const": false
+              }
+            }
+          }
         },
         {
-          "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
-          "then": { "not": { "required": ["errorCode"] } }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "errorCode"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "status": { "const": "unavailable" } }, "required": ["status"] },
-          "then": { "properties": { "errorCode": { "const": "discovery_unavailable" } }, "required": ["errorCode"] }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "errorCode": {
+                "const": "discovery_unavailable"
+              }
+            },
+            "required": [
+              "errorCode"
+            ]
+          }
         },
         {
-          "if": { "properties": { "status": { "const": "partial" } }, "required": ["status"] },
-          "then": { "properties": { "errorCode": { "const": "discovery_partial" } }, "required": ["errorCode"] }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "partial"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "errorCode": {
+                "const": "discovery_partial"
+              }
+            },
+            "required": [
+              "errorCode"
+            ]
+          }
         },
         {
-          "if": { "properties": { "status": { "const": "reauth_required" } }, "required": ["status"] },
-          "then": { "properties": { "errorCode": { "const": "reauth_required" } }, "required": ["errorCode"] }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "reauth_required"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "errorCode": {
+                "const": "reauth_required"
+              }
+            },
+            "required": [
+              "errorCode"
+            ]
+          }
         }
       ],
       "additionalProperties": false
     },
     "oauthStartRequest": {
       "type": "object",
-      "required": ["flowID", "connectionID", "providerID", "billingLane", "mode", "method", "redirectURI", "state", "nonce", "codeVerifierChallenge", "expiresAt", "inputs"],
+      "required": [
+        "flowID",
+        "connectionID",
+        "providerID",
+        "billingLane",
+        "mode",
+        "method",
+        "redirectURI",
+        "state",
+        "nonce",
+        "codeVerifierChallenge",
+        "expiresAt",
+        "inputs"
+      ],
       "properties": {
-        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
-        "connectionID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "providerID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "mode": { "enum": ["add", "reauth"] },
-        "targetAccountID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "expectedRevision": { "type": "integer", "minimum": 1 },
-        "method": { "type": "integer", "minimum": 0 },
-        "redirectURI": { "type": "string", "minLength": 1, "maxLength": 2048 },
-        "state": { "type": "string", "minLength": 16, "maxLength": 256 },
-        "nonce": { "type": "string", "minLength": 16, "maxLength": 128 },
-        "codeVerifierChallenge": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
-        "expiresAt": { "type": "integer", "minimum": 1 },
-        "inputs": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 4096 } }
+        "flowID": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "providerID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "mode": {
+          "enum": [
+            "add",
+            "reauth"
+          ]
+        },
+        "targetAccountID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "method": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "redirectURI": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "state": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 256
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "codeVerifierChallenge": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "expiresAt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "mode": { "const": "reauth" } }, "required": ["mode"] },
-          "then": { "required": ["targetAccountID", "expectedRevision"] },
-          "else": { "not": { "anyOf": [{ "required": ["targetAccountID"] }, { "required": ["expectedRevision"] }] } }
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "reauth"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "targetAccountID",
+              "expectedRevision"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "targetAccountID"
+                  ]
+                },
+                {
+                  "required": [
+                    "expectedRevision"
+                  ]
+                }
+              ]
+            }
+          }
         }
       ],
       "additionalProperties": false
     },
     "oauthStartResult": {
       "type": "object",
-      "required": ["flowID", "url", "method", "instructions", "expiresAt"],
+      "required": [
+        "flowID",
+        "url",
+        "method",
+        "instructions",
+        "expiresAt"
+      ],
       "properties": {
-        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
-        "url": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "method": { "enum": ["auto", "code"] },
-        "instructions": { "type": "string", "maxLength": 4096 },
-        "expiresAt": { "type": "integer", "minimum": 1 }
+        "flowID": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "method": {
+          "enum": [
+            "auto",
+            "code"
+          ]
+        },
+        "instructions": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "userCode": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9-]+$"
+        },
+        "expiresAt": {
+          "type": "integer",
+          "minimum": 1
+        }
       },
       "additionalProperties": false
     },
     "oauthCompletionRequest": {
       "type": "object",
-      "required": ["flowID", "connectionID", "providerID", "billingLane", "mode", "nonce", "codeVerifier"],
+      "required": [
+        "flowID",
+        "connectionID",
+        "providerID",
+        "billingLane",
+        "mode",
+        "nonce",
+        "codeVerifier"
+      ],
       "properties": {
-        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
-        "connectionID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "providerID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "mode": { "enum": ["add", "reauth"] },
-        "targetAccountID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "expectedRevision": { "type": "integer", "minimum": 1 },
-        "nonce": { "type": "string", "minLength": 16, "maxLength": 128 },
-        "codeVerifier": { "type": "string", "minLength": 43, "maxLength": 128 },
-        "code": { "type": "string", "maxLength": 131072 }
+        "flowID": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "providerID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "mode": {
+          "enum": [
+            "add",
+            "reauth"
+          ]
+        },
+        "targetAccountID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "codeVerifier": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 128
+        },
+        "code": {
+          "type": "string",
+          "maxLength": 131072
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "mode": { "const": "reauth" } }, "required": ["mode"] },
-          "then": { "required": ["targetAccountID", "expectedRevision"] },
-          "else": { "not": { "anyOf": [{ "required": ["targetAccountID"] }, { "required": ["expectedRevision"] }] } }
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "reauth"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "targetAccountID",
+              "expectedRevision"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "targetAccountID"
+                  ]
+                },
+                {
+                  "required": [
+                    "expectedRevision"
+                  ]
+                }
+              ]
+            }
+          }
         }
       ],
       "additionalProperties": false
     },
     "oauthCompletionResult": {
       "type": "object",
-      "required": ["flowID", "connectionID", "providerID", "billingLane", "mode", "status"],
+      "required": [
+        "flowID",
+        "connectionID",
+        "providerID",
+        "billingLane",
+        "mode",
+        "status"
+      ],
       "properties": {
-        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
-        "connectionID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "providerID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "mode": { "enum": ["add", "reauth"] },
-        "targetAccountID": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "expectedRevision": { "type": "integer", "minimum": 1 },
-        "status": { "enum": ["pending", "running", "complete", "failed", "cancelled", "expired"] },
-        "credential": { "$ref": "#/$defs/authInfo" },
-        "authMethod": { "const": "oauth" },
-        "authClass": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "safeIdentity": { "type": "object", "additionalProperties": { "type": "string" } },
-        "errorCode": { "enum": ["oauth_exchange_failed", "oauth_expired", "oauth_cancelled"] }
+        "flowID": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "providerID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "mode": {
+          "enum": [
+            "add",
+            "reauth"
+          ]
+        },
+        "targetAccountID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "complete",
+            "failed",
+            "cancelled",
+            "expired"
+          ]
+        },
+        "credential": {
+          "$ref": "#/$defs/authInfo"
+        },
+        "authMethod": {
+          "const": "oauth"
+        },
+        "authClass": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "safeIdentity": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "errorCode": {
+          "enum": [
+            "oauth_exchange_failed",
+            "oauth_expired",
+            "oauth_cancelled"
+          ]
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "mode": { "const": "reauth" } }, "required": ["mode"] },
-          "then": { "required": ["targetAccountID", "expectedRevision"] },
-          "else": { "not": { "anyOf": [{ "required": ["targetAccountID"] }, { "required": ["expectedRevision"] }] } }
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "reauth"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "targetAccountID",
+              "expectedRevision"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "targetAccountID"
+                  ]
+                },
+                {
+                  "required": [
+                    "expectedRevision"
+                  ]
+                }
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
-          "then": { "required": ["credential", "authMethod", "authClass", "safeIdentity"] },
-          "else": { "not": { "anyOf": [{ "required": ["credential"] }, { "required": ["authMethod"] }, { "required": ["authClass"] }, { "required": ["safeIdentity"] }] } }
+          "if": {
+            "properties": {
+              "status": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "credential",
+              "authMethod",
+              "authClass",
+              "safeIdentity"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "credential"
+                  ]
+                },
+                {
+                  "required": [
+                    "authMethod"
+                  ]
+                },
+                {
+                  "required": [
+                    "authClass"
+                  ]
+                },
+                {
+                  "required": [
+                    "safeIdentity"
+                  ]
+                }
+              ]
+            }
+          }
         }
       ],
       "additionalProperties": false
     },
     "oauthCancelResult": {
       "type": "object",
-      "required": ["flowID", "status"],
+      "required": [
+        "flowID",
+        "status"
+      ],
       "properties": {
-        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
-        "status": { "const": "cancelled" }
+        "flowID": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "status": {
+          "const": "cancelled"
+        }
       },
       "additionalProperties": false
     },
     "accountSelectionRequest": {
       "type": "object",
-      "required": ["rootOperationID", "connectionID", "providerID", "billingLane", "modelID"],
+      "required": [
+        "rootOperationID",
+        "connectionID",
+        "providerID",
+        "billingLane",
+        "modelID"
+      ],
       "properties": {
-        "rootOperationID": { "type": "string", "minLength": 1 },
-        "connectionID": { "type": "string", "minLength": 1 },
-        "providerID": { "type": "string", "minLength": 1 },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "modelID": { "type": "string", "minLength": 1 },
-        "preferredAccountID": { "type": "string", "minLength": 1 },
-        "inheritedAccountID": { "type": "string", "minLength": 1 },
-        "grantID": { "type": "string", "minLength": 1 }
+        "rootOperationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "providerID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "modelID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "preferredAccountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inheritedAccountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "grantID": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "additionalProperties": false
     },
     "accountCommitRequest": {
       "type": "object",
-      "required": ["bindingID", "expectedRevision"],
+      "required": [
+        "bindingID",
+        "expectedRevision"
+      ],
       "properties": {
-        "bindingID": { "type": "string", "minLength": 1 },
-        "expectedRevision": { "type": "integer", "minimum": 1 }
+        "bindingID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        }
       },
       "additionalProperties": false
     },
     "accountAttemptRequest": {
       "type": "object",
-      "required": ["bindingID", "expectedRevision", "outcome"],
+      "required": [
+        "bindingID",
+        "expectedRevision",
+        "outcome"
+      ],
       "properties": {
-        "bindingID": { "type": "string", "minLength": 1 },
-        "expectedRevision": { "type": "integer", "minimum": 1 },
-        "accountID": { "type": "string", "minLength": 1 },
-        "outcome": { "enum": ["success", "auth", "quota", "entitlement", "transient", "unknown"] },
-        "retryAfterMs": { "type": "integer", "minimum": 0 },
-        "modelEligible": { "type": "boolean" }
+        "bindingID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "enum": [
+            "success",
+            "auth",
+            "quota",
+            "entitlement",
+            "transient",
+            "unknown"
+          ]
+        },
+        "retryAfterMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modelEligible": {
+          "type": "boolean"
+        }
       },
       "additionalProperties": false
     },
@@ -588,40 +2596,107 @@
         "committed"
       ],
       "properties": {
-        "bindingID": { "type": "string", "minLength": 1 },
-        "bindingRevision": { "type": "number", "minimum": 1 },
-        "rootOperationID": { "type": "string", "minLength": 1 },
-        "connectionID": { "type": "string", "minLength": 1 },
-        "providerID": { "type": "string", "minLength": 1 },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "modelID": { "type": "string", "minLength": 1 },
-        "credentialRequired": { "type": "boolean" },
-        "accountID": { "type": "string", "minLength": 1 },
-        "credentialRevision": { "type": "number", "minimum": 1 },
-        "source": { "enum": ["round_robin", "preferred", "inherited", "failover", "keyless"] },
-        "attempt": { "type": "number", "minimum": 1 },
-        "committed": { "type": "boolean" }
+        "bindingID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bindingRevision": {
+          "type": "number",
+          "minimum": 1
+        },
+        "rootOperationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "providerID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "modelID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credentialRequired": {
+          "type": "boolean"
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credentialRevision": {
+          "type": "number",
+          "minimum": 1
+        },
+        "source": {
+          "enum": [
+            "round_robin",
+            "preferred",
+            "inherited",
+            "failover",
+            "keyless"
+          ]
+        },
+        "attempt": {
+          "type": "number",
+          "minimum": 1
+        },
+        "committed": {
+          "type": "boolean"
+        }
       },
       "allOf": [
         {
           "if": {
-            "properties": { "credentialRequired": { "const": true } },
-            "required": ["credentialRequired"]
+            "properties": {
+              "credentialRequired": {
+                "const": true
+              }
+            },
+            "required": [
+              "credentialRequired"
+            ]
           },
           "then": {
-            "required": ["accountID", "credentialRevision"],
+            "required": [
+              "accountID",
+              "credentialRevision"
+            ],
             "properties": {
               "source": {
-                "enum": ["round_robin", "preferred", "inherited", "failover"]
+                "enum": [
+                  "round_robin",
+                  "preferred",
+                  "inherited",
+                  "failover"
+                ]
               }
             }
           },
           "else": {
-            "properties": { "source": { "const": "keyless" } },
+            "properties": {
+              "source": {
+                "const": "keyless"
+              }
+            },
             "not": {
               "anyOf": [
-                { "required": ["accountID"] },
-                { "required": ["credentialRevision"] }
+                {
+                  "required": [
+                    "accountID"
+                  ]
+                },
+                {
+                  "required": [
+                    "credentialRevision"
+                  ]
+                }
               ]
             }
           }
@@ -639,12 +2714,30 @@
         "expectedCredentialRevision"
       ],
       "properties": {
-        "rootOperationID": { "type": "string", "minLength": 1 },
-        "connectionID": { "type": "string", "minLength": 1 },
-        "accountID": { "type": "string", "minLength": 1 },
-        "modelID": { "type": "string", "minLength": 1 },
-        "grantID": { "type": "string", "minLength": 1 },
-        "expectedCredentialRevision": { "type": "number", "minimum": 1 }
+        "rootOperationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "modelID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "grantID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedCredentialRevision": {
+          "type": "number",
+          "minimum": 1
+        }
       },
       "additionalProperties": false
     },
@@ -659,63 +2752,146 @@
         "credential"
       ],
       "properties": {
-        "leaseID": { "type": "string", "minLength": 1 },
-        "connectionID": { "type": "string", "minLength": 1 },
-        "accountID": { "type": "string", "minLength": 1 },
-        "credentialRevision": { "type": "number", "minimum": 1 },
-        "expiresAt": { "type": "number" },
-        "credential": { "$ref": "#/$defs/authInfo" }
+        "leaseID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credentialRevision": {
+          "type": "number",
+          "minimum": 1
+        },
+        "expiresAt": {
+          "type": "number"
+        },
+        "credential": {
+          "$ref": "#/$defs/authInfo"
+        }
       },
       "additionalProperties": false
     },
     "credentialReplaceRequest": {
       "type": "object",
-      "required": ["connectionID", "accountID", "expectedRevision", "credential"],
+      "required": [
+        "connectionID",
+        "accountID",
+        "expectedRevision",
+        "credential"
+      ],
       "properties": {
-        "connectionID": { "type": "string", "minLength": 1 },
-        "accountID": { "type": "string", "minLength": 1 },
-        "expectedRevision": { "type": "number", "minimum": 1 },
-        "credential": { "$ref": "#/$defs/authInfo" }
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedRevision": {
+          "type": "number",
+          "minimum": 1
+        },
+        "credential": {
+          "$ref": "#/$defs/authInfo"
+        }
       },
       "additionalProperties": false
     },
     "refreshAcquireRequest": {
       "type": "object",
-      "required": ["connectionID", "accountID", "expectedRevision"],
+      "required": [
+        "connectionID",
+        "accountID",
+        "expectedRevision"
+      ],
       "properties": {
-        "connectionID": { "type": "string", "minLength": 1 },
-        "accountID": { "type": "string", "minLength": 1 },
-        "expectedRevision": { "type": "number", "minimum": 1 },
-        "ttlMs": { "type": "number", "minimum": 1, "maximum": 60000 }
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedRevision": {
+          "type": "number",
+          "minimum": 1
+        },
+        "ttlMs": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 60000
+        }
       },
       "additionalProperties": false
     },
     "refreshRenewRequest": {
       "type": "object",
-      "required": ["leaseID"],
+      "required": [
+        "leaseID"
+      ],
       "properties": {
-        "leaseID": { "type": "string", "minLength": 1 },
-        "ttlMs": { "type": "number", "minimum": 1, "maximum": 60000 }
+        "leaseID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ttlMs": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 60000
+        }
       },
       "additionalProperties": false
     },
     "refreshCommitRequest": {
       "type": "object",
-      "required": ["leaseID", "connectionID", "accountID", "expectedRevision", "credential"],
+      "required": [
+        "leaseID",
+        "connectionID",
+        "accountID",
+        "expectedRevision",
+        "credential"
+      ],
       "properties": {
-        "leaseID": { "type": "string", "minLength": 1 },
-        "connectionID": { "type": "string", "minLength": 1 },
-        "accountID": { "type": "string", "minLength": 1 },
-        "expectedRevision": { "type": "number", "minimum": 1 },
-        "credential": { "$ref": "#/$defs/authInfo" }
+        "leaseID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedRevision": {
+          "type": "number",
+          "minimum": 1
+        },
+        "credential": {
+          "$ref": "#/$defs/authInfo"
+        }
       },
       "additionalProperties": false
     },
     "refreshAbortRequest": {
       "type": "object",
-      "required": ["leaseID"],
+      "required": [
+        "leaseID"
+      ],
       "properties": {
-        "leaseID": { "type": "string", "minLength": 1 }
+        "leaseID": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "additionalProperties": false
     },
@@ -730,36 +2906,96 @@
         "renewable"
       ],
       "properties": {
-        "leaseID": { "type": "string", "minLength": 1 },
-        "connectionID": { "type": "string", "minLength": 1 },
-        "accountID": { "type": "string", "minLength": 1 },
-        "credentialRevision": { "type": "number", "minimum": 1 },
-        "expiresAt": { "type": "number" },
-        "renewable": { "type": "boolean" }
+        "leaseID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credentialRevision": {
+          "type": "number",
+          "minimum": 1
+        },
+        "expiresAt": {
+          "type": "number"
+        },
+        "renewable": {
+          "type": "boolean"
+        }
       },
       "additionalProperties": false
     },
     "artifactDescriptor": {
       "type": "object",
-      "required": ["artifactID", "contentSHA256", "sizeBytes", "mediaType", "state"],
+      "required": [
+        "artifactID",
+        "contentSHA256",
+        "sizeBytes",
+        "mediaType",
+        "state"
+      ],
       "properties": {
-        "artifactID": { "type": "string", "minLength": 1 },
-        "contentSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "sizeBytes": { "type": "integer", "minimum": 0 },
-        "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 },
-        "state": { "enum": ["staged", "acknowledged"] },
-        "expiresAt": { "type": "number" }
+        "artifactID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contentSHA256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "state": {
+          "enum": [
+            "staged",
+            "acknowledged"
+          ]
+        },
+        "expiresAt": {
+          "type": "number"
+        }
       },
       "additionalProperties": false
     },
     "sessionCwdChangeRequest": {
       "type": "object",
-      "required": ["sessionID", "requestedCwd", "expectedWorkspaceRevision", "transitionID"],
+      "required": [
+        "sessionID",
+        "requestedCwd",
+        "expectedWorkspaceRevision",
+        "transitionID"
+      ],
       "properties": {
-        "sessionID": { "type": "string", "minLength": 1 },
-        "requestedCwd": { "type": "string", "minLength": 1 },
-        "expectedWorkspaceRevision": { "type": "integer", "minimum": 0 },
-        "transitionID": { "type": "string", "minLength": 1, "maxLength": 128 }
+        "sessionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestedCwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedWorkspaceRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "transitionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
       },
       "additionalProperties": false
     },
@@ -767,24 +3003,67 @@
       "oneOf": [
         {
           "type": "object",
-          "required": ["outcome", "canonicalCwd", "workspaceRevision", "changed", "transitionID"],
+          "required": [
+            "outcome",
+            "canonicalCwd",
+            "workspaceRevision",
+            "changed",
+            "transitionID"
+          ],
           "properties": {
-            "outcome": { "const": "accepted" },
-            "canonicalCwd": { "type": "string", "minLength": 1 },
-            "workspaceRevision": { "type": "integer", "minimum": 0 },
-            "changed": { "type": "boolean" },
-            "transitionID": { "type": "string", "minLength": 1, "maxLength": 128 }
+            "outcome": {
+              "const": "accepted"
+            },
+            "canonicalCwd": {
+              "type": "string",
+              "minLength": 1
+            },
+            "workspaceRevision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "changed": {
+              "type": "boolean"
+            },
+            "transitionID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
           },
           "additionalProperties": false
         },
         {
           "type": "object",
-          "required": ["outcome", "transitionID", "committed", "code"],
+          "required": [
+            "outcome",
+            "transitionID",
+            "committed",
+            "code"
+          ],
           "properties": {
-            "outcome": { "const": "rejected" },
-            "transitionID": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "committed": { "const": false },
-            "code": { "enum": ["invalid_cwd", "unknown_session", "stale_engine_session", "owner_mismatch", "workspace_rejected", "workspace_revision_conflict", "binding_unavailable"] }
+            "outcome": {
+              "const": "rejected"
+            },
+            "transitionID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "committed": {
+              "const": false
+            },
+            "code": {
+              "enum": [
+                "invalid_cwd",
+                "unknown_session",
+                "stale_engine_session",
+                "owner_mismatch",
+                "workspace_rejected",
+                "workspace_revision_conflict",
+                "binding_unavailable"
+              ]
+            }
           },
           "additionalProperties": false
         }
@@ -792,47 +3071,234 @@
     },
     "sessionBindingReadRequest": {
       "type": "object",
-      "required": ["sessionID"],
-      "properties": { "sessionID": { "type": "string", "minLength": 1 } },
+      "required": [
+        "sessionID"
+      ],
+      "properties": {
+        "sessionID": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
       "additionalProperties": false
     },
     "sessionBindingReadResult": {
       "type": "object",
-      "required": ["engineSessionID", "stableChatID", "owner", "canonicalCwd", "workspaceRevision", "authorityWorkspaceID", "memoryWorkspaceID", "copalWorkspace", "memoryEnabled", "engineAliases", "mapRevision", "mappingRevision"],
+      "required": [
+        "engineSessionID",
+        "stableChatID",
+        "owner",
+        "canonicalCwd",
+        "workspaceRevision",
+        "authorityWorkspaceID",
+        "memoryWorkspaceID",
+        "copalWorkspace",
+        "memoryEnabled",
+        "engineAliases",
+        "mapRevision",
+        "mappingRevision"
+      ],
       "properties": {
-        "engineSessionID": { "type": "string", "minLength": 1 },
-        "stableChatID": { "type": "string", "minLength": 1 },
-        "owner": { "type": "string", "minLength": 1 },
-        "canonicalCwd": { "type": "string", "minLength": 1 },
-        "workspaceRevision": { "type": "integer", "minimum": 0 },
-        "authorityWorkspaceID": { "type": "string", "minLength": 1 },
-        "memoryWorkspaceID": { "type": "string", "minLength": 1 },
-        "copalWorkspace": { "type": "string", "minLength": 1 },
-        "memoryEnabled": { "type": "boolean" },
-        "engineAliases": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
-        "mapRevision": { "type": "integer", "minimum": 0 },
-        "mappingRevision": { "type": "integer", "minimum": 0 }
+        "engineSessionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stableChatID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonicalCwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workspaceRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "authorityWorkspaceID": {
+          "type": "string",
+          "description": "Selected filesystem authority Workspace ID; explicit empty string means no selected Files authority."
+        },
+        "memoryWorkspaceID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "copalWorkspace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "memoryEnabled": {
+          "type": "boolean"
+        },
+        "engineAliases": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "mapRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mappingRevision": {
+          "type": "integer",
+          "minimum": 0
+        }
       },
       "additionalProperties": false
     },
     "sessionSettingsEffectiveRequest": {
       "type": "object",
-      "required": ["providerID", "modelID"],
+      "required": [
+        "providerID",
+        "modelID"
+      ],
       "properties": {
-        "providerID": { "type": "string", "minLength": 1 },
-        "modelID": { "type": "string", "minLength": 1 }
+        "providerID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "modelID": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "additionalProperties": false
     },
     "sessionSettingsEffectiveResult": {
       "type": "object",
-      "required": ["providerID", "modelID", "context", "compaction", "checkpoint"],
+      "required": [
+        "providerID",
+        "modelID",
+        "context",
+        "compaction",
+        "checkpoint"
+      ],
       "properties": {
-        "providerID": { "type": "string", "minLength": 1 },
-        "modelID": { "type": "string", "minLength": 1 },
-        "context": { "type": "object", "required": ["hard", "effective", "usable", "source", "input", "output"], "properties": { "hard": { "type": "integer", "minimum": 0 }, "effective": { "type": "integer", "minimum": 0 }, "usable": { "type": "integer", "minimum": 0 }, "source": { "enum": ["model", "config"] }, "input": { "type": "integer", "minimum": 0 }, "output": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
-        "compaction": { "type": "object", "required": ["auto", "prune", "tailTurns", "preserveRecentTokens", "reserved"], "properties": { "auto": { "type": "boolean" }, "prune": { "type": "boolean" }, "tailTurns": { "type": "integer", "minimum": 0 }, "preserveRecentTokens": { "type": "integer", "minimum": 0 }, "reserved": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
-        "checkpoint": { "type": "object", "required": ["thresholds", "reserved", "maxWriterFailures", "fork", "pushCaps"], "properties": { "thresholds": { "type": "array", "items": { "type": "integer", "minimum": 0 } }, "reserved": { "type": "integer", "minimum": 0 }, "maxWriterFailures": { "type": "integer", "minimum": 1 }, "fork": { "type": "boolean" }, "pushCaps": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } } }, "additionalProperties": false }
+        "providerID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "modelID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context": {
+          "type": "object",
+          "required": [
+            "hard",
+            "effective",
+            "usable",
+            "source",
+            "input",
+            "output"
+          ],
+          "properties": {
+            "hard": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "effective": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "usable": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "source": {
+              "enum": [
+                "model",
+                "config"
+              ]
+            },
+            "input": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "output": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "compaction": {
+          "type": "object",
+          "required": [
+            "auto",
+            "prune",
+            "tailTurns",
+            "preserveRecentTokens",
+            "reserved"
+          ],
+          "properties": {
+            "auto": {
+              "type": "boolean"
+            },
+            "prune": {
+              "type": "boolean"
+            },
+            "tailTurns": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "preserveRecentTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reserved": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "checkpoint": {
+          "type": "object",
+          "required": [
+            "thresholds",
+            "reserved",
+            "maxWriterFailures",
+            "fork",
+            "pushCaps"
+          ],
+          "properties": {
+            "thresholds": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "reserved": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxWriterFailures": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "fork": {
+              "type": "boolean"
+            },
+            "pushCaps": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },
@@ -841,34 +3307,96 @@
         {
           "type": "object",
           "required": [
-            "action", "rootOperationID", "operation", "idempotencyKey", "request",
-            "connectionID", "billingLane", "modelRouteID"
+            "action",
+            "rootOperationID",
+            "operation",
+            "idempotencyKey",
+            "request",
+            "connectionID",
+            "billingLane",
+            "modelRouteID"
           ],
           "properties": {
-            "action": { "const": "begin" },
-            "rootOperationID": { "type": "string", "minLength": 1 },
-            "operation": { "$ref": "#/$defs/operation" },
-            "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 128 },
-            "request": { "type": "object" },
-            "connectionID": { "type": "string", "minLength": 1 },
-            "billingLane": { "$ref": "#/$defs/billingLane" },
-            "modelRouteID": { "type": "string", "minLength": 1 }
+            "action": {
+              "const": "begin"
+            },
+            "rootOperationID": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "$ref": "#/$defs/operation"
+            },
+            "idempotencyKey": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128
+            },
+            "request": {
+              "type": "object"
+            },
+            "connectionID": {
+              "type": "string",
+              "minLength": 1
+            },
+            "billingLane": {
+              "$ref": "#/$defs/billingLane"
+            },
+            "modelRouteID": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "additionalProperties": false
         },
         {
           "type": "object",
-          "required": ["action", "operationID", "expectedRevision"],
+          "required": [
+            "action",
+            "operationID",
+            "expectedRevision"
+          ],
           "properties": {
-            "action": { "const": "cas" },
-            "operationID": { "type": "string", "minLength": 1 },
-            "expectedRevision": { "type": "integer", "minimum": 1 },
-            "state": { "enum": ["pending", "running", "complete", "failed", "cancelled"] },
-            "bindingID": { "type": "string", "minLength": 1 },
-            "selectedAccountID": { "type": "string", "minLength": 1 },
-            "attempt": { "type": "object" },
-            "commitReason": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "artifactID": { "type": "string", "minLength": 1 }
+            "action": {
+              "const": "cas"
+            },
+            "operationID": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "running",
+                "complete",
+                "failed",
+                "cancelled"
+              ]
+            },
+            "bindingID": {
+              "type": "string",
+              "minLength": 1
+            },
+            "selectedAccountID": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt": {
+              "type": "object"
+            },
+            "commitReason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "artifactID": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "additionalProperties": false
         }
@@ -877,55 +3405,164 @@
     "operationJournalResult": {
       "type": "object",
       "required": [
-        "operationID", "rootOperationID", "operation", "requestHash", "connectionID",
-        "billingLane", "modelRouteID", "state", "committed", "attempts", "artifactIDs",
-        "revision", "replayed"
+        "operationID",
+        "rootOperationID",
+        "operation",
+        "requestHash",
+        "connectionID",
+        "billingLane",
+        "modelRouteID",
+        "state",
+        "committed",
+        "attempts",
+        "artifactIDs",
+        "revision",
+        "replayed"
       ],
       "properties": {
-        "operationID": { "type": "string", "minLength": 1 },
-        "rootOperationID": { "type": "string", "minLength": 1 },
-        "operation": { "$ref": "#/$defs/operation" },
-        "requestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "connectionID": { "type": "string", "minLength": 1 },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "modelRouteID": { "type": "string", "minLength": 1 },
-        "bindingID": { "type": "string", "minLength": 1 },
-        "selectedAccountID": { "type": "string", "minLength": 1 },
-        "state": { "enum": ["pending", "running", "complete", "failed", "cancelled"] },
-        "committed": { "type": "boolean" },
-        "commitReason": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "attempts": { "type": "array", "items": { "type": "object" } },
-        "artifactIDs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-        "revision": { "type": "integer", "minimum": 1 },
-        "replayed": { "type": "boolean" }
+        "operationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rootOperationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation": {
+          "$ref": "#/$defs/operation"
+        },
+        "requestHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "modelRouteID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bindingID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selectedAccountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "running",
+            "complete",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "committed": {
+          "type": "boolean"
+        },
+        "commitReason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "artifactIDs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "replayed": {
+          "type": "boolean"
+        }
       },
       "additionalProperties": false
     },
     "artifactReadRequest": {
       "type": "object",
-      "required": ["artifactID", "offset", "limit"],
+      "required": [
+        "artifactID",
+        "offset",
+        "limit"
+      ],
       "properties": {
-        "artifactID": { "type": "string", "minLength": 1 },
-        "offset": { "type": "integer", "minimum": 0 },
-        "limit": { "type": "integer", "minimum": 1, "maximum": 8388608 }
+        "artifactID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        }
       },
       "additionalProperties": false
     },
     "artifactReadResult": {
       "type": "object",
       "required": [
-        "artifactID", "contentSHA256", "sizeBytes", "mediaType", "offset",
-        "dataBase64", "chunkSHA256", "eof"
+        "artifactID",
+        "contentSHA256",
+        "sizeBytes",
+        "mediaType",
+        "offset",
+        "dataBase64",
+        "chunkSHA256",
+        "eof"
       ],
       "properties": {
-        "artifactID": { "type": "string", "minLength": 1 },
-        "contentSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "sizeBytes": { "type": "integer", "minimum": 0 },
-        "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 },
-        "offset": { "type": "integer", "minimum": 0 },
-        "dataBase64": { "type": "string" },
-        "chunkSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "eof": { "type": "boolean" }
+        "artifactID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contentSHA256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dataBase64": {
+          "type": "string"
+        },
+        "chunkSHA256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "eof": {
+          "type": "boolean"
+        }
       },
       "additionalProperties": false
     },
@@ -933,21 +3570,52 @@
       "oneOf": [
         {
           "type": "object",
-          "required": ["action", "mediaType", "contentSHA256", "sizeBytes", "chunks"],
+          "required": [
+            "action",
+            "mediaType",
+            "contentSHA256",
+            "sizeBytes",
+            "chunks"
+          ],
           "properties": {
-            "action": { "const": "put" },
-            "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 },
-            "contentSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-            "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 268435456 },
+            "action": {
+              "const": "put"
+            },
+            "mediaType": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "contentSHA256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 268435456
+            },
             "chunks": {
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["index", "dataBase64", "sha256"],
+                "required": [
+                  "index",
+                  "dataBase64",
+                  "sha256"
+                ],
                 "properties": {
-                  "index": { "type": "integer", "minimum": 0 },
-                  "dataBase64": { "type": "string" },
-                  "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "dataBase64": {
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
                 },
                 "additionalProperties": false
               }
@@ -955,19 +3623,48 @@
           },
           "allOf": [
             {
-              "if": { "properties": { "sizeBytes": { "const": 0 } }, "required": ["sizeBytes"] },
-              "then": { "properties": { "chunks": { "maxItems": 0 } } },
-              "else": { "properties": { "chunks": { "minItems": 1 } } }
+              "if": {
+                "properties": {
+                  "sizeBytes": {
+                    "const": 0
+                  }
+                },
+                "required": [
+                  "sizeBytes"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "chunks": {
+                    "maxItems": 0
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "chunks": {
+                    "minItems": 1
+                  }
+                }
+              }
             }
           ],
           "additionalProperties": false
         },
         {
           "type": "object",
-          "required": ["action", "artifactID"],
+          "required": [
+            "action",
+            "artifactID"
+          ],
           "properties": {
-            "action": { "const": "acknowledge" },
-            "artifactID": { "type": "string", "minLength": 1 }
+            "action": {
+              "const": "acknowledge"
+            },
+            "artifactID": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "additionalProperties": false
         }
@@ -975,125 +3672,902 @@
     },
     "executorInvokeRequest": {
       "type": "object",
-      "required": ["executorID", "operation", "artifactIDs", "options"],
+      "required": [
+        "executorID",
+        "operation",
+        "artifactIDs",
+        "options"
+      ],
       "properties": {
-        "executorID": { "type": "string", "minLength": 1 },
-        "operation": { "$ref": "#/$defs/operation" },
+        "executorID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation": {
+          "$ref": "#/$defs/operation"
+        },
         "artifactIDs": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 },
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "uniqueItems": true
         },
-        "options": { "type": "object" }
+        "options": {
+          "type": "object"
+        }
       },
       "additionalProperties": false
     },
     "operationRouteContext": {
       "type": "object",
-      "required": ["connectionID", "providerID", "billingLane", "modelRouteID", "modelID"],
+      "required": [
+        "connectionID",
+        "providerID",
+        "billingLane",
+        "modelRouteID",
+        "modelID"
+      ],
       "properties": {
-        "connectionID": { "type": "string", "minLength": 1 },
-        "providerID": { "type": "string", "minLength": 1 },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "modelRouteID": { "type": "string", "minLength": 1 },
-        "modelID": { "type": "string", "minLength": 1 },
-        "grantID": { "type": "string", "minLength": 1 },
-        "preferredAccountID": { "type": "string", "minLength": 1 },
-        "inheritedAccountID": { "type": "string", "minLength": 1 }
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "providerID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "modelRouteID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "modelID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "grantID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "preferredAccountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inheritedAccountID": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "additionalProperties": false
     },
     "operationArtifactInput": {
       "type": "object",
-      "required": ["name", "artifactID", "contentSHA256", "sizeBytes", "mediaType"],
+      "required": [
+        "name",
+        "artifactID",
+        "contentSHA256",
+        "sizeBytes",
+        "mediaType"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "artifactID": { "type": "string", "minLength": 1 },
-        "contentSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "sizeBytes": { "type": "integer", "minimum": 0 },
-        "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 }
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "artifactID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contentSHA256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
       },
       "additionalProperties": false
     },
     "operationCancelRequest": {
       "type": "object",
-      "required": ["rootOperationID", "idempotencyKey"],
+      "required": [
+        "rootOperationID",
+        "idempotencyKey"
+      ],
       "properties": {
-        "rootOperationID": { "type": "string", "minLength": 1 },
-        "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 128 }
+        "rootOperationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        }
       },
       "additionalProperties": false
     },
     "operationCancelResult": {
       "type": "object",
-      "required": ["operationID", "rootOperationID", "state"],
+      "required": [
+        "operationID",
+        "rootOperationID",
+        "state"
+      ],
       "properties": {
-        "operationID": { "type": "string", "minLength": 1 },
-        "rootOperationID": { "type": "string", "minLength": 1 },
-        "state": { "enum": ["pending", "cancelled", "complete", "failed"] }
+        "operationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rootOperationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "cancelled",
+            "complete",
+            "failed"
+          ]
+        }
       },
       "additionalProperties": false
     },
     "operationExecuteRequest": {
       "type": "object",
-      "required": ["rootOperationID", "idempotencyKey", "operation", "routes", "input", "artifactInputs", "options"],
+      "required": [
+        "rootOperationID",
+        "idempotencyKey",
+        "operation",
+        "routes",
+        "input",
+        "artifactInputs",
+        "options"
+      ],
       "properties": {
-        "rootOperationID": { "type": "string", "minLength": 1 },
-        "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 128 },
-        "operation": { "$ref": "#/$defs/operation" },
+        "rootOperationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128
+        },
+        "operation": {
+          "$ref": "#/$defs/operation"
+        },
         "routes": {
           "type": "array",
           "minItems": 1,
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/operationRouteContext" }
+          "items": {
+            "$ref": "#/$defs/operationRouteContext"
+          }
         },
-        "input": { "type": "object" },
+        "input": {
+          "type": "object"
+        },
         "artifactInputs": {
           "type": "array",
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/operationArtifactInput" }
+          "items": {
+            "$ref": "#/$defs/operationArtifactInput"
+          }
         },
-        "options": { "type": "object" }
+        "options": {
+          "type": "object"
+        }
       },
       "additionalProperties": false
     },
     "operationExecuteResult": {
       "type": "object",
       "required": [
-        "operationID", "rootOperationID", "operation", "modelRouteID", "connectionID",
-        "billingLane", "state", "committed", "output", "artifacts", "replayed"
+        "operationID",
+        "rootOperationID",
+        "operation",
+        "modelRouteID",
+        "connectionID",
+        "billingLane",
+        "state",
+        "committed",
+        "output",
+        "artifacts",
+        "replayed"
       ],
       "properties": {
-        "operationID": { "type": "string", "minLength": 1 },
-        "rootOperationID": { "type": "string", "minLength": 1 },
-        "operation": { "$ref": "#/$defs/operation" },
-        "modelRouteID": { "type": "string", "minLength": 1 },
-        "connectionID": { "type": "string", "minLength": 1 },
-        "billingLane": { "$ref": "#/$defs/billingLane" },
-        "state": { "enum": ["complete", "failed", "cancelled"] },
-        "committed": { "type": "boolean" },
-        "commitReason": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "bindingID": { "type": "string", "minLength": 1 },
-        "selectedAccountID": { "type": "string", "minLength": 1 },
-        "output": { "type": "object" },
-        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifactDescriptor" } },
+        "operationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rootOperationID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation": {
+          "$ref": "#/$defs/operation"
+        },
+        "modelRouteID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connectionID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "billingLane": {
+          "$ref": "#/$defs/billingLane"
+        },
+        "state": {
+          "enum": [
+            "complete",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "committed": {
+          "type": "boolean"
+        },
+        "commitReason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "bindingID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selectedAccountID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "output": {
+          "type": "object"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifactDescriptor"
+          }
+        },
         "usage": {
           "type": "object",
           "properties": {
-            "inputTokens": { "type": "integer", "minimum": 0 },
-            "outputTokens": { "type": "integer", "minimum": 0 },
-            "totalTokens": { "type": "integer", "minimum": 0 }
+            "inputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "outputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "totalTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cacheReadTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cacheWriteTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reasoningTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "audioInputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "audioOutputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "imageInputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "imageOutputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "searchRequests": {
+              "type": "integer",
+              "minimum": 0
+            }
           },
           "additionalProperties": false
         },
-        "modelFingerprint": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "dimension": { "type": "integer", "minimum": 1 },
-        "replayed": { "type": "boolean" }
+        "modelFingerprint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "dimension": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "metricCoverage": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": [
+                  "reported",
+                  "estimated",
+                  "unavailable",
+                  "not_applicable"
+                ]
+              },
+              "coverage": {
+                "enum": [
+                  "complete",
+                  "partial",
+                  "unknown"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "state",
+              "coverage",
+              "source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "coveredDispatchIDs": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "identityCoverage": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "lossReasons": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "dropped",
+              "truncated",
+              "parse_degraded",
+              "write_failed",
+              "interrupted",
+              "admission_unavailable",
+              "queue_full",
+              "delivery_timeout"
+            ]
+          }
+        },
+        "normalizationProfile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "quota": {
+          "type": "object",
+          "maxProperties": 6
+        }
       },
+      "additionalProperties": false
+    },
+    "loggingAdmissionRequest": {
+      "type": "object",
+      "properties": {
+        "bindingID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "rootOperationID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "operationID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "bindingID",
+        "rootOperationID"
+      ],
+      "additionalProperties": false
+    },
+    "loggingAdmissionResult": {
+      "type": "object",
+      "properties": {
+        "admissionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "advanced_enabled": {
+              "type": "boolean"
+            },
+            "request_body_enabled": {
+              "type": "boolean"
+            },
+            "response_body_enabled": {
+              "type": "boolean"
+            },
+            "binary_body_enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "revision",
+            "advanced_enabled",
+            "request_body_enabled",
+            "response_body_enabled",
+            "binary_body_enabled"
+          ],
+          "additionalProperties": false
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "providerID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "operationID": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 128
+            },
+            "rootOperationID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "instanceID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "bindingID": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "bindingRevision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "identityCoverage": {
+              "enum": [
+                "complete",
+                "partial"
+              ]
+            },
+            "transportMode": {
+              "enum": [
+                "direct",
+                "advanced_proxy"
+              ]
+            },
+            "persistence": {
+              "type": "object",
+              "properties": {
+                "numeric": {
+                  "type": "boolean"
+                },
+                "content": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "enum": [
+                    "normal",
+                    "incognito",
+                    "temporary",
+                    "auxiliary"
+                  ]
+                }
+              },
+              "required": [
+                "numeric",
+                "content",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "providerID",
+            "operationID",
+            "rootOperationID",
+            "instanceID",
+            "bindingID",
+            "bindingRevision",
+            "identityCoverage",
+            "transportMode",
+            "persistence"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "admissionID",
+        "policy",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "loggingEventRequest": {
+      "type": "object",
+      "properties": {
+        "admissionID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "upstream_error",
+            "cancelled",
+            "disconnected",
+            "interrupted",
+            "unknown"
+          ]
+        },
+        "metrics": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "normalizationProfile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "actualModel": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "timing": {
+          "type": "object",
+          "maxProperties": 16
+        },
+        "billable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "requestBody": {},
+        "responseBody": {},
+        "events": {
+          "type": "array",
+          "maxItems": 256
+        },
+        "lossReasons": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "dropped",
+              "truncated",
+              "parse_degraded",
+              "write_failed",
+              "interrupted",
+              "admission_unavailable",
+              "queue_full",
+              "delivery_timeout"
+            ]
+          }
+        },
+        "quota": {
+          "type": "object",
+          "maxProperties": 6
+        },
+        "dispatchID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "source": {
+          "enum": [
+            "wire",
+            "sdk",
+            "acp",
+            "executor"
+          ]
+        },
+        "metricCoverage": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": [
+                  "reported",
+                  "estimated",
+                  "unavailable",
+                  "not_applicable"
+                ]
+              },
+              "coverage": {
+                "enum": [
+                  "complete",
+                  "partial",
+                  "unknown"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "state",
+              "coverage",
+              "source"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "dispatchIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retryOfDispatchID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "coveredDispatchIDs": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "identityCoverage": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "observationKind": {
+          "enum": [
+            "delta",
+            "cumulative_snapshot",
+            "final_snapshot"
+          ]
+        },
+        "http": {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16
+            },
+            "endpoint": {
+              "type": "object",
+              "properties": {
+                "origin": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "path": {
+                  "type": "string",
+                  "maxLength": 1024
+                }
+              },
+              "required": [
+                "origin",
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "status": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 599
+            },
+            "requestHeaders": {
+              "type": "array",
+              "maxItems": 65,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "values": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 2048
+                    }
+                  },
+                  "state": {
+                    "enum": [
+                      "reported",
+                      "redacted",
+                      "omitted",
+                      "truncated"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "values",
+                  "state"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "responseHeaders": {
+              "type": "array",
+              "maxItems": 65,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "values": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 2048
+                    }
+                  },
+                  "state": {
+                    "enum": [
+                      "reported",
+                      "redacted",
+                      "omitted",
+                      "truncated"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "values",
+                  "state"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "coverage": {
+              "type": "object",
+              "maxProperties": 6,
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 128
+              }
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "admissionID",
+        "dispatchID",
+        "source",
+        "sequence"
+      ],
+      "additionalProperties": false
+    },
+    "loggingEventResult": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "captureState": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "accepted",
+        "replayed"
+      ],
       "additionalProperties": false
     }
   },
   "x-openclank-methods": {
+    "_openclank/history/v1/mutate": {
+      "direction": "engine_to_host",
+      "request": "#/$defs/historyMutationRequest",
+      "result": "#/$defs/historyMutationResult"
+    },
+    "_openclank/history/v1/query": {
+      "direction": "engine_to_host",
+      "request": "#/$defs/historyQueryRequest",
+      "result": "#/$defs/historyQueryResult"
+    },
     "_openclank/provider-control/v1/catalog": {
       "direction": "host_to_engine",
       "request": "empty object",
@@ -1214,10 +4688,25 @@
       "request": "#/$defs/sessionBindingReadRequest",
       "result": "#/$defs/sessionBindingReadResult"
     },
+    "_openclank/session/v1/goal/completed": {
+      "direction": "engine_to_host",
+      "request": "#/$defs/goalCompletionRequest",
+      "result": "#/$defs/goalCompletionResult"
+    },
     "_openclank/session/v1/settings/effective": {
       "direction": "host_to_engine",
       "request": "#/$defs/sessionSettingsEffectiveRequest",
       "result": "#/$defs/sessionSettingsEffectiveResult"
+    },
+    "_openclank/logging/v1/admit": {
+      "direction": "engine_to_host",
+      "request": "#/$defs/loggingAdmissionRequest",
+      "result": "#/$defs/loggingAdmissionResult"
+    },
+    "_openclank/logging/v1/events": {
+      "direction": "engine_to_host",
+      "request": "#/$defs/loggingEventRequest",
+      "result": "#/$defs/loggingEventResult"
     }
   }
 }

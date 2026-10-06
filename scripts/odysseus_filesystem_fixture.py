@@ -145,84 +145,40 @@ def copal_seed_documents() -> list[dict[str, Any]]:
     ]
 
 
-def seed_copal_redb(root: Path, bridge_binary: Path) -> dict[str, int]:
-    if not bridge_binary.is_file() or not os.access(bridge_binary, os.X_OK):
-        raise ValueError(f"Copal bridge is not executable; build {bridge_binary}")
-    data_dir = root / "copal-redb"
-    data_dir.mkdir()
-    environment = os.environ.copy()
-    environment["COPAL_DATA_DIR"] = str(data_dir)
-    environment["COPAL_WIKI_DATA_DIR"] = str(data_dir)
-    process = subprocess.Popen(
-        [str(bridge_binary)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=environment,
-    )
-    request_id = 0
+def seed_copal_files(root: Path) -> dict[str, int]:
+    import asyncio
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from src.openclank.copal_loose import LooseCopalBridge
 
-    def call(operation: str, args: dict[str, Any]) -> Any:
-        nonlocal request_id
-        request_id += 1
-        assert process.stdin is not None and process.stdout is not None
-        process.stdin.write(json.dumps({"id": request_id, "op": operation, "args": args}) + "\n")
-        process.stdin.flush()
-        response = json.loads(process.stdout.readline())
-        if response.get("id") != request_id or not response.get("ok"):
-            raise RuntimeError(f"Copal fixture operation failed: {operation}")
-        return response.get("result")
-
-    created = []
-    try:
-        call("status", {})
-        for seed in copal_seed_documents():
-            result = call("create", {"owner": "synthetic-audit", "workspace_id": "fixture", **seed})
-            created.append(result["doc"])
-        note = created[0]
-        call(
-            "write",
-            {
-                "owner": "synthetic-audit",
-                "workspace_id": "fixture",
-                "id": note["id"],
-                "corpus": "notes",
-                "base": note["head"],
-                "content": note["text"] + "\nSynthetic second revision.\n",
-            },
-        )
-        trashed = created[-1]
-        call(
-            "delete",
-            {
-                "owner": "synthetic-audit",
-                "workspace_id": "fixture",
-                "id": trashed["id"],
-                "corpus": "notes",
-            },
-        )
-    finally:
-        if process.stdin is not None:
-            process.stdin.close()
+    async def seed():
+        bridge = LooseCopalBridge(root / "copal-files")
+        await bridge.start()
+        scope = {"owner": "synthetic-audit", "workspace_id": "fixture"}
+        created = []
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            process.wait(timeout=5)
-    if process.returncode != 0:
-        raise RuntimeError("Copal fixture bridge exited unsuccessfully")
-    return {"documents_created": len(created), "documents_left_in_trash": 1}
+            for item in copal_seed_documents():
+                result = await bridge.call("create", {**scope, **item})
+                created.append(result["doc"])
+            note = created[0]
+            await bridge.call("write", {**scope, "id": note["id"], "corpus": "notes",
+                "base": note["head"], "content": note["text"] + "\nSynthetic second revision.\n"})
+            await bridge.call("delete", {**scope, "id": created[-1]["id"], "corpus": "notes"})
+        finally:
+            await bridge.stop()
+        return {"documents_created": len(created), "documents_left_in_trash": 1}
+
+    return asyncio.run(seed())
 
 
-def generate(output: Path, tree_count: int, bridge_binary: Path | None) -> dict[str, Any]:
+def generate(output: Path, tree_count: int, include_copal: bool) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     make_tree(output / "tree", tree_count)
     sizes = make_file_matrix(output)
     permissions = make_permission_matrix(output)
     copal = (
-        seed_copal_redb(output, bridge_binary)
-        if bridge_binary is not None
+        seed_copal_files(output)
+        if include_copal
         else {"documents_created": 0, "documents_left_in_trash": 0}
     )
     code = output / "code-workspace"
@@ -236,7 +192,7 @@ def generate(output: Path, tree_count: int, bridge_binary: Path | None) -> dict[
         "tree_entries": tree_count,
         "logical_large_file_bytes": sizes,
         "permission_matrix": permissions,
-        "copal_redb": copal,
+        "copal_files": copal,
         "code_languages": ["rust", "typescript", "markdown"],
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -247,17 +203,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, help="empty destination below the OS temporary directory")
     parser.add_argument("--tree-count", type=int, choices=TREE_COUNTS, default=500)
-    parser.add_argument("--skip-copal-redb", action="store_true", help="omit Redb generation for generator-only tests")
+    parser.add_argument("--skip-copal", action="store_true", help="omit Copal generation for generator-only tests")
     args = parser.parse_args()
     try:
         output = validated_output(args.output)
-        bridge = None
-        if not args.skip_copal_redb:
-            bridge = Path(__file__).resolve().parents[1] / "packages" / "Copal" / "rust" / "copal-db" / "target" / "release" / "copal-bridge"
-        manifest = generate(output, args.tree_count, bridge)
+        manifest = generate(output, args.tree_count, not args.skip_copal)
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
-    print(json.dumps({"schema": manifest["schema"], "synthetic_only": True, "tree_entries": args.tree_count, "copal_documents": manifest["copal_redb"]["documents_created"]}, sort_keys=True))
+    print(json.dumps({"schema": manifest["schema"], "synthetic_only": True, "tree_entries": args.tree_count, "copal_documents": manifest["copal_files"]["documents_created"]}, sort_keys=True))
     return 0
 
 

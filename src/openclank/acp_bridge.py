@@ -184,9 +184,9 @@ def lifetools_mcp_descriptor(
     # partitioned store into that process as well.  Without this, a
     # disposable/partitioned app falls back to the repository default and
     # collides with another running Copal bridge before the first tool call.
-    copal_data_dir = os.environ.get("COPAL_DATA_DIR", "").strip()
-    if copal_data_dir:
-        child_env["COPAL_DATA_DIR"] = copal_data_dir
+    copal_root = os.environ.get("COPAL_LOOSE_ROOT", "").strip()
+    if copal_root:
+        child_env["COPAL_LOOSE_ROOT"] = copal_root
     if _COPAL_BROKER_URL:
         child_env.update(
             {
@@ -506,6 +506,23 @@ class ACPBridge:
         client.register_callback("_odysseus/question", self.question_handler.handle)
         client.register_callback("_openclank/session/v1/cwd/change", self._handle_session_cwd_change)
         client.register_callback("_openclank/session/v1/binding/read", self._handle_session_binding_read)
+        client.register_callback("_openclank/session/v1/goal/completed", self._handle_goal_completed)
+        # History callbacks derive both account and stable chat from this
+        # admitted engine session. The engine never receives an owner selector.
+        from src.openclank.conversation_archive import get_conversation_archive
+        from src.openclank.managed_history import ManagedHistoryCallbacks
+
+        self._managed_history_callbacks = ManagedHistoryCallbacks(
+            get_conversation_archive(), self._managed_history_binding
+        )
+        client.register_callback(
+            "_openclank/history/v1/query",
+            lambda params: self._managed_history_callbacks.dispatch("_openclank/history/v1/query", params),
+        )
+        client.register_callback(
+            "_openclank/history/v1/mutate",
+            lambda params: self._managed_history_callbacks.dispatch("_openclank/history/v1/mutate", params),
+        )
         if permission_handler is not None and hasattr(permission_handler, "on_request"):
             permission_handler.on_request(self._surface_permission)
 
@@ -954,6 +971,50 @@ class ACPBridge:
         )
         return validate_managed_method_result(method, result)
 
+    def _managed_history_binding(self, mimo_session_id: str) -> tuple[str, str]:
+        """Return the current owner/chat only after durable admission checks."""
+        context = self._session_context.get(mimo_session_id) or {}
+        owner = str(context.get("owner") or self._owner or "").strip()
+        chat_id = str(context.get("odysseus_session_id") or "").strip()
+        if not owner or not chat_id:
+            raise ValueError("managed history session is not bound")
+        entry = self._durable_session_map.lookup(chat_id)
+        if not entry or entry.get("current") != mimo_session_id:
+            raise ValueError("managed history session is stale")
+        from src.openclank.transcript_projection import get_managed_binding
+
+        binding = get_managed_binding(chat_id, owner=owner)
+        if (
+            binding.get("owner") != owner
+            or binding.get("stableChatID") != chat_id
+            or binding.get("engineSessionID") != mimo_session_id
+        ):
+            raise ValueError("managed history binding mismatch")
+        return owner, chat_id
+
+    async def _handle_goal_completed(self, params: dict) -> dict:
+        from datetime import datetime, UTC
+        from src.openclank.managed_protocol import validate_managed_method_request, validate_managed_method_result
+        from src.openclank.files_service_client import history_binding_for
+        from src.openclank.achievement_producers import record_journal_activity
+        method = "_openclank/session/v1/goal/completed"
+        receipt = validate_managed_method_request(method, params)
+        session_id = receipt["sessionID"]
+        owner, chat_id = self._managed_history_binding(session_id)
+        context = self._session_context[session_id]
+        binding = history_binding_for(owner, "agent", context)
+        account_id = str((binding or {}).get("account_id") or "")
+        if not account_id:
+            raise ValueError("Goal receipt has no authenticated account binding")
+        # Owner/account/session come from admission, never caller facts. Only
+        # journal IDs and trusted evidence references cross this private seam.
+        replayed = await asyncio.to_thread(record_journal_activity, account_id, "goal.verified.completed",
+                    receipt["journalID"], {"goalId": receipt["goalID"], "transition": "verified_completed",
+                    "evidenceSatisfied": True, "evidenceRefs": receipt["evidenceRefs"], "modelClaimOnly": False},
+                    occurred_at=datetime.fromtimestamp(receipt["verifiedAt"] / 1000, UTC).isoformat(),
+                    workspace_id=str(context.get("workspace_id") or binding.get("workspace_id") or "default"))
+        return validate_managed_method_result(method, {"accepted": True, "replayed": replayed})
+
     async def _handle_session_binding_read(self, params: dict) -> dict:
         from src.openclank.managed_protocol import (
             validate_managed_method_request,
@@ -979,9 +1040,14 @@ class ACPBridge:
             raise ValueError("managed binding engine mismatch")
         if binding.get("owner") != self._owner or binding.get("stableChatID") != chat_id:
             raise ValueError("managed binding identity mismatch")
-        required_strings = ("physicalCwd", "memoryWorkspaceID", "authorityWorkspaceID", "copalWorkspace")
+        required_strings = ("physicalCwd", "memoryWorkspaceID", "copalWorkspace")
         if any(not isinstance(binding.get(key), str) or not binding[key].strip() for key in required_strings):
             raise ValueError("managed binding is incomplete")
+        # Explicit empty means the chat has no selected Files authority.
+        # It is distinct from an omitted/malformed managed binding field.
+        authority_workspace = binding.get("authorityWorkspaceID")
+        if not isinstance(authority_workspace, str) or authority_workspace != authority_workspace.strip():
+            raise ValueError("managed binding authority workspace is invalid")
         if not os.path.isabs(str(binding["physicalCwd"])) or str(Path(binding["physicalCwd"]).resolve(strict=False)) != binding["physicalCwd"]:
             raise ValueError("managed binding cwd is not canonical")
         aliases = binding.get("engineAliases")
@@ -2726,6 +2792,29 @@ class ACPBridge:
             envelope["system_prompt"] = (
                 f"{base_system}\n\n{trusted_block}" if base_system else trusted_block
             )
+        # General entries are saved defaults subordinate to this turn's
+        # explicit request. Reuse the host's pinned boundary snapshot; edits
+        # while this turn runs affect subsequent operations only.
+        from src.general_hex_runtime import turn_hex_snapshot
+        from src.general_hex_composition import defaults_instruction
+        try:
+            hex_snapshot = await asyncio.to_thread(
+                turn_hex_snapshot, self._memory_provider, owner_id=owner, boundary_id=turn_id,
+                workspace=effective_cwd or None,
+                workspace_id=str(envelope.get("authority_workspace_id") or "") or None,
+                task_id=odysseus_session, persist=not incognito,
+            )
+            envelope["general_hex_snapshot_ref"] = {
+                "boundary_id": turn_id, "snapshot_hash": hex_snapshot["snapshot_hash"],
+                "budget": hex_snapshot["budget"],
+            }
+            defaults = defaults_instruction(hex_snapshot)
+            if defaults:
+                base_system = str(envelope.get("system_prompt") or "").rstrip()
+                envelope["system_prompt"] = f"{base_system}\n\n{defaults}" if base_system else defaults
+        except (ValueError, OSError) as exc:
+            envelope["general_hex_snapshot_ref"] = {"state": "unavailable", "reason": str(exc)}
+            logger.info("General Hex defaults unavailable: %s", exc)
         prompt_parts = _build_prompt_parts(
             messages,
             turn_id=turn_id,
@@ -2760,6 +2849,24 @@ class ACPBridge:
                 yield f'event: error\ndata: {json.dumps({"code": "MANAGED_PROVIDER_ROUTE_UNAVAILABLE", "error": str(exc), "status": 409, "retryable": False})}\n\n'
                 yield "data: [DONE]\n\n"
                 return
+
+        logging_outcome = "unknown"
+        logging_context = {}
+        logging_callbacks = getattr(self, "_logging_callbacks", None)
+        if logging_callbacks is not None:
+            try:
+                logging_context = await asyncio.to_thread(logging_callbacks.register_logging_operation, turn_id,
+                    {"operation_type": "chat", "session_id": odysseus_session, "run_id": turn_id,
+                     "actor_id": "main", "actor_kind": "foreground", "incognito": incognito or auxiliary,
+                     "workspace_id": str(envelope.get("authority_workspace_id") or "") or None,
+                     "connection_id": managed_wire.get("connectionID") if self._managed_provider_context is not None else None,
+                     "route_id": managed_wire.get("modelRouteID") if self._managed_provider_context is not None else None,
+                     "model_id": managed_wire.get("modelID") if self._managed_provider_context is not None else None,
+                     "billing_lane": managed_wire.get("billingLane") if self._managed_provider_context is not None else None})
+                if logging_context.get("operationID"):
+                    managed_wire["operationID"] = logging_context["operationID"]
+            except Exception as exc:
+                logger.warning("chat logging admission unavailable: %s", type(exc).__name__)
 
         # Fire the prompt request (blocks until stopReason, notifications arrive concurrently)
         prompt_task = asyncio.ensure_future(
@@ -2808,8 +2915,15 @@ class ACPBridge:
                 yield "data: [DONE]\n\n"
                 return
 
+            logging_outcome = "completed"
             state.stop_reason = result.get("stopReason", "end_turn")
             state.usage = result.get("usage")
+            usage_meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
+            for field, key in (("normalizationProfile", "normalization_profile"), ("metricCoverage", "metric_coverage"),
+                               ("coveredDispatchIDs", "covered_dispatch_ids"), ("lossReasons", "loss_reasons"),
+                               ("identityCoverage", "identity_coverage")):
+                if field in result or field in usage_meta:
+                    state.metrics[key] = result[field] if field in result else usage_meta[field]
 
             # Emit final metrics
             elapsed = time.time() - state.turn_start
@@ -2818,18 +2932,37 @@ class ACPBridge:
                 "model": model or "openclank-engine",
                 "stop_reason": state.stop_reason,
                 "root_turn_id": turn_id,
+                "root_operation_id": turn_id,
+                "operation_id": logging_context.get("operationID"),
+                "identity_coverage": logging_context.get("identityCoverage", "partial"),
                 **state.metrics,
             }
             if state.usage:
-                metrics["input_tokens"] = state.usage.get("inputTokens", 0)
-                metrics["output_tokens"] = state.usage.get("outputTokens", 0)
-                metrics["total_tokens"] = state.usage.get("totalTokens", 0)
-                metrics["thinking_tokens"] = state.usage.get("thoughtTokens", 0)
-                metrics["cache_read_tokens"] = state.usage.get("cachedReadTokens", 0)
-                metrics["cache_write_tokens"] = state.usage.get("cachedWriteTokens", 0)
+                if "inputTokens" in state.usage:
+                    metrics["input_tokens"] = state.usage["inputTokens"]
+                if "outputTokens" in state.usage:
+                    metrics["output_tokens"] = state.usage["outputTokens"]
+                if "totalTokens" in state.usage:
+                    metrics["total_tokens"] = state.usage["totalTokens"]
+                if "thoughtTokens" in state.usage:
+                    metrics["thinking_tokens"] = state.usage["thoughtTokens"]
+                if "cachedReadTokens" in state.usage:
+                    metrics["cache_read_tokens"] = state.usage["cachedReadTokens"]
+                if "cachedWriteTokens" in state.usage:
+                    metrics["cache_write_tokens"] = state.usage["cachedWriteTokens"]
                 metrics["usage_source"] = "reported"
             else:
                 metrics["usage_source"] = "estimated"
+
+            # Ordinary numeric usage is independent of Advanced admission and
+            # visible reply persistence. Preserve the actual aggregate coverage,
+            # including missing categories and unresolved dispatch overlap.
+            if logging_callbacks is not None:
+                try:
+                    await asyncio.to_thread(logging_callbacks.record_logging_metrics, turn_id, metrics, logging_outcome)
+                except Exception as exc:
+                    logger.warning("chat ordinary usage write unavailable: %s", type(exc).__name__)
+                    metrics["loss_reasons"] = list(dict.fromkeys([*(metrics.get("loss_reasons") or []), "ordinary_usage_write_failed"]))
 
             yield f'data: {json.dumps({"type": "metrics", "data": metrics})}\n\n'
 
@@ -2842,6 +2975,7 @@ class ACPBridge:
             yield "data: [DONE]\n\n"
 
         except (asyncio.CancelledError, GeneratorExit):
+            logging_outcome = "cancelled"
             # Client disconnected — cancel the turn
             try:
                 await self._client.cancel(mimo_session)
@@ -2857,6 +2991,11 @@ class ACPBridge:
                     await prompt_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            if logging_callbacks is not None:
+                try:
+                    await asyncio.to_thread(logging_callbacks.finish_logging_operation, turn_id, logging_outcome)
+                except Exception as exc:
+                    logger.warning("chat logging finalization unavailable: %s", type(exc).__name__)
             if incognito:
                 self._session_context.pop(mimo_session, None)
                 self._session_state.pop(mimo_session, None)
@@ -3812,6 +3951,7 @@ class PermissionHandler:
         """
         tool_call = params.get("toolCall", {})
         title = tool_call.get("title", "unknown tool")
+        forced_ask = title in {"bash_delete", "bash_destructive"}
         raw_input = tool_call.get("rawInput", {})
         options = params.get("options", ["once", "chat", "workspace", "always", "reject"])
         session_id = params.get("sessionId", "")
@@ -3823,6 +3963,8 @@ class PermissionHandler:
         authority_workspace_id = str(
             context.get("authority_workspace_id") or ""
         )
+        from src.openclank.operation_approvals import canonical_workspace_id
+        authority_workspace_id = canonical_workspace_id(owner, authority_workspace_id)
         incognito = bool(context.get("incognito"))
         is_admin = bool(context.get("is_admin"))
 
@@ -3831,23 +3973,10 @@ class PermissionHandler:
         if owner and not is_admin:
             return self._approve("reject")
 
-        # ── safe-dirs auto-approve ──
-        # Any request whose target file is inside a configured safe dir is
-        # approved immediately so the always-on assistant doesn't block on
-        # known workspaces.
-        # A selected Workspace is authority narrowing, not operation consent.
-        # Only explicit installation safe directories retain this legacy
-        # convenience; canonical Workspace requests continue to the durable
-        # grant matcher or human prompt below.
-        allowed_roots = [] if incognito or authority_workspace_id else self._safe_dirs
-        if filepath and allowed_roots and any(
-            _path_within(filepath, root) for root in allowed_roots
-        ):
-            logger.info("auto-approved %s: %s (safe-dirs match)", title, filepath)
-            return self._approve()
-
+        # Installation safe-directory hints are not a second consent store.
+        # Every reusable approval is checked in the canonical ledger below.
         # ── stored durable grants ──
-        if not incognito:
+        if not incognito and not forced_ask:
             try:
                 from src.openclank.operation_approvals import (
                     match_operation_approval,
@@ -3862,27 +3991,16 @@ class PermissionHandler:
                     workspace_path=workspace,
                 ):
                     logger.info("auto-approved %s: %s (canonical grant)", title, filepath or "*")
-                    return self._approve()
+                    return self._approve("once")
             except Exception:
                 pass
-        if not incognito and self._grant_store is not None and self._grant_store.match(
-            title,
-            filepath=filepath or None,
-            owner=owner,
-            session_id=odysseus_session,
-            workspace=workspace,
-            workspace_id=authority_workspace_id,
-        ):
-            logger.info("auto-approved %s: %s (stored grant)", title, filepath or "*")
-            return self._approve()
-
         # ── owner permission mode (yolo/auto) ──
         # Approve with once semantics — no durable grant, no UI wait. The
         # fail_on_interaction and non-admin rejects above stay authoritative.
         try:
             from src.permission_mode import auto_approves
 
-            if auto_approves(owner):
+            if not forced_ask and auto_approves(owner):
                 logger.info("auto-approved %s: %s (permission mode)", title, filepath or "*")
                 return self._approve("once")
         except Exception:
@@ -3927,7 +4045,7 @@ class PermissionHandler:
                 return self._approve("reject")
 
             option_id = await req.wait()
-            if incognito and option_id in {"chat", "workspace", "always"}:
+            if (incognito or forced_ask) and option_id in {"chat", "workspace", "always"}:
                 option_id = "once"
 
             if not incognito and option_id in {"chat", "workspace", "always"} and self._grant_store is not None:
@@ -3964,15 +4082,8 @@ class PermissionHandler:
                         target_path=filepath or workspace,
                     )
                     if not persisted:
-                        self._grant_store.add(
-                            title,
-                            pattern,
-                            owner=owner,
-                            session_id=grant_session,
-                            workspace=grant_workspace,
-                            workspace_id=grant_workspace_id,
-                        )
-                        logger.info("stored %s grant: (%s, %s)", option_id, title, pattern)
+                        option_id = "once"
+                        logger.info("approval persistence unavailable; using Once")
                     else:
                         logger.info("stored canonical %s grant: (%s, %s)", option_id, title, pattern)
                 else:
@@ -3981,11 +4092,9 @@ class PermissionHandler:
                     # wide approval under a misleading label.
                     option_id = "once"
 
-            # ACP/OpenCode only understands its wire-level allow-once and
-            # allow-always outcomes. Chat/workspace are Open Clank's durable
-            # scope refinements; they are persisted above and sent upstream
-            # as the ordinary allow-always decision for this request.
-            return self._approve("always" if option_id in {"chat", "workspace"} else option_id)
+            # Keep the managed engine from caching a second approval ledger.
+            # Reusable consent is resolved afresh by this bridge on each ask.
+            return self._approve("once" if option_id in {"chat", "workspace", "always"} else option_id)
         finally:
             self.pending_requests.pop(request_id, None)
 

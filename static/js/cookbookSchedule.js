@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // Cookbook Schedule — opens a small inline form (styled with the app's
 // existing .cookbook-* classes) that creates a ScheduledTask with
 // action=cookbook_serve. Mounted from two places:
@@ -112,12 +113,7 @@ try { (function () {
     return `
       <div class="hwfit-schedule-form cookbook-panel">
         <div class="hwfit-schedule-title">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="4" width="18" height="18" rx="2"/>
-            <line x1="16" y1="2" x2="16" y2="6"/>
-            <line x1="8" y1="2" x2="8" y2="6"/>
-            <line x1="3" y1="10" x2="21" y2="10"/>
-          </svg>
+          ${uiIcon("calendar", 14)}
           <span class="hwfit-schedule-title-text">Schedule serve: <strong>${esc(cfg.title)}</strong></span>
           <span class="hwfit-schedule-title-spacer"></span>
           <label class="hwfit-schedule-mirror-toggle" title="Also create a calendar event on the Cookbook calendar">
@@ -148,11 +144,11 @@ try { (function () {
           </label>
           <div class="hwfit-schedule-actions-inline">
             <button type="button" class="cookbook-btn hwfit-sched-cancel" title="Cancel">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;flex-shrink:0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              ${uiIcon("close", 11, {"style":"vertical-align:-1px;margin-right:5px;flex-shrink:0;"})}
               <span>Cancel</span>
             </button>
             <button type="button" class="cookbook-btn hwfit-sched-save" title="Save schedule" aria-label="Save schedule">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;flex-shrink:0;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              ${uiIcon("calendar", 12, {"style":"vertical-align:-1px;margin-right:5px;flex-shrink:0;"})}
               <span>Save</span>
             </button>
           </div>

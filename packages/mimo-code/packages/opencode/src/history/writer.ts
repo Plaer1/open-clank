@@ -8,12 +8,13 @@ import { HistoryFtsTable } from "./fts.sql"
 import { extract, DEFAULT_KINDS, type Kind } from "./extract"
 import { makeResolver, type Resolver } from "./resolve"
 import { Log } from "../util"
+import { ManagedProvider } from "@/acp/managed-provider"
 
 const log = Log.create({ service: "history.writer" })
 
 type Job =
   | { type: "upsert"; part: MessageV2.Part; time: number }
-  | { type: "delete"; partID: string }
+  | { type: "delete"; sessionID: string; messageID: string; partID: string }
 
 export interface Interface {
   readonly init: () => Effect.Effect<void>
@@ -32,7 +33,7 @@ export const layer: Layer.Layer<Service, never, Config.Service | Bus.Service> = 
         const config = yield* cfg.get()
         const kinds = config.history?.kinds ?? DEFAULT_KINDS
         const enabled = new Set<Kind>(kinds as readonly Kind[])
-        if (enabled.size === 0) return { started: true }
+        if (!ManagedProvider.enabled() && enabled.size === 0) return { started: true }
 
         const queue = yield* Queue.unbounded<Job>()
         const resolver = makeResolver()
@@ -44,7 +45,12 @@ export const layer: Layer.Layer<Service, never, Config.Service | Bus.Service> = 
           Queue.offerUnsafe(queue, { type: "upsert", part: evt.properties.part, time: evt.properties.time })
         })
         yield* bus.subscribeCallback(MessageV2.Event.PartRemoved, (evt) => {
-          Queue.offerUnsafe(queue, { type: "delete", partID: evt.properties.partID })
+          Queue.offerUnsafe(queue, {
+            type: "delete",
+            sessionID: evt.properties.sessionID,
+            messageID: evt.properties.messageID,
+            partID: evt.properties.partID,
+          })
         })
 
         yield* Effect.forever(
@@ -71,6 +77,31 @@ export const layer: Layer.Layer<Service, never, Config.Service | Bus.Service> = 
 )
 
 function handle(job: Job, resolver: Resolver, enabled: ReadonlySet<Kind>) {
+  if (ManagedProvider.enabled()) {
+    if (job.type === "delete") {
+      return Effect.tryPromise(() =>
+        ManagedProvider.historyMutate(job.sessionID, "tombstone", [{
+          messageID: job.messageID,
+          partID: job.partID,
+        }]),
+      ).pipe(Effect.asVoid)
+    }
+    return Effect.gen(function* () {
+      const role = yield* resolver.role(job.part.messageID)
+      yield* Effect.tryPromise(() =>
+        ManagedProvider.historyMutate(job.part.sessionID, "upsert", [{
+          messageID: job.part.messageID,
+          partID: job.part.id,
+          role,
+          partType: job.part.type,
+          content: job.part,
+          timeCreated: Math.max(0, Math.floor(job.time)),
+          timeUpdated: Math.max(0, Math.floor(job.time)),
+          eventSequence: Math.max(0, Math.floor(job.time)),
+        }]),
+      )
+    }).pipe(Effect.asVoid)
+  }
   if (job.type === "delete") {
     return Effect.sync(() =>
       Database.use((db) => db.delete(HistoryFtsTable).where(eq(HistoryFtsTable.part_id, job.partID)).run()),
@@ -109,4 +140,3 @@ function handle(job: Job, resolver: Resolver, enabled: ReadonlySet<Kind>) {
     )
   })
 }
-

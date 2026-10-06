@@ -279,68 +279,6 @@ def build_embedding_lanes(base_name: str, *, owner: Optional[str] = None) -> Lis
         return []
 
 
-def migrate_legacy_collection(base_name: str, lanes: Sequence[EmbeddingLane]) -> None:
-    """Backfill empty lanes from a legacy unsuffixed collection, if present."""
-    if not lanes:
-        return
-
-    try:
-        from src.chroma_client import get_chroma_client
-
-        chroma_client = get_chroma_client()
-        legacy = chroma_client.get_collection(base_name)
-        data = legacy.get(include=["documents", "metadatas"])
-    except Exception:
-        return
-
-    ids = data.get("ids") or []
-    docs = data.get("documents") or []
-    metas = data.get("metadatas") or []
-    if not ids or not docs:
-        return
-
-    for lane in lanes:
-        try:
-            existing = lane.collection.get(ids=ids)
-            existing_ids = set(existing.get("ids") or [])
-        except Exception:
-            existing_ids = set()
-        all_metas = list(metas or [])
-        if len(all_metas) < len(ids):
-            all_metas += [{}] * (len(ids) - len(all_metas))
-        missing = [
-            (row_id, doc, meta)
-            for row_id, doc, meta in zip(ids, docs, all_metas)
-            if row_id not in existing_ids
-        ]
-        if not missing:
-            continue
-
-        for start in range(0, len(missing), 100):
-            batch = missing[start:start + 100]
-            batch_ids = [row_id for row_id, _doc, _meta in batch]
-            batch_docs = [doc for _row_id, doc, _meta in batch]
-            batch_metas = [meta or {} for _row_id, _doc, meta in batch]
-            if len(batch_metas) < len(batch_ids):
-                batch_metas += [{}] * (len(batch_ids) - len(batch_metas))
-            try:
-                embeddings = lane.encode(batch_docs)
-                lane.collection.add(
-                    ids=batch_ids,
-                    documents=batch_docs,
-                    metadatas=batch_metas,
-                    embeddings=embeddings,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Could not backfill %s lane from legacy collection %s: %s",
-                    lane.name,
-                    base_name,
-                    e,
-                )
-                break
-        else:
-            logger.info("Backfilled %s %s lane rows from legacy collection %s", len(missing), lane.name, base_name)
 
 
 def lane_count(lanes: Sequence[EmbeddingLane]) -> int:

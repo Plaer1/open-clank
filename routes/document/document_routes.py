@@ -2,28 +2,45 @@
 
 import uuid
 import logging
+import os
 from urllib.parse import quote
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from sqlalchemy import case, func, or_
 from core.database import SessionLocal, Document, DocumentVersion
 from core.database import Session as DbSession
-from src.auth_helpers import get_current_user, _auth_disabled
+from src.auth_helpers import effective_user, require_authenticated_request
 from src.constants import MAIL_ATTACHMENTS_DIR
 from src.upload_handler import reserve_upload_references
+from src.openclank.resource_refs import ResourceRefError, resolve_resource_ref
 
 logger = logging.getLogger(__name__)
 
+class DocumentResourceResolve(BaseModel):
+    resource_ref: str = Field(min_length=8, max_length=16_384)
+
+
+
+def _document_owner(request: Request) -> str:
+    require_authenticated_request(request)
+    user = str(effective_user(request) or "").strip().lower()
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    return user
+
 
 def _get_session_or_404(db, session_id: str, user: Optional[str]):
+    if not user or not str(user).strip():
+        raise HTTPException(401, "Authentication required")
     session = db.query(DbSession).filter(DbSession.id == session_id).first()
     if not session:
         raise HTTPException(404, "Session not found")
-    if user and session.owner != user:
+    if session.owner != user:
         raise HTTPException(404, "Session not found")
     return session
 
@@ -81,8 +98,8 @@ from routes.document.document_helpers import (
 def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     router = APIRouter(tags=["documents"])
 
-    def _reserve_document_uploads(user: Optional[str], content: str) -> None:
-        missing_id = reserve_upload_references(upload_handler, user, content)
+    def _reserve_document_uploads(user: Optional[str], content: str, db) -> None:
+        missing_id = reserve_upload_references(upload_handler, user, content, db=db)
         if missing_id:
             raise HTTPException(
                 409,
@@ -107,7 +124,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     @router.post("/api/document")
     async def create_document(request: Request, req: DocumentCreate) -> Dict[str, Any]:
         from src.auth_helpers import require_privilege
-        user = require_privilege(request, "can_use_documents")
+        require_privilege(request, "can_use_documents")
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             # session_id is optional: a doc can be a session-less "library" doc
@@ -135,7 +153,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             if _looks_like_email_document(req.content, req.title):
                 language = "email"
 
-            _reserve_document_uploads(user, req.content)
+            _reserve_document_uploads(user, req.content, db)
             _assert_pdf_marker_upload_owned(request, req.content, user, upload_handler)
 
             # Reply drafts are keyed to the source email. If a UI/tool path tries
@@ -219,6 +237,62 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         finally:
             db.close()
 
+    # ---- POST /api/documents/resolve-resource ----
+    @router.post("/api/documents/resolve-resource")
+    async def resolve_document_resource(request: Request, body: DocumentResourceResolve) -> Dict[str, Any]:
+        """Resolve an owner-bound Library document ref into its legacy editor DTO.
+
+        The opaque Files ref is verified against the immutable account and the
+        current policy generation before the legacy editor receives a document
+        id. The id alone remains non-authoritative: the database owner check is
+        exact and current on every bridge call.
+        """
+        from src.auth_helpers import require_privilege
+
+        require_privilege(request, "can_use_documents")
+        username = _document_owner(request)
+        app_state = getattr(request.app, "state", None)
+        auth_manager = getattr(app_state, "auth_manager", None)
+        account_id = auth_manager.account_id(username) if auth_manager and hasattr(auth_manager, "account_id") else None
+        if not account_id:
+            # Account identity is intentionally not the mutable username.
+            raise HTTPException(503, "Immutable account identity is unavailable")
+
+        repository = getattr(app_state, "files_policy_repository", None)
+        generation = getattr(repository, "generation", None)
+        if not callable(generation):
+            raise HTTPException(503, "Files policy authority is unavailable")
+        try:
+            ref = resolve_resource_ref(
+                body.resource_ref,
+                expected_owner_subject_id=str(account_id),
+                current_policy_generation=int(generation()),
+                required_capability="open",
+            )
+        except ResourceRefError as exc:
+            if exc.code == "resource_ref_stale":
+                raise HTTPException(409, "Files selection is stale; select the document again") from exc
+            raise HTTPException(404, "Document resource not found") from exc
+
+        if ref.provider != "library" or ref.kind != "document" or not ref.origin_id.startswith("document:"):
+            raise HTTPException(404, "Document resource not found")
+        document_id = ref.origin_id.split(":", 1)[1].strip()
+        if not document_id:
+            raise HTTPException(404, "Document resource not found")
+
+        db = SessionLocal()
+        try:
+            doc = db.query(Document).filter(
+                Document.id == document_id,
+                Document.owner == username,
+                Document.is_active == True,
+            ).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            return _doc_to_dict(doc)
+        finally:
+            db.close()
+
     # ---- POST /api/documents/import-pdf ----
     @router.post("/api/documents/import-pdf")
     async def import_pdf(
@@ -243,7 +317,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         import os
 
         from src.auth_helpers import require_privilege
-        user = require_privilege(request, "can_use_documents")
+        require_privilege(request, "can_use_documents")
+        user = _document_owner(request)
 
         # session_id is optional — a library import isn't tied to a chat. When
         # given, validate it; otherwise the PDF becomes a session-less library
@@ -332,7 +407,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         limit: int = Query(20, ge=1, le=50),
         archived: bool = Query(False),
     ) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             from sqlalchemy import or_
@@ -446,12 +521,9 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     # ---- GET /api/documents/{session_id} ----
     @router.get("/api/documents/{session_id}")
     async def list_documents(request: Request, session_id: str) -> List[Dict[str, Any]]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
-            if not user:
-                if not _auth_disabled():
-                    raise HTTPException(403, "Authentication required")
             # v2 review HIGH-9: raise 403 explicitly when the caller
             # can't see this session, instead of returning [] which the
             # UI treats identically to "no docs" and silently masks
@@ -470,7 +542,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     # ---- GET /api/document/{doc_id} ----
     @router.get("/api/document/{doc_id}")
     async def get_document(request: Request, doc_id: str) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -489,7 +561,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         It deliberately serializes the logical document body rather than
         exposing database paths or a second storage implementation.
         """
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -530,7 +602,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     # ---- POST /api/document/{doc_id}/archive — soft-archive / restore ----
     @router.post("/api/document/{doc_id}/archive")
     async def archive_document(request: Request, doc_id: str, archived: bool = Query(True)) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -557,7 +629,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         from src.document_processor import _process_pdf, strip_pdf_content_marker
         from src.pdf_form_doc import find_source_upload_id
 
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -609,7 +681,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         """Zip the selected documents (each as a text file with the right
         extension) — mirrors the gallery's bulk download-zip so multi-export
         is one file instead of a blocked flood of individual downloads."""
-        user = get_current_user(request)
+        user = _document_owner(request)
         try:
             data = await request.json()
         except Exception as e:
@@ -670,7 +742,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
 
     @router.put("/api/document/{doc_id}")
     async def update_document(request: Request, doc_id: str, req: DocumentUpdate) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -694,7 +766,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             if doc.current_content == incoming_content and not req.force_version:
                 return _doc_to_dict(doc)
 
-            _reserve_document_uploads(user, incoming_content)
+            _reserve_document_uploads(user, incoming_content, db)
             _assert_pdf_marker_upload_owned(request, incoming_content, user, upload_handler)
 
             # Check if we can coalesce with the latest version
@@ -745,7 +817,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     # ---- PATCH /api/document/{doc_id} — metadata only ----
     @router.patch("/api/document/{doc_id}")
     async def patch_document(request: Request, doc_id: str, req: DocumentPatch) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -784,7 +856,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     # ---- DELETE /api/document/{doc_id} — soft delete ----
     @router.delete("/api/document/{doc_id}")
     async def delete_document(request: Request, doc_id: str) -> Dict[str, str]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -812,7 +884,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     # ---- GET /api/document/{doc_id}/versions ----
     @router.get("/api/document/{doc_id}/versions")
     async def list_versions(request: Request, doc_id: str) -> List[Dict[str, Any]]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             # Verify ownership before listing versions
@@ -837,7 +909,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     # ---- GET /api/document/{doc_id}/version/{num} ----
     @router.get("/api/document/{doc_id}/version/{num}")
     async def get_version(request: Request, doc_id: str, num: int) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             # Verify ownership
@@ -858,7 +930,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     # ---- POST /api/document/{doc_id}/restore/{num} ----
     @router.post("/api/document/{doc_id}/restore/{num}")
     async def restore_version(request: Request, doc_id: str, num: int) -> Dict[str, Any]:
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -896,219 +968,15 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         finally:
             db.close()
 
-    # ---- POST /api/documents/tidy — clean up broken/empty documents ----
+    # These cleanup endpoints are retired. Document content is user data and
+    # must only be removed through an explicit, user-selected delete action.
     @router.post("/api/documents/tidy")
     async def tidy_documents(request: Request) -> Dict[str, Any]:
-        """Fix empty titles and remove broken/empty documents (user's docs only)."""
-        user = get_current_user(request)
-        db = SessionLocal()
-        try:
-            q = (
-                db.query(Document)
-                .outerjoin(DbSession, Document.session_id == DbSession.id)
-                .filter(Document.is_active == True)
-                .filter((Document.archived == False) | (Document.archived.is_(None)))
-            )
-            q = _owner_session_filter(q, user)
-            docs = q.all()
-            fixed_titles = 0
-            deleted = 0
+        raise HTTPException(410, "Document tidy has been retired; no documents were changed.")
 
-            # Same junk-detection logic as the scheduled tidy_documents
-            # action (src/document_actions.py). Keep these two in sync.
-            import re as _re
-            from src.document_actions import _JUNK_TITLES
-
-            to_delete = []
-            now = datetime.now(timezone.utc)
-            for doc in docs:
-                created = doc.created_at
-                if created and created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
-
-                # Skip freshly created documents to avoid deleting them while the user is actively editing
-                if created and (now - created).total_seconds() < 900:  # 15 minutes
-                    continue
-
-                content = (doc.current_content or "").strip()
-                title_raw = (doc.title or "").strip()
-                title = title_raw.lower()
-                is_fresh_empty = (
-                    not content
-                    and created is not None
-                    and (now - created).total_seconds() < 1800
-                )
-                if is_fresh_empty:
-                    continue
-
-                # Strip markdown noise to get a "real" character count
-                stripped = _re.sub(r"^#{1,6}\s+", "", content, flags=_re.MULTILINE)
-                stripped = _re.sub(r"[*_`>\-=]+", "", stripped)
-                stripped = _re.sub(r"\s+", " ", stripped).strip()
-                real_len = len(stripped)
-
-                # Detect email-scaffold stubs: "To: \nSubject: \n---\n" style
-                # bodies with nothing typed in. Stub = every meaningful line
-                # is a header label (To:/From:/Subject:/...) with no real
-                # value (blank, "empty", "(empty)", "-", "none", "n/a").
-                _is_email_stub = False
-                _HEADER_RE = _re.compile(r"^(to|from|cc|bcc|subject|reply-to):\s*(.*)$", _re.I)
-                _PLACEHOLDER_VALS = {"", "empty", "(empty)", "-", "—", "none", "n/a", "na", "tbd"}
-                if title in ("new email", "new mail", "new message") or doc.language == "email":
-                    body_lines = [ln.strip() for ln in content.split("\n")
-                                  if ln.strip() and ln.strip() != "---"]
-                    def _is_filler(ln):
-                        m = _HEADER_RE.match(ln)
-                        if not m:
-                            return False
-                        val = (m.group(2) or "").strip().lower()
-                        return val in _PLACEHOLDER_VALS
-                    has_real_body = any(not _is_filler(ln) for ln in body_lines)
-                    if body_lines and not has_real_body:
-                        _is_email_stub = True
-
-                # Hard-delete obviously empty / junk documents
-                if not content or content in ("", "# Untitled"):
-                    to_delete.append(doc); deleted += 1; continue
-                if _is_email_stub:
-                    to_delete.append(doc); deleted += 1; continue
-                if title in _JUNK_TITLES:
-                    to_delete.append(doc); deleted += 1; continue
-
-                # Fix empty or placeholder titles on survivors
-                if not title_raw or title_raw == "Untitled":
-                    new_title = _derive_title(content)
-                    if new_title and new_title != "Untitled":
-                        doc.title = new_title
-                        fixed_titles += 1
-
-            for doc in to_delete:
-                db.delete(doc)
-
-            # Also clean up inactive empty docs from previous soft-deletes
-            inactive_q = (
-                db.query(Document)
-                .outerjoin(DbSession, Document.session_id == DbSession.id)
-                .filter(Document.is_active == False)
-                .filter((Document.current_content == None) | (Document.current_content == ""))
-            )
-            inactive_q = _owner_session_filter(inactive_q, user)
-            inactive_docs = inactive_q.all()
-            for doc in inactive_docs:
-                db.delete(doc)
-            deleted += len(inactive_docs)
-
-            db.commit()
-            return {
-                "fixed_titles": fixed_titles,
-                "deleted": deleted,
-                "message": f"Fixed {fixed_titles} title{'s' if fixed_titles != 1 else ''}, removed {deleted} empty document{'s' if deleted != 1 else ''}",
-            }
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Document tidy failed: {e}")
-            raise HTTPException(500, f"Tidy failed: {e}")
-        finally:
-            db.close()
-
-    # ---- POST /api/documents/ai-tidy — AI-powered cleanup of junk/test documents ----
     @router.post("/api/documents/ai-tidy")
     async def ai_tidy_documents(request: Request) -> Dict[str, Any]:
-        """Use AI to judge if documents are junk/test/accidental, then delete them.
-        Caches verdicts so previously-reviewed docs are skipped."""
-        from src.openclank.modality_facade import complete_text
-
-        user = get_current_user(request)
-
-        db = SessionLocal()
-        try:
-            q = (
-                db.query(Document)
-                .outerjoin(DbSession, Document.session_id == DbSession.id)
-                .filter(Document.is_active == True)
-                .filter((Document.archived == False) | (Document.archived.is_(None)))
-            )
-            q = _owner_session_filter(q, user)
-            docs = q.all()
-
-            # Only review docs that haven't been reviewed yet
-            to_review = [d for d in docs if not d.tidy_verdict]
-            if not to_review:
-                return {"deleted": 0, "reviewed": 0, "message": "All documents already reviewed"}
-
-            # Build a batch prompt — review up to 30 at a time
-            batch = to_review[:30]
-            doc_list = []
-            for i, doc in enumerate(batch):
-                preview = (doc.current_content or "")[:300].strip()
-                doc_list.append(f"[{i}] title=\"{doc.title}\" lang={doc.language or 'text'} content_preview=\"{preview}\"")
-
-            prompt = (
-                "You are a document library cleaner. For each document below, decide if it is JUNK "
-                "(test, accidental, placeholder, empty-ish, tool-test, throwaway) or KEEP (real content worth saving).\n\n"
-                "Respond with ONLY a JSON array of verdicts, one per document, like: [\"junk\",\"keep\",\"junk\",...]\n"
-                "No explanation, no markdown, just the JSON array.\n\n"
-                + "\n".join(doc_list)
-            )
-
-            import hashlib
-
-            response = await complete_text(
-                owner=user or "local-installation",
-                purpose="utility",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You classify documents as junk or keep. Respond only with a JSON array.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.1,
-                max_output_tokens=200,
-                idempotency_key=(
-                    "document-ai-tidy-"
-                    + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:32]
-                ),
-            )
-
-            # Parse verdicts
-            import re
-            match = re.search(r'\[.*?\]', response, re.DOTALL)
-            if not match:
-                raise HTTPException(500, "AI returned invalid response")
-
-            import json as _json
-            verdicts = _json.loads(match.group())
-
-            deleted = 0
-            reviewed = 0
-            for i, doc in enumerate(batch):
-                if i >= len(verdicts):
-                    break
-                verdict = str(verdicts[i] or "").lower().strip()
-                if verdict == "junk":
-                    doc.tidy_verdict = "junk"
-                    db.delete(doc)
-                    deleted += 1
-                else:
-                    doc.tidy_verdict = "keep"
-                reviewed += 1
-
-            db.commit()
-            return {
-                "deleted": deleted,
-                "reviewed": reviewed,
-                "remaining": len(to_review) - len(batch),
-                "message": f"Reviewed {reviewed}, removed {deleted} junk document{'s' if deleted != 1 else ''}",
-            }
-        except HTTPException:
-            raise
-        except Exception as e:
-            db.rollback()
-            logger.error(f"AI tidy failed: {e}")
-            raise HTTPException(500, f"AI tidy failed: {e}")
-        finally:
-            db.close()
+        raise HTTPException(410, "AI document tidy has been retired; no documents were changed.")
 
     # ---- POST /api/document/{doc_id}/export-pdf/preview ----
     @router.post("/api/document/{doc_id}/export-pdf/preview")
@@ -1120,7 +988,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         """
         from src.pdf_form_doc import find_source_upload_id, parse_markdown_to_values, load_field_sidecar
 
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1184,7 +1052,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         """
         from src.pdf_form_doc import find_source_upload_id, parse_markdown_to_values, load_field_sidecar
 
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1251,7 +1119,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         from fastapi.responses import Response
         from src.pdf_form_doc import find_source_upload_id
 
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1305,7 +1173,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         if not instruction:
             raise HTTPException(400, "instruction is required")
 
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1443,7 +1311,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 except Exception as _e:
                     logger.warning(f"Could not unlink temp PDF {_p}: {_e}")
 
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1541,7 +1409,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 except Exception as _e:
                     logger.warning(f"Could not unlink temp PDF {_p}: {_e}")
 
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -1678,7 +1546,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         _COMPOSE_DIR = _Path(MAIL_ATTACHMENTS_DIR) / "_compose"
         _COMPOSE_DIR.mkdir(parents=True, exist_ok=True)
 
-        user = get_current_user(request)
+        user = _document_owner(request)
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()

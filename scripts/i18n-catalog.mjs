@@ -101,6 +101,7 @@ const JS_EXCLUDES = [
   /\/static\/js\/mimoProviders\.generated\.js$/,
   /\/node_modules\//,
   /\/\.references\//,
+  /\/\.clanker\/references\//,
   /\/packages\/mimo-code\//,
   /\/packages\/Copal\/src\/components\/ui\//,
   /\/packages\/Copal\/src\/lib\/emoji-data\.ts$/,
@@ -124,6 +125,8 @@ const CSS_PROPERTY = /^(?:--|align|animation|appearance|backdrop|background|bord
 const HTML_SELECTOR_TAG = /^(?:a|article|button|code|div|form|h[1-6]|input|label|li|main|option|p|pre|select|span|table|td|textarea|th|tr|ul)$/iu;
 
 function walk(target) {
+  const rel = path.relative(ROOT, target).split(path.sep).join('/');
+  if (/(?:^|\/)(?:\.references|\.clanker\/references)(?:\/|$)/.test(rel)) return [];
   if (!fs.existsSync(target)) return [];
   const stat = fs.statSync(target);
   if (stat.isFile()) return [target];
@@ -663,7 +666,8 @@ function digest(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-function importDonor(donor = '/Users/e/sauce/ai/agents/odysisussies/odysseus-vanilla') {
+function importDonor(donor) {
+  if (!donor) throw new Error('import-donor requires an explicit donor checkout path');
   const revision = '08eeb26a4e9b28190e6832f88b7d6e1d0a12646a';
   if (!fs.existsSync(donor)) throw new Error(`donor checkout does not exist: ${donor}`);
   const donorEnglishText = gitFile(donor, revision, 'static/i18n/en.json');
@@ -821,7 +825,8 @@ function importDonor(donor = '/Users/e/sauce/ai/agents/odysisussies/odysseus-van
     schema: 1,
     operation: 'translation-recovery',
     donor: {
-      checkout: donor,
+      source: 'https://github.com/odysseus-dev/odysseus',
+      checkout_scope: 'Local source checkout; absolute operator path omitted from published provenance',
       revision,
       license: 'AGPL-3.0',
       license_sha256: (() => {
@@ -1150,7 +1155,7 @@ function generateLocalizedManifests() {
 async function main() {
   const [command = 'validate', locale] = process.argv.slice(2);
   if (command === 'extract') extract();
-  else if (command === 'import-donor') importDonor(locale || '/Users/e/sauce/ai/agents/odysisussies/odysseus-vanilla');
+  else if (command === 'import-donor') importDonor(locale);
   else if (command === 'validate') validate();
   else if (command === 'translate') await translateLocale(locale);
   else if (command === 'translate-all') {
@@ -1169,7 +1174,7 @@ async function main() {
     const extra = process.argv.slice(3);
     execFileSync('python3', [script, ...extra], { stdio: 'inherit', cwd: ROOT });
   } else {
-    throw new Error('usage: node scripts/i18n-catalog.mjs extract|import-donor [DONOR]|validate|freeze|structured-extract|translate LOCALE|translate-all|translate-google LOCALE|translate-google-all|repair-google-all|manifests');
+    throw new Error('usage: node scripts/i18n-catalog.mjs extract|import-donor DONOR|validate|freeze|structured-extract|translate LOCALE|translate-all|translate-google LOCALE|translate-google-all|repair-google-all|manifests');
   }
 }
 

@@ -44,7 +44,7 @@ impl NativeApiConfig {
         let root_dir = root_dir.canonicalize().unwrap_or(root_dir);
         let site_dir = root_dir.join("out");
         let data_file = root_dir.join("move-data.json");
-        let seed_file = site_dir.join("data").join("move-data.json");
+        let seed_file = site_dir.join("examples").join("planning.json");
         let vault_dir = std::env::var_os("COPAL_VAULT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root_dir.join("sample-vault"));
@@ -456,7 +456,13 @@ fn json_bytes(value: &Value) -> Vec<u8> {
 fn read_data(config: &NativeApiConfig) -> Vec<u8> {
     fs::read(&config.data_file)
         .or_else(|_| fs::read(&config.seed_file))
-        .unwrap_or_else(|_| b"{}".to_vec())
+        .unwrap_or_else(|_| {
+            #[cfg(feature = "embedded-assets")]
+            if let Some(seed) = EMBEDDED_OUT.get_file("examples/planning.json") {
+                return seed.contents().to_vec();
+            }
+            b"{}".to_vec()
+        })
 }
 
 fn handle_data_post(state: &ApiState, body: &[u8]) -> Response {

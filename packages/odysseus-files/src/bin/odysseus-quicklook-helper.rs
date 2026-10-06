@@ -248,7 +248,7 @@ mod macos {
                 &url,
                 CGSize::new(command.width as f64, command.height as f64),
                 command.scale,
-                QLThumbnailGenerationRequestRepresentationTypes::Thumbnail,
+                QLThumbnailGenerationRequestRepresentationTypes::All,
             )
         };
         unsafe { request.setIconMode(false) };
@@ -258,7 +258,7 @@ mod macos {
             RcBlock::new(
                 move |representation: *mut QLThumbnailRepresentation, _error: *mut NSError| {
                     let result = autoreleasepool(|_| {
-                        encode_content_thumbnail(representation, max_output_bytes)
+                        encode_native_representation(representation, max_output_bytes)
                     });
                     let _ = sender.send(NativeCompletion { job_id, result });
                 },
@@ -273,17 +273,19 @@ mod macos {
         })
     }
 
-    fn encode_content_thumbnail(
+    fn encode_native_representation(
         representation: *mut QLThumbnailRepresentation,
         max_output_bytes: usize,
     ) -> Result<Vec<u8>, wire::HelperErrorCode> {
         let representation =
             unsafe { representation.as_ref() }.ok_or(wire::HelperErrorCode::NativeUnavailable)?;
         let representation_type = unsafe { representation.r#type() };
-        if representation_type == QLThumbnailRepresentationType::Icon {
-            return Err(wire::HelperErrorCode::IconRepresentationRejected);
-        }
-        if representation_type != QLThumbnailRepresentationType::Thumbnail {
+        // Quick Look chooses the best available representation for an All request:
+        // content thumbnails take priority, with the native file icon as fallback.
+        if representation_type != QLThumbnailRepresentationType::Thumbnail
+            && representation_type != QLThumbnailRepresentationType::LowQualityThumbnail
+            && representation_type != QLThumbnailRepresentationType::Icon
+        {
             return Err(wire::HelperErrorCode::NativeUnavailable);
         }
         let image = unsafe { representation.CGImage() };

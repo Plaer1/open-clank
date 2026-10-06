@@ -86,7 +86,7 @@ test('danger and error affordances use semantic error tokens', () => {
   const css = fs.readFileSync(new URL('../static/style.css', import.meta.url), 'utf8');
   for (const selector of [
     '.session-bulk-btn-danger', '.footer-delete-btn:hover', '.msg-delete-btn:hover',
-    '.gallery-bulk-delete:hover', '.task-btn-danger', '.gallery-editor-draft-delete:hover',
+    '.task-btn-danger',
     '.note-card-delete:hover', '.note-delete-btn:hover', '.note-form-delete-btn:hover',
   ]) {
     const start = css.indexOf(selector);

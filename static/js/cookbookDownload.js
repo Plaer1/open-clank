@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK DOWNLOAD SUB-MODULE
 // Download tab: SSE streaming, model download,
@@ -328,7 +329,7 @@ export function _wirePanelEvents(panel, model, backend) {
       const text = panel.querySelector('.cookbook-output-pre')?.textContent || '';
       _copyText(text).then(() => {
         const origHTML = outputCopyBtn.innerHTML;
-        outputCopyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        outputCopyBtn.innerHTML = uiIcon("check", 14, {"role":"success"});
         outputCopyBtn.classList.add('copied');
         setTimeout(() => {
           outputCopyBtn.innerHTML = origHTML;

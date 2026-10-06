@@ -24,7 +24,7 @@ from starlette.requests import Request
 from routes import workspace_routes
 from src import tool_execution
 from src.agent_tools.filesystem_tools import LsTool, ReadFileTool
-from src.openclank.copal_bridge import CopalBridge
+from src.openclank.copal_loose import LooseCopalBridge
 
 
 T = TypeVar("T")
@@ -131,7 +131,7 @@ async def benchmark(iterations: int, cold_runs: int) -> dict[str, object]:
             raise RuntimeError("native file baseline operation failed")
 
         copal_dir = root / "copal"
-        bridge = CopalBridge(data_dir=copal_dir)
+        bridge = LooseCopalBridge(copal_dir)
         await bridge.start()
         document_ids: list[str] = []
         for index in range(100):
@@ -178,7 +178,7 @@ async def benchmark(iterations: int, cold_runs: int) -> dict[str, object]:
 
         cold_samples: list[float] = []
         for _ in range(cold_runs):
-            child = CopalBridge(data_dir=copal_dir)
+            child = LooseCopalBridge(copal_dir)
             started = time.perf_counter()
             await child.start()
             cold_samples.append(time.perf_counter() - started)

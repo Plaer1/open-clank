@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import asyncio
+from src.openclank.copal_history_wire import capture_metadata, mutation_failure_status
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -22,7 +23,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from src.openclank.copal_bridge import CopalBridge
+from src.openclank.copal_storage import configured_bridge
+from src.openclank.copal_errors import CopalBridgeError
 from src.openclank.copal_urls import canonical_open_url
 from src.openclank.copal_bases import BaseDefinitionError, dump_base_definition, parse_base_definition, set_frontmatter_property
 from src.openclank.copal_calendar_projection import reconcile_projection
@@ -42,11 +44,9 @@ from src.openclank.copal_planning import (
 from src.openclank.copal_treehouse import (
     TREEHOUSE_COMMAND_TYPES,
     TreeHouseError,
-    apply_legacy_migration,
     apply_treehouse_command,
     compute_treehouse_projections,
     new_treehouse_state,
-    plan_legacy_migration,
     public_treehouse_snapshot,
     state_fingerprint,
     validate_treehouse_state,
@@ -72,8 +72,8 @@ MANAGE_ACTIONS = (
     "galaxy.link_event_track", "galaxy.unlink_event_track", "graph.link", "graph.unlink",
     "mind.heading.add", "mind.heading.rename", "mind.heading.move", "mind.heading.reparent", "mind.heading.delete",
     "todo.create", "todo.update", "todo.complete", "todo.trash",
-    "bases.migrate.preview", "bases.migrate.apply", "bases.row.update",
-    "treehouse.command", "treehouse.migrate.preview", "treehouse.migrate.apply",
+    "bases.row.update",
+    "treehouse.command",
     "maintenance.bulk_trash.preview", "maintenance.bulk_trash.apply",
     "maintenance.bulk_restore.preview", "maintenance.bulk_restore.apply",
     "maintenance.calendar_reconcile", "maintenance.import.preview", "maintenance.import.apply",
@@ -96,11 +96,8 @@ _ACTION_FIELDS = {
     "galaxy.link_event_track": {"action", "workspace", "id", "trackId"}, "galaxy.unlink_event_track": {"action", "workspace", "id", "trackId"},
     **{action: {"action", "workspace", "id", "patch"} for action in ("mind.heading.add", "mind.heading.rename", "mind.heading.move", "mind.heading.reparent", "mind.heading.delete")},
     "todo.create": {"action", "workspace", "event"},
-    **{action: {"action", "workspace", "id", "previewToken"} for action in ("bases.migrate.preview", "bases.migrate.apply")},
     "bases.row.update": {"action", "workspace", "id", "patch"},
     "treehouse.command": {"action", "workspace", "command", "commandId", "expectedRevision"},
-    "treehouse.migrate.preview": {"action", "workspace", "commandId", "expectedRevision"},
-    "treehouse.migrate.apply": {"action", "workspace", "commandId", "expectedRevision", "previewToken"},
     **{action: {"action", "workspace", "ids", "previewToken"} for action in ("maintenance.bulk_trash.preview", "maintenance.bulk_trash.apply", "maintenance.bulk_restore.preview", "maintenance.bulk_restore.apply")},
     "maintenance.calendar_reconcile": {"action", "workspace"},
     "maintenance.import.preview": {"action", "workspace", "attachmentId", "corpus"},
@@ -137,7 +134,7 @@ class _HistoryMutationBridge:
 
     @staticmethod
     def _bytes(doc: dict[str, Any] | None) -> bytes | None:
-        if not doc or doc.get("text") is None:
+        if not doc:
             return None
         # Preserve the complete managed envelope, including typed fields and
         # provider extensions.  A text-only history record cannot restore a
@@ -148,11 +145,10 @@ class _HistoryMutationBridge:
     def _fingerprint(doc: dict[str, Any] | None) -> str:
         if not doc:
             return "absent"
-        return str(doc.get("head") or "present")
+        return "sha256:" + hashlib.sha256(_HistoryMutationBridge._bytes(doc)).hexdigest()
 
     def _envelope(self, operation: str, args: dict[str, Any], resource_id: str, before: dict[str, Any] | None, action_id: str) -> dict[str, Any]:
         now = int(time.time() * 1000)
-        revision = before.get("head") if before else None
         return {
             "schema_version": 1,
             "action_id": action_id,
@@ -166,20 +162,17 @@ class _HistoryMutationBridge:
             "guard_resource_ids": [],
             "modified_resource_ids": [],
             "operation": operation,
-            "expected_revision": {"Opaque": {"kind": "head", "value": str(revision)}} if revision else None,
             "actor_id": self._actor_id,
             "actor_kind": "agent",
             "session_id": None,
             "run_id": None,
             "task_id": None,
             "tool_id": "manage_copal",
-            "before_revision": {"Opaque": {"kind": "head", "value": str(revision)}} if revision else None,
             "expected_after_revision": None,
-            "original_locator": {"display_name": str(before.get("name") or resource_id), "location_label": self._workspace, "opaque_ref": None} if before else None,
-            "destination_locator": {"display_name": str(args.get("name") or resource_id), "location_label": self._workspace, "opaque_ref": None},
             "timestamp_millis": now,
             "coverage": {"metadata": {"coverage_kind": "KnownMutationHooks", "roots": [self._workspace], "exclusions": []}},
             "per_resource_outcomes": None,
+            **capture_metadata(before, workspace=self._workspace, resource_id=resource_id, destination_name=args.get("name")),
         }
 
     async def call(self, operation: str, args: dict[str, Any] | None = None, *, timeout: float = 20) -> Any:
@@ -189,6 +182,7 @@ class _HistoryMutationBridge:
         supplied_action_id = str(args.get("actionId") or args.get("operationId") or args.get("commandId") or "").strip()
         raw_id = str(args.get("id") or args.get("name") or args.get("path") or f"{operation}:{supplied_action_id or uuid.uuid4().hex}")
         action_id = supplied_action_id or self._action_id or f"manage-{uuid.uuid4().hex}"
+        args = {**args, "action_id": action_id}
         before = self._docs.get(str(args.get("id")))
         envelope = self._envelope(operation, args, raw_id, before, action_id)
         before_bytes = self._bytes(before)
@@ -200,25 +194,30 @@ class _HistoryMutationBridge:
         }
         prepared = False
         try:
+            if args.get("id") and before is None:
+                before = await self._bridge.call("get", {**args, "id": args["id"]}, timeout=timeout)
+                if not isinstance(before, dict):
+                    raise ValueError("required Copal recovery preimage is unavailable")
+                envelope = self._envelope(operation, args, raw_id, before, action_id)
+                before_bytes = self._bytes(before)
             await asyncio.to_thread(self._client.prepare, envelope, content=before_bytes, fingerprint=self._fingerprint(before))
             prepared = True
             history_status.update(status="prepared", durable=False)
         except Exception as exc:
-            # A history worker outage must not turn a valid live Copal save into
-            # an unavailable save. Unix transport errors and worker protocol
-            # errors are both reported as an explicit best-effort status.
+            # Required recovery is admitted before the provider mutation.
+            # A failed preimage leaves the original intact.
             paused = "history_paused_budget" in str(exc)
             history_status.update(
                 status="paused" if paused else "failed",
                 phase="budget" if paused else "before",
                 error=str(exc),
             )
+            raise RuntimeError("Required recovery preimage is unavailable; original was preserved") from exc
         try:
             result = await self._bridge.call(operation, args, timeout=timeout)
-        except Exception:
-            # Preserve the prepared action as an explicit non-commit when the
-            # live provider fails or the bridge connection is interrupted.
-            # The original provider exception remains authoritative.
+        except BaseException as exc:
+            # Delivery failure can follow a committed write. Keep this action
+            # and its original locator for reconciliation; never replay it.
             if prepared:
                 try:
                     await asyncio.to_thread(
@@ -226,7 +225,7 @@ class _HistoryMutationBridge:
                         envelope["action_id"],
                         {
                             "action_id": envelope["action_id"],
-                            "status": "NotCommitted",
+                            "status": mutation_failure_status(exc),
                             "fingerprint": None,
                             "after_unavailable": True,
                             "resource_id": raw_id,
@@ -234,6 +233,8 @@ class _HistoryMutationBridge:
                     )
                 except Exception:
                     pass
+            if mutation_failure_status(exc) == "Unknown" and not isinstance(exc, asyncio.CancelledError):
+                raise CopalBridgeError(f"Mutation outcome Unknown; reconcile action {action_id} before retrying") from exc
             raise
         result = result if isinstance(result, dict) else {}
         stale = result.get("outcome") == "stale"
@@ -257,6 +258,9 @@ class _HistoryMutationBridge:
                 else:
                     history_status.update(status="failed", phase="live_conflict")
             except Exception as exc:
+                if status == "Committed":
+                    try: await asyncio.to_thread(self._client.after_unavailable, action_id)
+                    except Exception: pass
                 paused = "history_paused_budget" in str(exc)
                 history_status.update(
                     status="paused" if paused else "failed",
@@ -642,7 +646,7 @@ async def manage_copal(
     # process-wide repository while still routing real agent calls through the
     # shared account access predicate.
     supplied_bridge = bridge is not None
-    bridge = bridge or CopalBridge()
+    bridge = bridge or configured_bridge()
     # Repository-backed TreeHouse commands carry their own account/CAS
     # boundary and must remain usable when the document bridge is unavailable.
     # Other Copal mutations still load their bridge documents here.
@@ -682,33 +686,6 @@ async def manage_copal(
                 raise CopalManageError("restore preview requires a commitId", code="missing_field")
             data = {"id": document_id, "commitId": commit_id, "sourceHead": doc.get("head"), "history": history}
             return await _preview(bridge, action, args, owner, workspace, data)
-        if action == "bases.migrate.preview":
-            document_id = _id(args.get("id"))
-            doc = _base_doc(docs, document_id)
-            try:
-                definition, diagnostics = parse_base_definition(str(doc.get("text") or ""))
-            except BaseDefinitionError as exc:
-                raise CopalManageError("Base definition is invalid", code="invalid_definition", detail={"diagnostics": exc.diagnostics}) from exc
-            canonical = dump_base_definition(definition)
-            return await _preview(
-                bridge,
-                action,
-                args,
-                owner,
-                workspace,
-                {"id": document_id, "sourceHead": doc.get("head"), "changed": canonical != doc.get("text"), "canonical": canonical, "diagnostics": diagnostics},
-            )
-        if action == "treehouse.migrate.preview":
-            doc, state = await _treehouse_state(bridge, owner, workspace, initialize=True)
-            plan = plan_legacy_migration(docs, state)
-            return await _preview(
-                bridge,
-                action,
-                args,
-                owner,
-                workspace,
-                {"sourceHead": doc.get("head"), "revision": state.get("revision"), "plan": plan, "commandId": str(args.get("commandId") or uuid.uuid4().hex)},
-            )
         if action == "maintenance.import.preview":
             corpus = str(args.get("corpus") or "notes")
             if corpus not in {"notes", "wiki"}:
@@ -777,7 +754,11 @@ async def manage_copal(
         if current.get("sourceHash") != (record.get("data") or {}).get("sourceHash"):
             raise CopalManageError("Copal changed after export preview; request a fresh preview", code="stale_preview")
         try:
-            result = await create_export(bridge, snapshot=snapshot, owner=owner, workspace=workspace, options=options)
+            from src.openclank.achievement_producers import record_account_activity
+            result = await create_export(
+                bridge, snapshot=snapshot, owner=owner, workspace=workspace, options=options,
+                on_completed=(lambda occurrence, facts: record_account_activity(str(account_id), "export.manifest.validated", occurrence, facts, workspace_id=workspace)) if account_id else None,
+            )
         except CopalTransferError as exc:
             raise transfer_error(exc) from exc
         return _result(action, workspace, saved=False, data=result)
@@ -793,41 +774,7 @@ async def manage_copal(
         result = await bridge.call("restore", {"owner": owner, "workspace_id": workspace, "id": document_id, "commit": record["data"]["commitId"], "corpus": corpus}, timeout=60)
         return _result(action, workspace, doc=result.get("doc") or doc, data=result)
 
-    if action == "bases.migrate.apply":
-        record = await _consume_preview(bridge, action, args, owner, workspace)
-        data = record.get("data") or {}
-        doc = _base_doc(docs, _id(args.get("id")))
-        if data.get("sourceHead") != doc.get("head"):
-            raise CopalManageError("Base changed after preview; refresh and preview again", code="stale_preview")
-        if not data.get("changed"):
-            return _result(action, workspace, doc=doc, data=data, warnings=["Base is already canonical"])
-        result = await bridge.call(
-            "write",
-            {"owner": owner, "workspace_id": workspace, "id": doc["id"], "content": data["canonical"], "base": doc.get("head"), "corpus": "notes"},
-            timeout=60,
-        )
-        if (result or {}).get("outcome") == "stale":
-            raise CopalManageError("Base changed before this write; refresh and retry explicitly", code="stale")
-        return _result(action, workspace, doc=result.get("doc") or doc, data=data)
 
-    if action == "treehouse.migrate.apply":
-        record = await _consume_preview(bridge, action, args, owner, workspace)
-        data = record.get("data") or {}
-        doc, state = await _treehouse_state(bridge, owner, workspace, initialize=True)
-        if data.get("sourceHead") != doc.get("head") or int(data.get("revision", -1)) != int(state.get("revision", -2)):
-            raise CopalManageError("TreeHouse changed after preview; refresh and preview again", code="stale_preview")
-        try:
-            next_state, migration_result, changed = apply_legacy_migration(
-                state,
-                data.get("plan") or {},
-                actor_id="owner",
-                command_id=_id(data.get("commandId"), "commandId"),
-                expected_revision=state.get("revision"),
-            )
-        except TreeHouseError as exc:
-            raise CopalManageError(str(exc), code=exc.code, detail=exc.details) from exc
-        result = await _write_treehouse(bridge, owner, workspace, doc, next_state) if changed else {"doc": doc, "outcome": "unchanged"}
-        return _result(action, workspace, doc=result.get("doc") or doc, data={"result": migration_result, "plan": data.get("plan"), "fingerprint": state_fingerprint(next_state)})
 
     if action in {"notes.create", "wiki.create"}:
         name = str(args.get("name") or "").strip()

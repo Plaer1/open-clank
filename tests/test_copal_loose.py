@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.openclank.copal_loose import LooseCopalBridge
 from routes.copal_routes import setup_copal_routes
-from src.openclank.copal_bridge import CopalBridgeError
+from src.openclank.copal_errors import CopalBridgeError
 
 
 @pytest.mark.asyncio

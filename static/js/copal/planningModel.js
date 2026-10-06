@@ -86,7 +86,7 @@ export function timelineSourceClassification(source) {
   const ref = String(source.resourceRef || source.resource_ref || '').trim();
   const provider = String(source.provider || source.resource?.provider || '').trim().toLowerCase();
   const readable = source.readable ?? source.capabilities?.read ?? source.capabilities?.open ?? source.capabilities?.download;
-  if (!ref || (readable === false) || (!['host', 'copal', 'gallery', 'library'].includes(provider) && provider)) return { supported: false, reason: 'This resource cannot be read by the current account.' };
+  if (!ref || (readable === false) || (!['host', 'copal', 'files', 'library'].includes(provider) && provider)) return { supported: false, reason: 'This resource cannot be read by the current account.' };
   if (!ref) return { supported: false, reason: 'Choose a readable Files resource.' };
   return { supported: true, resourceRef: ref, provider: provider || null, expectedRevision: source.expectedRevision || source.expected_revision || null };
 }

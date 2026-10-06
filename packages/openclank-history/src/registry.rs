@@ -24,6 +24,9 @@ static RESOURCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResourceRegistration {
     pub resource_id: String,
+    /// Persist lane restriction so withdrawing a root never reopens old history to wildcard credentials.
+    #[serde(default)]
+    pub actor_ids: std::collections::BTreeSet<String>,
     pub account_id: String,
     pub workspace_id: String,
     #[serde(default)]
@@ -99,6 +102,7 @@ impl ResourceRegistry {
             upgraded.entries.insert(
                 resource_id.clone(),
                 ResourceRegistration {
+                    actor_ids: Default::default(),
                     resource_id,
                     account_id: String::new(),
                     workspace_id: String::new(),
@@ -140,8 +144,8 @@ impl ResourceRegistry {
             use std::io::Write;
             file.write_all(&bytes)?;
             file.sync_all()?;
-            fs::rename(&temporary, path)?;
-            sync_directory(parent)
+            crate::platform::publish(&temporary, path)?;
+            crate::platform::finish_publication(path)
         })();
         let _ = fs::remove_file(&temporary);
         result
@@ -241,14 +245,4 @@ impl ResourceRegistry {
             }
         }
     }
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> io::Result<()> {
-    fs::File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
 }

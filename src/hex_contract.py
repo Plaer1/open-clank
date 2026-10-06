@@ -5,7 +5,7 @@ v0.11.1 (MIT, https://github.com/benquemax/henxels, pinned in
 ``.references/henxels``).  This module is an Open Clank implementation: it has
 no runtime import, executable, package, or network dependency on Henxels.
 
-New contracts use ``.hex`` with ``hexes:`` entries headed by ``hex:``.  The
+New contracts use ``.clanker/hexes/contract.yaml`` with ``hexes:`` entries headed by ``hex:``.  The
 loader accepts the former ``henxels:``/``henxel:`` vocabulary only as an
 explicit compatibility input so existing activated projects can migrate
 without losing their exact contract history.
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 import yaml
-from src.clanker_paths import GLOBAL_HEX_CONTRACT
+from src.clanker_paths import GLOBAL_HEX_CONTRACT_PATHS, is_reference_path, project_root_for_contract
 
 
 ENGINE_VERSION = "open-clank-hexes/1"
@@ -428,9 +428,10 @@ def find_contract(start: str | os.PathLike[str] = ".") -> Optional[Path]:
     if current.is_file():
         current = current.parent
     for directory in (current, *current.parents):
-        canonical = directory / GLOBAL_HEX_CONTRACT
-        if canonical.is_file():
-            return canonical
+        for relative in GLOBAL_HEX_CONTRACT_PATHS:
+            canonical = directory / relative
+            if canonical.is_file():
+                return canonical
         primary = directory / ".hex"
         if primary.is_file():
             return primary
@@ -466,7 +467,8 @@ def discover(root: str | os.PathLike[str]) -> list[str]:
     if values is None:
         values = []
         for directory, names, files in os.walk(base, followlinks=False):
-            names[:] = [name for name in names if name not in DEFAULT_EXCLUDES]
+            names[:] = [name for name in names if name not in DEFAULT_EXCLUDES
+                        and not is_reference_path((Path(directory) / name).relative_to(base))]
             parent = Path(directory)
             values.extend((parent / name).relative_to(base).as_posix() for name in files)
             if len(values) > MAX_DISCOVERED_FILES:
@@ -476,6 +478,7 @@ def discover(root: str | os.PathLike[str]) -> list[str]:
             value.replace("\\", "/")
             for value in values
             if not any(part in DEFAULT_EXCLUDES for part in Path(value).parts)
+            and not is_reference_path(value)
         )
     )
     if len(filtered) > MAX_DISCOVERED_FILES:
@@ -493,16 +496,21 @@ def _install_import_aliases(*, legacy: bool) -> None:
         sys.modules["henxels"] = compatibility
 
 
-def apply_imports(contract: HexContract, *, root: str | os.PathLike[str]) -> list[str]:
-    _reset_custom_statements()
-    _install_import_aliases(legacy=contract.vocabulary == "legacy_henxels")
+def custom_check_references(contract: HexContract, root: str | os.PathLike[str]) -> list[str]:
+    """Return workspace-relative checks shared by the loader and trust manifest.
+
+    Only the selected contract contributes its adjacent checks. Discovery is
+    read-only and never executes modules or transfers trust between layouts.
+    """
     base = Path(root).resolve()
     references = list(contract.imports)
     if contract.vocabulary == "hexes":
-        if contract.path.resolve().as_posix().endswith("/.clankers/hexes/contract.yaml"):
-            canonical_check = base / ".clankers/hexes/checks/project_checks.py"
-            if canonical_check.is_file():
-                references.append(canonical_check.relative_to(base).as_posix())
+        if any(contract.path.resolve().as_posix().endswith("/" + path) for path in GLOBAL_HEX_CONTRACT_PATHS):
+            checks = contract.path.resolve().parent / "checks"
+            references.extend(
+                path.relative_to(base).as_posix()
+                for path in sorted(checks.glob("*.py")) if not path.name.startswith("_")
+            )
         if (base / "hexes_checks.py").is_file():
             references.append("hexes_checks.py")
         local = base / ".hexes"
@@ -512,8 +520,24 @@ def apply_imports(contract: HexContract, *, root: str | os.PathLike[str]) -> lis
         local = base / ".henxels"
     if local.is_dir():
         references.extend(path.relative_to(base).as_posix() for path in sorted(local.glob("*.py")) if not path.name.startswith("_"))
+    normalized = []
+    for reference in dict.fromkeys(references):
+        if not (reference.endswith(".py") or "/" in reference or "\\" in reference):
+            module = Path(*reference.split("."))
+            candidates = [base / module.with_suffix(".py"), base / module / "__init__.py"]
+            present = [path for path in candidates if path.is_file()]
+            if len(present) == 1:
+                reference = present[0].relative_to(base).as_posix()
+        normalized.append(reference)
+    return list(dict.fromkeys(normalized))
+
+
+def apply_imports(contract: HexContract, *, root: str | os.PathLike[str]) -> list[str]:
+    _reset_custom_statements()
+    _install_import_aliases(legacy=contract.vocabulary == "legacy_henxels")
+    base = Path(root).resolve()
     failed: list[str] = []
-    for index, reference in enumerate(dict.fromkeys(references)):
+    for index, reference in enumerate(custom_check_references(contract, base)):
         candidate = (base / reference).resolve(strict=False)
         try:
             candidate.relative_to(base)
@@ -642,11 +666,12 @@ def evaluate_contract(
     diff: Optional[CandidateDiff] = None,
     stage: str = "check",
     command_root: Optional[str | os.PathLike[str]] = None,
+    policy_root: Optional[str | os.PathLike[str]] = None,
 ) -> dict[str, Any]:
     if stage not in {"check", "pre-commit", "pre-push"}:
         raise HexContractError(f"unsupported Hexes stage: {stage}")
     contract = load_contract(contract_path)
-    failed_imports = apply_imports(contract, root=root)
+    failed_imports = apply_imports(contract, root=policy_root if policy_root is not None else root)
     if failed_imports:
         raise HexContractError("Hexes custom checks failed to load: " + ", ".join(failed_imports))
     findings = run_contract(contract, root, files, diff=diff)
@@ -712,11 +737,14 @@ def explain_contract(contract: HexContract, path: str) -> list[dict[str, Any]]:
 
 
 def render_agent_digest(contract: HexContract) -> str:
+    root = project_root_for_contract(contract.path)
+    source = contract.path.resolve().relative_to(root).as_posix()
+    checks = contract.path.resolve().parent.relative_to(root) / "checks"
     lines = [
         "<!-- openclank-hexes:begin -->",
         "## The contract (Open Clank Hexes)",
         "",
-        "_Generated from `.clankers/hexes/contract.yaml` by `openclank hex sync`; edit the canonical contract, not this block._",
+        f"_Generated from `{source}` by `openclank hex sync`; edit the canonical contract, not this block._",
         "",
         "Before creating or changing a file, run `openclank hex explain <path>`.",
         "The exact activated contract hash is the authority for project mutations.",
@@ -743,7 +771,7 @@ def render_agent_digest(contract: HexContract) -> str:
     lines.extend(
         [
             "",
-            "Custom checks live in `.clankers/hexes/checks/*.py` and may not",
+            f"Custom checks live in `{checks.as_posix()}/*.py` and may not" if source in GLOBAL_HEX_CONTRACT_PATHS else "Custom checks use project imports, `hexes_checks.py` or `.hexes/*.py` and may not",
             "replace built-ins. Activated runtime mutations execute them in the contained",
             "policy worker; explicit local checks/hooks execute repository-owned checks.",
             "<!-- openclank-hexes:end -->",
@@ -924,6 +952,65 @@ def _run_before_push() -> None:
 def _allowed_filetypes(param: Any, scope: HexScope) -> list[str]:
     patterns = [str(item) for item in _as_list(param)]
     return [f"{path} — should be {' or '.join(patterns)}" for path in scope.files if not any(_file_matches(pattern, path) for pattern in patterns)]
+
+
+@statement("untracked_only", help="project-relative directories stay out of the Git index", builtin=True)
+def _untracked_only(param: Any, scope: HexScope, diff: Optional[CandidateDiff]) -> list[str]:
+    """Check index paths, including ignored force-adds and submodule gitlinks.
+
+    The candidate tree has no Git index. Its source root remains the authority;
+    a candidate file's presence alone does not mean it is being tracked.
+    """
+    directories: list[str] = []
+    for value in _as_list(param):
+        if not isinstance(value, str):
+            return ["configure untracked_only with project-relative directory paths"]
+        path = value.removeprefix("./").rstrip("/")
+        if (
+            not path
+            or path.startswith("/")
+            or re.match(r"^[A-Za-z]:", path)
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or any(char in path for char in "\\*?[]")
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+        ):
+            return ["configure untracked_only with literal project-relative directory paths, not globs or traversal"]
+        directories.append(path)
+    if not directories:
+        return ["configure untracked_only with at least one project-relative directory"]
+
+    projection = getattr(diff, "git_index_paths", None) if diff is not None else None
+    if projection is not None:
+        state = getattr(diff, "git_index_state", None)
+        if state not in {"git", "non-git"} or (state == "non-git" and projection) or any(not isinstance(path, str) for path in projection):
+            return ["cannot verify untracked_only: native Git index projection is malformed"]
+        prefixes = tuple(dict.fromkeys(directories))
+        return [f"{path} — must stay untracked; remove it from the Git index while keeping the local reference"
+                for path in sorted(projection) if any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)]
+    root = Path(diff.source_root if diff is not None else scope.root).resolve()
+    # Do not turn a non-Git workspace into an error or read reference contents.
+    if not any((parent / ".git").exists() or (parent / ".git").is_symlink()
+               for parent in (root, *root.parents)):
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "--literal-pathspecs", "ls-files", "--cached", "-z", "--",
+             *dict.fromkeys(directories)],
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ["cannot verify untracked_only: Git index is unavailable"]
+    if result.returncode:
+        return ["cannot verify untracked_only: Git index is unavailable"]
+    paths = sorted({value.decode("utf-8", errors="surrogateescape")
+                    for value in result.stdout.split(b"\0") if value})
+    return [f"{path} — must stay untracked; remove it from the Git index while keeping the local reference"
+            for path in paths]
 
 
 @statement("required_files", help="required files exist in every scoped location", builtin=True)

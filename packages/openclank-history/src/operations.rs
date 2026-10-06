@@ -11,6 +11,8 @@ use crate::usage::{
     add_external_storage, measure_root_with_reservations, HistoryUsage, RetainedVersionUsage,
 };
 use crate::{Context, HistoryStore, Partition};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,6 +26,375 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::atomic::AtomicU8;
 
 static VERSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub const MAX_RESOURCE_VERSION_PAGE_SIZE: u16 = 100;
+pub const MAX_RESOURCE_VERSION_CHUNK_BYTES: u32 = 256 * 1024;
+const FILE_RESOURCE_PROVIDERS: [&str; 2] = ["filesystem", "odysseus-files"];
+
+/// Bounded metadata returned for one exact Files resource version. The opaque
+/// `id` binds an action and receipt version; callers still supply the resource
+/// id and the service rechecks that binding before every read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VersionDescriptor {
+    pub id: String,
+    pub source_provider: String,
+    pub action_id: String,
+    pub version_id: String,
+    pub phase: String,
+    pub operation: String,
+    pub timestamp_millis: u64,
+    pub display_name: Option<String>,
+    pub resource_type: String,
+    pub size_bytes: Option<u64>,
+    pub fingerprint: String,
+    pub action_state: String,
+    /// `available`, `absent`, `expiring`, or `expired`.
+    pub availability: String,
+    pub can_read: bool,
+    pub can_restore: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceVersionPage {
+    pub items: Vec<VersionDescriptor>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionLookupError {
+    InvalidCursor,
+    InvalidLimit,
+    InvalidVersionRef,
+    InvalidOffset,
+    AmbiguousVersionRef,
+    VersionNotFound,
+    VersionNotRestorable,
+    VersionExpiring,
+    VersionExpired,
+    Storage(String),
+}
+
+impl VersionLookupError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidCursor => "invalid_cursor",
+            Self::InvalidLimit => "invalid_limit",
+            Self::InvalidVersionRef => "invalid_version_ref",
+            Self::InvalidOffset => "invalid_offset",
+            Self::AmbiguousVersionRef => "ambiguous_version_ref",
+            Self::VersionNotFound => "version_not_found",
+            Self::VersionNotRestorable => "version_not_restorable",
+            Self::VersionExpiring => "version_expiring",
+            Self::VersionExpired => "version_expired",
+            Self::Storage(_) => "history_read_failed",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::InvalidCursor => "history page cursor is invalid".into(),
+            Self::InvalidLimit => "history page size must be between 1 and 100".into(),
+            Self::InvalidVersionRef => "history version identity is invalid".into(),
+            Self::InvalidOffset => "history read offset is outside the selected version".into(),
+            Self::AmbiguousVersionRef => "the selected history version is ambiguous across source providers; reload the version list".into(),
+            Self::VersionNotFound => "the selected history version is missing or no longer belongs to this resource".into(),
+            Self::VersionNotRestorable => "the selected history version is not currently eligible for restore".into(),
+            Self::VersionExpiring => "the selected history version is being pruned".into(),
+            Self::VersionExpired => "the selected history version has been pruned".into(),
+            Self::Storage(error) => format!("history version read failed: {error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VersionIdentity {
+    action_id: String,
+    version_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_provider: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VersionPageCursor {
+    timestamp_millis: u64,
+    action_id: String,
+    version_id: String,
+    #[serde(default = "legacy_filesystem_provider")]
+    source_provider: String,
+}
+
+fn legacy_filesystem_provider() -> String {
+    "filesystem".into()
+}
+
+#[derive(Debug, Clone)]
+struct VersionCandidate {
+    phase: &'static str,
+    receipt: VersionReceipt,
+    metadata: Option<ResourceMetadata>,
+    resource_type: Option<ResourceType>,
+    locator: Option<Locator>,
+    byte_len: Option<u64>,
+}
+
+fn version_ref(action_id: &str, version_id: &str, source_provider: &str) -> String {
+    URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&VersionIdentity {
+            action_id: action_id.to_owned(),
+            version_id: version_id.to_owned(),
+            source_provider: Some(source_provider.to_owned()),
+        })
+        .expect("history version identity is serializable"),
+    )
+}
+
+fn decode_version_ref(value: &str) -> Result<VersionIdentity, VersionLookupError> {
+    if value.is_empty() || value.len() > 1024 {
+        return Err(VersionLookupError::InvalidVersionRef);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| VersionLookupError::InvalidVersionRef)?;
+    let identity: VersionIdentity =
+        serde_json::from_slice(&bytes).map_err(|_| VersionLookupError::InvalidVersionRef)?;
+    if identity.action_id.is_empty()
+        || identity.version_id.is_empty()
+        || identity
+            .source_provider
+            .as_deref()
+            .is_some_and(|provider| provider.is_empty() || provider.len() > 128)
+    {
+        return Err(VersionLookupError::InvalidVersionRef);
+    }
+    Ok(identity)
+}
+
+fn encode_page_cursor(cursor: &VersionPageCursor) -> String {
+    URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(cursor).expect("history page cursor is serializable"),
+    )
+}
+
+fn decode_page_cursor(value: &str) -> Result<VersionPageCursor, VersionLookupError> {
+    if value.is_empty() || value.len() > 2048 {
+        return Err(VersionLookupError::InvalidCursor);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| VersionLookupError::InvalidCursor)?;
+    let cursor: VersionPageCursor =
+        serde_json::from_slice(&bytes).map_err(|_| VersionLookupError::InvalidCursor)?;
+    if cursor.action_id.is_empty()
+        || cursor.version_id.is_empty()
+        || cursor.source_provider.is_empty()
+        || cursor.source_provider.len() > 128
+    {
+        return Err(VersionLookupError::InvalidCursor);
+    }
+    Ok(cursor)
+}
+
+fn compare_page_cursor(left: &VersionPageCursor, right: &VersionPageCursor) -> std::cmp::Ordering {
+    left.timestamp_millis
+        .cmp(&right.timestamp_millis)
+        .then_with(|| left.action_id.cmp(&right.action_id))
+        .then_with(|| left.version_id.cmp(&right.version_id))
+        .then_with(|| left.source_provider.cmp(&right.source_provider))
+}
+
+fn resource_version_providers(key: &ResourceKey) -> Vec<&str> {
+    if FILE_RESOURCE_PROVIDERS.contains(&key.provider.as_str()) {
+        FILE_RESOURCE_PROVIDERS.to_vec()
+    } else {
+        vec![key.provider.as_str()]
+    }
+}
+
+fn resource_key_for_provider(key: &ResourceKey, provider: &str) -> ResourceKey {
+    ResourceKey {
+        account_id: key.account_id.clone(),
+        workspace_id: key.workspace_id.clone(),
+        provider: provider.to_owned(),
+        resource_id: key.resource_id.clone(),
+    }
+}
+
+fn version_candidates(record: &ActionRecord, key: &ResourceKey) -> Vec<VersionCandidate> {
+    let mut candidates = BTreeMap::<String, VersionCandidate>::new();
+    let mut insert = |candidate: VersionCandidate| {
+        candidates
+            .entry(candidate.receipt.version_id.clone())
+            .or_insert(candidate);
+    };
+
+    for resource in &record.before_resources {
+        if &resource.resource_key == key {
+            if let Some(receipt) = &resource.before {
+                insert(VersionCandidate {
+                    phase: "before",
+                    receipt: receipt.clone(),
+                    metadata: Some(resource.metadata.clone()),
+                    resource_type: Some(resource.resource_type.clone()),
+                    locator: resource.old_locator.clone(),
+                    byte_len: resource.coverage.byte_len,
+                });
+            }
+        }
+    }
+    if let Some(batch) = &record.mutation_batch {
+        for resource in &batch.resources {
+            if &resource.resource_key == key {
+                if let Some(receipt) = &resource.before {
+                    insert(VersionCandidate {
+                        phase: "before",
+                        receipt: receipt.clone(),
+                        metadata: Some(resource.metadata.clone()),
+                        resource_type: Some(resource.resource_type.clone()),
+                        locator: resource.old_locator.clone(),
+                        byte_len: resource.coverage.byte_len,
+                    });
+                }
+            }
+        }
+    }
+    for resource in &record.after_resources {
+        if &resource.resource_key == key {
+            insert(VersionCandidate {
+                phase: "after",
+                receipt: resource.after.clone(),
+                metadata: Some(resource.metadata.clone()),
+                resource_type: Some(resource.resource_type.clone()),
+                locator: resource.locator.clone(),
+                byte_len: resource.coverage.byte_len,
+            });
+        }
+    }
+
+    if &record.resource_key == key {
+        if let Some(receipt) = &record.before {
+            insert(VersionCandidate {
+                phase: "before",
+                receipt: receipt.clone(),
+                metadata: None,
+                resource_type: None,
+                locator: record.original_locator.clone(),
+                byte_len: record.coverage.as_ref().and_then(|value| value.byte_len),
+            });
+        }
+        if let Some(receipt) = &record.after {
+            insert(VersionCandidate {
+                phase: "after",
+                receipt: receipt.clone(),
+                metadata: None,
+                resource_type: None,
+                locator: record
+                    .destination_locator
+                    .clone()
+                    .or_else(|| record.original_locator.clone()),
+                byte_len: record.coverage.as_ref().and_then(|value| value.byte_len),
+            });
+        }
+    }
+
+    candidates.into_values().collect()
+}
+
+fn selected_version_candidate(
+    record: &ActionRecord,
+    key: &ResourceKey,
+    identity: &VersionIdentity,
+) -> Result<(String, VersionCandidate), VersionLookupError> {
+    let providers = resource_version_providers(key);
+    if let Some(selected_provider) = identity.source_provider.as_deref() {
+        if !providers.contains(&selected_provider) {
+            return Err(VersionLookupError::InvalidVersionRef);
+        }
+        let selected_key = resource_key_for_provider(key, selected_provider);
+        return version_candidates(record, &selected_key)
+            .into_iter()
+            .find(|candidate| candidate.receipt.version_id == identity.version_id)
+            .map(|candidate| (selected_provider.to_owned(), candidate))
+            .ok_or(VersionLookupError::VersionNotFound);
+    }
+
+    let mut matches = providers.into_iter().filter_map(|provider| {
+        let provider_key = resource_key_for_provider(key, provider);
+        version_candidates(record, &provider_key)
+            .into_iter()
+            .find(|candidate| candidate.receipt.version_id == identity.version_id)
+            .map(|candidate| (provider.to_owned(), candidate))
+    });
+    let Some(first) = matches.next() else {
+        return Err(VersionLookupError::VersionNotFound);
+    };
+    if matches.next().is_some() {
+        return Err(VersionLookupError::AmbiguousVersionRef);
+    }
+    Ok(first)
+}
+
+fn version_descriptor(
+    record: &ActionRecord,
+    candidate: &VersionCandidate,
+    expiry: Option<&ExpiryRecord>,
+    source_provider: &str,
+) -> VersionDescriptor {
+    let availability = match expiry.map(|value| &value.state) {
+        Some(ExpiryState::Expiring) => "expiring",
+        Some(ExpiryState::Expired) => "expired",
+        None if candidate.receipt.content == VersionContent::Tombstone => "absent",
+        None => "available",
+    }
+    .to_owned();
+    let can_read = availability == "available";
+    let can_restore = availability == "available"
+        && matches!(
+            &record.state,
+            ActionState::Complete | ActionState::AfterCaptureFailed
+        );
+    let resource_type = candidate
+        .resource_type
+        .as_ref()
+        .map(|value| format!("{value:?}").to_lowercase())
+        .unwrap_or_else(|| "file".into());
+    let fallback_locator = if candidate.phase == "after" {
+        record
+            .destination_locator
+            .as_ref()
+            .or(record.original_locator.as_ref())
+    } else {
+        record.original_locator.as_ref()
+    };
+    VersionDescriptor {
+        id: version_ref(
+            &record.action_id,
+            &candidate.receipt.version_id,
+            source_provider,
+        ),
+        source_provider: source_provider.to_owned(),
+        action_id: record.action_id.clone(),
+        version_id: candidate.receipt.version_id.clone(),
+        phase: candidate.phase.into(),
+        operation: record.operation.clone(),
+        timestamp_millis: record.timestamp_millis.unwrap_or(0),
+        display_name: candidate
+            .locator
+            .as_ref()
+            .map(|value| value.display_name.clone())
+            .or_else(|| fallback_locator.map(|value| value.display_name.clone())),
+        resource_type,
+        size_bytes: candidate
+            .metadata
+            .as_ref()
+            .and_then(|value| value.size)
+            .or(candidate.byte_len),
+        fingerprint: candidate.receipt.fingerprint.clone(),
+        action_state: format!("{:?}", record.state).to_lowercase(),
+        availability,
+        can_read,
+        can_restore,
+    }
+}
 
 #[cfg(feature = "test_faults")]
 static CAPTURE_FAULT: AtomicU8 = AtomicU8::new(0);
@@ -293,8 +664,188 @@ impl HistoryCoordinator {
         Ok(coordinator)
     }
 
+    /// Explicit offline retained-reference inspection must not reclaim expired
+    /// payloads or reconcile pending writes while deciding coverage.
+    pub async fn open_for_inventory(
+        catalog_path: impl AsRef<std::path::Path>,
+        lore_root: impl AsRef<std::path::Path>,
+        account_id: &str,
+    ) -> CatalogResult<Self> {
+        Ok(Self {
+            catalog: Catalog::open(catalog_path, account_id)?,
+            store: HistoryStore::open(lore_root).await?,
+            held_leases: Mutex::new(BTreeMap::new()),
+        })
+    }
+
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
+    }
+
+    /// Return one bounded page of versions for an exact account/workspace/
+    /// resource identity. Files resources span the two capture producer
+    /// namespaces; each descriptor and cursor retains its source provider.
+    pub fn list_resource_versions(
+        &self,
+        key: &ResourceKey,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<ResourceVersionPage, VersionLookupError> {
+        if !(1..=MAX_RESOURCE_VERSION_PAGE_SIZE).contains(&limit) {
+            return Err(VersionLookupError::InvalidLimit);
+        }
+        let providers = resource_version_providers(key);
+        let after = cursor.map(decode_page_cursor).transpose()?;
+        if after
+            .as_ref()
+            .is_some_and(|value| !providers.contains(&value.source_provider.as_str()))
+        {
+            return Err(VersionLookupError::InvalidCursor);
+        }
+        let actions = self
+            .catalog
+            .all_actions()
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?;
+        let mut versions = Vec::<(VersionPageCursor, VersionDescriptor)>::new();
+        for action in actions {
+            let expiry = self
+                .catalog
+                .expiry(&action.action_id)
+                .map_err(|error| VersionLookupError::Storage(error.to_string()))?;
+            for provider in providers.iter().copied() {
+                let provider_key = resource_key_for_provider(key, provider);
+                for candidate in version_candidates(&action, &provider_key) {
+                    let descriptor =
+                        version_descriptor(&action, &candidate, expiry.as_ref(), provider);
+                    versions.push((
+                        VersionPageCursor {
+                            timestamp_millis: descriptor.timestamp_millis,
+                            action_id: descriptor.action_id.clone(),
+                            version_id: descriptor.version_id.clone(),
+                            source_provider: provider.to_owned(),
+                        },
+                        descriptor,
+                    ));
+                }
+            }
+        }
+        versions.sort_by(|left, right| compare_page_cursor(&right.0, &left.0));
+        let mut eligible = versions.into_iter().filter(|(position, _)| {
+            after
+                .as_ref()
+                .is_none_or(|cursor| compare_page_cursor(position, cursor).is_lt())
+        });
+        let page_size = usize::from(limit);
+        let mut page = Vec::with_capacity(page_size + 1);
+        for item in eligible.by_ref().take(page_size + 1) {
+            page.push(item);
+        }
+        let has_more = page.len() > page_size;
+        if has_more {
+            page.pop();
+        }
+        let next_cursor = if has_more {
+            page.last().map(|(position, _)| encode_page_cursor(position))
+        } else {
+            None
+        };
+        Ok(ResourceVersionPage {
+            items: page.into_iter().map(|(_, descriptor)| descriptor).collect(),
+            next_cursor,
+        })
+    }
+
+    /// Resolve a browser selection to the catalog-verified receipt consumed
+    /// by RestoreHost. The receipt stays inside the trusted service boundary.
+    pub fn resolve_resource_version(
+        &self,
+        key: &ResourceKey,
+        version_ref: &str,
+    ) -> Result<(VersionDescriptor, VersionReceipt), VersionLookupError> {
+        let identity = decode_version_ref(version_ref)?;
+        let action = self
+            .catalog
+            .get_action(&identity.action_id)
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?
+            .ok_or(VersionLookupError::VersionNotFound)?;
+        let (source_provider, candidate) =
+            selected_version_candidate(&action, key, &identity)?;
+        let expiry = self
+            .catalog
+            .expiry(&action.action_id)
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?;
+        let descriptor = version_descriptor(
+            &action,
+            &candidate,
+            expiry.as_ref(),
+            &source_provider,
+        );
+        match descriptor.availability.as_str() {
+            "expiring" => return Err(VersionLookupError::VersionExpiring),
+            "expired" => return Err(VersionLookupError::VersionExpired),
+            _ => {}
+        }
+        if !descriptor.can_restore {
+            return Err(VersionLookupError::VersionNotRestorable);
+        }
+        Ok((descriptor, candidate.receipt))
+    }
+
+    /// Read one bounded chunk after resolving the opaque selection again
+    /// against the exact resource key. No host path or Lore address crosses
+    /// this API boundary.
+    pub async fn read_resource_version_chunk(
+        &self,
+        key: &ResourceKey,
+        version_ref: &str,
+        offset: u64,
+        length: u32,
+    ) -> Result<(VersionDescriptor, Option<Vec<u8>>, bool), VersionLookupError> {
+        if length == 0 || length > MAX_RESOURCE_VERSION_CHUNK_BYTES {
+            return Err(VersionLookupError::InvalidLimit);
+        }
+        let identity = decode_version_ref(version_ref)?;
+        let action = self
+            .catalog
+            .get_action(&identity.action_id)
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?
+            .ok_or(VersionLookupError::VersionNotFound)?;
+        let (source_provider, candidate) =
+            selected_version_candidate(&action, key, &identity)?;
+        let expiry = self
+            .catalog
+            .expiry(&action.action_id)
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?;
+        let descriptor = version_descriptor(
+            &action,
+            &candidate,
+            expiry.as_ref(),
+            &source_provider,
+        );
+        match descriptor.availability.as_str() {
+            "expiring" => return Err(VersionLookupError::VersionExpiring),
+            "expired" => return Err(VersionLookupError::VersionExpired),
+            _ => {}
+        }
+        let Some(bytes) = self
+            .read_version(&action.action_id, &candidate.receipt)
+            .await
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?
+        else {
+            return Ok((descriptor, None, true));
+        };
+        let start = usize::try_from(offset).map_err(|_| VersionLookupError::InvalidOffset)?;
+        if start > bytes.len() {
+            return Err(VersionLookupError::InvalidOffset);
+        }
+        let end = start
+            .saturating_add(length as usize)
+            .min(bytes.len());
+        Ok((
+            descriptor,
+            Some(bytes.slice(start..end).to_vec()),
+            end == bytes.len(),
+        ))
     }
 
     pub fn policy_set(&self) -> CatalogResult<PolicySet> {
@@ -654,6 +1205,7 @@ impl HistoryCoordinator {
                 .iter()
                 .chain(batch_before)
                 .chain(action.after.iter())
+                .chain(action.after_resources.iter().map(|resource| &resource.after))
             {
                 let VersionContent::Bytes(reference) = &receipt.content else {
                     continue;
@@ -1168,6 +1720,27 @@ impl HistoryCoordinator {
         let _ = self.catalog.release_leases(action_id, lease);
     }
 
+    /// Persist a capture gap without changing the authoritative committed live
+    /// receipt. This retries only recovery state, never the provider mutation.
+    pub fn after_unavailable(&self, action_id: &str) -> CatalogResult<ActionRecord> {
+        let action = self.catalog.get_action(action_id)?.ok_or("unknown action")?;
+        if action.live.as_ref().map(|live| &live.status) != Some(&LiveStatus::Committed) {
+            return Err("after-capture failure requires a committed live receipt".into());
+        }
+        if action.state == ActionState::AfterCaptureFailed {
+            return Ok(action);
+        }
+        if !matches!(action.state, ActionState::Applied | ActionState::CapturingAfter) {
+            return Err("after-capture failure has an invalid action state".into());
+        }
+        if action.state == ActionState::Applied {
+            self.catalog.transition(action_id, ActionState::Applied, ActionState::CapturingAfter)?;
+        }
+        let record = self.catalog.transition(action_id, ActionState::CapturingAfter, ActionState::AfterCaptureFailed)?;
+        self.release_after_failure(action_id, &lease_ids(&record));
+        Ok(record)
+    }
+
     pub async fn capture_after(
         &self,
         action_id: &str,
@@ -1413,7 +1986,11 @@ impl HistoryCoordinator {
                 })?;
                 let blake3_digest = blake3::hash(content).to_hex().to_string();
                 let sha256_digest = format!("sha256:{:x}", Sha256::digest(content));
-                if content_digest != blake3_digest && content_digest != sha256_digest {
+                let sized_sha256_digest = format!("{sha256_digest}:{}", content.len());
+                if content_digest != blake3_digest
+                    && content_digest != sha256_digest
+                    && content_digest != sized_sha256_digest
+                {
                     return Err(format!(
                         "after-state content digest mismatch for {}",
                         entry.resource_key.resource_id
@@ -1448,6 +2025,7 @@ impl HistoryCoordinator {
             }
             if let Some(prepared) = prepared.as_ref().and_then(|resources| resources.get(&entry.resource_key)) {
                 if prepared.existence == ResourceExistence::Present
+                    && entry.existence == ResourceExistence::Present
                     && prepared.resource_type != entry.resource_type
                 {
                     return Err(format!(
@@ -1659,6 +2237,15 @@ impl HistoryCoordinator {
                 .before_resources
                 .iter()
                 .any(|resource| resource.before.as_ref() == Some(receipt))
+            && !action
+                .mutation_batch
+                .as_ref()
+                .is_some_and(|batch| {
+                    batch
+                        .resources
+                        .iter()
+                        .any(|resource| resource.before.as_ref() == Some(receipt))
+                })
             && !action
                 .after
                 .as_ref()

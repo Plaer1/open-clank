@@ -4,7 +4,11 @@ Thanks for helping. The project is moving quickly, so the best contributions are
 
 ## Branch model
 
-Open Clank currently uses **`main`** for the Build Week snapshot and pull requests.
+The public default branch is **`main`**; target focused pull requests there.
+This is Beta 1, the first of several betas. macOS is the current build/dogfood
+focus. Windows and Linux Files/native integration remains unfinished; support
+is coming as soon as possible, without a date or parity promise. Build artifacts
+do not establish platform acceptance. See [known limits](docs/known-limits.md).
 
 ## Before You Start
 
@@ -15,7 +19,10 @@ Open Clank currently uses **`main`** for the Build Week snapshot and pull reques
 
 ## Setup
 
-Docker is the recommended path for normal testing:
+Follow [setup](docs/setup.md) for fresh native installation, and
+[upgrading](docs/upgrading.md) before using existing data. macOS native is the
+current dogfood path. A disposable Compose environment is useful for contributor
+checks that specifically concern container behavior:
 
 ```bash
 git clone https://github.com/Plaer1/open-clank.git
@@ -30,18 +37,29 @@ Manual development uses Python 3.11+:
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python -m uvicorn app:app --host 127.0.0.1 --port 7777
+python setup.py
+openclank server start
+openclank server status
+# stop this CLI-managed service when finished:
+openclank server stop
 ```
 
-Windows is not actively tested. Docker on Linux or a Linux/macOS manual install is the safer path for now.
+For a foreground source run use
+`python scripts/openclank_bootstrap.py serve --host 127.0.0.1 --port 7777`.
+Bootstrap validates engine/current-store state before app import. Setup may
+fetch pinned Bun/build dependencies; native Files/History/memory/Copal workers
+have separate artifact requirements. Neither Windows nor Linux is currently a
+promise of complete Files/native parity. Authentication is required in local
+development too.
 
 ## Running Checks
 
-Run the smallest relevant checks for your change:
+Use [tests/README.md](tests/README.md) to select the smallest meaningful checks
+for the affected behavior. Typical focused commands include:
 
 ```bash
-python -m pytest
-python -m py_compile app.py routes/*.py src/*.py
+python -m pytest tests/<relevant-test>.py
+python -m py_compile <changed-python-file>.py
 node --check static/js/<file-you-changed>.js
 ```
 
@@ -91,7 +109,8 @@ If you are unsure whether a change is "visual," it is. Default to attaching a sc
 
 Don't hardcode values that the project already exposes through a constant or a helper. Hardcoded literals drift out of sync, break on non-default deployments, and reintroduce bugs we've already fixed.
 
-- **Filesystem paths:** never build writable paths from `Path(__file__)...` into the source tree, hardcode `/app/...`, or use a relative `"data/..."` string. Every persisted file and directory has a named constant in `src/constants.py` (for example `AUTH_FILE`, `USER_PREFS_FILE`, `SETTINGS_FILE`, `TTS_CACHE_DIR`, `CHROMA_DIR`). Import and use that named constant; do not re-derive the path locally with `os.path.join(DATA_DIR, "x.json")` or `DATA_DIR / "x.json"`. `DATA_DIR` is the single place that reads `ODYSSEUS_DATA_DIR`, so use it directly only for dynamic paths that have no fixed name (for example per-owner files). If a data file or directory has no constant yet, add one to `src/constants.py`. The source tree is read-only in Docker and `/app/...` does not exist on native runs; guard directory creation so an unwritable path degrades gracefully instead of crashing at import.
+- **Filesystem paths:** never build writable paths from `Path(__file__)...` into the source tree, hardcode `/app/...`, or use a relative `"data/..."` string. Every persisted file and directory has a named constant in `src/constants.py` (for example `AUTH_FILE`, `USER_PREFS_FILE`, `SETTINGS_FILE`, `TTS_CACHE_DIR`). Import and use that named constant; do not re-derive the path locally with `os.path.join(DATA_DIR, "x.json")` or `DATA_DIR / "x.json"`. `DATA_DIR` resolves `OPEN_CLANK_DATA_DIR` first, accepts the legacy
+  `ODYSSEUS_DATA_DIR` alias and normalizes both to the same root, so use it directly only for dynamic paths that have no fixed name (for example per-owner files). If a data file or directory has no constant yet, add one to `src/constants.py`. The source tree is read-only in Docker and `/app/...` does not exist on native runs; guard directory creation so an unwritable path degrades gracefully instead of crashing at import.
 - **Internal API / loopback URLs:** don't hardcode `http://localhost:7777`. Use `internal_api_base()` from `src.constants` (it honors `ODYSSEUS_INTERNAL_BASE` / `APP_PORT`).
 - **Ports, limits, model lists, and similar:** reuse the existing constant if one exists; if it doesn't and the value is used in more than one place, add a constant rather than copying the literal.
 
@@ -103,7 +122,8 @@ If you need a value that has no constant or helper yet, add it to `src/constants
 
 For bugs, include:
 
-- Install method: Docker, manual Python, WSL, etc.
+- Machine version and installed revision (Beta 1 label currently accompanies `1.0.2`).
+- Install method: native launcher, source/CLI, packaged build, Compose, WSL, etc.
 - OS, browser, and device if relevant.
 - Exact steps to reproduce.
 - Expected behavior and actual behavior.
@@ -123,3 +143,17 @@ Issues with only "help", "does not work", or a screenshot without context may be
 Do not post secrets, API keys, private logs, personal documents, or public IPs in issues or pull requests.
 
 For security reports, follow [SECURITY.md](SECURITY.md).
+
+## Private workspaces and release inputs
+
+Keep every singular `.clanker/` directory private, including contracts, tools,
+plans and notes. Use public source/docs links in contributions; a private local
+receipt is not a working GitHub documentation link. Preserve exact recoverable
+preimages before changing dirty work. Keep user data, runtime credentials and
+operator recovery material out of commits, images and package exports.
+
+Review an explicit file list before staging. Publication checks cover the
+selected index/history and assembled export separately; ignore rules cannot
+sanitize prior commits. Never mirror local recovery/evidence refs. Focused
+artifact/link/UI checks are appropriate for documentation and export changes;
+run behavior checks when the changed behavior requires them.

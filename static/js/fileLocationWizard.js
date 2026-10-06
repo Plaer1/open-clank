@@ -1,4 +1,5 @@
 import { glyphIcon } from './langIcons.js';
+import { topPortalZ } from './toolWindowZOrder.js';
 
 let dialog = null;
 let active = null;
@@ -206,6 +207,7 @@ export function openFileLocationWizardDialog({
   chooseKind('directory');
   setStatus('');
   updateReview();
+  dialog.style.zIndex = String(topPortalZ({ exclude: dialog }));
   dialog.hidden = false;
   const restore = document.activeElement;
   return new Promise(resolve => {

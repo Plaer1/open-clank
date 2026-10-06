@@ -18,7 +18,7 @@ const generation = 7;
 const revision = { kind: 'hostFingerprint', value: 's06-r1' };
 const mountedGates = [
   ['S07 Timeline/TreeHouse mounted production journey', 'tests/s07_timeline_treehouse_mounted_acceptance.mjs'],
-  ['S07 Gallery/Canvas mounted production journey', 'tests/s07_gallery_canvas_mounted_acceptance.mjs'],
+  ['S07 Files/Imps mounted production journey', 'tests/s07_imps_canvas_mounted_acceptance.mjs'],
   ['S06 cold Tasks projection recovery', 'tests/copal_qol2_s06_tasks_cold_projection.py'],
   ['S06 Files linked receipt service matrix', 'tests/copal_qol2_s06_files_receipts.py'],
 ];
@@ -62,7 +62,6 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><link rel="styles
     ['graph', '/static/js/copal/graphModel.js?s06'],
     ['treehouse', '/static/js/copal/treehouse.js?s06'],
     ['planning', '/static/js/copal/planning.js?s06'],
-    ['gallery', '/static/js/gallery.js?s06'],
     ['canvas', '/static/js/editor/clipboard-and-drop.js?s06'],
     ['copal', '/static/js/copal.js?s06'],
     ['notes', '/static/js/copal/notesFeature.js?s06'],
@@ -241,9 +240,9 @@ test('QOL2 S06 integrated authenticated disposable journey', async () => {
       assert.equal(value.timeline.ok, true, JSON.stringify(value)); assert.equal(value.timelineWrong.ok, false, JSON.stringify(value)); assert.equal(value.lesson.supported, true, JSON.stringify(value)); assert.equal(value.folder.supported, false, JSON.stringify(value));
     });
 
-    await check('Gallery exact image classification/export boundary and Canvas MIME seam', async () => {
-      const value = await evaluate(`(() => { const gallery=window.__s06.loaded.gallery; const canvas=window.__s06.loaded.canvas; const image={id:'gallery-1',mime_type:'image/png',file_size:3,readable:true,exportable:true,export_url:'/fixture-image',filename:'photo.png'}; const destination={resource_ref:'s06-root-ref',resource_key:'${account}|${workspace}|host:s06-root',provider:'host',capabilities:['write','children'],revision:{kind:'hostFingerprint',value:'s06-root'}}; const resourceKey='${account}|${workspace}|host:s06-image'; const context={commandId:'s06-canvas',generation:${generation},policyGeneration:${generation},selectionEpoch:1,owner:'${account}',workspace:'${workspace}',pane:'s06-pane',provider:'host',parent:'s06-root-ref',scopeKey:'${account}|${workspace}|host|s06-root-ref||',selectedKeys:[resourceKey],sourceCapabilities:{[resourceKey]:{read:true,open:false,download:true,export:false}},allowCopy:true,allowMove:false}; const payload=canvas.createFilesCanvasImagePayload({ref:'s06-image-ref',resource_key:resourceKey,provider:'host',mime_type:'image/png',size:3,capabilities:['read','download'],revision:${JSON.stringify(revision)}},{account:'${account}',workspace:'${workspace}',operationId:'s06-canvas',itemId:'s06-image',context}); let unscopedRejected=false; try { canvas.createFilesCanvasImagePayload({ref:'s06-image-ref',resource_key:'s06-image-key',provider:'host',mime_type:'image/png',size:3,capabilities:['read','download'],revision:${JSON.stringify(revision)}},{account:'${account}',workspace:'${workspace}',operationId:'s06-canvas',itemId:'s06-image',context}); } catch (_) { unscopedRejected=true; } return {gallery:gallery.classifyGalleryExport(image,destination),denied:gallery.classifyGalleryExport({...image,exportable:false},destination),canvas:payload,unscopedRejected,canvasText:canvas.classifyCanvasDrop({types:['text/plain'],getData:()=> 'heading'})}; })()`);
-      assert.equal(value.gallery.ok, true); assert.equal(value.denied.ok, false); assert.equal(value.canvas.type, 'application/vnd.openclank.files-image+json'); assert.equal(value.canvas.resource_key, `${account}|${workspace}|host:s06-image`); assert.equal(value.unscopedRejected, true); assert.equal(value.canvasText.ok, false);
+    await check('Files Canvas MIME seam rejects unscoped and text drops', async () => {
+      const value = await evaluate(`(() => { const canvas=window.__s06.loaded.canvas; const resourceKey='${account}|${workspace}|host:s06-image'; const context={commandId:'s06-canvas',generation:${generation},policyGeneration:${generation},selectionEpoch:1,owner:'${account}',workspace:'${workspace}',pane:'s06-pane',provider:'host',parent:'s06-root-ref',scopeKey:'${account}|${workspace}|host|s06-root-ref||',selectedKeys:[resourceKey],sourceCapabilities:{[resourceKey]:{read:true,open:false,download:true,export:false}},allowCopy:true,allowMove:false}; const payload=canvas.createFilesCanvasImagePayload({ref:'s06-image-ref',resource_key:resourceKey,provider:'host',mime_type:'image/png',size:3,capabilities:['read','download'],revision:${JSON.stringify(revision)}},{account:'${account}',workspace:'${workspace}',operationId:'s06-canvas',itemId:'s06-image',context}); let unscopedRejected=false; try { canvas.createFilesCanvasImagePayload({ref:'s06-image-ref',resource_key:'s06-image-key',provider:'host',mime_type:'image/png',size:3,capabilities:['read','download'],revision:${JSON.stringify(revision)}},{account:'${account}',workspace:'${workspace}',operationId:'s06-canvas',itemId:'s06-image',context}); } catch (_) { unscopedRejected=true; } return {canvas:payload,unscopedRejected,canvasText:canvas.classifyCanvasDrop({types:['text/plain'],getData:()=> 'heading'})}; })()`);
+      assert.equal(value.canvas.type, 'application/vnd.openclank.files-image+json'); assert.equal(value.canvas.resource_key, `${account}|${workspace}|host:s06-image`); assert.equal(value.unscopedRejected, true); assert.equal(value.canvasText.ok, false);
     });
 
     await check('Lifecycle cleanup leaves no stale S06 owner/listener', async () => {

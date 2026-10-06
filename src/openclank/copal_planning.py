@@ -497,17 +497,7 @@ def planning_projection(docs: Iterable[dict[str, Any]]) -> dict[str, Any]:
     if not registry_doc and not events:
         legacy = next((doc for doc in docs if doc.get("kind") == "planning"), None)
         if legacy:
-            try:
-                payload = json.loads(str(legacy.get("text") or "{}"))
-            except json.JSONDecodeError:
-                payload = {}
-            if isinstance(payload, dict):
-                return {
-                    **payload,
-                    "canonical": False,
-                    "migrationRequired": True,
-                    "legacyDocument": {"id": legacy.get("id"), "head": legacy.get("head")},
-                }
+            raise PlanningValidationError("This planning source uses an unsupported format. Preserve it and convert it offline to current tracks and event documents before reimporting.")
 
     registry = track_registry_from_document(registry_doc)
     tracks = [dict(track, tasks=[]) for track in registry.get("tracks") or []]
@@ -544,56 +534,6 @@ def planning_projection(docs: Iterable[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def legacy_inventory(planning_doc: dict[str, Any]) -> dict[str, Any]:
-    try:
-        data = json.loads(str(planning_doc.get("text") or "{}"))
-    except json.JSONDecodeError as exc:
-        raise PlanningValidationError("Legacy planning document is not valid JSON") from exc
-    if not isinstance(data, dict):
-        raise PlanningValidationError("Legacy planning root must be an object")
-    tracks = _validate_tracks_for_schema(data.get("tracks") or [], schema_version=1)
-    events: list[dict[str, Any]] = []
-    diagnostics: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for source_track in data.get("tracks") or []:
-        track_id = str(source_track.get("id") or "")
-        for index, task in enumerate(source_track.get("tasks") or []):
-            if not isinstance(task, dict):
-                diagnostics.append({"reason": f"non-object task on track {track_id}"})
-                continue
-            legacy_id = str(task.get("id") or f"{track_id}-{index}")
-            if legacy_id in seen:
-                diagnostics.append({"legacyId": legacy_id, "reason": "duplicate task id"})
-                legacy_id = f"{legacy_id}-{index}"
-            seen.add(legacy_id)
-            known = {key: deepcopy(task.get(key)) for key in _EVENT_FIELDS if key in task}
-            extra = {key: deepcopy(value) for key, value in task.items() if key not in {*_EVENT_FIELDS, "id", "description"}}
-            known.update({
-                "legacyId": legacy_id,
-                "title": task.get("title") or task.get("text") or "Untitled event",
-                "description": task.get("description") or "",
-                "trackId": track_id,
-                "copal_extra": extra,
-            })
-            events.append(validate_event(known, tracks))
-    for index, task in enumerate(data.get("floatingTodos") or []):
-        if not isinstance(task, dict):
-            continue
-        legacy_id = str(task.get("id") or f"floating-{index}")
-        extra = {key: deepcopy(value) for key, value in task.items() if key not in {*_EVENT_FIELDS, "id", "description", "text"}}
-        event = {key: deepcopy(task.get(key)) for key in _EVENT_FIELDS if key in task}
-        event.update({
-            "legacyId": legacy_id,
-            "title": task.get("title") or task.get("text") or "Untitled task",
-            "description": task.get("description") or "",
-            "status": task.get("status") or ("done" if task.get("done") else "pending"),
-            "trackId": None,
-            "floating": True,
-            "copal_extra": extra,
-        })
-        events.append(validate_event(event, tracks))
-    metadata = {key: deepcopy(value) for key, value in data.items() if key not in {"tracks", "floatingTodos"}}
-    return {"tracks": tracks, "events": events, "metadata": metadata, "diagnostics": diagnostics}
 
 
 def event_document_name(event: dict[str, Any]) -> str:

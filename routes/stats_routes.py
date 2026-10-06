@@ -21,10 +21,10 @@ from services.stats.query import (StatsQueryError, discover_filters, export_csv,
 from services.stats.query import _public_report
 from services.stats.pricing import InclusionProfile, PricingError, cache_counterfactual, cache_rate, cost_envelope, price_event, resolve_profile
 from services.stats.privacy import IdentityCatalog, identity_handle, safe_scope
+from services.stats.presentation import canonical_labels, chart_events, chart_values
 from services.stats.quota import QuotaError, quota_snapshot
 from services.stats.query import _install_progress_handler
-from src.auth_helpers import _auth_disabled, effective_user, require_user
-from src.owner_identity import LOCAL_INSTALLATION_OWNER
+from src.auth_helpers import effective_user, require_authenticated_request
 
 _QUERY_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="stats-query")
 _QUERY_CAPACITY = threading.BoundedSemaphore(2)
@@ -32,7 +32,10 @@ _QUERY_DEADLINE_SECONDS = 10.0
 _PRICING_PROFILES = {"managed-sdk-inclusive-v1": InclusionProfile(
     "managed-sdk-inclusive-v1", frozenset({"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens"}),
     input_includes_cache_read=True, input_includes_cache_write=True,
-    output_includes_reasoning=True, reasoning_billing="separate")}
+    output_includes_reasoning=True, reasoning_billing="separate"),
+    "openai-wire-inclusive-v1": InclusionProfile("openai-wire-inclusive-v1", frozenset({"input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens"}),
+        input_includes_cache_read=True, input_includes_cache_write=False, output_includes_reasoning=True, reasoning_billing="included_in_output"),
+    "anthropic-wire-separated-v1": InclusionProfile("anthropic-wire-separated-v1", frozenset({"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}))}
 _FILTER_NAMES = ("provider_id", "account_id", "workspace_id", "route_id", "requested_model",
                  "actual_model", "actor_kind", "source", "status")
 _OPAQUE_FILTERS = {"provider_id", "account_id", "workspace_id", "route_id", "requested_model", "actual_model"}
@@ -47,7 +50,9 @@ def _require_opaque_filters(filters: dict[str, str]) -> None:
 def _request_scope(owner, *, period, timezone, start, end, resolution, values):
     scope = parse_scope(owner=owner, period=period, timezone_name=timezone,
                         start=start, end=end, resolution=resolution)
-    return scope, {key: values.get(key) for key in _FILTER_NAMES if values.get(key) is not None}
+    filters = {key: values.get(key) for key in _FILTER_NAMES if values.get(key) is not None}
+    _require_opaque_filters(filters)
+    return scope, filters
 
 
 def _active_price_schedules(db, cancel_event, deadline):
@@ -102,13 +107,11 @@ async def _run_bounded(function):
 
 
 def _owner(request: Request) -> str:
-    user = str(effective_user(request) or "").strip().lower()
-    if user:
-        return user
-    if _auth_disabled():
-        return LOCAL_INSTALLATION_OWNER
-    require_user(request)
-    raise HTTPException(401, "Stats owner scope is unavailable")
+    require_authenticated_request(request)
+    owner = str(effective_user(request) or "").strip().lower()
+    if not owner:
+        raise HTTPException(401, "trusted Stats owner scope is required")
+    return owner
 
 
 def setup_stats_routes(*, session_factory=SessionLocal) -> APIRouter:
@@ -125,10 +128,12 @@ def setup_stats_routes(*, session_factory=SessionLocal) -> APIRouter:
                 "quota": {"status": "partial", "owner": "S02",
                            "details": "owner-scoped passive API capacity adapters and snapshots are implemented; subscription quota, provider cache refresh, and single-flight wiring remain unavailable"},
                 "pricing": {"status": "implemented", "owner": "S03", "details": "admitted schedules only; missing or mixed-currency facts remain explicitly unpriced"},
-                "activity": {"status": "implemented", "owner": "S08", "details": "owner-scoped bounded activity projection; tools and skills evidence remain unavailable"},
+                "activity": {"status": "implemented", "owner": "S08", "details": "owner-scoped bounded activity projection with measured tool and skill evidence from the canonical archive; missing evidence and timing remain explicitly unavailable"},
                 "trends": {"status": "implemented", "owner": "S09", "details": "explicit content opt-in and owner-scoped POST body terms"},
                 "quality": {"status": "implemented", "owner": "S09", "details": "formula-versioned quality projection with opaque evidence handles"},
-                "precision_logging": {"status": "unavailable", "details": "optional precision logging is disabled; no raw diagnostic payloads are retained"},
+                "precision_logging": {"status": "implemented", "owner_scoped": True,
+                                      "details": "ordinary usage is recorded independently of Advanced capture; optional diagnostic detail follows account policy, redaction, and retention",
+                                      "policy_path": "/api/logging/v1/policy", "status_path": "/api/logging/v1/status"},
             },
             "limits": {"max_facts": 100000, "max_buckets": 1000, "max_page": 100,
                        "max_top": 20, "max_export_bytes": 5 * 1024 * 1024},
@@ -241,51 +246,59 @@ def setup_stats_routes(*, session_factory=SessionLocal) -> APIRouter:
             raise HTTPException(422, str(exc)) from exc
 
     @router.get("/sessions/top")
-    async def top_sessions_early(request: Request, period: str = "30d", timezone: str = "UTC", rank: str = Query("tokens", pattern="^(tokens|cost)$"), limit: int = Query(10, ge=1, le=20)):
-        """Keep the collection resource ahead of the owner-checked item route."""
+    async def top_sessions_early(request: Request, period: str = "30d", timezone: str = "UTC",
+                                 rank: str = Query("tokens", pattern="^(tokens|cost)$"), limit: int = Query(10, ge=1, le=20),
+                                 start: str | None = None, end: str | None = None,
+                                 provider_id: str | None = None, account_id: str | None = None,
+                                 actual_model: str | None = None, workspace_id: str | None = None):
+        """Rank admitted observations, keeping unavailable metrics after numbers."""
         owner = _owner(request)
+        try:
+            scope, filters = _request_scope(owner, period=period, timezone=timezone, start=start, end=end,
+                                            resolution="day", values=locals())
+        except StatsQueryError as exc:
+            raise HTTPException(422, str(exc)) from exc
         def run(cancel_event, deadline):
+            from services.stats.presentation import session_metrics, catalogs
+            from fractions import Fraction
             db = session_factory()
             try:
-                scope, filters = _request_scope(owner, period=period, timezone=timezone, start=None, end=None, resolution="day", values=locals())
-                projection, truncated = admitted_events(db, scope, filters=filters, cancel_event=cancel_event, deadline=deadline)
-                events = projection.events
-                schedules = _active_price_schedules(db, cancel_event, deadline)
-                totals = defaultdict(lambda: {"token_records": [], "cost": 0, "cost_currency": None, "priced": True})
-                for event in events:
-                    if event.session_id:
-                        known = event.input_tokens is not None or event.output_tokens is not None
-                        token_state = "estimated" if "estimated" in {event.input_tokens_state, event.output_tokens_state} else "reported"
-                        if not known: token_state = "unavailable"
-                        elif event.input_tokens is None or event.output_tokens is None: token_state = "partial"
-                        totals[event.session_id]["token_records"].append((((event.input_tokens or 0) + (event.output_tokens or 0)) if known else None, token_state))
-                        components = price_event(event, schedules, inclusion_profile=resolve_profile(event, _PRICING_PROFILES), cancel_event=cancel_event, deadline=deadline)
-                        priced_components = [component for component in components if component.amount is not None]
-                        currencies = {component.currency for component in priced_components}
-                        blocking = {component.reason for component in components if component.state == "unpriced"} & {"missing_required_subset", "invalid_count", "no_exact_effective_schedule"}
-                        if not priced_components or len(currencies) != 1 or blocking:
-                            totals[event.session_id]["priced"] = False
-                        else:
-                            currency = next(iter(currencies))
-                            if totals[event.session_id]["cost_currency"] not in (None, currency): totals[event.session_id]["priced"] = False
-                            totals[event.session_id]["cost_currency"] = currency
-                            totals[event.session_id]["cost"] += sum(component.amount for component in priced_components)
-                for summary in totals.values(): summary["tokens"] = _aggregate(summary.pop("token_records"))
-                candidate_ids = sorted(totals, key=lambda session_id: (totals[session_id].get("tokens", {}).get("value", 0) if rank == "tokens" else (totals[session_id].get("cost", 0) if totals[session_id].get("priced") else -1)), reverse=True)[:1001]
-                rows = db.query(DbSession).filter(DbSession.owner == owner, DbSession.id.in_(candidate_ids)).limit(1001).all()
-                candidate_truncated = len(totals) > 1001
-                result = []
-                for row in sorted(rows, key=lambda item: (totals.get(item.id, {}).get("tokens", {}).get("value", 0) if rank == "tokens" else (totals.get(item.id, {}).get("cost", 0) if totals.get(item.id, {}).get("priced") else -1)), reverse=True)[:limit]:
-                    if cancel_event.is_set() or time.monotonic() >= deadline: raise TimeoutError("session query deadline exceeded")
-                    summary = totals.get(row.id, {})
-                    token = summary.get("tokens", {"value": None, "state": "unavailable"})
-                    result.append({"handle": identity_handle(owner, "session_id", row.id), "label": "Session", "status": "available", "tokens": {**token, "unit": "tokens"}, "cost": {"value": str(summary.get("cost")), "currency": summary.get("cost_currency"), "state": "reported" if summary.get("priced") and summary.get("cost_currency") else "unpriced"}, "coverage": {"state": "partial_truncated" if truncated else projection.coverage}})
-                choices = {}
-                for dimension, label in (("actual_model", "Model"), ("workspace_id", "Workspace")):
-                    values = sorted({getattr(event, dimension, None) for event in events if getattr(event, dimension, None)})
-                    choices[dimension] = [dict(IdentityCatalog(owner, dimension, values).project(value), label=f"{label} {index + 1}") for index, value in enumerate(values)]
-                catalogs = {dimension: IdentityCatalog(owner, dimension, [getattr(event, dimension, None) for event in events]) for dimension in ("actual_model", "workspace_id")}
-                return {"schema":"open-clank.stats.v1", "scope":safe_scope(owner, {"period": scope.period, "timezone": scope.timezone, "start": scope.start_utc.isoformat() if scope.start_utc else None, "end": scope.end_utc.isoformat() if scope.end_utc else None, "resolution": scope.resolution, "filters": filters}, catalogs=catalogs), "sessions": result, "choices": choices, "coverage":{"state":"partial_truncated" if truncated or candidate_truncated else "complete", "truncated":truncated or candidate_truncated}, "warnings":["session_candidate_cap_reached"] if candidate_truncated else []}
+                request_filters = {**filters, 'period': period, 'timezone': timezone}
+                if start is not None: request_filters['start'] = start
+                if end is not None: request_filters['end'] = end
+                metrics, _, projection, truncated, _, labels = session_metrics(db, owner, request_filters,
+                    cancel_event=cancel_event, deadline=deadline)
+                rows = db.query(DbSession.id, DbSession.name).filter(DbSession.owner == owner, DbSession.id.in_(metrics)).limit(100001).all()
+                result = [{'handle': identity_handle(owner, 'session_id', sid), 'label': name,
+                           'name': name, 'status': 'available', **metrics[sid]} for sid, name in rows]
+                def value(row):
+                    if rank == 'tokens':
+                        metric = row['tokens']
+                        return metric.get('value') if metric.get('value') is not None else int(metric['exact']) if metric.get('exact') else None
+                    amount = row['cost'].get('amount')
+                    try:
+                        return Fraction(amount) if amount is not None else None
+                    except (ValueError, TypeError, ZeroDivisionError):
+                        return None
+                result.sort(key=lambda row: row['handle'])
+                populated = [row for row in result if value(row) is not None]
+                populated.sort(key=value, reverse=True)
+                result = (populated + [row for row in result if value(row) is None])[:limit]
+                identity_catalogs = catalogs(owner, projection.events, labels)
+                from services.stats.query import _resolve_filter_handles
+                resolved = _resolve_filter_handles(db, owner, filters)
+                for dimension, raw in resolved.items():
+                    identity_catalogs[dimension] = IdentityCatalog(owner, dimension,
+                        [raw, *(getattr(event, dimension, None) for event in projection.events)], labels=labels.get(dimension, {}))
+                return {'schema': 'open-clank.stats.v1', 'sessions': result,
+                        'scope': safe_scope(owner, {'period': scope.period, 'timezone': scope.timezone,
+                            'start': scope.start_utc.isoformat() + 'Z' if scope.start_utc else None,
+                            'end': scope.end_utc.isoformat() + 'Z' if scope.end_utc else None,
+                            'resolution': scope.resolution, 'filters': filters}, catalogs=identity_catalogs),
+                        'choices': {dimension: identity_catalogs[dimension].choices() for dimension in ('actual_model', 'workspace_id')},
+                        'filter_semantics': 'session_cohort',
+                        'coverage': {'state': 'partial_truncated' if truncated else projection.coverage, 'truncated': truncated},
+                        'warnings': ['fact_cap_reached'] if truncated else []}
             finally:
                 db.close()
         try:
@@ -345,40 +358,58 @@ def setup_stats_routes(*, session_factory=SessionLocal) -> APIRouter:
             raise HTTPException(422, str(exc)) from exc
 
     @router.get("/buckets")
-    async def buckets(request: Request, period: str = "7d", timezone: str = "UTC", resolution: str = "day", start: str | None = None, end: str | None = None, provider_id: str | None = None, account_id: str | None = None, workspace_id: str | None = None, route_id: str | None = None, requested_model: str | None = None, actual_model: str | None = None, actor_kind: str | None = None, source: str | None = None, status: str | None = None):
+    async def buckets(request: Request, period: str = "7d", timezone: str = "UTC", resolution: str = "day", start: str | None = None, end: str | None = None, provider_id: str | None = None, account_id: str | None = None, workspace_id: str | None = None, route_id: str | None = None, requested_model: str | None = None, actual_model: str | None = None, actor_kind: str | None = None, source: str | None = None, status: str | None = None, metric: str = "output_tokens", group_by: str | None = None):
         try:
             scope, filters = _request_scope(_owner(request), period=period, timezone=timezone, start=start, end=end, resolution=resolution, values=locals())
             def run(cancel_event, deadline):
                 db = session_factory()
                 try:
                     projection, truncated = admitted_events(db, scope, filters=filters, cancel_event=cancel_event, deadline=deadline)
-                    return _public_report({"schema": "open-clank.stats.v1", "scope": {"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": filters}, "formula_revision": "s04-base-v1", "provenance": {"source": "stats_events", "projection": "s01-ledger"}, "buckets": temporal_buckets(projection.events, scope, coverage_known=projection.coverage == "complete" and not truncated, cancel_event=cancel_event, deadline=deadline)}, owner=scope.owner) | {"coverage": {"state": "partial_truncated" if truncated else projection.coverage, "truncated": truncated}, "warnings": ["fact_cap_reached"] if truncated else []}
+                    observations, currency = chart_events(db, projection.events, metric, cancel_event=cancel_event, deadline=deadline)
+                    bucket_rows = chart_values(temporal_buckets(observations, scope, coverage_known=projection.coverage == "complete" and not truncated,
+                                                cancel_event=cancel_event, deadline=deadline), metric, currency)
+                    series = []
+                    if group_by is not None:
+                        if group_by not in {'actual_model', 'workspace_id', 'provider_id'}:
+                            raise StatsQueryError('unsupported chart grouping')
+                        labels = canonical_labels(db, scope.owner)
+                        catalog = IdentityCatalog(scope.owner, group_by, [getattr(e, group_by) for e in observations], labels=labels.get(group_by, {}))
+                        grouped = defaultdict(list)
+                        for event in observations: grouped[getattr(event, group_by)].append(event)
+                        if len(grouped) > 20: raise StatsQueryError('chart series cap exceeded; narrow the scope')
+                        for raw, events in grouped.items():
+                            identity = catalog.project(raw)
+                            series.append({'identity': identity, 'label': identity['label'] if identity else 'Unavailable',
+                                'buckets': chart_values(temporal_buckets(events, scope, coverage_known=projection.coverage == 'complete' and not truncated,
+                                    cancel_event=cancel_event, deadline=deadline), metric, currency)})
+                    return _public_report({"schema": "open-clank.stats.v1", "scope": {"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": filters}, "formula_revision": "s04-base-v1", "provenance": {"source": "stats_events", "projection": "s01-ledger"}, "metric": metric, "group_by": group_by, "series": series, "buckets": bucket_rows}, owner=scope.owner, db=db) | {"coverage": {"state": "partial_truncated" if truncated else projection.coverage, "truncated": truncated}, "warnings": ["fact_cap_reached"] if truncated else []}
                 finally: db.close()
             return await _run_bounded(run)
         except TimeoutError as exc: raise HTTPException(504, str(exc)) from exc
         except (StatsQueryError, PricingError) as exc: raise HTTPException(422, str(exc)) from exc
 
     @router.get("/groups")
-    async def groups(request: Request, field: str, limit: int = Query(10, ge=1, le=20), period: str = "7d", timezone: str = "UTC", start: str | None = None, end: str | None = None, resolution: str = "day", provider_id: str | None = None, account_id: str | None = None, workspace_id: str | None = None, route_id: str | None = None, requested_model: str | None = None, actual_model: str | None = None, actor_kind: str | None = None, source: str | None = None, status: str | None = None):
+    async def groups(request: Request, field: str, limit: int = Query(10, ge=1, le=20), period: str = "7d", timezone: str = "UTC", start: str | None = None, end: str | None = None, resolution: str = "day", provider_id: str | None = None, account_id: str | None = None, workspace_id: str | None = None, route_id: str | None = None, requested_model: str | None = None, actual_model: str | None = None, actor_kind: str | None = None, source: str | None = None, status: str | None = None, metric: str = "output_tokens"):
         try:
             scope, filters = _request_scope(_owner(request), period=period, timezone=timezone, start=start, end=end, resolution=resolution, values=locals())
             def run(cancel_event, deadline):
                 db = session_factory()
                 try:
                     projection, truncated = admitted_events(db, scope, filters=filters, cancel_event=cancel_event, deadline=deadline)
-                    groups = top_n(projection.events, field, limit=limit)
+                    observations, currency = chart_events(db, projection.events, metric, cancel_event=cancel_event, deadline=deadline)
+                    groups = chart_values(top_n(observations, field, limit=limit), metric, currency)
                     if field in {"provider_id", "account_id", "workspace_id", "route_id", "requested_model", "actual_model"}:
-                        catalog = IdentityCatalog(scope.owner, field, [row.get("key") for row in groups if row.get("kind") == "value"])
+                        catalog = IdentityCatalog(scope.owner, field, [row.get("key") for row in groups if row.get("kind") == "value"], labels=canonical_labels(db, scope.owner).get(field, {}))
                         for row in groups:
                             projected = catalog.project(row.get("key"))
                             if projected:
                                 row["identity"] = projected
                                 row["key"] = projected["label"]
-                    return _public_report({"schema": "open-clank.stats.v1", "scope": {"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": filters}, "formula_revision": "s04-base-v1", "provenance": {"source": "stats_events", "projection": "s01-ledger"}, "groups": groups}, owner=scope.owner) | {"coverage": {"state": "partial_truncated" if truncated else projection.coverage, "truncated": truncated}, "warnings": ["fact_cap_reached"] if truncated else []}
+                    return _public_report({"schema": "open-clank.stats.v1", "scope": {"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": filters}, "formula_revision": "s04-base-v1", "provenance": {"source": "stats_events", "projection": "s01-ledger"}, "metric": metric, "groups": groups}, owner=scope.owner, db=db) | {"coverage": {"state": "partial_truncated" if truncated else projection.coverage, "truncated": truncated}, "warnings": ["fact_cap_reached"] if truncated else []}
                 finally: db.close()
             return await _run_bounded(run)
         except TimeoutError as exc: raise HTTPException(504, str(exc)) from exc
-        except StatsQueryError as exc: raise HTTPException(422, str(exc)) from exc
+        except (StatsQueryError, PricingError) as exc: raise HTTPException(422, str(exc)) from exc
 
     @router.get("/cost")
     async def cost(request: Request, period: str = "7d", timezone: str = "UTC", start: str | None = None,
@@ -398,7 +429,7 @@ def setup_stats_routes(*, session_factory=SessionLocal) -> APIRouter:
                     report = cost_envelope(projection.events, schedules, profiles=_PRICING_PROFILES, cancel_event=cancel_event, deadline=deadline, scope={"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": filters})
                     report["coverage"].update({"truncated": truncated, "state": "partial_truncated" if truncated else report["coverage"].get("state", "complete")})
                     if truncated: report["warnings"].append("fact_cap_reached")
-                    return _public_report(report, owner=scope.owner)
+                    return _public_report(report, owner=scope.owner, db=db)
                 finally:
                     db.close()
             return await _run_bounded(run)
@@ -422,7 +453,7 @@ def setup_stats_routes(*, session_factory=SessionLocal) -> APIRouter:
                     result = cache_counterfactual(projection.events, schedules, profiles=_PRICING_PROFILES, cancel_event=cancel_event, deadline=deadline)
                     result["cache_rate"] = cache_rate(projection.events, profiles=_PRICING_PROFILES, cancel_event=cancel_event, deadline=deadline)
                     result.update({"schema": "open-clank.stats.v1", "scope": {"owner": scope.owner, "timezone": scope.timezone, "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None, "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None, "resolution": scope.resolution, "filters": filters}, "coverage": {"truncated": truncated, "state": "partial_truncated" if truncated else projection.coverage}, "formula_revision": "s03-cache-v1", "warnings": (["fact_cap_reached"] if truncated else []) + (["cache_unavailable"] if result.get("state") == "unavailable" else [])})
-                    return _public_report(result, owner=scope.owner)
+                    return _public_report(result, owner=scope.owner, db=db)
                 finally: db.close()
             return await _run_bounded(run)
         except TimeoutError as exc: raise HTTPException(504, str(exc)) from exc
@@ -455,16 +486,22 @@ def setup_stats_routes(*, session_factory=SessionLocal) -> APIRouter:
         owner = _owner(request)
         dimension = payload.get("dimension", "actual_model")
         if dimension not in {"actual_model", "workspace_id"}: raise HTTPException(422, "unsupported comparison dimension")
+        metric = payload.get("metric", "tokens")
+        normalization = payload.get("normalization", "total")
+        if metric not in {"tokens", "cost"} or normalization not in {"total", "per_session"}:
+            raise HTTPException(422, "unsupported comparison metric or normalization")
+        if not isinstance(payload.get("filters", {}), dict): raise HTTPException(422, "filters must be an object")
+        if set(payload.get("filters") or {}) - set(_FILTER_NAMES): raise HTTPException(422, "unsupported comparison filter")
         handles = payload.get("handles") or []
         if not isinstance(handles, list) or len(handles) != 2: raise HTTPException(422, "two comparison handles are required")
         def run(cancel_event, deadline):
             db = session_factory()
             try:
-                scope, filters = _request_scope(owner, period=payload.get("period", "30d"), timezone=payload.get("timezone", "UTC"), start=payload.get("start"), end=payload.get("end"), resolution="day", values={})
+                scope, filters = _request_scope(owner, period=payload.get("period", "30d"), timezone=payload.get("timezone", "UTC"), start=payload.get("start"), end=payload.get("end"), resolution="day", values=payload.get("filters") or {})
                 projection, truncated = admitted_events(db, scope, filters=filters, cancel_event=cancel_event, deadline=deadline)
                 rows = projection.events
                 choices = sorted({getattr(row, dimension, None) for row in rows if getattr(row, dimension, None)})
-                catalog = IdentityCatalog(owner, dimension, choices)
+                catalog = IdentityCatalog(owner, dimension, choices, labels=canonical_labels(db, owner).get(dimension, {}))
                 schedules = _active_price_schedules(db, cancel_event, deadline)
                 resolved=[]
                 for handle in handles:
@@ -479,29 +516,61 @@ def setup_stats_routes(*, session_factory=SessionLocal) -> APIRouter:
                         elif row.input_tokens is None or row.output_tokens is None: state = "partial"
                         token_records.append((((row.input_tokens or 0) + (row.output_tokens or 0)) if known else None, state))
                     token_total = _aggregate(token_records)
-                    costs = defaultdict(int); priced = True
+                    costs = defaultdict(int); priced = True; estimated_cost = False
                     for row in selected:
                         components = price_event(row, schedules, inclusion_profile=resolve_profile(row, _PRICING_PROFILES), cancel_event=cancel_event, deadline=deadline)
                         payable = [component for component in components if component.amount is not None]
+                        estimated_cost = estimated_cost or any(component.state == "estimated" for component in payable)
                         currencies = {component.currency for component in payable}
                         blocking = {component.reason for component in components if component.state == "unpriced"} & {"missing_required_subset", "invalid_count", "no_exact_effective_schedule"}
                         if not payable or len(currencies) != 1 or blocking:
                             priced = False
                         else: costs[next(iter(currencies))] += sum(component.amount for component in payable)
                     public = catalog.project(choice)
-                    resolved.append({"label": public["label"] if public["label"] else ("Model" if dimension=="actual_model" else "Workspace"), "tokens":{**token_total,"unit":"tokens"},"sessions":len({row.session_id for row in selected if row.session_id}), "cost": {"state": "reported", "currency": next(iter(costs), None), "amount": str(next(iter(costs.values()))) } if priced and len(costs) == 1 else {"state": "unpriced"}})
-                currencies = {side["cost"].get("currency") for side in resolved if side["cost"].get("state") == "reported"}
-                if len(resolved) == 2 and all(side["cost"].get("state") == "reported" for side in resolved) and len(currencies) == 1:
-                    from fractions import Fraction
-                    left_amount, right_amount = (Fraction(side["cost"]["amount"]) for side in resolved)
-                    delta = right_amount - left_amount
-                    ratio = right_amount / left_amount if left_amount else None
-                    comparison = {"state": "reported", "currency": next(iter(currencies)), "delta": str(delta), "ratio": ({"numerator": str(ratio.numerator), "denominator": str(ratio.denominator)} if ratio is not None else None)}
-                    coverage = {"state": "complete"}
+                    resolved.append({"label": public["label"] if public["label"] else ("Model" if dimension=="actual_model" else "Workspace"), "tokens":{**token_total,"unit":"tokens"},"sessions":len({row.session_id for row in selected if row.session_id}), "cost": {"state": "estimated" if estimated_cost else "reported", "currency": next(iter(costs), None), "amount": str(next(iter(costs.values()))) } if priced and len(costs) == 1 else {"state": "unpriced"}})
+                from fractions import Fraction
+                amounts = []
+                currencies = set()
+                reason = None
+                for side in resolved:
+                    source = side[metric]
+                    if metric == "tokens":
+                        if source.get("value") is None or source.get("state") == "unavailable":
+                            reason = "token_coverage_unavailable"
+                            break
+                        amount = Fraction(str(source["value"]))
+                    else:
+                        if source.get("state") not in {"reported", "estimated"}:
+                            reason = "unpriced_or_incompatible_currency"
+                            break
+                        currencies.add(source["currency"])
+                        amount = Fraction(source["amount"])
+                    if normalization == "per_session":
+                        if not side["sessions"]:
+                            reason = "session_attribution_unavailable"
+                            break
+                        amount /= side["sessions"]
+                    side["compared_amount"] = str(amount)
+                    amounts.append(amount)
+                if metric == "cost" and len(currencies) != 1:
+                    reason = "unpriced_or_incompatible_currency"
+                if reason or len(amounts) != 2:
+                    comparison = {"state": "unavailable", "reason": reason or "coverage_unavailable"}
                 else:
-                    comparison = {"state":"unavailable","reason":"unpriced_or_incompatible_currency"}
-                    coverage = {"state":"partial_unpriced"}
-                return {"schema":"open-clank.stats.v1","dimension":dimension,"sides":resolved,"comparison":comparison,"coverage": {**coverage, "truncated": truncated}}
+                    ratio = amounts[1] / amounts[0] if amounts[0] else None
+                    partial = truncated or any(side[metric].get("state") not in {"reported", "exact"} for side in resolved)
+                    comparison = {"state": "partial" if partial else "reported", "delta": str(amounts[1] - amounts[0]),
+                                  "unit": "tokens" if metric == "tokens" else "currency_major",
+                                  "normalization": normalization,
+                                  "currency": next(iter(currencies), None),
+                                  "ratio": {"numerator": str(ratio.numerator), "denominator": str(ratio.denominator)} if ratio is not None else None}
+                return _public_report({"schema": "open-clank.stats.v1", "dimension": dimension, "metric": metric,
+                        "normalization": normalization, "sides": resolved, "comparison": comparison,
+                        "scope": {"owner": owner, "timezone": scope.timezone, "period": scope.period,
+                                  "start": scope.start_utc.isoformat() + "Z" if scope.start_utc else None,
+                                  "end": scope.end_utc.isoformat() + "Z" if scope.end_utc else None,
+                                  "resolution": scope.resolution, "filters": filters},
+                        "coverage": {"state": comparison["state"], "truncated": truncated}}, owner=owner, db=db)
             finally: db.close()
         try:
             return await _run_bounded(run)
@@ -578,8 +647,12 @@ def setup_stats_routes(*, session_factory=SessionLocal) -> APIRouter:
                             requested_account_id = IdentityCatalog(owner, "account_id", ids).resolve(requested_account_id)
                         except Exception as exc:
                             raise QuotaError("requested account is unavailable") from exc
-                    return _public_report(quota_snapshot(db, owner=owner, account_id=requested_account_id, session_id=requested_session_id,
-                                          period=period, timezone_name=timezone), owner=owner)
+                    report = quota_snapshot(db, owner=owner, account_id=requested_account_id, session_id=requested_session_id,
+                                          period=period, timezone_name=timezone)
+                    for observation in report.get("observations", []):
+                        observation["provider_handle"] = identity_handle(owner, "provider_id", observation["provider_id"]) if observation.get("provider_id") else None
+                        observation["account_handle"] = identity_handle(owner, "account_id", observation["account_id"]) if observation.get("account_id") is not None else None
+                    return _public_report(report, owner=owner)
                 except OperationalError as exc:
                     if cancel_event.is_set() or time.monotonic() >= deadline: raise TimeoutError("quota query deadline exceeded") from exc
                     raise

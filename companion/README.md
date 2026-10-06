@@ -1,7 +1,7 @@
 # Companion bridge
 
 A thin, additive layer so a LAN client (e.g. a phone) can discover what an
-Odysseus server offers and pair to it, without duplicating any LLM logic.
+Open Clank server offers and pair to it, without duplicating any LLM logic.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
@@ -11,8 +11,10 @@ Odysseus server offers and pair to it, without duplicating any LLM logic.
 | GET | `/api/companion/pair` | **admin cookie** | pairing page (a form; never mints) |
 | POST | `/api/companion/pair` | **admin cookie** | mint a one-time pairing token (`?format=json` for an in-app screen) |
 
-`/models` scopes to the caller's real owner plus legacy null-owner shared rows
-(same rule as `owner_filter`) and never returns API-key material.
+`/models` resolves the caller’s real owner, requires chat scope for bearer
+clients, and lists normalized own/accepted shared routes. A bearer token without
+an owner is refused. The response uses managed endpoint markers and never
+returns provider credentials or raw provider URLs.
 
 ## Pairing CSRF posture
 

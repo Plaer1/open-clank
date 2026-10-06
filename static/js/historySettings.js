@@ -4,6 +4,7 @@
 
   const endpoint = "/api/history/settings";
   const mounted = new WeakMap();
+  const activationObservers = new WeakMap();
 
   function formatBytes(value) {
     const bytes = Number(value || 0);
@@ -103,6 +104,20 @@
       status.textContent = message || "";
       status.dataset.state = error ? "error" : "ok";
     };
+    const ensureRetryButton = () => {
+      let button = container.querySelector("[data-history-retry]");
+      if (!button) {
+        button = document.createElement("button");
+        button.type = "button";
+        button.className = "admin-btn-add";
+        button.dataset.historyRetry = "true";
+        button.textContent = "Retry History";
+        button.style.marginTop = "8px";
+        container.append(button);
+      }
+      button.disabled = false;
+      return button;
+    };
     const sync = () => {
       const policy = state.policy || {};
       const globalPolicy = policy.global || {};
@@ -198,6 +213,14 @@
     if (container && container.dataset.historyActionsBound !== "1") {
       container.dataset.historyActionsBound = "1";
       container.addEventListener("click", (event) => {
+        const retry = event.target.closest?.("[data-history-retry]");
+        if (retry) {
+          event.preventDefault();
+          retry.disabled = true;
+          setStatus("Retrying History service…", false);
+          void mount(container, { force: true }).catch(() => {});
+          return;
+        }
         const button = event.target.closest?.("[data-history-action]");
         const action = button?.dataset.historyAction;
         if (action === "add-workspace") {
@@ -251,6 +274,12 @@
         if (!Number.isFinite(value) || value <= 0) { setStatus("Global limit must be greater than zero.", true); return; }
         patch.global = { total_bytes: value };
       }
+      if (!state || state.status?.available === false) {
+        setStatus("History service is unavailable. Retry before saving settings.", true);
+        ensureRetryButton();
+        if (saveButton) saveButton.disabled = true;
+        return;
+      }
       if (saveButton) saveButton.disabled = true;
       setStatus("Saving…", false);
       try {
@@ -260,22 +289,45 @@
         sync();
         setStatus("History settings saved.", false);
       } catch (error) {
-        if (isCurrent()) setStatus(error.message || "History settings could not be saved.", true);
+        if (isCurrent()) {
+          setStatus(error.message || "History settings could not be saved.", true);
+          if (!error.status || error.status >= 500) {
+            state.status = { ...(state.status || {}), available: false };
+            if (saveButton) saveButton.disabled = true;
+            ensureRetryButton();
+          }
+        }
       } finally {
-        if (isCurrent() && saveButton) saveButton.disabled = false;
+        if (isCurrent() && saveButton && state?.status?.available !== false) saveButton.disabled = false;
       }
     };
+    if (saveButton) saveButton.disabled = true;
+    if (usage) usage.textContent = "Loading measured History usage…";
+    setStatus("Connecting to History service…", false);
     const promise = load({ signal: abort.signal }).then((loaded) => {
       if (!isCurrent()) return loaded;
       state = loaded;
       sync();
       entry.saveListener = saveCurrent;
       saveButton?.addEventListener("click", entry.saveListener);
-      setStatus(loaded.status?.history_paused ? `History capture paused: ${loaded.status.state}. Ordinary saves continue.` : `History capture ${loaded.status?.state || "ready"}.`, false);
+      const available = loaded.status?.available !== false;
+      if (saveButton) saveButton.disabled = !available;
+      if (available) {
+        container.querySelector("[data-history-retry]")?.remove();
+        setStatus(loaded.status?.history_paused ? `History capture paused: ${loaded.status.state}. Ordinary saves continue.` : `History capture ${loaded.status?.state || "ready"}.`, false);
+      } else {
+        setStatus("History service is unavailable. Ordinary saves continue; retry to load History settings.", true);
+        ensureRetryButton();
+      }
       return loaded;
     }).catch((error) => {
-      if (isCurrent()) setStatus(error.message || "History settings unavailable.", true);
-      throw error;
+      if (isCurrent()) {
+        if (usage) usage.textContent = "History usage is unavailable because the History service did not respond.";
+        if (saveButton) saveButton.disabled = true;
+        setStatus(error.message || "History settings unavailable. Ordinary saves continue.", true);
+        ensureRetryButton();
+      }
+      return null;
     });
     entry.promise = promise;
     entry.cleanup = () => {
@@ -286,11 +338,31 @@
   }
 
   function refreshAll(options = {}) {
-    return Promise.all(Array.from(document.querySelectorAll("[data-history-settings]")).map((container) => mount(container, options).catch(() => {})));
+    return Promise.all(Array.from(document.querySelectorAll('[data-settings-panel="history"]'))
+      .filter((panel) => !panel.classList.contains("hidden"))
+      .map((panel) => panel.querySelector("[data-history-settings]"))
+      .filter(Boolean)
+      .map((container) => mount(container, options)));
+  }
+
+  function observeHistoryActivation() {
+    document.querySelectorAll('[data-settings-panel="history"]').forEach((panel) => {
+      if (activationObservers.has(panel)) return;
+      const container = panel.querySelector("[data-history-settings]");
+      if (!container) return;
+      let wasVisible = !panel.classList.contains("hidden");
+      const observer = new MutationObserver(() => {
+        const visible = !panel.classList.contains("hidden");
+        if (visible && !wasVisible) void mount(container, { force: true });
+        wasVisible = visible;
+      });
+      observer.observe(panel, { attributes: true, attributeFilter: ["class"] });
+      activationObservers.set(panel, observer);
+      if (wasVisible) void mount(container, { force: true });
+    });
   }
 
   global.OpenClankHistorySettings = { endpoint, formatBytes, load, save, render, mount, refreshAll };
-  document.addEventListener("DOMContentLoaded", () => { refreshAll(); });
+  document.addEventListener("DOMContentLoaded", observeHistoryActivation);
   document.addEventListener("openclank:auth-context-changed", (event) => { refreshAll({ accountId: event.detail?.accountId, force: true }); });
-  document.addEventListener("openclank:settings-open", () => { refreshAll({ force: true }); });
 })(window);

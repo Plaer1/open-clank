@@ -16,11 +16,11 @@ async def do_edit_image(
     root_operation_id: Optional[str] = None,
     grant_id: Optional[str] = None,
 ) -> Dict:
-    """Edit a Gallery image through the typed MiMo operation router."""
+    """Edit a Files image through the typed MiMo operation router."""
 
-    from src.ai_interaction import _save_managed_gallery_image
-    from src.database import GalleryImage, SessionLocal
-    from src.generated_images import gallery_owner_key, resolve_generated_image_path
+    from src.ai_interaction import _save_managed_files_image
+    from src.generated_images import gallery_owner_key, resolve_gallery_image_path
+    from src.openclank.files_image_store import FilesImageStore
     from src.openclank.modality_facade import transform_image
     from src.openclank.operation_router import (
         ManagedOperationDenied,
@@ -41,25 +41,20 @@ async def do_edit_image(
 
     owner_key = gallery_owner_key(owner)
     if owner_key is None:
-        return {"error": "Gallery image not found", "exit_code": 1}
-
-    with SessionLocal() as db:
-        query = db.query(GalleryImage).filter(
-            GalleryImage.id == image_id,
-            GalleryImage.is_active.is_(True),
-            GalleryImage.owner == owner_key,
-        )
-        source = query.first()
-        if source is None:
-            return {"error": "Gallery image not found", "exit_code": 1}
-        filename = source.filename
-        session_id = source.session_id
+        return {"error": "Files image not found", "exit_code": 1}
 
     try:
-        path = resolve_generated_image_path(filename)
+        source = FilesImageStore().image(owner_key, image_id)
+    except Exception:
+        return {"error": "Files image not found", "exit_code": 1}
+    filename = source.locator
+    session_id = next(iter((source.provenance or {}).get("session_ids", [])), None)
+
+    try:
+        path = resolve_gallery_image_path(filename, require_exists=True)
         image = path.read_bytes()
     except Exception:
-        return {"error": "Gallery image file not found", "exit_code": 1}
+        return {"error": "Files image file not found", "exit_code": 1}
 
     operation = {
         "upscale": "image.upscale",
@@ -137,7 +132,7 @@ async def do_edit_image(
     except Exception:
         return {"error": "Managed image edit failed", "exit_code": 1}
 
-    image_url, new_id = _save_managed_gallery_image(
+    image_url, new_id = _save_managed_files_image(
         image_bytes=output,
         media_type=media_type,
         prompt=prompt or action,

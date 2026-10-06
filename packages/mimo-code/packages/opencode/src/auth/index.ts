@@ -94,54 +94,6 @@ export function legacyAccountID(providerID: string): string {
   return `legacy:${normalizeConnectionID(providerID)}`
 }
 
-/**
- * Explicit reader for the pre-v2 `{ providerID: Auth.Info }` shape. Invalid
- * entries are ignored exactly as the old reader ignored them. Keeping this
- * separate prevents a malformed v2 document from being silently accepted as
- * a legacy store by callers that require strict migration preflight.
- */
-export function readLegacyStore(input: unknown): LegacyStore {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) return {}
-  const decode = Schema.decodeUnknownOption(Info)
-  return Record.filterMap(input as Record<string, unknown>, (value) =>
-    Result.fromOption(decode(value), () => undefined),
-  )
-}
-
-/** Convert the old one-credential-per-provider map into isolated legacy pools. */
-export function migrateLegacyStore(input: unknown): Store {
-  const legacy = readLegacyStore(input)
-  const pools: Record<string, Pool> = {}
-  for (const [rawProviderID, credential] of Object.entries(legacy)) {
-    const connectionID = normalizeConnectionID(rawProviderID)
-    if (!connectionID) continue
-    const accountID = legacyAccountID(connectionID)
-    pools[connectionID] = {
-      connectionID,
-      providerID: connectionID,
-      billingLane: "legacy",
-      revision: 1,
-      cursor: 0,
-      accounts: {
-        [accountID]: {
-          id: accountID,
-          label: "Imported account",
-          enabled: true,
-          order: 0,
-          revision: 1,
-          credentialRevision: 1,
-          credential,
-        },
-      },
-    }
-  }
-  return {
-    version: STORE_VERSION,
-    revision: Object.keys(pools).length === 0 ? 0 : 1,
-    pools,
-  }
-}
-
 export function selectCompatibilityAccount(pool: Pool | undefined): Account | undefined {
   if (!pool) return
   const legacy = pool.accounts[legacyAccountID(pool.connectionID)]
@@ -271,7 +223,8 @@ export const layer = Layer.effect(
       if (typeof raw === "object" && raw !== null && !Array.isArray(raw) && ("version" in raw || "pools" in raw)) {
         return yield* new AuthError({ message: "Invalid versioned provider auth store" })
       }
-      return migrateLegacyStore(raw)
+      if (typeof raw === "object" && raw !== null && !Array.isArray(raw) && Object.keys(raw).length === 0) return emptyStore()
+      return yield* new AuthError({ message: "Legacy provider auth store; run .clanker/tools/native/mimo auth with the explicit auth.json path" })
     })
 
     const persist = (store: Store) =>

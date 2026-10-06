@@ -29,11 +29,13 @@ from src.openclank.managed_protocol import (
     METHOD_DIRECTIONS,
     validate_managed_method_request,
     validate_managed_method_result,
+    prepare_managed_method_validation,
 )
 from src.openclank.generated.managed_provider_contract import (
     OPERATION_METHODS,
     PROVIDER_STORE_METHODS,
     SESSION_METHODS,
+    LOGGING_METHODS,
 )
 from src.openclank.artifacts import ArtifactError, ArtifactStore
 from src.openclank.local_executor import LocalExecutorBroker, LocalExecutorError
@@ -46,7 +48,7 @@ from src.openclank.provider_store import ProviderStore, ProviderStoreError
 
 _GENERATED_CALLBACK_METHODS = tuple(
     method
-    for method in (*PROVIDER_STORE_METHODS, *OPERATION_METHODS)
+    for method in (*PROVIDER_STORE_METHODS, *OPERATION_METHODS, *LOGGING_METHODS)
     if METHOD_DIRECTIONS[method] == "engine_to_host"
 )
 if frozenset(_GENERATED_CALLBACK_METHODS) != HOST_CALLBACK_METHODS - frozenset(SESSION_METHODS):
@@ -129,6 +131,7 @@ class ManagedProviderCallbacks:
         operation_journal: Optional[OperationJournalStore] = None,
         artifact_store: Optional[ArtifactStore] = None,
         executor_broker: Optional[LocalExecutorBroker] = None,
+        capture_store=None,
     ) -> None:
         self._owner = _required_text(owner, "managed worker owner").lower()
         self._holder_id = _required_text(holder_id, "managed worker generation")
@@ -146,6 +149,13 @@ class ManagedProviderCallbacks:
             )
         self._artifact_store = artifact_store
         self._executor_broker = executor_broker
+        if capture_store is None:
+            from src.openclank.logging_capture_store import CAPTURE
+            capture_store = CAPTURE
+        self._capture = capture_store
+        self._logging_operations: dict[str, dict[str, Any]] = {}
+        self._logging_contexts: dict[str, dict[str, Any]] = {}
+        self._logging_context_lock = __import__("threading").RLock()
 
     @property
     def owner(self) -> str:
@@ -247,6 +257,13 @@ class ManagedProviderCallbacks:
                 billing_lane=str(params["billingLane"]),
                 model_route_id=str(params["modelRouteID"]),
             )
+            with self._logging_context_lock:
+                context = self._logging_contexts.get(row.root_operation_id)
+                if context is not None:
+                    # Preserve the existing journal propagation and retain an
+                    # operation-keyed association when roots contain multiple operations.
+                    context["operation_id"] = row.id
+                    self._logging_operations[row.id] = dict(context)
             return self._journal_result(row, replayed=replayed)
         if action == "cas":
             attempt = params.get("attempt")
@@ -374,6 +391,133 @@ class ManagedProviderCallbacks:
         )
         return self._artifact_descriptor(row)
 
+    def register_logging_operation(self, root_operation_id: str, context: Mapping[str, Any]) -> dict[str, Any]:
+        """Supervisor/bridge-only admission; never an engine owner selector."""
+        trusted = {**dict(context), "owner": self._owner, "holder_id": self._holder_id,
+                   "root_operation_id": root_operation_id, "operation_id": context.get("operation_id")}
+        if trusted.get("operation_type") == "chat" and trusted.get("connection_id") and trusted.get("route_id"):
+            journal, _ = self._operation_journal.begin(owner=self._owner, root_operation_id=root_operation_id,
+                operation="chat.complete", idempotency_key="chat_turn_"+root_operation_id,
+                request={"kind": "chat.turn", "root": root_operation_id,
+                         "route": trusted["route_id"], "model": trusted.get("model_id")},
+                connection_id=trusted["connection_id"], billing_lane=trusted.get("billing_lane") or "local",
+                model_route_id=trusted["route_id"])
+            trusted["operation_id"] = journal.id
+            trusted["chat_journal"] = True
+        self._capture.policy.pin_policy(self._owner, root_operation_id, holder_id=self._holder_id,
+                                        incognito=bool(trusted.get("incognito")))
+        with self._logging_context_lock:
+            if len(self._logging_contexts) >= 1000 and root_operation_id not in self._logging_contexts:
+                raise ManagedProviderCallbackError("logging operation capacity unavailable")
+            self._logging_contexts[root_operation_id] = trusted
+            if trusted["operation_id"]:
+                self._logging_operations[trusted["operation_id"]] = dict(trusted)
+        return {"operationID": trusted["operation_id"], "identityCoverage": "complete" if trusted["operation_id"] else "partial"}
+
+    def record_logging_metrics(self, root_operation_id: str, metrics: Mapping[str, Any], outcome: str = "completed") -> bool:
+        """Persist actual final usage through the active trusted journal context."""
+        with self._logging_context_lock:
+            context = dict(self._logging_contexts.get(root_operation_id) or {})
+            if context.get("root_operation_id") != root_operation_id or not context.get("operation_id"):
+                raise ManagedProviderCallbackError("chat usage operation is inactive")
+            if context.get("incognito") or context.get("temporary") or self._capture.policy.private_operation(self._owner, root_operation_id):
+                return False
+            from core.operation_models import OperationJournal
+            from services.stats.ledger import capture_chat_metrics
+            db = self._session_factory()
+            try:
+                journal = db.query(OperationJournal).filter_by(owner=self._owner, id=context["operation_id"], root_operation_id=root_operation_id).first()
+                if journal is None:
+                    raise ManagedProviderCallbackError("chat usage journal is foreign")
+                from core.provider_models import ProviderOperationBinding
+                binding = db.query(ProviderOperationBinding).filter_by(owner=self._owner, root_operation_id=root_operation_id, connection_id=context.get("connection_id"), model_id=context.get("model_id")).first()
+                if binding is not None:
+                    context.update(provider_id=binding.provider_id, account_id=binding.selected_account_id)
+                context["instance_id"] = self._holder_id
+                capture_chat_metrics(db, owner=self._owner, context=context, metrics=metrics, outcome=outcome)
+                db.commit()
+                return True
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+    def finish_logging_operation(self, root_operation_id: str, outcome: str | None = None) -> None:
+        with self._logging_context_lock:
+            context = dict(self._logging_contexts.get(root_operation_id) or {})
+        try:
+            self._capture.finish_operation(self._owner, self._holder_id, root_operation_id)
+            if context.get("chat_journal") and outcome:
+                from core.operation_models import OperationJournal
+                db = self._session_factory()
+                try:
+                    row = db.query(OperationJournal).filter_by(owner=self._owner, id=context["operation_id"]).first()
+                    if row is not None and row.state not in {"complete", "failed", "cancelled"}:
+                        self._operation_journal.cas(owner=self._owner, operation_id=row.id, expected_revision=row.revision,
+                            state="complete" if outcome == "completed" else "cancelled" if outcome == "cancelled" else "failed",
+                            commit_reason="chat_turn_complete" if outcome == "completed" else None)
+                finally:
+                    db.close()
+        finally:
+            with self._logging_context_lock:
+                self._logging_contexts.pop(root_operation_id, None)
+                self._logging_operations = {key: value for key, value in self._logging_operations.items()
+                    if value["root_operation_id"] != root_operation_id}
+
+    def teardown_logging(self) -> None:
+        try:
+            self._capture.interrupt_holder(self._owner, self._holder_id)
+        finally:
+            with self._logging_context_lock:
+                self._logging_contexts.clear()
+                self._logging_operations.clear()
+
+    def _logging_callback(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        if method.endswith("/events"):
+            return self._capture.events(owner=self._owner, holder_id=self._holder_id, payload=params)
+        from core.provider_models import ProviderOperationBinding, ProviderCredentialLease
+        from core.database import utcnow_naive
+        root = str(params["rootOperationID"])
+        with self._logging_context_lock:
+            operation_id = params.get("operationID")
+            context = dict((self._logging_operations.get(operation_id) if operation_id else self._logging_contexts.get(root)) or {})
+            if not operation_id:
+                context["operation_id"] = None
+        if not context.get("root_operation_id") or context["root_operation_id"] != root:
+            raise ManagedProviderCallbackError("logging operation is inactive")
+        db = self._session_factory()
+        try:
+            binding = db.query(ProviderOperationBinding).filter_by(owner=self._owner, id=params["bindingID"], root_operation_id=root).first()
+            if binding is None:
+                raise ManagedProviderCallbackError("logging binding is foreign")
+            if operation_id:
+                from core.operation_models import OperationJournal
+                journal = db.query(OperationJournal).filter_by(owner=self._owner, id=operation_id, root_operation_id=root).first()
+                if journal is None:
+                    raise ManagedProviderCallbackError("logging journal is foreign")
+            allowed = context.get("allowed_routes") or []
+            if allowed and not any(r.get("connectionID") == binding.connection_id and r.get("modelID") == binding.model_id
+                                   and r.get("billingLane") == binding.billing_lane for r in allowed):
+                raise ManagedProviderCallbackError("logging route escaped operation")
+            if context.get("connection_id") and context["connection_id"] != binding.connection_id:
+                raise ManagedProviderCallbackError("logging connection escaped operation")
+            if binding.selected_account_id:
+                lease = db.query(ProviderCredentialLease).filter_by(owner=self._owner, holder_id=self._holder_id,
+                    root_operation_id=root, binding_id=binding.id, account_id=binding.selected_account_id).filter(
+                    ProviderCredentialLease.expires_at > utcnow_naive()).first()
+                if lease is None:
+                    raise ManagedProviderCallbackError("logging credential lease is expired")
+            if allowed:
+                selected = next(r for r in allowed if r.get("connectionID") == binding.connection_id and r.get("modelID") == binding.model_id)
+                context["route_id"] = selected.get("modelRouteID")
+            with self._logging_context_lock:
+                if root not in self._logging_contexts:
+                    raise ManagedProviderCallbackError("logging operation ended during admission")
+                return self._capture.admit(owner=self._owner, holder_id=self._holder_id, context=context, binding=binding)
+        finally:
+            db.close()
+
     async def dispatch(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         """Validate, execute off-loop, and validate one callback round trip."""
 
@@ -381,7 +525,9 @@ class ManagedProviderCallbacks:
             raise ManagedProviderCallbackError("unsupported managed callback")
         try:
             request = validate_managed_method_request(method, params)
-            if method in PROVIDER_CALLBACK_METHODS:
+            if method in LOGGING_METHODS:
+                result = await asyncio.to_thread(self._logging_callback, method, request)
+            elif method in PROVIDER_CALLBACK_METHODS:
                 result = await asyncio.to_thread(
                     self._store.handle_managed_method,
                     owner=self._owner,
@@ -437,6 +583,7 @@ class ManagedProviderCallbacks:
     def register(self, client: Any) -> None:
         """Register exact owner-bound methods on an :class:`ACPClient`."""
 
+        prepare_managed_method_validation()
         for method in MANAGED_CALLBACK_METHODS:
             async def callback(
                 params: dict,

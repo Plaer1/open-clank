@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 import core.database as cdb
-from core.database import GalleryImage
+from core.database import FilesImageResource
 from src import generated_images
 from src.upload_handler import count_recent_uploads, UploadHandler
 import routes.upload_routes as up
@@ -195,15 +195,15 @@ async def test_chat_image_upload_is_added_to_gallery(tmp_path, monkeypatch):
     result = await endpoint(_request(user="alice"), [_image_upload()])
     uploaded = result["files"][0]
 
-    assert uploaded["gallery_id"]
+    assert uploaded["image_id"]
     db = TestingSession()
     try:
-        image = db.query(GalleryImage).filter(GalleryImage.id == uploaded["gallery_id"]).one()
+        image = db.query(FilesImageResource).filter(FilesImageResource.id == uploaded["image_id"]).one()
         assert image.owner == "alice"
-        assert image.model == "chat-upload"
-        assert image.prompt == "photo.png"
-        assert image.file_hash == uploaded["hash"]
-        assert (gallery_dir / image.filename).exists()
+        assert image.provenance["model"] == "chat-upload"
+        assert image.provenance["prompt"] == "photo.png"
+        assert image.digest == uploaded["hash"]
+        assert (gallery_dir / image.locator).exists()
     finally:
         db.close()
 
@@ -232,9 +232,32 @@ async def test_non_image_chat_upload_is_not_added_to_gallery(tmp_path, monkeypat
         file=io.BytesIO(b"plain text upload"),
     )])
 
-    assert "gallery_id" not in result["files"][0]
+    assert "image_id" not in result["files"][0]
     db = TestingSession()
     try:
-        assert db.query(GalleryImage).count() == 0
+        assert db.query(FilesImageResource).count() == 0
     finally:
         db.close()
+
+
+def _files_image(**values):
+    """Build a Files-owned resource from legacy fixture metadata."""
+    filename = values.pop("filename", values.pop("name", "image"))
+    parent_id = values.pop("album_id", values.pop("parent_id", None))
+    prompt = values.pop("prompt", None)
+    model = values.pop("model", None)
+    file_hash = values.pop("file_hash", values.pop("digest", None))
+    size = values.pop("file_size", values.pop("size", 0))
+    provenance = dict(values.pop("provenance", {}) or {})
+    for key, value in (("prompt", prompt), ("model", model)):
+        if value is not None:
+            provenance[key] = value
+    is_folder = not filename or ("name" in values and parent_id is None)
+    return FilesImageResource(
+        id=values.pop("id"), owner=values.pop("owner", "alice"),
+        kind="folder" if is_folder else "image", parent_id=parent_id,
+        display_name=filename, locator=values.pop("locator", filename),
+        digest=file_hash, size=size, mime_type=values.pop("mime_type", None),
+        favorite=values.pop("favorite", False), is_active=values.pop("is_active", True),
+        provenance=provenance or None, **values,
+    )

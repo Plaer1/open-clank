@@ -1,7 +1,9 @@
+import { uiIcon, setUiIconText } from './uiIcons.js';
 // static/js/settings.js — Settings panel module (ES6)
 // User-facing preferences: AI models, search, appearance
 
 import uiModule from './ui.js';
+import { resetMyAchievements, mountAchievementNotificationSettings } from './achievementClient.js';
 import searchModule from './search.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { clearDockSide } from './modalSnap.js';
@@ -12,6 +14,8 @@ import { isAltGrEvent } from './platform.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import providerControl from './providerControl.js';
 import { getWorkspaceId } from './workspace.js';
+import { mountGeneralHexLibrary } from './generalHexLibrary.js';
+import { mountLoggingSettings } from './loggingSettings.js';
 
 let initialized = false;
 let modalEl = null;
@@ -47,9 +51,13 @@ const SETTINGS_OWNERSHIP = Object.freeze({
   integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Open Clank services and approved agent integrations' },
   email: { scope: 'per-user', api: '/api/email', consumer: 'mail tools and composition' },
   reminders: { scope: 'per-user', api: '/api/auth/settings', consumer: 'reminder delivery' },
+  logging: { scope: 'per-user', api: '/api/logging/v1/policy', consumer: 'Open Clank capture, storage and display preferences' },
+  hexes: { scope: 'per-user', api: '/api/hexes', consumer: 'saved General defaults and the current Workspace contract' },
   history: { scope: 'shared-policy', api: '/api/history/settings', consumer: 'Lore history usage and retention budgets' },
   appearance: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
   shortcuts: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
+  help: { scope: 'shared-content', api: '/api/copal/official/docs', consumer: 'Open Clank handbook and documentation' },
+  advanced: { scope: 'per-user', api: '/api/copal/treehouse/achievements/reset', consumer: 'your achievement progress and unlocks' },
   account: { scope: 'per-user', api: '/api/auth', consumer: 'current account lifecycle' },
   tools: { scope: 'global-admin', api: '/api/settings', consumer: 'Open Clank effective tool policy' },
   'file-access': { scope: 'shared-policy', api: '/api/file-policy/state + /api/file-policy/locations + /api/file-policy/people', consumer: 'Locations, People access, and separate agent approvals' },
@@ -75,9 +83,16 @@ const PANEL_ALIASES = Object.freeze({
   fileaccess: 'file-access',
   filesystem: 'file-access',
   locations: 'file-access',
+  logs: 'logging',
+  'advanced logging': 'logging',
+  hex: 'hexes',
+  'general hexes': 'hexes',
   lore: 'history',
   retention: 'history',
   'history usage': 'history',
+  docs: 'help',
+  documentation: 'help',
+  handbook: 'help',
   theme: 'appearance',
   themes: 'appearance',
   models: 'services',
@@ -108,11 +123,39 @@ function activatePanel(tab) {
   modalEl?.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
   document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
   syncAppearanceOpacity(tab === 'appearance');
+  if (tab === 'logging') {
+    const root = modalEl?.querySelector('[data-logging-settings]');
+    if (root?.dataset.loggingMounted) root.dispatchEvent(new Event('logging-settings-refresh'));
+    else mountLoggingSettings(root);
+  }
+  if (tab === 'hexes') {
+    const root = modalEl?.querySelector('[data-general-hex-library]');
+    if (root?.dataset.hexMounted) root.dispatchEvent(new Event('hex-refresh'));
+    else mountGeneralHexLibrary(root);
+  }
+  if (tab === 'file-access') void loadFileAccessSettings();
+  if (tab === 'advanced') {
+    mountAchievementNotificationSettings(modalEl?.querySelector('[data-achievement-notification-settings]'));
+    const button = el('settings-reset-achievements');
+    if (button && !button.dataset.bound) {
+      button.dataset.bound = '1';
+      button.onclick = async () => {
+        if (!await uiModule.styledConfirm('Reset your account-wide achievement progress and unlocks? This clears achievement receipts and pending unlock notifications. Your courses, source activity history, and other accounts are preserved. Achievements can be earned again through new activity.', { title: 'Reset achievements', confirmText: 'Reset achievements', danger: true })) return;
+        button.disabled = true;
+        const status = el('settings-achievement-reset-status');
+        try {
+          await resetMyAchievements();
+          if (status) status.textContent = 'Your achievement progress and unlocks have been reset.';
+          uiModule.showToast('Achievements reset');
+        } catch (error) { if (status) status.textContent = error.message; }
+        finally { button.disabled = false; }
+      };
+    }
+  }
   if (_activatedPanels.has(tab)) return;
   _activatedPanels.add(tab);
   if (tab === 'appearance') syncCopalNotesSettings();
   if (tab === 'ai') activateAiSettings();
-  if (tab === 'file-access') { loadFilesystemRoots(); loadPermissionGrants(); initPermissionResetControls(); }
   if (MODEL_MANAGEMENT_TABS.has(tab)) {
     providerControl.load({ view: tab });
   }
@@ -145,10 +188,28 @@ function applyOwnershipManifest() {
     if (panel && !panel.querySelector(':scope > .settings-scope-label')) {
       const label = document.createElement('div');
       label.className = 'settings-scope-label';
-      label.textContent = `${owner.scope} · ${owner.consumer}`;
+      label.textContent = tab === 'file-access' ? 'Files and agent permissions' : `${owner.scope} · ${owner.consumer}`;
+      if (tab === 'file-access') label.style.textTransform = 'none';
       panel.prepend(label);
     }
     if (panel) applyControlOwnership(panel);
+  }
+}
+
+function initHelpLinks() {
+  for (const [id, presentation] of [['settings-help-wiki', 'wiki'], ['settings-help-copal', 'copal']]) {
+    el(id)?.addEventListener('click', async () => {
+      const status = el('settings-help-status');
+      if (status) status.textContent = 'Opening handbook…';
+      try {
+        const opened = await window.openClankHandbook?.({ presentation });
+        if (!opened) throw new Error('The handbook is not available yet. Retry opening Wiki documentation or the Copal handbook.');
+        if (status) status.textContent = '';
+        close();
+      } catch (error) {
+        if (status) status.textContent = error.message || 'Could not open the handbook.';
+      }
+    });
   }
 }
 
@@ -1634,7 +1695,7 @@ async function initSearchSettings() {
       .filter(function(o) { return !inChain.has(o.value); });
   }
   var addBtn = el('set-searchAddFallback');
-  var TRASH_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
+  var TRASH_SVG = uiIcon("trash",20,{"role":"inherit"});
   function _renderFallbackChain() {
     if (!fbWrap) return;
     var chain = (_settings.search_fallback_chain || []).slice();
@@ -1763,18 +1824,18 @@ async function initSearchSettings() {
         var d = await r.json();
         var ms = Math.round(performance.now() - t0);
         if (d.error) {
-          msg.textContent = '✗ ' + d.error + ' (' + ms + 'ms)';
+          setControlMessage(msg, '✗ ' + d.error + ' (' + ms + 'ms)');
           msg.style.color = 'var(--red)';
         } else if (!d.results || !d.results.length) {
-          msg.textContent = '⚠ No results returned (' + ms + 'ms)';
+          setControlMessage(msg, '⚠ No results returned (' + ms + 'ms)');
           msg.style.color = 'var(--red)';
         } else {
           var topTitle = (d.results[0].title || d.results[0].url || '').slice(0, 60);
-          msg.textContent = '✓ ' + d.results.length + ' result' + (d.results.length === 1 ? '' : 's') + ' · ' + ms + 'ms · top: ' + topTitle;
+          setControlMessage(msg, '✓ ' + d.results.length + ' result' + (d.results.length === 1 ? '' : 's') + ' · ' + ms + 'ms · top: ' + topTitle);
           msg.style.color = 'var(--fg)';
         }
       } catch (e) {
-        msg.textContent = '✗ Test failed: ' + (e && e.message ? e.message : e);
+        setControlMessage(msg, '✗ Test failed: ' + (e && e.message ? e.message : e));
         msg.style.color = 'var(--red)';
       } finally {
         if (wp) { try { wp.destroy(); } catch (_) {} }
@@ -1792,7 +1853,7 @@ var _SEARCH_PROVIDER_LOGOS = {
   google_pse:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M21.35 11.1H12v3.2h5.35c-.5 2.4-2.55 4-5.35 4-3.25 0-5.9-2.65-5.9-5.9s2.65-5.9 5.9-5.9c1.55 0 2.95.55 4.05 1.55l2.4-2.4C16.85 4.05 14.55 3 12 3 7 3 3 7 3 12s4 9 9 9c5.2 0 8.65-3.65 8.65-8.8 0-.4-.05-.7-.3-1.1z"/></svg>',
   tavily:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 8.5l4 2.5v6l6 3.5 6-3.5v-6l4-2.5L12 2zm-4 9.5L12 14l4-2.5V16l-4 2.5L8 16v-4.5z"/></svg>',
   serper:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 4a7 7 0 1 0 4.2 12.6l4.5 4.5 1.4-1.4-4.5-4.5A7 7 0 0 0 11 4zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm-1 2v2H8v2h2v2h2v-2h2V10h-2V8h-2z"/></svg>',
-  disabled:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+  disabled:  uiIcon("unavailable",16,{"role":"inherit"}),
 };
 
 /* ── Deep Research Model (AI tab) ── */
@@ -2264,6 +2325,9 @@ function initCopalAppearanceControls() {
   const renderPanels = () => {
     if (!panels || !_copalModule?.getNotesPanels) return;
     panels.replaceChildren();
+    const customize = document.createElement('button'); customize.type = 'button'; customize.className = 'copal-btn'; customize.textContent = 'Customize Explorer…';
+    customize.addEventListener('click', () => { try { _copalModule.customizeExplorer(); } catch (error) { window.uiModule?.showToast?.(error.message); } });
+    panels.append(customize);
     let panelItems;
     try { panelItems = _copalModule.getNotesPanels(); } catch (_) {
       const message = document.createElement('p');
@@ -2279,8 +2343,8 @@ function initCopalAppearanceControls() {
       const side = document.createElement('select'); side.className = 'settings-select'; side.innerHTML = '<option value="left">Left</option><option value="right">Right</option>'; side.value = item.side;
       side.addEventListener('change', async () => { await _copalModule.updateNotesPanel(item.id, { side: side.value }); renderPanels(); });
       const visible = document.createElement('input'); visible.type = 'checkbox'; visible.checked = !item.hidden; visible.addEventListener('change', async () => { await _copalModule.updateNotesPanel(item.id, { hidden: !visible.checked }); renderPanels(); });
-      const up = document.createElement('button'); up.type = 'button'; up.className = 'copal-btn'; up.textContent = '↑'; up.disabled = item.hidden; up.addEventListener('click', async () => { await _copalModule.updateNotesPanel(item.id, { move: 'up' }); renderPanels(); });
-      const down = document.createElement('button'); down.type = 'button'; down.className = 'copal-btn'; down.textContent = '↓'; down.disabled = item.hidden; down.addEventListener('click', async () => { await _copalModule.updateNotesPanel(item.id, { move: 'down' }); renderPanels(); });
+      const up = document.createElement('button'); up.type = 'button'; up.className = 'copal-btn'; up.innerHTML = uiIcon('chevron-up', 14); up.setAttribute('aria-label', 'Move panel up'); up.disabled = item.hidden; up.addEventListener('click', async () => { await _copalModule.updateNotesPanel(item.id, { move: 'up' }); renderPanels(); });
+      const down = document.createElement('button'); down.type = 'button'; down.className = 'copal-btn'; down.innerHTML = uiIcon('chevron-down', 14); down.setAttribute('aria-label', 'Move panel down'); down.disabled = item.hidden; down.addEventListener('click', async () => { await _copalModule.updateNotesPanel(item.id, { move: 'down' }); renderPanels(); });
       row.append(label, side, visible, up, down); panels.append(row);
     }
   };
@@ -2328,7 +2392,6 @@ const SHORTCUT_DEFAULTS = {
   open_compare:   '',
   open_cookbook:  '',
   open_research:  '',
-  open_gallery:   '',
   open_library:   '',
   open_memory:    '',
   open_notes:     '',
@@ -2338,27 +2401,26 @@ const SHORTCUT_DEFAULTS = {
 };
 
 const SHORTCUT_ICONS = {
-  search:         '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-4.35-4.35"/></svg>',
-  toggle_sidebar: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
-  new_session:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
-  fav_session:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
-  delete_session: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
-  cancel:         '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
-  tts:            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>',
-  incognito:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>',
-  settings:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
-  focus_input:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
-  open_calendar:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
-  open_compare:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg>',
-  open_cookbook:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
-  open_research:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
-  open_gallery:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
-  open_library:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
-  open_memory:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>',
-  open_notes:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg>',
-  open_tasks:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>',
-  open_theme:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg>',
-  open_usage:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M7 15l3-4 3 2 4-6"/></svg>',
+  search:         uiIcon("search",14,{"role":"inherit"}),
+  toggle_sidebar: uiIcon("menu",14,{"role":"inherit"}),
+  new_session:    uiIcon("add",14,{"role":"inherit"}),
+  fav_session:    uiIcon("bookmark",14,{"role":"inherit"}),
+  delete_session: uiIcon("trash",14,{"role":"inherit"}),
+  cancel:         uiIcon("close",14,{"role":"inherit"}),
+  tts:            uiIcon("audio",14,{"role":"inherit"}),
+  incognito:      uiIcon("eye-off",14,{"role":"inherit"}),
+  settings:       uiIcon("settings",14,{"role":"inherit"}),
+  focus_input:    uiIcon("chat",14,{"role":"inherit"}),
+  open_calendar:  uiIcon("calendar",14,{"role":"inherit"}),
+  open_compare:   uiIcon("compare",14,{"role":"inherit"}),
+  open_cookbook:  uiIcon("cookbook",14,{"role":"inherit"}),
+  open_research:  uiIcon("research",14,{"role":"inherit"}),
+  open_library:   uiIcon("library",14,{"role":"inherit"}),
+  open_memory:    uiIcon("memory",14,{"role":"inherit"}),
+  open_notes:     uiIcon("code",14,{"role":"inherit"}),
+  open_tasks:     uiIcon("tasks",14,{"role":"inherit"}),
+  open_theme:     uiIcon("hue",14,{"role":"inherit"}),
+  open_usage:     uiIcon("usage",14,{"role":"inherit"}),
 };
 
 const SHORTCUT_LABELS = {
@@ -2376,7 +2438,6 @@ const SHORTCUT_LABELS = {
   open_compare:   'Open Compare',
   open_cookbook:  'Open Cookbook',
   open_research:  'Open Deep Research',
-  open_gallery:   'Open Gallery',
   open_library:   'Open Library',
   open_memory:    'Open Memory',
   open_notes:     'Open Editor',
@@ -2389,7 +2450,7 @@ const SHORTCUT_CATEGORIES = [
   { name: 'Navigation', keys: ['search', 'toggle_sidebar', 'focus_input', 'settings'] },
   { name: 'Sessions', keys: ['new_session', 'fav_session', 'delete_session'] },
   { name: 'Tools', keys: ['incognito', 'tts', 'cancel'] },
-  { name: 'Open Tools', keys: ['open_calendar', 'open_compare', 'open_cookbook', 'open_research', 'open_gallery', 'open_library', 'open_memory', 'open_notes', 'open_tasks', 'open_theme', 'open_usage'] },
+  { name: 'Open Tools', keys: ['open_calendar', 'open_compare', 'open_cookbook', 'open_research', 'open_library', 'open_memory', 'open_notes', 'open_tasks', 'open_theme', 'open_usage'] },
 ];
 
 function _formatKeyCaps(combo) {
@@ -2474,14 +2535,14 @@ async function initShortcuts() {
         row.dataset.action = action;
         const keyContent = combo ? _formatKeyCaps(combo) : '<span class="shortcut-unset">Set</span>';
         row.innerHTML = `
-          <span class="shortcut-label"><span class="shortcut-icon">${icon}</span>${esc(label)}${hasConflict ? '<span class="shortcut-warn" title="Duplicate shortcut">!</span>' : ''}</span>
+          <span class="shortcut-label"><span class="shortcut-icon">${icon}</span>${esc(label)}${hasConflict ? '<span class="shortcut-warn" title="Duplicate shortcut">' + uiIcon("warning", 12, { role:"inherit" }) + '</span>' : ''}</span>
           <div class="shortcut-controls">
             <span class="shortcut-hint" hidden></span>
             <button class="shortcut-key${combo ? '' : ' shortcut-key-unset'}" data-action="${action}" title="Click to rebind">${keyContent}</button>
             <button class="shortcut-action-btn ${isCustom ? 'is-reset' : ''}" data-action="${action}" title="${isCustom ? 'Reset to default' : 'Confirm'}" style="${isCustom ? '' : 'visibility:hidden'}">
               ${isCustom
-                ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>'
-                : '\u2713'}
+                ? uiIcon("restore",13,{"role":"inherit"})
+                : uiIcon('check', 13, { role:'inherit' })}
             </button>
           </div>
         `;
@@ -2521,7 +2582,7 @@ async function initShortcuts() {
     btn.classList.add('listening');
     btn.textContent = 'Press keys...';
     // Show confirm button
-    actionBtn.textContent = '\u2713';
+    setControlMessage(actionBtn, '\u2713');
     actionBtn.classList.remove('is-reset');
     actionBtn.style.visibility = 'visible';
     actionBtn.title = 'Confirm';
@@ -2553,7 +2614,7 @@ async function initShortcuts() {
         btn.innerHTML = _formatKeyCaps(keybinds[action]);
         const isCustom = keybinds[action] !== SHORTCUT_DEFAULTS[action];
         if (isCustom) {
-          actionBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+          actionBtn.innerHTML = uiIcon("restore",13,{"role":"inherit"});
           actionBtn.classList.add('is-reset');
           actionBtn.title = 'Reset to default';
         } else {
@@ -2577,7 +2638,7 @@ async function initShortcuts() {
       pendingCombo = combo;
       btn.innerHTML = _formatKeyCaps(combo);
       // Now that a combo is captured, prompt to commit with Enter.
-      if (hintEl) hintEl.textContent = '\u21B5 Enter to save';
+      if (hintEl) setUiIconText(hintEl, 'enter', 'Enter to save', 11);
     }
 
     function cleanup() {
@@ -2718,7 +2779,7 @@ function initAccount() {
           // 2FA is ON — show disable option
           tfaContent.innerHTML = `
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
-              <span style="color:var(--color-save-green, #4caf50);font-size:12px;font-weight:600;">&#x2713; Enabled</span>
+              <span style="color:var(--color-save-green, #4caf50);font-size:12px;font-weight:600;">${uiIcon("check", 12, { role:"inherit" })} Enabled</span>
               <span style="font-size:11px;opacity:0.5;">Authenticator app required on login</span>
             </div>
             <input id="tfa-disable-pw" type="password" placeholder="Enter password to disable" autocomplete="current-password" style="padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;font-size:12px;width:100%;box-sizing:border-box;margin-bottom:6px;">
@@ -2786,7 +2847,7 @@ function initAccount() {
                   // Show backup codes
                   const codes = result.backup_codes || [];
                   tfaContent.innerHTML = `
-                    <div style="color:var(--color-save-green, #4caf50);font-size:13px;font-weight:600;margin-bottom:8px;">&#x2713; 2FA Enabled!</div>
+                    <div style="color:var(--color-save-green, #4caf50);font-size:13px;font-weight:600;margin-bottom:8px;">${uiIcon("check", 12, { role:"inherit" })} 2FA Enabled!</div>
                     <div style="font-size:12px;opacity:0.7;margin-bottom:8px;">Save these backup codes somewhere safe. Each can be used once if you lose your authenticator:</div>
                     <div style="font-family:monospace;font-size:12px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;columns:2;column-gap:16px;margin-bottom:8px;">${codes.map(c => '<div style="margin-bottom:2px;">' + c + '</div>').join('')}</div>
                     <button class="admin-btn-add" id="tfa-done-btn">Done</button>`;
@@ -2845,6 +2906,7 @@ function initAll() {
     }
   }).observe(modalEl, { childList: true, subtree: true });
   initTabs();
+  initHelpLinks();
   initSettingsFinder();
   providerControl.init({
     onCatalogChanged: async () => {
@@ -3124,10 +3186,10 @@ async function initReminderSettings() {
       remove.textContent = 'Remove';
       const moveUp = document.createElement('button');
       moveUp.type = 'button'; moveUp.className = 'admin-btn-sm reminder-endpoint-up';
-      moveUp.textContent = '↑'; moveUp.title = 'Move endpoint up'; moveUp.disabled = index === 0;
+      moveUp.innerHTML = uiIcon('chevron-up', 14); moveUp.setAttribute('aria-label', 'Move endpoint up'); moveUp.title = 'Move endpoint up'; moveUp.disabled = index === 0;
       const moveDown = document.createElement('button');
       moveDown.type = 'button'; moveDown.className = 'admin-btn-sm reminder-endpoint-down';
-      moveDown.textContent = '↓'; moveDown.title = 'Move endpoint down'; moveDown.disabled = index === endpointDraft.length - 1;
+      moveDown.innerHTML = uiIcon('chevron-down', 14); moveDown.setAttribute('aria-label', 'Move endpoint down'); moveDown.title = 'Move endpoint down'; moveDown.disabled = index === endpointDraft.length - 1;
       const test = document.createElement('button');
       test.type = 'button'; test.className = 'admin-btn-sm reminder-endpoint-test';
       test.textContent = 'Test';
@@ -3711,7 +3773,7 @@ async function initEmailAccountsSettings() {
         <div class="settings-row"><label class="settings-label">Display Name${_hint('Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.')}</label><input id="eaf-display-name" class="settings-input" placeholder="Your Name" value="${esc(a.display_name || '')}"></div>
         <div id="eaf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
           <div style="font-size:11px;font-weight:600;margin-bottom:6px">Google OAuth2 — required for Workspace / .edu accounts</div>
-          <div id="eaf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${a.oauth_provider === 'google' ? '✓ Connected via Google OAuth' : 'Not connected — click below to authorize'}</div>
+          <div id="eaf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${a.oauth_provider === 'google' ? uiIcon("check", 12, { role:"inherit" }) + "Connected via Google OAuth" : 'Not connected — click below to authorize'}</div>
           <button type="button" id="eaf-oauth-btn" class="admin-btn-add" style="font-size:11px">${a.oauth_provider === 'google' ? 'Reconnect with Google' : 'Connect with Google'}</button>
         </div>
         <div style="font-size:11px;font-weight:600;opacity:0.6;margin:6px 0 2px">IMAP (Receiving)</div>
@@ -3729,12 +3791,12 @@ async function initEmailAccountsSettings() {
         <div class="settings-row eaf-smtp-creds"><label class="settings-label">Password${_hint('Your SMTP password — often the same as your IMAP password. Outlook / Office 365 generally requires OAuth and will not work with a normal password here.')}</label><input id="eaf-smtp-pass" class="settings-input" type="password" placeholder="${isEdit && a.has_smtp_password ? '(unchanged)' : ''}"></div>
         <div class="settings-row" style="margin-top:10px;align-items:center;">
           <button class="admin-btn-add" id="eaf-save" style="background:var(--red);border-color:var(--red);color:#fff;display:inline-flex;align-items:center;gap:5px;font-weight:600;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+            ${uiIcon("check",11,{"role":"inherit"})}
             ${isEdit ? 'Save' : 'Create'}
           </button>
           <span id="eaf-msg" style="font-size:11px;flex:1;margin-left:8px;"></span>
           <button class="admin-btn-add" id="eaf-cancel" style="opacity:0.7;display:inline-flex;align-items:center;gap:5px;position:relative;top:1px;margin-left:auto;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            ${uiIcon("close",11,{"role":"inherit"})}
             Cancel
           </button>
         </div>
@@ -3963,7 +4025,7 @@ async function initEmailSettings() {
         body: JSON.stringify(data),
       });
       const result = await res.json();
-      if (msg) msg.textContent = result.success ? '✓ Saved' : (result.error || 'Failed');
+      if (msg) setControlMessage(msg, result.success ? '✓ Saved' : (result.error || 'Failed'));
       setTimeout(() => { if (msg) msg.textContent = ''; }, 3000);
     } catch (e) {
       if (msg) msg.textContent = 'Failed';
@@ -3987,7 +4049,7 @@ async function initEmailSettings() {
         body: JSON.stringify(data),
       });
       const result = await res.json();
-      if (msg) msg.textContent = result.success ? '✓ Saved' : (result.error || 'Failed');
+      if (msg) setControlMessage(msg, result.success ? '✓ Saved' : (result.error || 'Failed'));
       setTimeout(() => { if (msg) msg.textContent = ''; }, 3000);
     } catch (e) {
       if (msg) msg.textContent = 'Failed';
@@ -4031,7 +4093,7 @@ async function initEmailSettings() {
       if (data.success && data.style) {
         if (styleEl) styleEl.value = data.style;
         try { localStorage.setItem(styleKey(), data.style); } catch (_) {}
-        if (msg) msg.textContent = '✓ Style extracted';
+        if (msg) setControlMessage(msg, '✓ Style extracted');
       } else {
         if (msg) msg.textContent = data.error || 'Failed';
       }
@@ -4059,7 +4121,7 @@ async function initEmailSettings() {
       if (result.success) {
         try { localStorage.setItem(styleKey(), style); } catch (_) {}
       }
-      if (msg) msg.textContent = result.success ? '✓ Saved' : 'Failed';
+      if (msg) setControlMessage(msg, result.success ? '✓ Saved' : 'Failed');
       setTimeout(() => { if (msg) msg.textContent = ''; }, 3000);
     } catch (e) {
       if (msg) msg.textContent = 'Failed';
@@ -4275,15 +4337,15 @@ async function initIntegrations() {
 /* ══ Unified Integrations ══ */
 
 const INTG_TYPES = {
-  api:     { label: 'API',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>' },
-  caldav:  { label: 'CalDAV',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>' },
-  contacts: { label: 'Contacts', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
-  carddav: { label: 'CardDAV', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
-  email:   { label: 'Email',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>' },
-  mcp:     { label: 'MCP',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>' },
+  api:     { label: 'API',     icon: uiIcon("link",14,{"role":"inherit"}) },
+  caldav:  { label: 'CalDAV',  icon: uiIcon("calendar",14,{"role":"inherit"}) },
+  contacts: { label: 'Contacts', icon: uiIcon("contact",14,{"role":"inherit"}) },
+  carddav: { label: 'CardDAV', icon: uiIcon("contact",14,{"role":"inherit"}) },
+  email:   { label: 'Email',   icon: uiIcon("email",14,{"role":"inherit"}) },
+  mcp:     { label: 'MCP',     icon: uiIcon("model",14,{"role":"inherit"}) },
   codex:   { label: 'Codex',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 10.696.453a6.023 6.023 0 0 0-5.75 4.172 6.061 6.061 0 0 0-3.946 2.945 6.024 6.024 0 0 0 .742 7.099 5.98 5.98 0 0 0 .516 4.911 6.046 6.046 0 0 0 6.51 2.9A5.996 5.996 0 0 0 13.26 23.547a6.023 6.023 0 0 0 5.75-4.172 6.061 6.061 0 0 0 3.946-2.945 6.024 6.024 0 0 0-.674-6.609zM13.26 21.047a4.508 4.508 0 0 1-2.886-1.041l.143-.082 4.793-2.769a.777.777 0 0 0 .391-.676V10.34l2.026 1.17a.072.072 0 0 1 .039.061v5.596a4.532 4.532 0 0 1-4.506 4.48zM3.968 17.64a4.473 4.473 0 0 1-.537-3.018l.143.086 4.793 2.769a.79.79 0 0 0 .782 0l5.852-3.379v2.34a.072.072 0 0 1-.029.062l-4.845 2.796a4.532 4.532 0 0 1-6.159-1.656zM2.804 7.922a4.49 4.49 0 0 1 2.348-1.973V11.6a.778.778 0 0 0 .391.676l5.852 3.378-2.026 1.17a.072.072 0 0 1-.068 0L4.456 14.03a4.532 4.532 0 0 1-1.652-6.108zm16.423 3.823L13.375 8.367l2.026-1.17a.072.072 0 0 1 .068 0l4.845 2.796a4.525 4.525 0 0 1-.7 8.08V12.42a.778.778 0 0 0-.387-.676zm2.015-3.025l-.143-.086-4.793-2.769a.79.79 0 0 0-.782 0L9.672 9.243V6.903a.072.072 0 0 1 .029-.062l4.845-2.796a4.525 4.525 0 0 1 6.696 4.675zM8.598 12.66L6.57 11.49a.072.072 0 0 1-.039-.061V5.833a4.525 4.525 0 0 1 7.413-3.48l-.143.082-4.793 2.769a.777.777 0 0 0-.391.676l-.019 6.78zm1.1-2.379l2.607-1.505 2.607 1.505v3.01l-2.607 1.505-2.607-1.505z"/></svg>' },
   claude:  { label: 'Claude',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>' },
-  vault:   { label: 'Vault',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' },
+  vault:   { label: 'Vault',   icon: uiIcon("lock",14,{"role":"inherit"}) },
 };
 
 // Config shared by the Codex Agent and Claude Agent forms. Both use the same
@@ -4464,7 +4526,7 @@ async function initUnifiedIntegrations() {
       </div>
       ${statusDot}
       <button class="admin-btn-sm intg-del-btn" data-intg-id="${item.id}" data-intg-type="${item.type}" data-intg-name="${(item.name || '').replace(/"/g, '&quot;')}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        ${uiIcon("trash",13,{"role":"inherit"})}
       </button>
     </div>`;
   }
@@ -4568,7 +4630,7 @@ async function initUnifiedIntegrations() {
     // Letter-in-brand-color logo for each API preset; outline plug icon for
     // "Custom (no preset)". Matches the email-provider dropdown pattern.
     const _apiLetter = (letter, bg) => `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" style="flex-shrink:0"><circle cx="12" cy="12" r="11" fill="${bg}"/><text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="#fff" font-family="system-ui,sans-serif">${letter}</text></svg>`;
-    const _apiCustomIco = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;opacity:0.7"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>';
+    const _apiCustomIco = uiIcon("link",16,{"role":"inherit","style":"flex-shrink:0;opacity:0.7"});
     const API_PRESET_LOGO = {
       miniflux:        _apiLetter('M', '#214c87'),
       gitea:           _apiLetter('G', '#609926'),
@@ -4588,7 +4650,7 @@ async function initUnifiedIntegrations() {
       .map(([k, label]) => `<button type="button" class="ufapi-option" data-value="${esc(k)}" style="display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;background:transparent;border:0;color:var(--fg);font:inherit;cursor:pointer;text-align:left;">${_apiIconFor(k)}<span>${esc(label)}</span></button>`).join('');
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>API Integration</h2>
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;">${uiIcon("link",14,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}API Integration</h2>
         <div class="settings-col">
           <div class="settings-row"><label class="settings-label">Preset</label>
             <div style="position:relative;flex:1;min-width:0;">
@@ -4748,7 +4810,7 @@ async function initUnifiedIntegrations() {
     const isNew = !editId || editId === 'new';
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>${isNew ? 'Add CalDAV Calendar' : 'Edit CalDAV Calendar'}</h2>
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;">${uiIcon("calendar",14,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}${isNew ? 'Add CalDAV Calendar' : 'Edit CalDAV Calendar'}</h2>
         <div class="settings-col">
           <div class="settings-row"><label class="settings-label">Label</label><input id="uf-caldav-label" class="settings-input" placeholder="e.g. Work, Personal"></div>
           <div class="settings-row"><label class="settings-label">Server URL</label><input id="uf-caldav-url" class="settings-input" placeholder="https://www.google.com/calendar/dav/you@gmail.com/user/"></div>
@@ -4858,7 +4920,7 @@ async function initUnifiedIntegrations() {
   async function showCardDavForm() {
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Contacts (CardDAV)</h2>
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;">${uiIcon("contact",14,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}Contacts (CardDAV)</h2>
         <div class="settings-col">
           <div class="settings-row"><label class="settings-label">URL</label><input id="uf-carddav-url" class="settings-input" placeholder="http://localhost:5232/user/contacts/"></div>
           <div class="settings-row"><label class="settings-label">Username</label><input id="uf-carddav-user" class="settings-input"></div>
@@ -4866,11 +4928,11 @@ async function initUnifiedIntegrations() {
           <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
             <span id="uf-carddav-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
             <button class="admin-btn-add" id="uf-carddav-save" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              ${uiIcon("check",11,{"role":"inherit"})}
               Save
             </button>
             <button class="admin-btn-add" id="uf-carddav-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              ${uiIcon("close",11,{"role":"inherit"})}
               Cancel
             </button>
           </div>
@@ -4878,7 +4940,7 @@ async function initUnifiedIntegrations() {
       </div>
       <div class="admin-card contacts-manager" style="margin-top:8px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-          <h2 style="font-size:13px;margin:0;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Contacts Import <span id="cm-count" style="opacity:0.5;font-weight:normal;font-size:11px;"></span></h2>
+          <h2 style="font-size:13px;margin:0;display:flex;align-items:center;gap:6px;">${uiIcon("download",14,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}Contacts Import <span id="cm-count" style="opacity:0.5;font-weight:normal;font-size:11px;"></span></h2>
           <button class="admin-btn-sm" id="cm-import-btn" style="margin-left:auto;">Import</button>
           <button class="admin-btn-sm" id="cm-export-vcf-btn">Export .vcf</button>
           <button class="admin-btn-sm" id="cm-export-csv-btn">Export .csv</button>
@@ -5073,11 +5135,11 @@ async function initUnifiedIntegrations() {
               <div class="contact-sub" style="font-size:10px;opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(sub)}</div>
             </div>
             <button class="admin-btn-sm contact-edit" title="Edit" style="display:inline-flex;align-items:center;gap:4px;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 35%, var(--border));">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              ${uiIcon("edit",12,{"role":"inherit"})}
               Edit
             </button>
             <button class="admin-btn-sm contact-del" title="Delete" style="opacity:0.85;display:inline-flex;align-items:center;gap:4px;">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              ${uiIcon("trash",12,{"role":"inherit"})}
               Delete
             </button>
           </div>
@@ -5181,7 +5243,7 @@ async function initUnifiedIntegrations() {
     // option. Letter-in-brand-color circle for known providers; outline
     // envelope for "Custom…". Inline SVG (no external assets, no emoji).
     const _letterLogo = (letter, bg) => `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" style="flex-shrink:0"><circle cx="12" cy="12" r="11" fill="${bg}"/><text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="#fff" font-family="system-ui,sans-serif">${letter}</text></svg>`;
-    const _customLogo = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;opacity:0.7"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>';
+    const _customLogo = uiIcon("email",16,{"role":"inherit","style":"flex-shrink:0;opacity:0.7"});
     const PROV_LOGO = {
       '':       _customLogo,
       gmail:    _letterLogo('G', '#ea4335'),
@@ -5217,16 +5279,16 @@ async function initUnifiedIntegrations() {
           <div class="settings-row"><label class="settings-label">Display Name${_hint('Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.')}</label><input id="uf-display-name" class="settings-input" placeholder="Your Name"></div>
           <div id="uf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
             <div style="font-size:11px;font-weight:600;margin-bottom:6px">Google OAuth2 — required for Workspace / .edu accounts</div>
-            <div id="uf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${existing && existing.oauth_provider === 'google' ? '✓ Connected via Google OAuth' : 'Not connected — click below to authorize'}</div>
+            <div id="uf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${existing && existing.oauth_provider === 'google' ? uiIcon("check", 12, { role:"inherit" }) + "Connected via Google OAuth" : 'Not connected — click below to authorize'}</div>
             <button type="button" id="uf-oauth-btn" class="admin-btn-add" style="font-size:11px">${existing && existing.oauth_provider === 'google' ? 'Reconnect with Google' : 'Connect with Google'}</button>
           </div>
-          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:4px 0 2px;display:flex;align-items:center;gap:5px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>IMAP (Receiving)</div>
+          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:4px 0 2px;display:flex;align-items:center;gap:5px;">${uiIcon("inbox",12,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}IMAP (Receiving)</div>
           <div class="settings-row"><label class="settings-label">Host${_hint('Your IMAP server, e.g. imap.gmail.com, imap.migadu.com, a LAN host, or a Tailscale IP for Dovecot.')}</label><input id="uf-imap-host" class="settings-input" placeholder="imap.example.com"></div>
           <div class="settings-row"><label class="settings-label">Port${_hint('993 for IMAPS (most providers), 143 for plain or STARTTLS. Local servers often use a custom port like 31143.')}</label><input id="uf-imap-port" class="settings-input" type="number" placeholder="993" style="max-width:100px"></div>
           <div class="settings-row"><label class="settings-label">Username${_hint('Yes — your full email address goes here too (e.g. you@gmail.com). Same as the Email field above for almost every provider.')}</label><input id="uf-imap-user" class="settings-input" placeholder="you@example.com"></div>
           <div class="uf-password-section"><div class="settings-row"><label class="settings-label">Password${_hint('For Gmail, iCloud, and Yahoo: paste your App Password (NOT your normal account password). For Migadu and Fastmail, your mailbox password usually works. Outlook / Office 365 generally requires OAuth and will not work with this password form.')}</label><input id="uf-imap-pass" class="settings-input" type="password" placeholder="${placeholderPass}"></div></div>
           <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch" style="margin-left:0"><input type="checkbox" id="uf-imap-starttls" checked><span class="admin-slider"></span></label></div>
-          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px;display:flex;align-items:center;gap:5px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
+          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px;display:flex;align-items:center;gap:5px;">${uiIcon("send",12,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
           <div class="settings-row"><label class="settings-label">Host${_hint('Your outgoing-mail server, e.g. smtp.gmail.com. Leave blank to make this account read-only.')}</label><input id="uf-smtp-host" class="settings-input" placeholder="smtp.example.com"></div>
           <div class="settings-row"><label class="settings-label">Port${_hint('465 for SSL/SMTPS, 587 for STARTTLS. 25 is usually blocked by ISPs.')}</label><input id="uf-smtp-port" class="settings-input" type="number" placeholder="465" style="max-width:100px"></div>
           <div class="settings-row"><label class="settings-label">Security${_hint('SSL for port 465, STARTTLS for port 587, or None for local SMTP bridges such as Proton Mail Bridge.')}</label><select id="uf-smtp-security" class="settings-select"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option><option value="none">None</option></select></div>
@@ -5238,18 +5300,18 @@ async function initUnifiedIntegrations() {
             <span id="uf-email-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
             <button class="admin-btn-add" id="uf-email-test" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
               <span class="uf-email-test-ico" style="display:inline-flex;width:11px;height:11px;align-items:center;justify-content:center;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 4 12 14.01 9 11.01"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                ${uiIcon("check",11,{"role":"inherit"})}
               </span>
               Test
             </button>
             <button class="admin-btn-add" id="uf-email-save" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">
               <span class="uf-email-save-ico" style="display:inline-flex;width:11px;height:11px;align-items:center;justify-content:center;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                ${uiIcon("check",11,{"role":"inherit"})}
               </span>
               <span class="uf-email-save-label">${isEdit ? 'Save' : 'Create'}</span>
             </button>
             <button class="admin-btn-add" id="uf-email-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              ${uiIcon("close",11,{"role":"inherit"})}
               Cancel
             </button>
           </div>
@@ -5324,7 +5386,7 @@ async function initUnifiedIntegrations() {
           return;
         }
         uiModule.showToast?.('Copied');
-        copyBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Copied';
+        copyBtn.innerHTML = uiIcon("check",10,{"role":"inherit"}) + " Copied";
         setTimeout(() => {
           if (copyBtn.isConnected) copyBtn.innerHTML = orig;
         }, 1500);
@@ -5339,11 +5401,11 @@ async function initUnifiedIntegrations() {
         <div style="opacity:0.8;margin-bottom:6px;">${esc(n.body)}</div>
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer" class="admin-btn-sm" style="background:var(--red);border-color:var(--red);color:#fff;text-decoration:none;display:inline-flex;align-items:center;gap:5px;font-weight:600;">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            ${uiIcon("external",10,{"role":"inherit"})}
             ${esc(n.linkLabel || 'Generate App Password')}
           </a>
           <button type="button" class="admin-btn-sm uf-prov-copy" data-url="${esc(n.url)}" style="opacity:0.7;display:inline-flex;align-items:center;gap:5px;">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            ${uiIcon("copy",10,{"role":"inherit"})}
             Copy link
           </button>
         </div>`;
@@ -5534,7 +5596,7 @@ async function initUnifiedIntegrations() {
     // Spinner SVG kept inline so we can swap it back to the original
     // checkmark on completion. ~13px to match the button icon size.
     const _spinner = '<span style="display:inline-block;width:11px;height:11px;border-radius:50%;border:1.5px solid currentColor;border-top-color:transparent;animation:whirlpool-spin 0.7s linear infinite"></span>';
-    const _checkIcon = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+    const _checkIcon = uiIcon("check",11,{"role":"inherit"});
 
     el('uf-email-test').addEventListener('click', async () => {
       const body = _collectBody();
@@ -6014,12 +6076,12 @@ async function initUnifiedIntegrations() {
     );
     const current = agentTokens.find(t => String(t.id) === String(editId));
     const _scopeIcons = {
-      todos: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
-      documents: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
-      email: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="2 6 12 13 22 6"/></svg>',
-      calendar: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
-      memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2a2.5 2.5 0 0 0-2.5 2.5 2.5 2.5 0 0 0-2.5 2.5A2.5 2.5 0 0 0 2 9.5v3A2.5 2.5 0 0 0 4.5 15a2.5 2.5 0 0 0 2.5 2.5A2.5 2.5 0 0 0 9.5 20H10V2z"/><path d="M14.5 2a2.5 2.5 0 0 1 2.5 2.5 2.5 2.5 0 0 1 2.5 2.5A2.5 2.5 0 0 1 22 9.5v3A2.5 2.5 0 0 1 19.5 15a2.5 2.5 0 0 1-2.5 2.5A2.5 2.5 0 0 1 14.5 20H14V2z"/></svg>',
-      cookbook: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+      todos: uiIcon("tasks",14,{"role":"inherit"}),
+      documents: uiIcon("document",14,{"role":"inherit"}),
+      email: uiIcon("email",14,{"role":"inherit"}),
+      calendar: uiIcon("calendar",14,{"role":"inherit"}),
+      memory: uiIcon("memory",14,{"role":"inherit"}),
+      cookbook: uiIcon("cookbook",14,{"role":"inherit"}),
     };
     const _scopeNiceLabel = (label) => label.replace(/\s+(write|drafts?|send)$/i, '');
     const _scopeAction = (key) => (key.split(':')[1] || '').toLowerCase();
@@ -6078,7 +6140,7 @@ async function initUnifiedIntegrations() {
             <div style="position:relative;">
               <code id="uf-codex-token" style="display:block;word-break:break-all;font-size:11px;padding:6px 30px 6px 8px;background:rgba(0,0,0,0.08);border-radius:4px;"></code>
               <button type="button" class="admin-btn-sm" id="uf-codex-copy-token" title="Copy token" aria-label="Copy token" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);padding:3px 5px;background:none;border:none;color:inherit;opacity:0.7;cursor:pointer;display:inline-flex;align-items:center;">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                ${uiIcon("copy",13,{"role":"inherit"})}
               </button>
             </div>
 
@@ -6090,11 +6152,11 @@ async function initUnifiedIntegrations() {
               <span style="font-weight:600;font-size:11px;">Configure access</span>
               <span style="flex:1"></span>
               <button type="button" class="admin-btn-sm" id="uf-codex-copy-setup" title="Copy setup" aria-label="Copy setup" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:5px;opacity:0.85;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                ${uiIcon("copy",11,{"role":"inherit"})}
                 <span>Copy</span>
               </button>
               <button type="button" class="admin-btn-sm" id="uf-codex-toggle-config" aria-expanded="false" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:5px;opacity:0.85;">
-                <svg id="uf-codex-toggle-config-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 0.15s"><polyline points="6 9 12 15 18 9"/></svg>
+                ${uiIcon("chevron-down",10,{"role":"inherit","style":"transition:transform 0.15s","id":"uf-codex-toggle-config-caret"})}
                 <span>Configure</span>
               </button>
             </div>
@@ -6105,20 +6167,20 @@ async function initUnifiedIntegrations() {
           </div>
           <div class="settings-row" style="margin-top:10px;align-items:center;gap:6px;">
             <button class="admin-btn-add" id="uf-codex-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              ${uiIcon("close",11,{"role":"inherit"})}
               Cancel
             </button>
             <span id="uf-codex-msg" style="font-size:11px;flex:1;text-align:center;"></span>
             <button class="admin-btn-add" id="uf-codex-revoke" style="display:none;align-items:center;gap:5px;background:color-mix(in srgb, var(--color-error) 10%, transparent);color:var(--color-error);border:1px solid var(--color-error);font-weight:600;">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              ${uiIcon("trash",11,{"role":"inherit"})}
               Revoke
             </button>
             <button class="admin-btn-add" id="uf-codex-create-btn" style="display:${current ? 'none' : 'inline-flex'};align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/><path d="M15.5 7.5l3 3"/></svg>
+              ${uiIcon("key",11,{"role":"inherit"})}
               Create token
             </button>
             <button class="admin-btn-add" id="uf-codex-save" style="display:none;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              ${uiIcon("check",11,{"role":"inherit"})}
               Save
             </button>
           </div>
@@ -6353,8 +6415,8 @@ async function initUnifiedIntegrations() {
       selection.removeAllRanges();
       selection.addRange(range);
     };
-    const COPY_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-    const CHECK_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    const COPY_ICON = uiIcon("copy",13,{"role":"inherit"});
+    const CHECK_ICON = uiIcon("check",13,{"role":"inherit"});
     el('uf-codex-copy-setup')?.addEventListener('click', async () => {
       const token = el('uf-codex-copy-setup')?.dataset.token || '';
       const btn = el('uf-codex-copy-setup');
@@ -6497,18 +6559,13 @@ function syncAdminVisibility() {
   });
 }
 
-async function loadCanonicalPolicyState({ includeInactive = false } = {}) {
-  const suffix = includeInactive ? '?include_inactive=true' : '';
-  const response = await window.fetch(`/api/file-policy/state${suffix}`, {
-    credentials: 'same-origin',
-    cache: 'no-store',
+let _fileAccessInitialized = false;
+let _fileAccessLoadId = 0;
+
+async function loadCanonicalPolicyState() {
+  const response = await checkedFetch('/api/file-policy/state?include_inactive=true', {
+    credentials: 'same-origin', cache: 'no-store',
   });
-  if (response.status === 404) return null; // measured compatibility fallback
-  if (!response.ok) {
-    let detail = {};
-    try { detail = await response.json(); } catch (_) {}
-    throw new Error(String(detail.detail?.message || detail.detail || `Policy request failed (${response.status})`));
-  }
   return response.json();
 }
 
@@ -6518,238 +6575,10 @@ function announceFilePolicyChanged(detail = {}) {
   }));
 }
 
-async function loadPermissionGrants() {
-  const list = el('odysseus-agent-grants') || el('mimo-permission-grants');
-  const status = el('odysseus-permissions-reset-status') || el('mimo-permission-grants-status');
-  if (!list) return;
-  list.replaceChildren();
-  let canonical = null;
-  let grants = [];
-  const errors = [];
-  try { canonical = await loadCanonicalPolicyState(); } catch (error) { errors.push(error.message); }
-  try {
-    const response = await checkedFetch('/api/mimo/permission-grants', { credentials: 'same-origin' });
-    const data = await response.json();
-    grants = Array.isArray(data.grants) ? data.grants : [];
-  } catch (error) { errors.push(error.message); }
-
-  const canonicalRows = (canonical?.bindings || []).filter(binding => ['agent', 'operation'].includes(binding.binding_class));
-  if (canonicalRows.length) {
-    const heading = document.createElement('div');
-    heading.className = 'admin-toggle-sub';
-    heading.textContent = 'Canonical agent policy';
-    list.append(heading);
-    for (const binding of canonicalRows) {
-      const row = document.createElement('div');
-      row.className = 'admin-user-row permission-workspace-grant';
-      const text = document.createElement('span');
-      const caps = (binding.capabilities || []).join(' + ') || 'no capabilities';
-      const scope = binding.lifetime === 'chat' ? 'this chat'
-        : binding.lifetime === 'workspace' ? 'this workspace'
-          : binding.lifetime === 'once' ? 'once' : 'always';
-      text.textContent = `${binding.binding_class} · ${caps} · ${scope}${binding.operation ? ` · ${binding.operation}` : ''}`;
-      row.append(text);
-      list.append(row);
-    }
-  }
-
-  const workspaceNames = new Map(
-    (canonical?.workspaces || []).map(workspace => [workspace.id, workspace.name]),
-  );
-  const byWorkspace = new Map();
-  grants.forEach((grant) => {
-    const workspaceId = String(grant.workspace_id || '');
-    const legacyWorkspace = String(grant.workspace || '');
-    const scopeKey = workspaceId ? `workspace:${workspaceId}`
-      : legacyWorkspace ? `legacy:${legacyWorkspace}` : 'account';
-    if (!byWorkspace.has(scopeKey)) byWorkspace.set(scopeKey, []);
-    byWorkspace.get(scopeKey).push(grant);
-  });
-  for (const [scopeKey, workspaceGrants] of byWorkspace) {
-    const group = document.createElement('details');
-    group.className = 'permission-workspace-group';
-    group.open = true;
-    const summary = document.createElement('summary');
-    summary.className = 'permission-workspace-summary';
-    const path = document.createElement('span');
-    path.className = 'permission-workspace-path';
-    const sample = workspaceGrants[0] || {};
-    path.textContent = sample.workspace_id
-      ? workspaceNames.get(sample.workspace_id) || 'This workspace'
-      : sample.workspace
-        ? 'Imported legacy path approval'
-        : 'Account-wide approvals';
-    const count = document.createElement('span');
-    count.className = 'permission-workspace-count';
-    count.textContent = `${workspaceGrants.length} grant${workspaceGrants.length === 1 ? '' : 's'}`;
-    summary.append(path, count);
-    const rows = document.createElement('div');
-    rows.className = 'permission-workspace-grants';
-    workspaceGrants.forEach((grant) => {
-      const row = document.createElement('div');
-      row.className = 'admin-user-row permission-workspace-grant';
-      const text = document.createElement('span');
-      const lifetime = grant.session_id ? 'this chat'
-        : grant.workspace_id ? 'this workspace'
-          : grant.workspace ? 'imported legacy scope' : 'always';
-      text.textContent = `${grant.permission_type} · ${grant.pattern} · ${lifetime}`;
-      const revoke = document.createElement('button');
-      revoke.type = 'button';
-      revoke.className = 'admin-btn-sm';
-      revoke.textContent = 'Revoke';
-      revoke.addEventListener('click', async () => {
-        try {
-          await checkedFetch(`/api/mimo/permission-grants/${grant.id}`, { method: 'DELETE', credentials: 'same-origin' });
-          announceFilePolicyChanged({ mutation: 'permission-revoke' });
-          await loadPermissionGrants();
-        } catch (error) { if (status) status.textContent = error.message; }
-      });
-      row.append(text, revoke);
-      rows.append(row);
-    });
-    group.append(summary, rows);
-    list.append(group);
-  }
-  if (!canonicalRows.length && !grants.length) list.textContent = 'No persistent agent permissions.';
-
-  const locationSelect = el('odysseus-permissions-reset-location');
-  if (locationSelect && canonical) {
-    const selected = locationSelect.value;
-    locationSelect.replaceChildren(new Option('Choose a location', ''));
-    for (const location of canonical.locations || []) {
-      locationSelect.append(new Option(location.display_path || location.canonical_path || location.id, location.id));
-    }
-    if ([...locationSelect.options].some(option => option.value === selected)) locationSelect.value = selected;
-  }
-  if (status) {
-    const total = canonicalRows.length + grants.length;
-    status.textContent = errors.length
-      ? errors.join(' · ')
-      : `${total} durable agent permission${total === 1 ? '' : 's'}; human sharing is separate.`;
-  }
-  return canonical;
-}
-
-let _fileRootsInitialized = false;
-let _fileVisibilityInitialized = false;
-let _fileVisibilityBackend = null;
-
-function filesystemAccessRow(titleText, metaText) {
-  const row = document.createElement('div');
-  row.className = 'admin-user-row';
-  const title = document.createElement('div');
-  title.style.fontWeight = '600';
-  title.textContent = titleText;
-  const meta = document.createElement('div');
-  meta.className = 'admin-toggle-sub';
-  meta.textContent = metaText;
-  row.append(title, meta);
-  return row;
-}
-
-let _permissionResetInitialized = false;
-async function initPermissionResetControls() {
-  const button = el('odysseus-permissions-reset-all');
-  const status = el('odysseus-permissions-reset-status');
-  if (!button || _permissionResetInitialized) return;
-  _permissionResetInitialized = true;
-  const canonicalReset = async (scope, payload, preview = false) => {
-    const response = await window.fetch(`/api/file-policy/resets${preview ? '/preview' : ''}`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scope, ...payload }),
-    });
-    if (response.status === 404) return null;
-    let data = {};
-    try { data = await response.json(); } catch (_) {}
-    if (!response.ok) throw new Error(String(data.detail?.message || data.detail || `Reset failed (${response.status})`));
-    return data;
-  };
-  const confirmReset = async (label, preview) => uiModule.styledConfirm(
-    `${label} will revoke ${preview?.total_matched ?? preview?.matched ?? 0} agent permission${(preview?.total_matched ?? preview?.matched) === 1 ? '' : 's'}. Shared locations and human access remain unchanged.`,
-    { title: `Reset ${label.toLowerCase()}?`, confirmText: 'Reset permissions', cancelText: 'Keep permissions', danger: true },
-  );
-  const resetScoped = async (scope, canonicalPayload, legacyPayload, label) => {
-    try {
-      const preview = canonicalPayload ? await canonicalReset(scope, canonicalPayload, true) : null;
-      if (!await confirmReset(label, preview)) return;
-      const canonical = canonicalPayload ? await canonicalReset(scope, canonicalPayload, false) : null;
-      let legacy = { revoked: 0, pending_rejected: 0 };
-      // Current canonical resets orchestrate compatibility cleanup on the
-      // server. Only an older server (404) needs the measured legacy call.
-      if (!canonical && legacyPayload) {
-        const response = await checkedFetch('/api/mimo/permission-grants/reset', {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scope, ...legacyPayload }),
-        });
-        legacy = await response.json();
-      }
-      const count = Number(canonical?.total_revoked ?? canonical?.matched ?? 0) + Number(legacy?.revoked || 0);
-      const pendingRejected = Number(canonical?.pending_rejected || 0) + Number(legacy?.pending_rejected || 0);
-      if (status) status.textContent = `${label}: reset ${count} durable agent permission${count === 1 ? '' : 's'}${pendingRejected ? ` and rejected ${pendingRejected} pending request${pendingRejected === 1 ? '' : 's'}` : ''}.`;
-      announceFilePolicyChanged({ mutation: 'permission-reset', scope });
-      await loadPermissionGrants();
-    } catch (error) { if (status) status.textContent = error.message || `Could not reset ${label.toLowerCase()} approvals.`; }
-  };
-  el('odysseus-permissions-reset-chat')?.addEventListener('click', async () => {
-    const sessionId = window.sessionModule?.getCurrentSessionId?.() || '';
-    if (!sessionId) { if (status) status.textContent = 'There is no active chat to reset.'; return; }
-    await resetScoped('chat', { chat_id: sessionId }, { session_id: sessionId }, 'This chat');
-  });
-  el('odysseus-permissions-reset-workspace')?.addEventListener('click', async () => {
-    const workspaceId = getWorkspaceId();
-    if (!workspaceId) { if (status) status.textContent = 'There is no active workspace to reset.'; return; }
-    await resetScoped(
-      'workspace',
-      { workspace_id: workspaceId },
-      { workspace_id: workspaceId },
-      'This workspace',
-    );
-  });
-  el('odysseus-permissions-reset-location-button')?.addEventListener('click', async () => {
-    const locationId = el('odysseus-permissions-reset-location')?.value || '';
-    if (!locationId) { if (status) status.textContent = 'Choose a location first.'; return; }
-    await resetScoped('location', { location_id: locationId }, null, 'This location');
-  });
-  button.addEventListener('click', async () => {
-    button.disabled = true;
-    try {
-      const preview = await canonicalReset('all_agent', {}, true);
-      if (!await confirmReset('All agent permissions', preview)) return;
-      const canonical = await canonicalReset('all_agent', {}, false);
-      let revoked = 0;
-      // Current canonical servers revoke canonical + compatibility approvals
-      // as one monotonic operation. Retain the older per-record fallback only
-      // when that endpoint is absent.
-      if (canonical) {
-        revoked = Number(canonical.total_revoked ?? canonical.matched ?? 0);
-      } else {
-        const response = await checkedFetch('/api/mimo/permission-grants', { credentials: 'same-origin', cache: 'no-store' });
-        const data = await response.json();
-        const grants = Array.isArray(data.grants) ? data.grants : [];
-        for (const grant of grants) {
-          if (!grant?.id) continue;
-          const result = await checkedFetch(`/api/mimo/permission-grants/${encodeURIComponent(grant.id)}`, { method: 'DELETE', credentials: 'same-origin' });
-          if (result.ok) revoked += 1;
-        }
-      }
-      if (status) status.textContent = revoked ? `Reset ${revoked} agent permission${revoked === 1 ? '' : 's'}. Human access was preserved.` : 'No durable agent permissions were present.';
-      announceFilePolicyChanged({ mutation: 'permission-reset', scope: 'all_agent' });
-      await loadPermissionGrants();
-    } catch (error) {
-      if (status) status.textContent = error.message || 'Could not reset approvals.';
-    } finally {
-      button.disabled = false;
-    }
-  });
-}
-
 function locationKindLabel(location) {
   if (location?.kind === 'exact_file') return 'Exact file';
   if (location?.kind === 'whole_root') return 'Whole disk / volume';
-  return 'Recursive folder';
+  return 'Folder and contents';
 }
 
 function fileCapabilitySummary(capabilities) {
@@ -6757,485 +6586,511 @@ function fileCapabilitySummary(capabilities) {
   const labels = [];
   if (values.has('read')) labels.push('Browse / download');
   if (values.has('write')) labels.push('Modify');
-  return labels.join(' + ') || 'No access';
+  if (values.has('execute')) labels.push('Execute');
+  return labels.join(' + ') || 'No file access';
 }
 
-async function loadCurrentAppFilesystemAccess(policyState = undefined) {
+function fileModifyCapabilities(binding, allowWrite) {
+  const capabilities = new Set(binding.capabilities || []);
+  if (allowWrite) capabilities.add('write');
+  else capabilities.delete('write');
+  return [...capabilities];
+}
+
+function filePolicyRow(titleText, metaText, { inactive = false } = {}) {
+  const row = document.createElement('div');
+  row.className = `admin-user-row file-policy-row${inactive ? ' file-policy-inactive' : ''}`;
+  const info = document.createElement('div');
+  info.className = 'file-policy-info';
+  const title = document.createElement('div');
+  title.className = 'file-policy-title';
+  title.textContent = titleText;
+  const meta = document.createElement('div');
+  meta.className = 'admin-toggle-sub';
+  meta.textContent = metaText;
+  info.append(title, meta);
+  row.append(info);
+  return row;
+}
+
+const FILE_POLICY_CONTROL_ICONS = Object.freeze({
+  'Disable':'pause', 'Enable':'play', 'Disable modify':'lock', 'Allow modify':'edit',
+  'Revoke':'unavailable', 'Restore Location':'restore', 'Remove Location':'remove',
+  'Enable agent':'agents', 'Save name':'save', 'Cancel':'close', 'Rename':'edit',
+  'Restore Workspace':'restore', 'Archive Workspace':'archive',
+  'Reset workspace permissions':'restore', 'Save expiry':'save', 'Clear expiry':'remove',
+  'Resolve':'check', 'Retry':'refresh',
+});
+function filePolicyButton(label, action, statusId, { disabled = false } = {}) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'admin-btn-sm';
+  button.textContent = label;
+  if (FILE_POLICY_CONTROL_ICONS[label]) setUiIconText(button, FILE_POLICY_CONTROL_ICONS[label], label);
+  button.disabled = disabled;
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try { await action(); }
+    catch (error) {
+      const status = el(statusId) || el('file-policy-status');
+      if (status) status.textContent = error.message || 'Could not update file access.';
+    } finally { button.disabled = disabled; }
+  });
+  return button;
+}
+
+async function changeFilePolicy(path, method, payload, mutation) {
+  const response = await checkedFetch(`/api/file-policy/${path}`, {
+    method, credentials: 'same-origin',
+    ...(payload === undefined ? {} : {
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }),
+  });
+  let result = {};
+  try { result = await response.json(); } catch (_) {}
+  announceFilePolicyChanged({ mutation });
+  await loadFileAccessSettings();
+  return result;
+}
+
+function fileBindingStatus(binding) {
+  if (!['active', 'disabled'].includes(binding.status)) return binding.status || 'disabled';
+  if (binding.expires_unix_ms != null && Number(binding.expires_unix_ms) <= Date.now()) return 'expired';
+  if (binding.lifetime === 'once' && Number(binding.remaining_uses) <= 0) return 'used';
+  return binding.status;
+}
+
+function fileBindingDetails(binding, state, usersById, { omitLocation = false, omitAccount = false } = {}) {
+  const location = (state.locations || []).find(item => String(item.id) === String(binding.location_id));
+  const workspace = (state.workspaces || []).find(item => String(item.id) === String(binding.workspace_id));
+  const details = [];
+  const owner = binding.subject_username || usersById.get(String(binding.subject_id))?.username || binding.subject_id;
+  if (!omitAccount && String(binding.subject_id) !== String(state.subject_id)) details.push(`Account: ${owner}`);
+  if (!omitLocation && location) details.push(location.display_path || location.canonical_path || location.id);
+  else if (!omitLocation && binding.location_id) details.push(`Location: ${binding.location_id}`);
+  if (!binding.location_id && !binding.workspace_id && !binding.chat_id) details.push('Account-wide scope');
+  if (binding.workspace_id) details.push(`Workspace: ${workspace?.name || binding.workspace_id}`);
+  if (binding.chat_id) details.push(`Chat: ${binding.chat_id}`);
+  const lifetimes = { always: 'Until revoked', workspace: 'This workspace', chat: 'This chat', once: 'One use' };
+  details.push(lifetimes[binding.lifetime] || binding.lifetime || 'Unknown lifetime');
+  if (binding.expires_unix_ms != null) {
+    const expiry = new Date(Number(binding.expires_unix_ms));
+    if (!Number.isNaN(expiry.getTime())) details.push(`Expires ${expiry.toLocaleString()}`);
+  }
+  if (binding.remaining_uses != null) details.push(`${binding.remaining_uses} use${Number(binding.remaining_uses) === 1 ? '' : 's'} remaining`);
+  const status = fileBindingStatus(binding);
+  details.push(binding.status === 'disabled' && status !== 'disabled' ? `disabled · ${status}` : status);
+  if (location && (!location.enabled || location.availability !== 'available')) {
+    details.push(!location.enabled ? 'Location disabled' : `Location ${location.availability || 'unavailable'}`);
+  }
+  if (workspace?.archived) details.push('Workspace archived');
+  return details.join(' · ');
+}
+
+function fileLocationCeiling(location, state) {
+  const capabilities = new Set(location.capabilities || []);
+  if (state.effective_scope?.host) return capabilities;
+  const effective = (state.effective_scope?.locations || []).find(item => String(item.location_id) === String(location.id));
+  return new Set((effective?.app_capabilities || []).filter(capability => capabilities.has(capability)));
+}
+
+function renderCurrentAppFilesystemAccess(state) {
   const list = el('odysseus-file-visible-to-me-list');
   if (!list) return;
-  try {
-    const canonical = policyState === undefined ? await loadCanonicalPolicyState() : policyState;
-    if (canonical) {
-      if (window._isAdmin) {
-        list.replaceChildren(filesystemAccessRow(
-          'Full OS-visible filesystem',
-          'Owner/admin app access · Editor opens at home by default · agent approvals remain separate.',
-        ));
-        return;
-      }
-      const locationsById = new Map((canonical.locations || []).map((location) => [String(location.id), location]));
-      const assignments = (canonical.bindings || []).filter((binding) => (
-        binding?.binding_class === 'people'
-        && binding.status === 'active'
-        && binding.location_id
-      ));
-      list.replaceChildren(...assignments.map((assignment) => {
-        const location = locationsById.get(String(assignment.location_id)) || {};
-        return filesystemAccessRow(
-          location.display_path || location.canonical_path || assignment.location_id || 'Assigned Location',
-          `${locationKindLabel(location)} · ${(assignment.capabilities || []).join(', ')} · ${location.availability || 'unknown'}`,
-        );
-      }));
-      if (!assignments.length) list.textContent = 'No files or folders have been shared with this account.';
-      return;
-    }
-
-    // Compatibility fallback is used only when the canonical state route is
-    // not installed (404), never when canonical policy reports an error.
-    const scopeResponse = await checkedFetch('/api/odysseus-files/app-scope', { credentials: 'same-origin' });
-    const scope = (await scopeResponse.json()).scope || {};
-    if (scope.host) {
-      list.replaceChildren(filesystemAccessRow(
-        'Full OS-visible filesystem',
-        'Owner/admin app access · Editor opens at home by default · agent approvals remain separate.',
-      ));
-      return;
-    }
-    const visibilityResponse = await checkedFetch('/api/odysseus-files/visibility', { credentials: 'same-origin' });
-    const visibility = await visibilityResponse.json();
-    const assignments = Array.isArray(visibility.assignments) ? visibility.assignments : [];
-    list.replaceChildren(...assignments.map((assignment) => {
-      const root = assignment.root || {};
-      return filesystemAccessRow(
-        root.display_path || root.canonical_path || assignment.root_id || 'Assigned root',
-        `${root.kind === 'exact_file' ? 'Exact file' : 'Recursive folder'} · ${(assignment.capabilities || []).join(', ')} · ${assignment.enabled ? 'enabled' : 'disabled'}`,
-      );
-    }));
-    if (!assignments.length) list.textContent = 'No files or folders have been shared with this account.';
-  } catch (error) {
-    list.textContent = error.message;
+  if (state.effective_scope?.host) {
+    list.replaceChildren(filePolicyRow('Full OS-visible filesystem', 'Your account follows the OS account’s file permissions. Editor opens at home by default.'));
+    return;
   }
+  const locations = new Map((state.locations || []).map(location => [String(location.id), location]));
+  const effective = (state.effective_scope?.locations || []).filter(scope => (scope.app_capabilities || []).length);
+  list.replaceChildren(...effective.map(scope => {
+    const location = locations.get(String(scope.location_id));
+    return filePolicyRow(location?.display_path || location?.canonical_path || scope.location_id,
+      `${locationKindLabel(location)} · ${fileCapabilitySummary(scope.app_capabilities)}`);
+  }));
+  if (!effective.length) list.textContent = 'No files or folders are currently shared with your account.';
 }
 
-function populateVisibilitySelectors(users, locations, { canonical = true } = {}) {
+function populateVisibilitySelectors(users, locations) {
   const subject = el('odysseus-file-visibility-subject');
   const root = el('odysseus-file-visibility-root');
   if (!subject || !root) return;
   const previousSubject = subject.value;
   const previousRoot = root.value;
-  subject.replaceChildren(new Option('Choose a non-admin user', ''));
+  subject.replaceChildren(new Option('Choose an account', ''));
   (Array.isArray(users) ? users : [])
-    .filter((user) => user && !user.is_admin && user.username)
+    .filter(user => user && !user.is_admin && user.username)
     .sort((a, b) => String(a.username).localeCompare(String(b.username)))
-    .forEach((user) => {
-      const accountId = String(user.account_id || '').trim();
-      const option = new Option(String(user.username), canonical && accountId ? accountId : String(user.username));
+    .forEach(user => {
+      const option = new Option(String(user.username), String(user.account_id || user.username));
       option.dataset.username = String(user.username);
-      if (accountId) option.dataset.accountId = accountId;
       subject.append(option);
     });
-  if ([...subject.options].some((option) => option.value === previousSubject)) subject.value = previousSubject;
+  if ([...subject.options].some(option => option.value === previousSubject)) subject.value = previousSubject;
   root.replaceChildren(new Option('Choose a Location', ''));
-  (Array.isArray(locations) ? locations : [])
-    .filter((item) => item && item.id && item.enabled && item.availability === 'available')
-    .forEach((item) => {
-      const label = `${locationKindLabel(item)} · ${item.display_path || item.canonical_path || item.id}`;
-      root.append(new Option(label, String(item.id)));
-    });
-  if ([...root.options].some((option) => option.value === previousRoot)) root.value = previousRoot;
+  for (const location of locations || []) {
+    if (!location.enabled || location.availability !== 'available') continue;
+    root.append(new Option(`${locationKindLabel(location)} · ${location.display_path || location.canonical_path || location.id}`, String(location.id)));
+  }
+  if ([...root.options].some(option => option.value === previousRoot)) root.value = previousRoot;
 }
 
-async function loadVisibilityAssignments(policyState = undefined, compatibilityRoots = [], usersPayload = null) {
+function renderPeopleAccess(state, users) {
   const list = el('odysseus-file-visibility-assignments');
-  const status = el('odysseus-file-visibility-status');
-  let canonical = policyState;
-  if (canonical === undefined) {
-    try {
-      canonical = await loadCanonicalPolicyState();
-    } catch (error) {
-      if (list) list.textContent = '';
-      if (status) status.textContent = error.message;
-      await loadCurrentAppFilesystemAccess(undefined);
+  if (!list || !state.is_admin) return;
+  populateVisibilitySelectors(users, state.locations);
+  const usersById = new Map(users.filter(user => user?.account_id).map(user => [String(user.account_id), user]));
+  const locations = new Map((state.locations || []).map(location => [String(location.id), location]));
+  const assignments = (state.bindings || []).filter(binding => binding.binding_class === 'people');
+  list.replaceChildren(...assignments.map(binding => {
+    const location = locations.get(String(binding.location_id));
+    const active = fileBindingStatus(binding) === 'active';
+    const username = binding.subject_username || usersById.get(String(binding.subject_id))?.username || binding.subject_id;
+    const row = filePolicyRow(`${username} · ${location?.display_path || location?.canonical_path || binding.location_id}`, `${fileCapabilitySummary(binding.capabilities)} · ${fileBindingDetails(binding, state, new Map(), { omitLocation: true, omitAccount: true })}`, { inactive: !active });
+    const endpoint = `people/${encodeURIComponent(binding.id)}`;
+    if (['active', 'disabled'].includes(binding.status)) {
+      row.append(filePolicyButton(active ? 'Disable' : 'Enable', () => changeFilePolicy(endpoint, 'PATCH', { enabled: !active }, 'people-access'), 'odysseus-file-visibility-status', {
+        disabled: !active && (!location?.enabled || location.availability !== 'available' || !usersById.has(String(binding.subject_id)) || ['expired', 'used'].includes(fileBindingStatus(binding))),
+      }));
+      const hasWrite = (binding.capabilities || []).includes('write');
+      row.append(filePolicyButton(hasWrite ? 'Disable modify' : 'Allow modify', () => changeFilePolicy(endpoint, 'PATCH', { capabilities: fileModifyCapabilities(binding, !hasWrite) }, 'people-access'), 'odysseus-file-visibility-status', {
+        disabled: !active || !(location?.capabilities || []).includes('write') || !fileModifyCapabilities(binding, !hasWrite).length,
+      }));
+      row.append(filePolicyButton('Revoke', () => changeFilePolicy(endpoint, 'DELETE', undefined, 'people-access'), 'odysseus-file-visibility-status'));
+    }
+    return row;
+  }));
+  if (!assignments.length) list.textContent = 'No Locations have been shared with other accounts.';
+}
+
+function renderFileLocations(state) {
+  const list = el('odysseus-file-roots');
+  if (!list) return;
+  const locations = state.locations || [];
+  list.replaceChildren(...locations.map(location => {
+    const row = filePolicyRow(location.display_path || location.canonical_path || location.id,
+      `${locationKindLabel(location)} · ${fileCapabilitySummary(location.capabilities)} · ${location.enabled ? 'enabled' : 'disabled'} · ${location.availability || 'unknown'}`,
+      { inactive: !location.enabled || location.availability !== 'available' });
+    if (state.is_admin && !location.enabled) {
+      row.append(filePolicyButton('Restore Location', async () => {
+        if (!await uiModule.styledConfirm(
+          `Restore “${location.display_path || location.canonical_path || location.id}”? This restores the Location’s registration. Previous People access, agent access, and operation approvals stay revoked.`,
+          { title: 'Restore Location?', confirmText: 'Restore Location', cancelText: 'Cancel' },
+        )) return;
+        await changeFilePolicy('locations', 'POST', {
+          path: location.canonical_path || location.display_path,
+          kind: location.kind,
+          capabilities: location.capabilities,
+          agent_access: false,
+        }, 'location-restore');
+        const status = el('odysseus-file-root-status');
+        if (status) status.textContent = 'Location restored. Choose any People or agent access explicitly.';
+      }, 'odysseus-file-root-status', { disabled: !(location.canonical_path || location.display_path) || !(location.capabilities || []).length }));
+    } else if (state.is_admin) {
+      row.append(filePolicyButton('Remove Location', async () => {
+        if (!await uiModule.styledConfirm(
+          `Remove “${location.display_path || location.canonical_path || location.id}”? This revokes its People access, agent access, and operation approvals, and archives its Workspaces. Files on disk are not deleted.`,
+          { title: 'Remove Location?', confirmText: 'Remove Location', cancelText: 'Keep Location', danger: true },
+        )) return;
+        const result = await changeFilePolicy(`locations/${encodeURIComponent(location.id)}`, 'DELETE', undefined, 'location-remove');
+        const status = el('odysseus-file-root-status');
+        if (status) status.textContent = `Removed Location; revoked ${Number(result.bindings_revoked || 0)} access records and archived ${Number(result.workspaces_archived || 0)} Workspaces.`;
+      }, 'odysseus-file-root-status'));
+    }
+    return row;
+  }));
+  if (!locations.length) list.textContent = 'No registered Locations are available to this account.';
+  const select = el('odysseus-permissions-reset-location');
+  if (select) {
+    const previous = select.value;
+    select.replaceChildren(new Option('Choose a Location', ''));
+    for (const location of locations) select.append(new Option(location.display_path || location.canonical_path || location.id, String(location.id)));
+    if ([...select.options].some(option => option.value === previous)) select.value = previous;
+  }
+}
+
+function renderAgentAccess(state, usersById) {
+  const list = el('file-policy-agent-access');
+  if (!list) return;
+  const bindings = (state.bindings || []).filter(binding => binding.binding_class === 'agent');
+  list.replaceChildren(...bindings.map(binding => {
+    const status = fileBindingStatus(binding);
+    const active = status === 'active';
+    const location = (state.locations || []).find(item => String(item.id) === String(binding.location_id));
+    const ceiling = location ? fileLocationCeiling(location, state) : new Set();
+    const effective = (state.effective_scope?.locations || []).find(scope => String(scope.location_id) === String(binding.location_id));
+    const available = String(binding.subject_id) === String(state.subject_id)
+      ? ` · Available to your agents: ${fileCapabilitySummary(effective?.agent_capabilities || [])}` : '';
+    const row = filePolicyRow(`Agent · ${fileCapabilitySummary(binding.capabilities)}`, `${fileBindingDetails(binding, state, usersById)}${available}`, { inactive: !active });
+    if (String(binding.subject_id) === String(state.subject_id) && ['active', 'disabled'].includes(binding.status)) {
+      const endpoint = `agent-access/${encodeURIComponent(binding.id)}`;
+      row.append(filePolicyButton(active ? 'Disable' : 'Enable', () => changeFilePolicy(endpoint, 'PATCH', { enabled: !active }, 'agent-access'), 'file-policy-agent-status', {
+        disabled: !active && (!location?.enabled || location.availability !== 'available' || !ceiling.has('read') || status === 'expired' || status === 'used'),
+      }));
+      const hasWrite = (binding.capabilities || []).includes('write');
+      row.append(filePolicyButton(hasWrite ? 'Disable modify' : 'Allow modify', () => changeFilePolicy(endpoint, 'PATCH', { capabilities: fileModifyCapabilities(binding, !hasWrite) }, 'agent-access'), 'file-policy-agent-status', { disabled: !active || !ceiling.has('write') || !fileModifyCapabilities(binding, !hasWrite).length }));
+      row.append(filePolicyButton('Revoke', () => changeFilePolicy(endpoint, 'DELETE', undefined, 'agent-access'), 'file-policy-agent-status'));
+    }
+    return row;
+  }));
+  for (const location of state.locations || []) {
+    if (!location.enabled || location.availability !== 'available' || !fileLocationCeiling(location, state).has('read')) continue;
+    if (bindings.some(binding => String(binding.subject_id) === String(state.subject_id) && String(binding.location_id) === String(location.id) && binding.lifetime === 'always' && ['active', 'disabled'].includes(binding.status))) continue;
+    const row = filePolicyRow(`Agent access off · ${location.display_path || location.canonical_path || location.id}`, 'Enable browsing for your agents within this Location.');
+    row.append(filePolicyButton('Enable agent', () => changeFilePolicy('agent-access', 'POST', { location_id: location.id, capabilities: ['read'] }, 'agent-access'), 'file-policy-agent-status'));
+    list.append(row);
+  }
+  if (!list.childNodes.length) list.textContent = 'No agent file access is configured.';
+}
+
+async function changeFileWorkspace(workspace, changes, mutation) {
+  try {
+    return await changeFilePolicy(`workspaces/${encodeURIComponent(workspace.id)}`, 'PATCH', {
+      ...changes, expected_revision: workspace.revision,
+    }, mutation);
+  } catch (error) {
+    // Refresh a stale revision before offering another deliberate edit.
+    await loadFileAccessSettings();
+    throw error;
+  }
+}
+
+function workspaceRenameControls(workspace) {
+  const fields = document.createElement('div');
+  fields.className = 'file-policy-review-fields';
+  fields.style.display = 'none';
+  const input = document.createElement('input');
+  input.className = 'settings-input';
+  input.setAttribute('aria-label', 'Workspace name');
+  input.maxLength = 200;
+  input.value = workspace.name || '';
+  const save = filePolicyButton('Save name', async () => {
+    const name = input.value.trim();
+    if (!name) throw new Error('Enter a Workspace name.');
+    if (name === workspace.name) { fields.style.display = 'none'; return; }
+    await changeFileWorkspace(workspace, { name }, 'workspace-rename');
+  }, 'file-policy-agent-status');
+  const cancel = filePolicyButton('Cancel', () => { fields.style.display = 'none'; }, 'file-policy-agent-status');
+  fields.append(input, save, cancel);
+  const button = filePolicyButton('Rename', () => {
+    fields.style.display = 'flex';
+    input.focus();
+    input.select();
+  }, 'file-policy-agent-status');
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); save.click(); }
+    else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); fields.style.display = 'none'; }
+  });
+  return { button, fields };
+}
+
+function renderFileWorkspaces(state, usersById) {
+  const list = el('file-policy-workspaces');
+  if (!list) return;
+  list.replaceChildren(...(state.workspaces || []).map(workspace => {
+    const location = (state.locations || []).find(item => String(item.id) === String(workspace.location_id));
+    const related = (state.bindings || []).filter(binding => String(binding.workspace_id) === String(workspace.id));
+    const configured = related.filter(binding => ['active', 'disabled'].includes(binding.status)).length;
+    const path = [location?.display_path || location?.canonical_path || workspace.location_id, workspace.relative_folder].filter(Boolean).join(' / ');
+    const ownWorkspace = String(workspace.owner_subject_id) === String(state.subject_id);
+    const owner = !ownWorkspace
+      ? ` · Account: ${usersById.get(String(workspace.owner_subject_id))?.username || workspace.owner_subject_id}` : '';
+    const locationAvailable = !!location?.enabled && location.availability === 'available';
+    const row = filePolicyRow(workspace.name || workspace.id,
+      `${path} · ${workspace.archived ? 'archived' : 'active workspace'}${owner}${locationAvailable ? '' : ' · Location unavailable'} · ${configured} scoped permission${configured === 1 ? '' : 's'}`,
+      { inactive: workspace.archived || !locationAvailable });
+    let rename = null;
+    if (ownWorkspace || state.is_admin) {
+      rename = workspaceRenameControls(workspace);
+      row.append(rename.button);
+      const archive = filePolicyButton(workspace.archived ? 'Restore Workspace' : 'Archive Workspace', async () => {
+        if (!workspace.archived && !await uiModule.styledConfirm(
+          `Archive “${workspace.name || workspace.id}”? This revokes active permissions scoped to this Workspace. Files remain on disk. Restoring the Workspace keeps those permissions revoked.`,
+          { title: 'Archive Workspace?', confirmText: 'Archive Workspace', cancelText: 'Keep Workspace', danger: true },
+        )) return;
+        await changeFileWorkspace(workspace, { archived: !workspace.archived }, workspace.archived ? 'workspace-restore' : 'workspace-archive');
+        const status = el('file-policy-agent-status');
+        if (status) status.textContent = workspace.archived
+          ? 'Workspace restored. Its revoked permissions remain revoked.'
+          : 'Workspace archived and its active scoped permissions revoked. Files remain on disk.';
+      }, 'file-policy-agent-status', { disabled: workspace.archived && !locationAvailable });
+      if (workspace.archived && !locationAvailable) archive.title = 'Restore the Location before restoring this Workspace.';
+      row.append(archive);
+    }
+    if (ownWorkspace && related.some(binding => ['agent', 'operation'].includes(binding.binding_class) && ['active', 'disabled'].includes(binding.status))) {
+      row.append(filePolicyButton('Reset workspace permissions', () => resetFileAgentPermissions('workspace', { workspace_id: workspace.id }, workspace.name || 'This workspace'), 'file-policy-agent-status'));
+    }
+    if (rename) row.append(rename.fields);
+    return row;
+  }));
+  if (!list.childNodes.length) list.textContent = 'No registered Workspaces.';
+}
+
+function operationExpiryControls(binding, endpoint) {
+  const details = document.createElement('details');
+  details.className = 'file-policy-expiry';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Edit expiry';
+  const fields = document.createElement('div');
+  fields.className = 'file-policy-review-fields';
+  const input = document.createElement('input');
+  input.type = 'datetime-local';
+  input.className = 'settings-input';
+  input.setAttribute('aria-label', 'Approval expiry in your local time');
+  if (binding.expires_unix_ms != null) {
+    const expiry = new Date(Number(binding.expires_unix_ms));
+    if (!Number.isNaN(expiry.getTime())) {
+      input.value = new Date(expiry.getTime() - expiry.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    }
+  }
+  const localTime = document.createElement('span');
+  localTime.className = 'admin-toggle-sub';
+  localTime.textContent = 'Your local time';
+  fields.append(input, localTime);
+  fields.append(filePolicyButton('Save expiry', async () => {
+    const timestamp = new Date(input.value).getTime();
+    if (!input.value || !Number.isFinite(timestamp) || timestamp <= Date.now()) throw new Error('Choose an expiry in the future.');
+    await changeFilePolicy(endpoint, 'PATCH', { expires_unix_ms: timestamp }, 'operation-expiry');
+  }, 'odysseus-permissions-reset-status'));
+  if (binding.expires_unix_ms != null) {
+    fields.append(filePolicyButton('Clear expiry', () => changeFilePolicy(endpoint, 'PATCH', { expires_unix_ms: null }, 'operation-expiry'), 'odysseus-permissions-reset-status'));
+  }
+  details.append(summary, fields);
+  return details;
+}
+
+function renderOperationApprovals(state, usersById) {
+  const list = el('odysseus-agent-grants');
+  if (!list) return;
+  const bindings = state.operation_approvals || [];
+  list.replaceChildren(...bindings.map(binding => {
+    const approval = binding.approval || {};
+    const operation = approval.permission_type || binding.operation || 'Operation approval';
+    const target = [approval.pattern, approval.resource].filter(Boolean).join(' · ');
+    const status = fileBindingStatus(binding);
+    const active = status === 'active';
+    const row = filePolicyRow(`${operation}${target ? ` · ${target}` : ''}`,
+      fileBindingDetails(binding, state, usersById), { inactive: !active });
+    const canManage = state.is_admin || String(binding.subject_id) === String(state.subject_id);
+    if (canManage && ['active', 'disabled'].includes(binding.status)) {
+      const endpoint = `operation-approvals/${encodeURIComponent(binding.id)}`;
+      const location = (state.locations || []).find(item => String(item.id) === String(binding.location_id));
+      const workspace = (state.workspaces || []).find(item => String(item.id) === String(binding.workspace_id));
+      const cannotEnable = status === 'expired' || status === 'used'
+        || (!!binding.location_id && (!location?.enabled || location.availability !== 'available'))
+        || (!!binding.workspace_id && (!workspace || workspace.archived));
+      row.append(filePolicyButton(active ? 'Disable' : 'Enable', () => changeFilePolicy(endpoint, 'PATCH', { enabled: !active }, 'operation-approval'), 'odysseus-permissions-reset-status', { disabled: !active && cannotEnable }));
+      row.append(filePolicyButton('Revoke', () => changeFilePolicy(endpoint, 'DELETE', undefined, 'operation-revoke'), 'odysseus-permissions-reset-status'));
+      row.append(operationExpiryControls(binding, endpoint));
+    }
+    return row;
+  }));
+  if (!bindings.length) list.textContent = 'No saved operation approvals.';
+}
+
+async function resetFileAgentPermissions(scope, payload, label) {
+  const request = async preview => {
+    const response = await checkedFetch(`/api/file-policy/resets${preview ? '/preview' : ''}`, {
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope, ...payload }),
+    });
+    return response.json();
+  };
+  const preview = await request(true);
+  const count = Number(preview.total_matched ?? preview.matched ?? 0);
+  if (!await uiModule.styledConfirm(
+    `${label} will revoke ${count} agent permission${count === 1 ? '' : 's'}. Shared Locations and human access remain unchanged.`,
+    { title: `Reset ${label.toLowerCase()}?`, confirmText: 'Reset permissions', cancelText: 'Keep permissions', danger: true },
+  )) return;
+  const result = await request(false);
+  announceFilePolicyChanged({ mutation: 'permission-reset', scope });
+  await loadFileAccessSettings();
+  const status = el('odysseus-permissions-reset-status');
+  const revoked = Number(result.total_revoked ?? result.matched ?? 0);
+  if (status) status.textContent = `Reset ${revoked} agent permission${revoked === 1 ? '' : 's'}${result.pending_rejected ? ` and rejected ${result.pending_rejected} pending requests` : ''}.`;
+}
+
+function initFileAccessControls() {
+  if (_fileAccessInitialized) return;
+  _fileAccessInitialized = true;
+  el('odysseus-file-root-add')?.addEventListener('click', () => { void openFileLocationWizard(); });
+  document.addEventListener('openclank:file-policy-changed', event => {
+    if (event.detail?.source === 'settings' || modalEl?.classList.contains('hidden')) return;
+    const panel = modalEl?.querySelector('[data-settings-panel="file-access"]');
+    if (panel && !panel.classList.contains('hidden')) void loadFileAccessSettings();
+  });
+  el('odysseus-file-visibility-add')?.addEventListener('click', async () => {
+    const button = el('odysseus-file-visibility-add');
+    const status = el('odysseus-file-visibility-status');
+    const account = el('odysseus-file-visibility-subject')?.selectedOptions?.[0];
+    const locationId = el('odysseus-file-visibility-root')?.value || '';
+    const capabilities = ['read', 'write'].filter(name => el(`odysseus-file-visibility-${name}`)?.checked);
+    if (!account?.dataset.username || !locationId || !capabilities.length) {
+      if (status) status.textContent = 'Choose an account, a Location, and at least one access capability.';
       return;
     }
-  }
-  await loadCurrentAppFilesystemAccess(canonical);
-  if (!window._isAdmin) {
-    return;
-  }
-  if (!list) return;
-  try {
-    let users = usersPayload;
-    if (!users) {
-      const usersResponse = await checkedFetch('/api/auth/users', { credentials: 'same-origin' });
-      users = await usersResponse.json();
-    }
-    if (canonical) {
-      _fileVisibilityBackend = 'canonical';
-      const locations = Array.isArray(canonical.locations) ? canonical.locations : [];
-      const assignments = (canonical.bindings || []).filter((binding) => binding?.binding_class === 'people');
-      const locationsById = new Map(locations.map((location) => [String(location.id), location]));
-      const usersByAccountId = new Map((users.users || [])
-        .filter((user) => user?.account_id)
-        .map((user) => [String(user.account_id), user]));
-      populateVisibilitySelectors(users.users, locations, { canonical: true });
-      list.replaceChildren(...assignments.map((assignment) => {
-        const row = document.createElement('div');
-        row.className = 'admin-user-row';
-        row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-        const info = document.createElement('div');
-        info.style.cssText = 'flex:1;min-width:240px;';
-        const location = locationsById.get(String(assignment.location_id));
-        const subject = usersByAccountId.get(String(assignment.subject_id));
-        const active = assignment.status === 'active';
-        const path = document.createElement('div');
-        path.style.fontWeight = '600';
-        path.textContent = `${subject?.username || assignment.subject_id} · ${location?.display_path || location?.canonical_path || assignment.location_id}`;
-        const meta = document.createElement('div');
-        meta.className = 'admin-toggle-sub';
-        meta.textContent = `People · ${fileCapabilitySummary(assignment.capabilities)} · ${active ? 'enabled' : assignment.status || 'disabled'} · policy ${assignment.generation ?? canonical.generation ?? 'unknown'}`;
-        info.append(path, meta);
-        const toggle = document.createElement('button');
-        toggle.type = 'button';
-        toggle.className = 'admin-btn-sm';
-        toggle.textContent = active ? 'Disable' : 'Enable';
-        toggle.addEventListener('click', async () => {
-          try {
-            await checkedFetch(`/api/file-policy/people/${encodeURIComponent(assignment.id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !active }), credentials: 'same-origin' });
-            announceFilePolicyChanged({ mutation: 'people-access' });
-            await loadFilesystemRoots();
-          } catch (error) { status.textContent = error.message; }
-        });
-        const locationCaps = new Set(location?.capabilities || []);
-        const hasWrite = (assignment.capabilities || []).includes('write');
-        const modify = document.createElement('button');
-        modify.type = 'button';
-        modify.className = 'admin-btn-sm';
-        modify.textContent = hasWrite ? 'Browse only' : 'Allow modify';
-        modify.disabled = !active || !locationCaps.has('write');
-        modify.addEventListener('click', async () => {
-          try {
-            await checkedFetch(`/api/file-policy/people/${encodeURIComponent(assignment.id)}`, {
-              method: 'PATCH', credentials: 'same-origin',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ capabilities: hasWrite ? ['read'] : ['read', 'write'] }),
-            });
-            announceFilePolicyChanged({ mutation: 'people-access' });
-            await loadFilesystemRoots();
-          } catch (error) { status.textContent = error.message; }
-        });
-        const remove = document.createElement('button');
-        remove.type = 'button';
-        remove.className = 'admin-btn-sm';
-        remove.textContent = 'Remove';
-        remove.addEventListener('click', async () => {
-          try {
-            await checkedFetch(`/api/file-policy/people/${encodeURIComponent(assignment.id)}`, { method: 'DELETE', credentials: 'same-origin' });
-            announceFilePolicyChanged({ mutation: 'people-access' });
-            await loadFilesystemRoots();
-          } catch (error) { status.textContent = error.message; }
-        });
-        row.append(info, toggle, modify, remove);
-        return row;
-      }));
-      if (!assignments.length) list.textContent = 'No People access has been shared yet.';
-      status.textContent = `${assignments.length} People assignment${assignments.length === 1 ? '' : 's'} · policy generation ${canonical.generation ?? 'unknown'}`;
-    } else {
-      _fileVisibilityBackend = 'legacy';
-      const visibilityResponse = await checkedFetch('/api/odysseus-files/visibility', { credentials: 'same-origin' });
-      const visibility = await visibilityResponse.json();
-      const assignments = Array.isArray(visibility.assignments) ? visibility.assignments : [];
-      const roots = Array.isArray(compatibilityRoots) ? compatibilityRoots : [];
-      populateVisibilitySelectors(users.users, roots, { canonical: false });
-      const rootsById = new Map(roots.map((item) => [String(item.id), item]));
-      list.replaceChildren(...assignments.map((assignment) => {
-        const row = document.createElement('div');
-        row.className = 'admin-user-row';
-        row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-        const info = document.createElement('div');
-        info.style.cssText = 'flex:1;min-width:240px;';
-        const rootRecord = rootsById.get(String(assignment.root_id));
-        const path = document.createElement('div');
-        path.style.fontWeight = '600';
-        path.textContent = `${assignment.subject_id} · ${rootRecord?.display_path || rootRecord?.canonical_path || assignment.root_id}`;
-        const meta = document.createElement('div');
-        meta.className = 'admin-toggle-sub';
-        meta.textContent = `${assignment.subject_kind || 'user'} · ${(assignment.capabilities || []).join(', ')} · ${assignment.enabled ? 'enabled' : 'disabled'} · compatibility policy ${assignment.generation ?? visibility.generation ?? 'unknown'}`;
-        info.append(path, meta);
-        const toggle = document.createElement('button');
-        toggle.type = 'button';
-        toggle.className = 'admin-btn-sm';
-        toggle.textContent = assignment.enabled ? 'Disable' : 'Enable';
-        toggle.addEventListener('click', async () => {
-          try {
-            await checkedFetch(`/api/odysseus-files/visibility/${encodeURIComponent(assignment.id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !assignment.enabled }), credentials: 'same-origin' });
-            announceFilePolicyChanged({ mutation: 'people-access' });
-            await loadFilesystemRoots();
-          } catch (error) { status.textContent = error.message; }
-        });
-        const remove = document.createElement('button');
-        remove.type = 'button';
-        remove.className = 'admin-btn-sm';
-        remove.textContent = 'Remove';
-        remove.addEventListener('click', async () => {
-          try {
-            await checkedFetch(`/api/odysseus-files/visibility/${encodeURIComponent(assignment.id)}`, { method: 'DELETE', credentials: 'same-origin' });
-            announceFilePolicyChanged({ mutation: 'people-access' });
-            await loadFilesystemRoots();
-          } catch (error) { status.textContent = error.message; }
-        });
-        row.append(info, toggle, remove);
-        return row;
-      }));
-      if (!assignments.length) list.textContent = 'No user-visible compatibility roots assigned yet.';
-      status.textContent = `${assignments.length} compatibility assignment${assignments.length === 1 ? '' : 's'} · policy generation ${visibility.generation ?? 'unknown'}`;
-    }
-  } catch (error) {
-    list.textContent = '';
-    status.textContent = error.message;
-  }
-  if (!_fileVisibilityInitialized) {
-    _fileVisibilityInitialized = true;
-    const add = el('odysseus-file-visibility-add');
-    add?.addEventListener('click', async () => {
-      const subjectSelect = el('odysseus-file-visibility-subject');
-      const subjectOption = subjectSelect?.selectedOptions?.[0];
-      const subjectId = subjectSelect?.value?.trim();
-      const subjectUsername = subjectOption?.dataset.username || subjectId;
-      const locationId = el('odysseus-file-visibility-root')?.value?.trim();
-      const capabilities = ['read', 'write'].filter((name) => el(`odysseus-file-visibility-${name}`)?.checked);
-      if (!subjectId || !subjectUsername || !locationId || !capabilities.length) {
-        if (status) status.textContent = 'Choose a user, a Location, and at least one capability.';
-        return;
-      }
+    button.disabled = true;
+    try { await changeFilePolicy('people', 'POST', { subject_username: account.dataset.username, location_id: locationId, capabilities }, 'people-access'); }
+    catch (error) { if (status) status.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+  const bindReset = (id, scope, context, label) => {
+    el(id)?.addEventListener('click', async () => {
+      const button = el(id);
+      const status = el('odysseus-permissions-reset-status');
+      button.disabled = true;
       try {
-        if (_fileVisibilityBackend === 'canonical') {
-          await checkedFetch('/api/file-policy/people', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subject_username: subjectUsername, location_id: locationId, capabilities }), credentials: 'same-origin' });
-        } else if (_fileVisibilityBackend === 'legacy') {
-          await checkedFetch('/api/odysseus-files/visibility', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subject_id: subjectUsername, root_id: locationId, capabilities }), credentials: 'same-origin' });
-        } else {
-          throw new Error('File policy is still loading.');
-        }
-        announceFilePolicyChanged({ mutation: 'people-access' });
-        await loadFilesystemRoots();
-      } catch (error) { status.textContent = error.message; }
+        const payload = context();
+        if (!payload) throw new Error(`There is no ${label.toLowerCase()} to reset.`);
+        await resetFileAgentPermissions(scope, payload, label);
+      } catch (error) { if (status) status.textContent = error.message; }
+      finally { button.disabled = false; }
     });
-  }
+  };
+  bindReset('odysseus-permissions-reset-chat', 'chat', () => {
+    const chatId = window.sessionModule?.getCurrentSessionId?.();
+    return chatId ? { chat_id: chatId } : null;
+  }, 'This chat');
+  bindReset('odysseus-permissions-reset-workspace', 'workspace', () => {
+    const workspaceId = getWorkspaceId();
+    return workspaceId ? { workspace_id: workspaceId } : null;
+  }, 'This workspace');
+  bindReset('odysseus-permissions-reset-location-button', 'location', () => {
+    const locationId = el('odysseus-permissions-reset-location')?.value;
+    return locationId ? { location_id: locationId } : null;
+  }, 'This Location');
+  bindReset('odysseus-permissions-reset-all', 'all_agent', () => ({}), 'All agent permissions');
 }
 
-async function loadFilesystemRoots() {
-  const list = el('odysseus-file-roots');
-  const status = el('odysseus-file-root-status');
-  if (!list) return;
+async function loadFileAccessSettings() {
+  initFileAccessControls();
+  const loadId = ++_fileAccessLoadId;
+  const status = el('file-policy-status');
+  if (status) status.textContent = 'Loading file access…';
   try {
-    const canonical = await loadCanonicalPolicyState();
-    if (canonical) {
-      const allLocations = Array.isArray(canonical.locations) ? canonical.locations : [];
-      let usersPayload = null;
-      if (window._isAdmin) {
-        try {
-          const usersResponse = await checkedFetch('/api/auth/users', { credentials: 'same-origin' });
-          usersPayload = await usersResponse.json();
-        } catch (_) {
-          // Locations and authority controls remain usable if account labels
-          // are temporarily unavailable; immutable subject IDs are shown.
-        }
-      }
-      const usersByAccountId = new Map((usersPayload?.users || [])
-        .filter((user) => user?.account_id)
-        .map((user) => [String(user.account_id), user]));
-      const peopleLocationIds = new Set((canonical.bindings || [])
-        .filter((binding) => binding?.binding_class === 'people' && binding.status === 'active' && binding.location_id)
-        .map((binding) => String(binding.location_id)));
-      const locations = window._isAdmin
-        ? allLocations
-        : allLocations.filter((location) => peopleLocationIds.has(String(location.id)));
-      const agentBindingsByLocation = new Map();
-      for (const binding of canonical.bindings || []) {
-        if (
-          binding?.binding_class !== 'agent'
-          || binding.status !== 'active'
-          || !binding.location_id
-          || String(binding.subject_id) !== String(canonical.subject_id)
-        ) continue;
-        const key = String(binding.location_id);
-        if (!agentBindingsByLocation.has(key)) agentBindingsByLocation.set(key, []);
-        agentBindingsByLocation.get(key).push(binding);
-      }
-      const peopleBindingsByLocation = new Map();
-      for (const binding of canonical.bindings || []) {
-        if (binding?.binding_class !== 'people' || binding.status !== 'active' || !binding.location_id) continue;
-        const key = String(binding.location_id);
-        if (!peopleBindingsByLocation.has(key)) peopleBindingsByLocation.set(key, []);
-        peopleBindingsByLocation.get(key).push(binding);
-      }
-      list.replaceChildren(...locations.map((location) => {
-        const row = document.createElement('div');
-        row.className = 'admin-user-row';
-        row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-        const info = document.createElement('div');
-        info.style.cssText = 'flex:1;min-width:240px;';
-        const path = document.createElement('div');
-        path.style.fontWeight = '600';
-        path.textContent = location.display_path || location.canonical_path || location.id;
-        const meta = document.createElement('div');
-        meta.className = 'admin-toggle-sub';
-        const agentBindings = agentBindingsByLocation.get(String(location.id)) || [];
-        const activeAgent = agentBindings.find((binding) => binding.status === 'active') || null;
-        const agentCaps = [...new Set(agentBindings.flatMap((binding) => binding.capabilities || []))];
-        const agentSummary = activeAgent
-          ? `Agent access: ${fileCapabilitySummary(agentCaps)}`
-          : 'Agent access: off';
-        const peopleBindings = peopleBindingsByLocation.get(String(location.id)) || [];
-        const peopleNames = peopleBindings.map((binding) => (
-          usersByAccountId.get(String(binding.subject_id))?.username || binding.subject_id
-        ));
-        const peopleSummary = peopleNames.length
-          ? `People: ${peopleNames.join(', ')} (${fileCapabilitySummary(peopleBindings.flatMap((binding) => binding.capabilities || []))})`
-          : 'People: nobody';
-        meta.textContent = `${locationKindLabel(location)} · Location ceiling: ${fileCapabilitySummary(location.capabilities)} · ${location.availability || 'unknown'} · ${location.enabled ? 'enabled' : 'disabled'} · ${peopleSummary} · ${agentSummary}`;
-        info.append(path, meta);
-        row.append(info);
-
-        const locationCaps = new Set(location.capabilities || []);
-        const peopleCaps = new Set((peopleBindingsByLocation.get(String(location.id)) || [])
-          .flatMap((binding) => binding.capabilities || []));
-        const ceiling = canonical.is_admin
-          ? locationCaps
-          : new Set([...locationCaps].filter((capability) => peopleCaps.has(capability)));
-        if (ceiling.has('read')) {
-          const toggleAgent = document.createElement('button');
-          toggleAgent.type = 'button';
-          toggleAgent.className = 'admin-btn-sm';
-          toggleAgent.textContent = activeAgent ? 'Disable agent' : 'Enable agent';
-          toggleAgent.addEventListener('click', async () => {
-            try {
-              if (activeAgent) {
-                await checkedFetch(`/api/file-policy/agent-access/${encodeURIComponent(activeAgent.id)}`, {
-                  method: 'PATCH', credentials: 'same-origin',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ enabled: false }),
-                });
-              } else {
-                await checkedFetch('/api/file-policy/agent-access', {
-                  method: 'POST', credentials: 'same-origin',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ location_id: location.id, capabilities: ['read'] }),
-                });
-              }
-              announceFilePolicyChanged({ mutation: 'agent-access' });
-              await loadFilesystemRoots();
-            } catch (error) { status.textContent = error.message; }
-          });
-          row.append(toggleAgent);
-          if (activeAgent && ceiling.has('write')) {
-            const hasWrite = (activeAgent.capabilities || []).includes('write');
-            const modify = document.createElement('button');
-            modify.type = 'button';
-            modify.className = 'admin-btn-sm';
-            modify.textContent = hasWrite ? 'Agent browse only' : 'Allow agent modify';
-            modify.addEventListener('click', async () => {
-              try {
-                await checkedFetch(`/api/file-policy/agent-access/${encodeURIComponent(activeAgent.id)}`, {
-                  method: 'PATCH', credentials: 'same-origin',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ capabilities: hasWrite ? ['read'] : ['read', 'write'] }),
-                });
-                announceFilePolicyChanged({ mutation: 'agent-access' });
-                await loadFilesystemRoots();
-              } catch (error) { status.textContent = error.message; }
-            });
-            row.append(modify);
-          }
-        }
-        if (canonical.is_admin) {
-          const remove = document.createElement('button');
-          remove.type = 'button';
-          remove.className = 'admin-btn-sm';
-          remove.textContent = 'Remove Location';
-          remove.addEventListener('click', async () => {
-            const confirmed = await uiModule.styledConfirm(
-              `Remove “${location.display_path || location.canonical_path || location.id}”? This revokes its People access, Agent access, and operation approvals, and archives its Workspaces. Files on disk are not deleted.`,
-              { title: 'Remove Location?', confirmText: 'Remove Location', cancelText: 'Keep Location', danger: true },
-            );
-            if (!confirmed) return;
-            try {
-              const response = await checkedFetch(`/api/file-policy/locations/${encodeURIComponent(location.id)}`, {
-                method: 'DELETE', credentials: 'same-origin',
-              });
-              const result = await response.json();
-              announceFilePolicyChanged({ mutation: 'location-remove' });
-              await loadFilesystemRoots();
-              await loadPermissionGrants();
-              status.textContent = `Removed Location; revoked ${Number(result.bindings_revoked || 0)} access record${Number(result.bindings_revoked || 0) === 1 ? '' : 's'} and archived ${Number(result.workspaces_archived || 0)} Workspace${Number(result.workspaces_archived || 0) === 1 ? '' : 's'}. Files were not deleted.`;
-            } catch (error) { status.textContent = error.message; }
-          });
-          row.append(remove);
-        }
-        return row;
-      }));
-      if (!locations.length) list.textContent = window._isAdmin
-        ? 'No Locations registered yet.'
-        : 'No Locations have been shared with this account.';
-      status.textContent = window._isAdmin
-        ? `${locations.length} registered Location${locations.length === 1 ? '' : 's'}. A Location grants no People or Agent access by itself.`
-        : `${locations.length} assigned Location${locations.length === 1 ? '' : 's'}. Agent access is a separate, narrower policy.`;
-      await loadVisibilityAssignments(canonical, [], usersPayload);
-    } else {
-      // Compatibility fallback for servers without the canonical policy API.
-      const response = await checkedFetch('/api/odysseus-files/roots', { credentials: 'same-origin' });
-      const data = await response.json();
-      const roots = Array.isArray(data.roots) ? data.roots : [];
-      list.replaceChildren(...roots.map((root) => {
-        const row = document.createElement('div');
-        row.className = 'admin-user-row';
-        row.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-        const info = document.createElement('div');
-        info.style.cssText = 'flex:1;min-width:220px;';
-        const path = document.createElement('div');
-        path.textContent = root.display_path || root.canonical_path || root.id;
-        path.style.fontWeight = '600';
-        const meta = document.createElement('div');
-        meta.className = 'admin-toggle-sub';
-        meta.textContent = `${locationKindLabel(root)} · ${(root.capabilities || []).join(', ')} · ${root.availability || 'unknown'} · compatibility root`;
-        info.append(path, meta);
-        const toggle = document.createElement('button');
-        toggle.type = 'button';
-        toggle.className = 'admin-btn-sm';
-        toggle.textContent = root.enabled ? 'Disable' : 'Enable';
-        toggle.addEventListener('click', async () => {
-          try {
-            await checkedFetch(`/api/odysseus-files/roots/${encodeURIComponent(root.id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !root.enabled }), credentials: 'same-origin' });
-            announceFilePolicyChanged({ mutation: 'location-access' });
-            await loadFilesystemRoots();
-          } catch (error) { status.textContent = error.message; }
-        });
-        const remove = document.createElement('button');
-        remove.type = 'button';
-        remove.className = 'admin-btn-sm';
-        remove.textContent = 'Remove';
-        remove.addEventListener('click', async () => {
-          try {
-            await checkedFetch(`/api/odysseus-files/roots/${encodeURIComponent(root.id)}`, { method: 'DELETE', credentials: 'same-origin' });
-            announceFilePolicyChanged({ mutation: 'location-remove' });
-            await loadFilesystemRoots();
-          } catch (error) { status.textContent = error.message; }
-        });
-        row.append(info, toggle, remove);
-        return row;
-      }));
-      if (!roots.length) list.textContent = 'No compatibility roots yet.';
-      status.textContent = `${roots.length} compatibility root${roots.length === 1 ? '' : 's'}.`;
-      await loadVisibilityAssignments(null, roots);
+    const state = await loadCanonicalPolicyState();
+    let users = [];
+    let accountWarning = '';
+    if (state.is_admin) {
+      try {
+        const response = await checkedFetch('/api/auth/users', { credentials: 'same-origin', cache: 'no-store' });
+        users = (await response.json()).users || [];
+      } catch (_) { accountWarning = 'Account names are unavailable; account IDs are shown.'; }
     }
+    if (loadId !== _fileAccessLoadId) return;
+    const usersById = new Map(users.filter(user => user?.account_id).map(user => [String(user.account_id), user]));
+    modalEl?.querySelectorAll('[data-settings-panel="file-access"] .admin-only').forEach(control => { control.style.display = state.is_admin ? '' : 'none'; });
+    renderCurrentAppFilesystemAccess(state);
+    renderFileLocations(state);
+    renderPeopleAccess(state, users);
+    renderFileWorkspaces(state, usersById);
+    renderAgentAccess(state, usersById);
+    renderOperationApprovals(state, usersById);
+    if (status) status.textContent = accountWarning;
   } catch (error) {
-    list.textContent = '';
-    status.textContent = error.message;
-  }
-  if (!_fileRootsInitialized) {
-    _fileRootsInitialized = true;
-    const add = el('odysseus-file-root-add');
-    add?.addEventListener('click', () => { void openFileLocationWizard(); });
+    if (loadId !== _fileAccessLoadId) return;
+    for (const id of ['odysseus-file-visible-to-me-list', 'odysseus-file-roots', 'odysseus-file-visibility-assignments', 'file-policy-workspaces', 'file-policy-agent-access', 'odysseus-agent-grants']) el(id)?.replaceChildren();
+    if (status) status.textContent = error.message || 'Could not load file access.';
   }
 }
 
@@ -7274,13 +7129,24 @@ export function setCopalModule(copalModule) {
   syncCopalNotesSettings();
 }
 
+// Files supplies an explicit, owned Workspace ID. Open the surface before
+// delivering context so this also works before the library's first mount.
+window.addEventListener('hex-open', (event) => {
+  const workspaceId = String(event.detail?.workspaceId || '').trim();
+  if (!workspaceId) return;
+  open('hexes');
+  modalEl?.querySelector('[data-general-hex-library]')?.dispatchEvent(
+    new CustomEvent('hex-context', { detail: Object.freeze({ workspaceId }) }),
+  );
+});
+
 export async function openFileLocationWizard({ suggestedPath = '', showSettings = true } = {}) {
   if (showSettings) open('file-access');
   const controller = await import('./fileLocationController.js');
   return controller.openFileLocationWizard({
     suggestedPath,
     onAdded: async ({ path, agentAccess }) => {
-      if (initialized) await loadFilesystemRoots();
+      if (initialized) await loadFileAccessSettings();
       const status = el('odysseus-file-root-status');
       if (status) status.textContent = `Added ${path}. Agent access is ${agentAccess ? 'enabled within this Location' : 'off'}.`;
     },
@@ -7321,9 +7187,9 @@ export function close() {
       window.settingsModule.open('integrations');
       // Brief toast-style banner.
       const banner = document.createElement('div');
-      banner.textContent = success
+      setControlMessage(banner, success
         ? '✓ Google account connected — email is ready'
-        : `Google OAuth failed: ${errMsg || 'unknown error'}`;
+        : `Google OAuth failed: ${errMsg || 'unknown error'}`);
       Object.assign(banner.style, {
         position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
         background: success ? 'var(--accent, #50fa7b)' : 'var(--red, #ff5555)',
@@ -7370,3 +7236,12 @@ const settingsModule = {
 
 
 export default settingsModule;
+
+function setControlMessage(node, message) {
+  if (!node) return;
+  const text = String(message || '');
+  const ids = { '✓':'check', '✗':'close', '⚠':'warning' };
+  const id = ids[text.charAt(0)];
+  if (id) setUiIconText(node, id, text.slice(1).trimStart());
+  else node.textContent = text;
+}

@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 /**
  * emailInbox.js — Email inbox list in sidebar.
  * Follows the session list pattern: list items, click to open as document, archive, etc.
@@ -18,13 +19,13 @@ const _acct = () => emailAccountQuery('&');
 const _emailSetupHint = () => '<div style="margin-top:6px;opacity:0.72;font-size:11px;">Setup: <span style="color:var(--accent,var(--red));">Settings &rsaquo; Integrations</span></div>';
 
 // SVG icons matching sessions.js dropdown style
-const _replyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
-const _archiveIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>';
-const _deleteIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
-const _unreadIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>';
-const _starIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
-const _starFilledIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
-const _bellIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';
+const _replyIcon = uiIcon("reply", 14);
+const _archiveIcon = uiIcon("archive", 14);
+const _deleteIcon = uiIcon("trash", 14);
+const _unreadIcon = uiIcon("select", 14);
+const _starIcon = uiIcon("bookmark", 14);
+const _starFilledIcon = uiIcon("bookmark-filled", 14);
+const _bellIcon = uiIcon("bell", 14);
 const _icon = (svg) => `<span class="dropdown-icon">${svg}</span>`;
 const _replySeparator = '---------- Previous message ----------';
 const _DONE_RESPONSE_TAGS = new Set(['urgent', 'reply-soon', 'action-needed']);
@@ -84,7 +85,7 @@ function _emailTagGroupHtml(tags, em) {
   if (!visible.length) return '';
   if (visible.length === 1) return `<span class="email-tags">${visible[0]}</span>`;
   const extra = visible.slice(1).map(html => `<span class="email-tag-extra">${html}</span>`).join('');
-  return `<span class="email-tags email-tags-collapsed">${visible[0]}${extra}<button type="button" class="email-tags-more" data-email-tags-more aria-expanded="false" title="Show all tags">+${visible.length - 1}<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button></span>`;
+  return `<span class="email-tags email-tags-collapsed">${visible[0]}${extra}<button type="button" class="email-tags-more" data-email-tags-more aria-expanded="false" title="Show all tags">+${visible.length - 1}${uiIcon("chevron-down", 9)}</button></span>`;
 }
 
 function _visibleEmailTagsForRender(em) {
@@ -582,7 +583,7 @@ function _createEmailItem(em) {
   const color = _senderColor(senderName);
 
   const attachIcon = em.has_attachments
-    ? '<span title="Has attachments" style="opacity:0.6;display:inline-flex;flex-shrink:0;margin-left:4px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></span>'
+    ? "<span title=\"Has attachments\" style=\"opacity:0.6;display:inline-flex;flex-shrink:0;margin-left:4px;\">" + uiIcon("attachment", 10) + "</span>"
     : '';
 
   // Per-row dot tint: if the urgency scanner flagged this UID, override the
@@ -607,7 +608,7 @@ function _createEmailItem(em) {
     }
   } catch (_) {}
   const unreadIcon = (!em.is_read && !em.is_answered)
-    ? `<span class="email-unread-dot-inline" title="${_esc(_unreadTitle)}" style="display:inline-flex;align-items:center;flex-shrink:0;margin-left:4px;color:${_unreadColor}"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg></span>`
+    ? `<span class="email-unread-dot-inline" title="${_esc(_unreadTitle)}" style="display:inline-flex;align-items:center;flex-shrink:0;margin-left:4px;color:${_unreadColor}">${uiIcon("dot", 8)}</span>`
     : '';
 
   const tags = _showEmailTags ? _visibleEmailTagsForRender(em) : [];

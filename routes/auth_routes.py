@@ -19,7 +19,7 @@ from pathlib import Path
 
 from core.atomic_io import atomic_write_json, atomic_write_text
 from core.auth import AuthManager, SetAdminResult, TOKEN_TTL, is_reserved_username
-from src.auth_helpers import _auth_disabled, copal_owner_for_user
+from src.auth_helpers import copal_owner_for_user
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
@@ -47,7 +47,6 @@ from src.integrations import (
     mask_integration_secret,
     execute_api_call,
     INTEGRATION_PRESETS,
-    migrate_from_settings,
 )
 from src.reminder_endpoints import ReminderEndpointError, normalize_endpoints
 
@@ -623,15 +622,21 @@ def _is_loopback_address(value: object) -> bool:
 
 
 def _session_cookie_is_secure(request: Request) -> bool:
-    """Keep configured HTTPS cookies secure while permitting explicit loopback HTTP.
+    """Choose a secure session cookie from explicit policy or request scheme.
 
-    A development login served directly at ``http://127.0.0.1`` cannot retain a
-    Secure cookie.  Only relax that attribute when both the socket peer and the
-    requested hostname are loopback; a reverse proxy connecting from loopback to
-    an external hostname therefore cannot accidentally downgrade a public cookie.
-    Forwarded headers are deliberately not authority for this exception.
+    Explicit ``SECURE_COOKIES`` remains an operator override.  When it is
+    unset, the ASGI request's HTTPS scheme receives a Secure cookie while
+    direct HTTP stays usable. Proxy middleware must set that scheme only after
+    applying its configured trust policy; a caller-supplied forwarding header
+    is not cookie-security authority. A forced Secure policy
+    still permits only a direct loopback HTTP login to support the native app.
     """
-    if os.getenv("SECURE_COOKIES", "false").lower() != "true":
+    configured = os.getenv("SECURE_COOKIES")
+    if configured is None or not configured.strip():
+        url = getattr(request, "url", None)
+        scheme = str(getattr(url, "scheme", "") or "").lower()
+        return scheme == "https"
+    if configured.lower() != "true":
         return False
     url = getattr(request, "url", None)
     scheme = str(getattr(url, "scheme", "") or "").lower()
@@ -812,11 +817,18 @@ def setup_auth_routes(
         return auth_manager.get_username_for_token(token)
 
     async def _sync_history_accounts(request: Request) -> None:
+        # Auth commits remain the identity authority. Project current aliases
+        # after lifecycle/account mutations, including zero-binding accounts.
+        from src.openclank.file_policy import FilePolicyRepository
+        from core.auth import normalize_known_username
+        current_users = {name: record for name, record in auth_manager.users.items() if normalize_known_username(auth_manager.users, name)}
+        repository = getattr(request.app.state, "files_policy_repository", None) or FilePolicyRepository()
+        repository.sync_subjects(current_users)
         supervisor = getattr(request.app.state, "history_supervisor", None)
         sync = getattr(supervisor, "sync_accounts", None)
         if callable(sync):
             try:
-                await sync(auth_manager.users)
+                await sync(current_users)
             except Exception as exc:
                 # Account changes remain authoritative in AuthManager; the
                 # worker reports a paused state until its scoped credential
@@ -853,56 +865,11 @@ def setup_auth_routes(
         async with first_run_setup_lock:
             if auth_manager.is_configured:
                 raise HTTPException(400, "Already configured")
-            copal_bridge = _copal_lifecycle_bridge(request)
-            copal_owner = copal_owner_for_user(username)
-            copal_manifest = await _call_copal_lifecycle(
-                copal_bridge,
-                "preflight_rename_owner",
-                {"old_owner": "local", "new_owner": copal_owner},
-            )
-            claim = await _call_copal_lifecycle(
-                copal_bridge,
-                "rename_owner",
-                {
-                    "old_owner": "local",
-                    "new_owner": copal_owner,
-                    "manifest": copal_manifest,
-                },
-            )
-            copal_claimed = bool(claim and claim.get("documents"))
-            try:
-                ok = await asyncio.to_thread(auth_manager.setup, username, body.password)
-            except Exception:
-                if copal_claimed:
-                    try:
-                        await _call_copal_lifecycle(
-                            copal_bridge,
-                            "compensate_owner_rename",
-                            {
-                                "old_owner": "local",
-                                "new_owner": copal_owner,
-                                "manifest": copal_manifest,
-                            },
-                        )
-                    except HTTPException:
-                        logger.exception("Failed to roll back first-run Copal owner claim")
-                raise
+            # Account bootstrap does not adopt or rename legacy local data.
+            ok = await asyncio.to_thread(auth_manager.setup, username, body.password)
             if ok:
                 await _sync_history_accounts(request)
                 return {"ok": True, "message": "Admin account created"}
-            if copal_claimed:
-                try:
-                    await _call_copal_lifecycle(
-                        copal_bridge,
-                        "compensate_owner_rename",
-                        {
-                            "old_owner": "local",
-                            "new_owner": copal_owner,
-                            "manifest": copal_manifest,
-                        },
-                    )
-                except HTTPException:
-                    logger.exception("Failed to roll back rejected first-run Copal owner claim")
             raise HTTPException(500, "Setup failed")
 
     @router.post("/signup")
@@ -4032,6 +3999,9 @@ def setup_auth_routes(
     async def get_settings(request: Request):
         """Return global policy with caller-owned model selections."""
         user = _get_current_user(request)
+        if not user:
+            # Login needs public feature/policy endpoints, not app preferences.
+            return {}
         settings = _load_settings()
         if user:
             settings = _settings_for_user(settings, user)
@@ -4063,7 +4033,7 @@ def setup_auth_routes(
                     settings["agent_settings_effective"] = {"status": "unavailable", "reason": code}
             else:
                 settings["agent_settings_effective"] = {"status": "pending", "reason": "CHAT_ROUTE_UNAVAILABLE"}
-        elif auth_manager.is_configured and not _auth_disabled():
+        else:
             # The route is intentionally readable before login for UI boot.
             # Never expose the operator's selected endpoints/models there.
             settings = _settings_for_user(settings, "")
@@ -4089,8 +4059,7 @@ def setup_auth_routes(
     async def set_settings(request: Request):
         """Save caller model choices; only admins may change global policy."""
         user = _get_current_user(request)
-        single_user = not user and _auth_disabled()
-        if not user and not single_user:
+        if not user:
             raise HTTPException(403, "Admin only")
         body = await request.json()
         if not isinstance(body, dict):
@@ -4166,8 +4135,6 @@ def setup_auth_routes(
 
     # ---- Integrations CRUD ----
 
-    # Run migration on startup
-    migrate_from_settings()
 
     @router.get("/integrations")
     async def list_integrations_route(request: Request):

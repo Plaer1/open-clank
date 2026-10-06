@@ -113,7 +113,7 @@ test('contextual help is mounted, cached, and keeps assistant consumption separa
   assert.match(serviceWorker, /\/static\/js\/contextualHelp\.js/);
   assert.match(source, /const HELP_EVENT = 'openclank:contextual-help'/);
   assert.match(source, /wiki: \{ label: 'Wiki in Editor'/);
-  assert.match(source, /Edit Wiki pages in the shared Editor/);
+  assert.match(source, /Edit Wiki documents in the shared Editor/);
   assert.match(source, /assistant: \{ label: 'Assistant'/);
   assert.match(source, /operations: \{ label: 'Operations'/);
   assert.match(source, /openclank:resource-revoked/);

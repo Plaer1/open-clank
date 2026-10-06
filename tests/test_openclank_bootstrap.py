@@ -120,6 +120,7 @@ def test_serve_execs_only_after_engine_and_cutover(tmp_path, monkeypatch):
     assert captured["environment"]["OPEN_CLANK_ENGINE_BIN"] == str(
         _Verification.binary
     )
+    assert captured["environment"]["APP_PORT"] == "7788"
     assert "DEBUG" not in captured["environment"]
 
 

@@ -214,7 +214,7 @@ export class FilesFacadeClient {
     const scope = String(provider || '').trim().toLowerCase();
     const needle = String(query || '').trim();
     if (!label || label.length > 200) throw new TypeError('saved-search name is invalid');
-    if (!['all', 'host', 'copal', 'gallery', 'library'].includes(scope)) {
+    if (!['all', 'host', 'copal', 'files', 'library'].includes(scope)) {
       throw new TypeError('saved-search provider is invalid');
     }
     if (!needle || needle.length > 512) throw new TypeError('saved-search query is invalid');
@@ -571,7 +571,7 @@ export class FilesFacadeClient {
     return `${this.baseUrl}/content/${encodeURIComponent(value)}?purpose=${normalizedPurpose}`;
   }
 
-  thumbnailUrl(resourceRef, { width = 160, height = 160, scale = 1 } = {}) {
+  thumbnailUrl(resourceRef, { width = 160, height = 160, scale = 1, icon = false } = {}) {
     const value = String(resourceRef || '').trim();
     if (!value) throw new TypeError('resource reference is required');
     const boundedWidth = Math.max(1, Math.min(1024, Math.round(Number(width) || 160)));
@@ -582,6 +582,7 @@ export class FilesFacadeClient {
       height: String(boundedHeight),
       scale: String(boundedScale),
     });
+    if (icon) query.set("icon", "true");
     return `${this.baseUrl}/thumbnail/${encodeURIComponent(value)}?${query}`;
   }
 

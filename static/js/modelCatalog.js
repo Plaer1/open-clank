@@ -22,22 +22,9 @@ export function modelStateKey(base, username) {
   return `${base}:scope:${encodeURIComponent(_normalizedOwner(owner) || 'pending')}`;
 }
 
-export function bindModelStateOwner(username, previousUsername = '') {
+export function bindModelStateOwner(username) {
   const owner = _normalizedOwner(username);
-  if (!owner) return;
-  const previous = _normalizedOwner(previousUsername);
-  try {
-    globalThis.__openClankAuthenticatedUser = owner;
-    MODEL_STATE_KEYS.forEach(base => {
-      const legacy = localStorage.getItem(base);
-      if (legacy === null) return;
-      const scoped = modelStateKey(base, owner);
-      if ((!previous || previous === owner) && localStorage.getItem(scoped) === null) {
-        localStorage.setItem(scoped, legacy);
-      }
-      localStorage.removeItem(base);
-    });
-  } catch { /* storage may be unavailable in private mode */ }
+  if (owner) globalThis.__openClankAuthenticatedUser = owner;
 }
 
 export function catalogEntries(item) {

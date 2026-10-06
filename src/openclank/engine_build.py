@@ -15,6 +15,7 @@ import platform
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -63,6 +64,7 @@ TIER_1_TARGETS = frozenset({
     "darwin-x64",
     "windows-x64",
 })
+BUN_TOOLCHAIN_TARGETS = TIER_1_TARGETS | {"windows-arm64"}
 EXPERIMENTAL_TARGETS = frozenset({
     "linux-x64-baseline",
     "linux-x64-musl",
@@ -124,6 +126,7 @@ _SOURCE_EXCLUDED_FILES = {
     "packages/opencode/src/ext/_manifest.ts",
     "packages/opencode/src/provider/models-snapshot.d.ts",
     "packages/opencode/src/provider/models-snapshot.js",
+    "packages/sdk/js/openapi.json",
 }
 
 
@@ -241,6 +244,50 @@ def current_target() -> str:
     return f"{os_name}-{architecture}{suffix}"
 
 
+def _native_windows_target() -> str:
+    """Query the OS architecture, separately from an emulated Python process."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    query = kernel.IsWow64Process2
+    query.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.USHORT), ctypes.POINTER(wintypes.USHORT)]
+    query.restype = wintypes.BOOL
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    process_machine, native_machine = wintypes.USHORT(), wintypes.USHORT()
+    if not query(kernel.GetCurrentProcess(), ctypes.byref(process_machine), ctypes.byref(native_machine)):
+        raise EngineBuildError("cannot determine native Windows engine architecture")
+    architecture = {0x8664: "x64", 0xAA64: "arm64"}.get(native_machine.value)
+    if architecture is None:
+        raise EngineBuildError("unsupported native Windows engine architecture")
+    return "windows-" + architecture
+
+
+def _compatible_host_target(target: str) -> bool:
+    if target == current_target():
+        return True
+    # Windows ARM runs native ARM64 engines beside an emulated x64 Python host.
+    # Explicit expected_target verification remains exact; this is runtime admission only.
+    return sys.platform == "win32" and _native_windows_target() == "windows-arm64" and target in {"windows-arm64", "windows-x64"}
+
+
+def _verify_pe_target(binary: Path, target: str) -> None:
+    if not target.startswith("windows-"):
+        return
+    with binary.open("rb") as stream:
+        header = stream.read(64)
+        if len(header) != 64 or header[:2] != b"MZ":
+            raise EngineBuildError("Windows engine is not a PE executable")
+        offset = struct.unpack_from("<I", header, 60)[0]
+        if offset > binary.stat().st_size - 6:
+            raise EngineBuildError("Windows engine has an invalid PE header")
+        stream.seek(offset)
+        pe = stream.read(6)
+    expected = {"windows-x64": 0x8664, "windows-arm64": 0xAA64}.get(target)
+    if pe[:4] != b"PE\0\0" or expected is None or struct.unpack_from("<H", pe, 4)[0] != expected:
+        raise EngineBuildError("Windows engine PE architecture disagrees with its target")
+
+
 def default_install_root(repo_root: Path | str | None = None) -> Path:
     return Path(repo_root or REPO_ROOT).resolve() / "libexec" / "openclank" / "engine"
 
@@ -304,22 +351,22 @@ def load_vendor_manifest(repo_root: Path | str | None = None) -> dict[str, Any]:
     bun = toolchain.get("bun", {})
     if not isinstance(bun, dict) or set(bun) != {"version", "release_repository", "downloads"}:
         raise EngineBuildError("vendor manifest Bun contract fields are incompatible")
-    if bun.get("version") != "1.3.14":
-        raise EngineBuildError("the managed engine requires exactly Bun 1.3.14")
+    if bun.get("version") != "1.4.0":
+        raise EngineBuildError("the managed engine requires exactly Bun 1.4.0")
     if bun.get("release_repository") != "https://github.com/oven-sh/bun":
         raise EngineBuildError("vendor manifest has an unexpected Bun release repository")
     package_manager = _load_json(vendor_root / "package.json", "vendored package manifest").get("packageManager")
-    if package_manager != "bun@1.3.14":
-        raise EngineBuildError("packages/mimo-code/package.json must pin bun@1.3.14")
+    if package_manager != "bun@1.4.0":
+        raise EngineBuildError("packages/mimo-code/package.json must pin bun@1.4.0")
     downloads = bun.get("downloads")
-    if not isinstance(downloads, dict) or set(downloads) != TIER_1_TARGETS:
-        raise EngineBuildError("vendor manifest is missing a Tier 1 Bun toolchain")
-    for target in TIER_1_TARGETS:
+    if not isinstance(downloads, dict) or set(downloads) != BUN_TOOLCHAIN_TARGETS:
+        raise EngineBuildError("vendor manifest is missing a pinned Bun toolchain")
+    for target in BUN_TOOLCHAIN_TARGETS:
         contract = downloads[target]
         if not isinstance(contract, dict) or set(contract) != {"url", "sha256"}:
             raise EngineBuildError(f"vendor manifest has an invalid Bun toolchain for {target}")
         url = str(contract.get("url", ""))
-        if not url.startswith("https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/"):
+        if not url.startswith("https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/"):
             raise EngineBuildError(f"vendor manifest has an invalid Bun source for {target}")
         if not _SHA256_RE.fullmatch(str(contract.get("sha256", ""))):
             raise EngineBuildError(f"vendor manifest has an invalid Bun checksum for {target}")
@@ -497,7 +544,7 @@ def _validate_provenance_shape(provenance: Mapping[str, Any]) -> list[str]:
         "product": "Open Clank",
         "artifact_kind": "managed-model-engine",
         "build_contract_version": 1,
-        "bun_version": "1.3.14",
+        "bun_version": "1.4.0",
     }
     for field, expected in expected_constants.items():
         if provenance.get(field) != expected:
@@ -702,7 +749,8 @@ def verify_install(
     target_expectation = expected_target
     if target_expectation is None:
         try:
-            target_expectation = current_target()
+            if not _compatible_host_target(str(target)):
+                target_expectation = current_target()
         except EngineBuildError as exc:
             errors.append(str(exc))
     if target_expectation is not None and target != target_expectation:
@@ -729,6 +777,10 @@ def verify_install(
             errors.append("managed engine binary checksum mismatch")
         if binary.stat().st_size != expected_binary_size:
             errors.append("managed engine binary size mismatch")
+        try:
+            _verify_pe_target(binary, str(target))
+        except (EngineBuildError, OSError) as exc:
+            errors.append(str(exc))
         if os.name != "nt" and not os.access(binary, os.X_OK):
             errors.append("managed engine binary is not executable")
 
@@ -844,9 +896,9 @@ def _ensure_bun(
         if _bun_version(executable) == manifest["toolchain"]["bun"]["version"]:
             return executable
         if not allow_download:
-            raise EngineBuildError("Bun is present but does not match the pinned version 1.3.14")
+            raise EngineBuildError("Bun is present but does not match the pinned version 1.4.0")
     elif not allow_download:
-        raise EngineBuildError("Bun 1.3.14 is required but was not found")
+        raise EngineBuildError("Bun 1.4.0 is required but was not found")
 
     target = current_target()
     contract = manifest["toolchain"]["bun"].get("downloads", {}).get(target)
@@ -1007,7 +1059,9 @@ def _install_artifact(
     try:
         shutil.copyfile(built_binary, staged_binary)
         staged_binary.chmod(0o755)
-        with staged_binary.open("rb") as handle:
+        # Windows fsync uses CRT _commit / FlushFileBuffers, which requires
+        # write access. Reopen the private copy without truncating its bytes.
+        with staged_binary.open("r+b") as handle:
             os.fsync(handle.fileno())
         _atomic_write(staging / "provenance.json", _canonical_json_bytes(provenance))
         if final.exists():
@@ -1039,6 +1093,7 @@ def build_current(
     install_dependencies: bool = True,
     force: bool = False,
     acp_smoke: bool = True,
+    target: str | None = None,
 ) -> EngineVerification:
     root = Path(repo_root or REPO_ROOT).resolve()
     destination = Path(install_root or default_install_root(root)).resolve()
@@ -1048,7 +1103,11 @@ def build_current(
     manifest_sha256 = _sha256_file(manifest_path)
     vendor_root = _vendor_root(root)
     source_sha256 = source_fingerprint(vendor_root)
-    target = current_target()
+    target = target or current_target()
+    if target not in TIER_1_TARGETS | EXPERIMENTAL_TARGETS:
+        raise EngineBuildError(f"unsupported explicit engine target: {target}")
+    if target.split("-", 1)[0] != current_target().split("-", 1)[0]:
+        raise EngineBuildError("engine version/ACP verification requires the target operating system")
     release_version = version or _read_app_version(root)
     if not _VERSION_RE.fullmatch(release_version):
         raise EngineBuildError("Open Clank version is unsafe for an engine artifact path")
@@ -1112,6 +1171,8 @@ def build_current(
                 "packages/opencode",
                 "script/build.ts",
                 "--single",
+                "--target",
+                target,
                 "--skip-install",
             ],
             cwd=vendor_root,
@@ -1122,6 +1183,7 @@ def build_current(
         built_binary = output / ("openclank-engine.exe" if target.startswith("windows-") else "openclank-engine")
         if not built_binary.is_file():
             raise EngineBuildError(f"engine build did not produce {built_binary}")
+        _verify_pe_target(built_binary, target)
         if source_fingerprint(vendor_root) != source_sha256:
             raise EngineBuildError("vendored engine source changed during the build")
 

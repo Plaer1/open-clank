@@ -2,11 +2,10 @@ export * as TuiConfig from "./tui"
 
 import z from "zod"
 import { mergeDeep, unique } from "remeda"
-import { applyEdits, modify } from "jsonc-parser"
+import { applyEdits, modify, parse as parseJsonc } from "jsonc-parser"
 import { Context, Effect, Fiber, Layer } from "effect"
 import { ConfigParse } from "@/config/parse"
 import * as ConfigPaths from "@/config/paths"
-import { migrateTuiConfig } from "./tui-migrate"
 import { TuiInfo } from "./tui-schema"
 import { Flag } from "@/flag/flag"
 import { isRecord } from "@/util/record"
@@ -94,7 +93,22 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
   // Every config dir we may read from: global config dir, any `.mimocode`
   // folders between cwd and home, and MIMOCODE_CONFIG_DIR.
   const directories = yield* ConfigPaths.directories(ctx.directory)
-  yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory }))
+
+  const serverFiles = unique([
+    ...ConfigPaths.fileInDirectory(Global.Path.config, "mimocode"),
+    ...directories.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "mimocode")),
+    ...(Flag.MIMOCODE_CONFIG ? [Flag.MIMOCODE_CONFIG] : []),
+  ])
+  for (const file of serverFiles) {
+    const text = yield* Effect.promise(() => Filesystem.readText(file).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return ""
+      throw error
+    }))
+    const value = parseJsonc(text)
+    if (isRecord(value) && ["theme","keybinds","tui"].some((key) => key in value)) {
+      return yield* Effect.die(new Error(`Legacy TUI config ${file}; run .clanker/tools/native/mimo tui with that explicit file`))
+    }
+  }
 
   const projectFiles = Flag.MIMOCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("tui", ctx.directory)
 

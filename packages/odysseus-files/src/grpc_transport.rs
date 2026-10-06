@@ -1,9 +1,9 @@
 //! Opt-in production Tonic transport for the canonical filesystem service.
 //!
-//! This module is deliberately macOS-only for the first production slice. It
-//! has no TCP listener or implicit fallback. Stable regular-file handles bind
-//! streaming reads and macOS content thumbnails to one Rust-opened object. The
-//! framed stdio lane remains available during installed-package cutover.
+//! macOS retains the private Unix endpoint and peer UID check. Windows uses a
+//! supervisor-owned, already-bound authenticated loopback endpoint. Stable
+//! opened-object handles bind streams and native previews to authorized files.
+//! The framed stdio lane remains available for unary operations.
 
 use crate::{
     ClientRequest, FileService, Operation, ProtocolError, ProtocolErrorCode,
@@ -12,17 +12,28 @@ use crate::{
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use std::env;
+#[cfg(target_os = "macos")]
 use std::fs;
 use std::io;
+#[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "macos")]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Semaphore};
-use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+use tokio_stream::wrappers::ReceiverStream;
+#[cfg(target_os = "macos")]
+use tokio_stream::wrappers::UnixListenerStream;
+#[cfg(windows)]
+use tokio_stream::wrappers::TcpListenerStream;
+#[cfg(target_os = "macos")]
 use tokio_stream::StreamExt;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
@@ -83,7 +94,7 @@ impl FilesTransport for ProductionFilesTransport {
     ) -> Result<Response<HealthResponse>, Status> {
         Ok(Response::new(HealthResponse {
             ready: true,
-            transport: "private-unix-domain-socket".into(),
+            transport: if cfg!(windows) { "authenticated-loopback-tcp" } else { "private-unix-domain-socket" }.into(),
             protocol_major: PROTOCOL_VERSION.major.into(),
             protocol_minor: PROTOCOL_VERSION.minor.into(),
             max_unary_bytes: DEFAULT_MAX_FRAME_BYTES as u32,
@@ -281,10 +292,16 @@ impl FilesTransport for ProductionFilesTransport {
             notify::Config::default(),
         )
         .map_err(|_| Status::unavailable("native filesystem watcher is unavailable"))?;
+        #[cfg(windows)]
+        let watch_parent_pins = crate::windows_fs::pin_parent(&authorized.path).map_err(|_| Status::permission_denied("watch directory authority changed"))?;
+        #[cfg(windows)]
+        let watch_directory_pin = crate::windows_fs::pin_directory(&authorized.path).map_err(|_| Status::permission_denied("watch directory authority changed"))?;
         watcher
             .watch(&authorized.path, RecursiveMode::NonRecursive)
             .map_err(|_| Status::unavailable("authorized directory cannot be watched"))?;
 
+        #[cfg(windows)]
+        drop((watch_parent_pins, watch_directory_pin));
         let (sender, receiver) = mpsc::channel(WATCH_OUTPUT_QUEUE);
         tokio::spawn(async move {
             let _permit = permit;
@@ -293,12 +310,17 @@ impl FilesTransport for ProductionFilesTransport {
             // exits and drops the native watcher without a detached watch.
             let _watcher = watcher;
             let mut sequence = 0_u64;
-            while let Some(event) = callback_receiver.recv().await {
+            loop {
+                let event = tokio::select! {
+                    _ = sender.closed() => return,
+                    event = callback_receiver.recv() => match event { Some(event) => event, None => return },
+                };
                 let overflow = overflowed.swap(false, Ordering::AcqRel);
                 let mapped = if overflow {
                     Some(("rescan_required", true))
                 } else {
                     match event {
+                        Ok(event) if event.need_rescan() => Some(("rescan_required", true)),
                         Ok(event) => event_kind(&event.kind),
                         Err(_) => Some(("rescan_required", true)),
                     }
@@ -456,12 +478,14 @@ fn protocol_status(error: ProtocolError) -> Status {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct SocketGuard {
     path: PathBuf,
     device: u64,
     inode: u64,
 }
 
+#[cfg(target_os = "macos")]
 impl SocketGuard {
     fn capture(path: PathBuf) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(&path)?;
@@ -473,6 +497,7 @@ impl SocketGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         let Ok(metadata) = fs::symlink_metadata(&self.path) else {
@@ -487,6 +512,7 @@ impl Drop for SocketGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn validate_socket_path(path: &Path) -> io::Result<()> {
     if !path.is_absolute() {
         return Err(io::Error::new(
@@ -552,6 +578,7 @@ fn validate_session_binding(value: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn verify_peer(stream: &UnixStream) -> io::Result<()> {
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
@@ -568,6 +595,7 @@ fn verify_peer(stream: &UnixStream) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 pub async fn serve(
     service: Arc<FileService>,
     socket_path: PathBuf,
@@ -618,6 +646,7 @@ pub async fn serve(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 async fn shutdown_signal() {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
@@ -712,4 +741,30 @@ mod tests {
             Some(("modified", false))
         );
     }
+}
+
+#[cfg(windows)]
+pub async fn serve(service: Arc<FileService>, endpoint: PathBuf, expected_session: String)
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if endpoint != Path::new("loopback") { return Err("Windows Files endpoint must be supervisor-selected loopback".into()); }
+    validate_session_binding(&expected_session)?;
+    // Bind port zero once: stdout returns the already-bound endpoint to the owning supervisor.
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    let endpoint = listener.local_addr()?;
+    let session_value: MetadataValue<_> = expected_session.parse()?;
+    let transport = FilesTransportServer::new(ProductionFilesTransport::new(service))
+        .max_decoding_message_size(MAX_ENCODED_UNARY_BYTES)
+        .max_encoding_message_size(MAX_ENCODED_UNARY_BYTES);
+    let transport = tonic::service::interceptor::InterceptedService::new(transport, move |request: Request<()>| {
+        if request.metadata().get(SESSION_HEADER) != Some(&session_value) {
+            return Err(Status::unauthenticated("invalid local session binding"));
+        }
+        Ok(request)
+    });
+    use std::io::Write;
+    writeln!(std::io::stdout(), "{endpoint}")?;
+    std::io::stdout().flush()?;
+    Server::builder().layer(ConcurrencyLimitLayer::new(64)).add_service(transport)
+        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async { let _ = tokio::signal::ctrl_c().await; }).await?;
+    Ok(())
 }

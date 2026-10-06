@@ -183,7 +183,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
       provider: "openai",
       async loader(getAuth, provider) {
         const auth = await getAuth()
-        if (auth.type !== "oauth") return {}
+        if (!auth || auth.type !== "oauth" || !provider) return {}
 
         // The account's live Codex catalog is the entitlement authority.
         // Never replace it with a source-code allowlist or a model-name
@@ -236,7 +236,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
             }
 
             const currentAuth = await getAuth()
-            if (currentAuth.type !== "oauth") return fetch(requestInput, init)
+            if (!currentAuth || currentAuth.type !== "oauth") return fetch(requestInput, init)
 
             // Cast to include accountId field
             const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
@@ -322,25 +322,48 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
               user_code: string
               interval: string
             }
+            const userCode = deviceData.user_code
+            if (typeof userCode !== "string" || !/^[A-Za-z0-9-]{4,64}$/.test(userCode)) {
+              throw new Error("Provider device authorization returned an invalid user code")
+            }
             const interval = Math.max(parseInt(deviceData.interval) || 5, 1) * 1000
 
-            return {
+            const authorization = {
               url: `${ISSUER}/codex/device`,
-              instructions: `Enter code: ${deviceData.user_code}`,
+              instructions: "Enter the sign-in code on the provider website.",
+              userCode,
               method: "auto" as const,
-              async callback() {
-                while (true) {
-                  const response = await fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": "application/json",
-                      "User-Agent": `opencode/${InstallationVersion}`,
-                    },
-                    body: JSON.stringify({
-                      device_auth_id: deviceData.device_auth_id,
-                      user_code: deviceData.user_code,
-                    }),
-                  })
+              async callback(_code?: string, signal?: AbortSignal) {
+                const waitForPoll = async () => {
+                  if (signal?.aborted) return false
+                  try {
+                    await sleep(interval + OAUTH_POLLING_SAFETY_MARGIN_MS, undefined, signal ? { signal } : undefined)
+                  } catch {
+                    if (!signal?.aborted) throw new Error("Provider device authorization polling failed")
+                    return false
+                  }
+                  return !signal?.aborted
+                }
+                while (!signal?.aborted) {
+                  let response: Response
+                  try {
+                    response = await fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
+                      method: "POST",
+                      headers: {
+                        "Content-Type": "application/json",
+                        "User-Agent": `opencode/${InstallationVersion}`,
+                      },
+                      signal,
+                      body: JSON.stringify({
+                        device_auth_id: deviceData.device_auth_id,
+                        user_code: userCode,
+                      }),
+                    })
+                  } catch {
+                    if (signal?.aborted) return { type: "failed" as const }
+                    if (!(await waitForPoll())) return { type: "failed" as const }
+                    continue
+                  }
 
                   if (response.ok) {
                     const data = (await response.json()) as {
@@ -351,6 +374,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                     const tokenResponse = await fetch(`${ISSUER}/oauth/token`, {
                       method: "POST",
                       headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                      signal,
                       body: new URLSearchParams({
                         grant_type: "authorization_code",
                         code: data.authorization_code,
@@ -375,14 +399,20 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                     }
                   }
 
-                  if (response.status !== 403 && response.status !== 404) {
+                  const retryable = response.status === 403
+                    || response.status === 404
+                    || [408, 425, 429].includes(response.status)
+                    || response.status >= 500
+                  if (!retryable) {
                     return { type: "failed" as const }
                   }
 
-                  await sleep(interval + OAUTH_POLLING_SAFETY_MARGIN_MS)
+                  if (!(await waitForPoll())) return { type: "failed" as const }
                 }
+                return { type: "failed" as const }
               },
             }
+            return authorization
           },
         },
         {

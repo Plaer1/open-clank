@@ -1699,6 +1699,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let prepare_only = args.as_slice() == ["--prepare-database"];
+    if !args.is_empty() && !prepare_only {
+        return Err("usage: fm-mcp [--prepare-database]; FM_DB_PATH selects the absolute database".into());
+    }
     let config = FmConfig::default();
     let db_path = std::path::Path::new(&config.db_path);
     if !db_path.is_absolute() {
@@ -1722,6 +1727,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
+    }
+    if prepare_only {
+        println!("{}", serde_json::json!({
+            "database_id": database_id,
+            "schema_version": schema_version,
+            "database_path": config.db_path,
+        }));
+        return Ok(());
     }
     tracing::info!(database_id, schema_version, path = %config.db_path, "frankenmemory database ready");
     // Curated/raw memory rows currently lack the immutable route, adapter,

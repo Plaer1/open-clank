@@ -1,21 +1,29 @@
 #Requires -Version 5.1
 param(
-    [switch]$UseExistingVerifiedEngine
+    [switch]$UseExistingVerifiedEngine,
+    [ValidateSet('windows-x64','windows-arm64')][string]$Target = 'windows-x64',
+    [string]$PythonExecutable,
+    [string]$BunExecutable = 'bun',
+    [string]$EngineInstallRoot,
+    [string]$VerifiedRustArtifacts,
+    [string]$VerifiedRustArtifactsSha256,
+    [switch]$IncludeCopalRedb
 )
 
 <#
-  Build a portable Windows x64 distribution for Open Clank.
+  Build a portable Windows target distribution with matching target Python.
 
   Output layout:
-    dist\openclank\openclank.exe
-    dist\openclank\_internal\libexec\openclank\engine\...
-    dist\openclank\portable-provenance.json
-    dist\openclank\SHA256SUMS
+    dist\windows-<arch>\openclank\openclank.exe
+    dist\windows-<arch>\openclank\_internal\libexec\openclank\engine\...
+    dist\windows-<arch>\openclank\_internal\bin\helper-artifacts.json
+    dist\windows-<arch>\openclank\portable-provenance.json
+    dist\windows-<arch>\openclank\SHA256SUMS
 
   The app then keeps using its normal filesystem layout when frozen.
 
   Usage:
-    powershell -ExecutionPolicy Bypass -File .\build-windows-portable.ps1
+    .\build-windows-portable.ps1 -Target windows-x64
 #>
 
 $ErrorActionPreference = "Stop"
@@ -34,8 +42,10 @@ function Write-Utf8NoBom($Path, $Text) {
 }
 
 Write-Step "Checking for Python"
-$pyExe = $null
-if (Test-Path ".\.venv\Scripts\python.exe") {
+$pyExe = $PythonExecutable
+if ($pyExe) {
+    if (-not (Test-Path $pyExe -PathType Leaf)) { Fail "Explicit Python interpreter is missing." }
+} elseif (Test-Path ".\.venv\Scripts\python.exe") {
     $pyExe = (Resolve-Path ".\.venv\Scripts\python.exe").Path
 } else {
     foreach ($c in @("py", "python")) {
@@ -55,27 +65,37 @@ if (-not $pyExe) {
 Write-Host ("Using Python: " + $pyExe)
 
 $hostTarget = (& $pyExe -c "import platform,struct,sys; print(f'{sys.platform}:{platform.machine().lower()}:{struct.calcsize(chr(80))*8}')").Trim()
-if ($LASTEXITCODE -ne 0 -or $hostTarget -notin @("win32:amd64:64", "win32:x86_64:64")) {
-    Fail "The Tier-1 portable artifact must be built with 64-bit x64 Python on Windows (found $hostTarget)."
+$expectedPython = if ($Target -eq 'windows-arm64') { @('win32:arm64:64','win32:aarch64:64') } else { @('win32:amd64:64','win32:x86_64:64') }
+if ($LASTEXITCODE -ne 0 -or $hostTarget -notin $expectedPython) {
+    Fail "Portable $Target requires matching target Python and complete requirements (found $hostTarget)."
 }
+$rustTarget = if ($Target -eq 'windows-arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
 
 Write-Step "Installing build dependencies"
 & $pyExe -m pip install --upgrade pip --quiet
 & $pyExe -m pip install -r requirements.txt pyinstaller==6.16.0
 if ($LASTEXITCODE -ne 0) { Fail "Dependency install failed." }
 
+# Separate target engine pointer/output without copying the full source tree.
+$sourceEngineRoot = Join-Path $PSScriptRoot "libexec\openclank\engine"
+$engineRootArgs = @()
+if ($EngineInstallRoot) {
+    if ($EngineInstallRoot -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/?]+\\[^\\/?]+(?:\\|$)|\\\\\?\\[A-Za-z]:\\|\\\\\?\\UNC\\[^\\/?]+\\[^\\/?]+(?:\\|$))') { Fail 'Explicit EngineInstallRoot must be fully qualified; drive-relative/current-drive paths are refused.' }
+    $sourceEngineRoot = [IO.Path]::GetFullPath($EngineInstallRoot)
+    $engineRootArgs = @('--install-root', $sourceEngineRoot)
+}
 if ($UseExistingVerifiedEngine) {
     Write-Step "Verifying the supplied managed engine"
-    & $pyExe scripts/openclank_engine.py verify --json
+    & $pyExe scripts/openclank_engine.py @engineRootArgs verify --target $Target --json
 } else {
     Write-Step "Building and ACP-verifying the exact managed engine"
-    & $pyExe scripts/openclank_engine.py build --json
+    & $pyExe scripts/openclank_engine.py @engineRootArgs build --target $Target --bun $BunExecutable --json
 }
 if ($LASTEXITCODE -ne 0) { Fail "Managed engine build or verification failed." }
 
 # Stage only current.json and the one activated versioned artifact. Copying the
 # ambient libexec tree could silently ship stale engines from earlier builds.
-$sourceEngineRoot = Join-Path $PSScriptRoot "libexec\openclank\engine"
+# $sourceEngineRoot is the same root just verified above.
 $sourceCurrentPath = Join-Path $sourceEngineRoot "current.json"
 if (-not (Test-Path $sourceCurrentPath -PathType Leaf)) { Fail "Verified engine current pointer is missing." }
 $sourceCurrent = Get-Content $sourceCurrentPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -92,8 +112,43 @@ New-Item -ItemType Directory -Path (Split-Path $stageArtifact -Parent) -Force | 
 Copy-Item $sourceCurrentPath (Join-Path $stageEngineRoot "current.json") -Force
 Copy-Item $sourceArtifact $stageArtifact -Recurse -Force
 
+if (($VerifiedRustArtifacts -and -not $VerifiedRustArtifactsSha256) -or ($VerifiedRustArtifactsSha256 -and -not $VerifiedRustArtifacts)) { Fail "Both reviewed Rust adoption manifest and SHA256 required." }
+Write-Step "Preparing target-specific native helpers"
+$stageBin = Join-Path $stageRoot 'bin'
+New-Item -ItemType Directory -Path $stageBin | Out-Null
+$cargoTargetDir = Join-Path $PSScriptRoot ('build\helpers\' + $Target)
+$helperCrates = @(
+    @{ manifest='packages/odysseus-files/Cargo.toml'; bins=@('odysseus-files-service','odysseus-shell-thumbnail-helper') },
+    @{ manifest='packages/openclank-history/Cargo.toml'; bins=@('openclank-history-service') },
+    @{ manifest='mcp_servers/frankenmemory/Cargo.toml'; bins=@('fm-mcp') }
+)
+if ($IncludeCopalRedb) { Fail 'Copal redb packaging requires its verified build-identity metadata; use the loose-file release lane until that inventory is implemented.' }
+if ($VerifiedRustArtifacts) {
+    & $pyExe -B scripts/windows_helper_artifacts.py --target $Target --source-root $PSScriptRoot --bin-dir $stageBin --reuse-rust-manifest $VerifiedRustArtifacts --reuse-rust-sha256 $VerifiedRustArtifactsSha256 --output (Join-Path $stageRoot 'rust-reuse-receipt.json')
+    if ($LASTEXITCODE -ne 0) { Fail 'Reviewed Rust artifact reuse failed; preserve staged state.' }
+} else {
+foreach ($crate in $helperCrates) {
+    $cargoArgs = @('+1.99.0','build','--locked','--release','--jobs','2','--target',$rustTarget,'--target-dir',$cargoTargetDir,'--manifest-path',$crate.manifest)
+    foreach ($bin in $crate.bins) { $cargoArgs += @('--bin',$bin) }
+    & cargo @cargoArgs
+    if ($LASTEXITCODE -ne 0) { Fail ('Helper target build failed: ' + $crate.manifest) }
+    foreach ($bin in $crate.bins) {
+        Copy-Item (Join-Path $cargoTargetDir ($rustTarget + '\release\' + $bin + '.exe')) $stageBin -ErrorAction Stop
+    }
+}
+}
+& $pyExe -m PyInstaller --noconfirm --clean --onefile --console --noupx --name openclank-windows-host-apps --paths . --distpath $stageBin --workpath (Join-Path $stageRoot 'host-apps-work') --specpath $stageRoot src/openclank/windows_host_apps.py
+if ($LASTEXITCODE -ne 0) { Fail 'Host application helper build failed.' }
+& $pyExe -m PyInstaller --noconfirm --clean --onefile --console --noupx --name openclank-windows-desktop-capture --paths . --collect-submodules winrt --collect-submodules PIL --distpath $stageBin --workpath (Join-Path $stageRoot 'desktop-work') --specpath $stageRoot src/windows_desktop_capture.py
+if ($LASTEXITCODE -ne 0) { Fail 'Desktop capture/OCR helper build failed.' }
+$adoptionArgs=@()
+if ($VerifiedRustArtifacts) { $adoptionArgs=@('--adoption-provenance-sha256',$VerifiedRustArtifactsSha256) }
+& $pyExe -B scripts/windows_helper_artifacts.py --target $Target --bin-dir $stageBin @adoptionArgs --output (Join-Path $stageBin 'helper-artifacts.json')
+if ($LASTEXITCODE -ne 0) { Fail 'Helper PE/source/hash inventory failed.' }
+
 Write-Step "Building portable exe bundle"
-Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
+$targetDist = Join-Path $PSScriptRoot ('dist\' + $Target)
+if (Test-Path (Join-Path $targetDist 'openclank')) { Fail 'Target bundle already exists; preserve it and choose a fresh build location before rebuilding.' }
 
 $dataArgs = @(
     "--add-data", "static;static",
@@ -103,18 +158,19 @@ $dataArgs = @(
     "--add-data", "config;config",
     "--add-data", "contracts;contracts",
     "--add-data", ((Join-Path $stageRoot "libexec") + ";libexec")
+    "--add-data", ($stageBin + ";bin")
 )
 
 $pyInstallerExit = 1
 try {
-    & $pyExe -m PyInstaller --noconfirm --clean --onedir --console --noupx --contents-directory _internal --icon=static/icon.ico --name openclank --hidden-import=app --collect-submodules=keyring.backends @dataArgs openclank_entry.py
+    & $pyExe -m PyInstaller --noconfirm --clean --onedir --console --noupx --distpath $targetDist --workpath (Join-Path $stageRoot 'app-work') --specpath $stageRoot --contents-directory _internal --icon=static/icon.ico --name openclank --hidden-import=app --collect-submodules=keyring.backends @dataArgs openclank_entry.py
     $pyInstallerExit = $LASTEXITCODE
 } finally {
     Remove-Item -Recurse -Force $stageRoot -ErrorAction SilentlyContinue
 }
 if ($pyInstallerExit -ne 0) { Fail "PyInstaller build failed." }
 
-$bundleRoot = Join-Path $PSScriptRoot "dist\openclank"
+$bundleRoot = Join-Path $targetDist 'openclank'
 $publicExe = Join-Path $bundleRoot "openclank.exe"
 if (-not (Test-Path $publicExe)) { Fail "Portable public command is missing." }
 
@@ -129,7 +185,7 @@ if (-not $artifactRelative -or [System.IO.Path]::IsPathRooted($artifactRelative)
 $engineProvenancePath = Join-Path $engineRoot (Join-Path $artifactRelative.Replace("/", "\") "provenance.json")
 if (-not (Test-Path $engineProvenancePath -PathType Leaf)) { Fail "Packaged engine provenance is missing." }
 $engineProvenance = Get-Content $engineProvenancePath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([string]$engineProvenance.target -ne "windows-x64") { Fail "Packaged engine target is not Windows x64." }
+if ([string]$engineProvenance.target -ne $Target) { Fail "Packaged engine target disagrees with portable target." }
 $engineBinaryPath = Join-Path (Split-Path $engineProvenancePath -Parent) ([string]$engineProvenance.binary.name)
 if (-not (Test-Path $engineBinaryPath -PathType Leaf)) { Fail "Packaged engine binary is missing." }
 
@@ -137,13 +193,17 @@ $relativeEngineProvenance = $engineProvenancePath.Substring($bundleRoot.Length +
 $relativeEngineBinary = $engineBinaryPath.Substring($bundleRoot.Length + 1).Replace("\", "/")
 $appVersion = (& $pyExe -c "from src.constants import APP_VERSION; print(APP_VERSION)").Trim()
 $portableProvenance = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     product = "Open Clank"
-    artifact_kind = "windows-x64-portable"
+    artifact_kind = ($Target + '-portable')
     version = $appVersion
-    target = "windows-x64"
+    target = $Target
     public_entrypoint = "openclank.exe"
     contents_directory = "_internal"
+    helpers = [ordered]@{
+        inventory_path = '_internal/bin/helper-artifacts.json'
+        inventory_sha256 = (Get-FileHash (Join-Path $bundleRoot '_internal\bin\helper-artifacts.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
     engine = [ordered]@{
         current_path = "_internal/libexec/openclank/engine/current.json"
         provenance_path = $relativeEngineProvenance

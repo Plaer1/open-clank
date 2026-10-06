@@ -44,6 +44,38 @@ pub struct ResourceHandle {
     pub generation: u64,
 }
 
+/// Private account-scoped candidates returned only across the authenticated
+/// local service boundary so the Files adapter can resolve its stable ID.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegisteredResourcePage {
+    pub items: Vec<crate::registry::ResourceRegistration>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreDestinationPreview {
+    /// The exact provider fingerprint to echo when confirming, or `missing`.
+    pub expected_fingerprint: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreEffect {
+    Create,
+    Replace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceVersionRestorePreview {
+    pub resource: ResourceHandle,
+    pub source: crate::operations::VersionDescriptor,
+    pub destination: RestoreDestinationPreview,
+    pub effect: RestoreEffect,
+    pub requires_confirmation: bool,
+    pub captures_current_destination: bool,
+}
+
 /// Wire representation of one exact before-state in a parent mutation.
 /// Content remains bounded by the existing inline/staged payload limits.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,6 +131,10 @@ pub enum ServiceRequest {
         envelope: ControlEnvelope,
         receipt: crate::catalog::LiveReceipt,
     },
+    /// A known committed mutation has no available recovery postimage.
+    AfterUnavailable(ControlEnvelope),
+    /// Selected capture metadata for the exact actor/account that owns it.
+    GetCaptureAction(ControlEnvelope),
     Complete {
         envelope: ControlEnvelope,
         #[serde(with = "base64_content")]
@@ -168,6 +204,57 @@ pub enum ServiceRequest {
     ReadVersionChunk {
         envelope: ControlEnvelope,
         receipt: crate::catalog::VersionReceipt,
+        offset: u64,
+        length: u32,
+    },
+    /// List bounded metadata for one registered Files resource. The service
+    /// resolves the opaque resource id through its private registry and binds
+    /// the result to the authenticated account before consulting the catalog.
+    ListResourceVersions {
+        envelope: ControlEnvelope,
+        resource_id: String,
+        #[serde(default)]
+        cursor: Option<String>,
+        limit: u16,
+    },
+    /// List private registrations for the authenticated account. This is an
+    /// internal identity bridge; HTTP callers receive only public Files IDs.
+    ListRegisteredResources {
+        envelope: ControlEnvelope,
+        #[serde(default)]
+        cursor: Option<String>,
+        limit: u16,
+    },
+    /// Resolve one listed version to the existing RestoreHost receipt inside
+    /// the service. This keeps Lore addresses out of the browser contract.
+    ResolveResourceVersion {
+        envelope: ControlEnvelope,
+        resource_id: String,
+        version_ref: String,
+    },
+    /// Preview an exact version against the current registered Files resource.
+    /// The worker resolves its private path and returns only a provider fingerprint.
+    PreviewResourceVersionRestore {
+        envelope: ControlEnvelope,
+        resource_id: String,
+        version_ref: String,
+    },
+    /// Confirm a previewed restore. `missing` is the explicit reviewed value
+    /// for a destination that did not exist at preview time.
+    RestoreResourceVersion {
+        envelope: ControlEnvelope,
+        restore_id: String,
+        resource_id: String,
+        version_ref: String,
+        expected_destination_fingerprint: String,
+    },
+    /// Read one bounded chunk using the stable opaque id returned by the
+    /// resource-version listing. The exact action/version pair is resolved
+    /// inside the service and checked against this resource again.
+    ReadResourceVersionChunk {
+        envelope: ControlEnvelope,
+        resource_id: String,
+        version_ref: String,
         offset: u64,
         length: u32,
     },
@@ -371,6 +458,27 @@ pub enum ServiceResponse {
         #[serde(with = "base64_content")]
         content: Option<Vec<u8>>,
         eof: bool,
+    },
+    Versions(crate::operations::ResourceVersionPage),
+    RegisteredResources(RegisteredResourcePage),
+    ResourceVersionChunk {
+        version: crate::operations::VersionDescriptor,
+        offset: u64,
+        #[serde(with = "base64_content")]
+        content: Option<Vec<u8>>,
+        eof: bool,
+    },
+    ResourceVersionSelection {
+        resource: ResourceHandle,
+        version: crate::operations::VersionDescriptor,
+        receipt: crate::catalog::VersionReceipt,
+    },
+    ResourceVersionRestorePreview(ResourceVersionRestorePreview),
+    /// A typed, non-transport absence such as a pruned version or a resource
+    /// whose Files permission was revoked after the browser opened it.
+    Unavailable {
+        code: String,
+        message: String,
     },
     Actions(Vec<crate::catalog::ActionRecord>),
     Policy(PolicySet),

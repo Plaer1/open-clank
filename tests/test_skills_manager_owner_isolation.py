@@ -519,3 +519,16 @@ async def test_model_skill_tool_cannot_publish_and_edits_restage(tmp_path, monke
     }), owner="alice")
     assert "Patched skill" in patched["results"]
     assert sm.load(owner="alice")[0]["status"] == "draft"
+
+
+@pytest.mark.asyncio
+async def test_model_skill_tool_requires_an_explicit_action(tmp_path, monkeypatch):
+    from src import constants
+    from src.tools.system import do_manage_skills
+
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
+
+    result = await do_manage_skills("{}", owner="alice")
+
+    assert result["exit_code"] == 1
+    assert "action is required" in result["error"]

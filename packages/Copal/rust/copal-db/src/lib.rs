@@ -452,43 +452,13 @@ fn validate_canonical_tables(database: &Database) -> Result<()> {
         .map_err(|error| err(format!("canonical source table 'ops' is missing or corrupt: {error}")))?;
     txn.open_table(META)
         .map_err(|error| err(format!("canonical source table 'meta' is missing or corrupt: {error}")))?;
+    txn.open_table(ACTIONS)?;
+    txn.open_table(OWNER_LIFECYCLES)?;
+    txn.open_table(TASK_INDEX)?;
+    txn.open_table(TASK_INDEX_RESOURCES)?;
     Ok(())
 }
 
-fn repair_task_tables(database: &Database) -> Result<bool> {
-    let tables = table_names(database)?;
-    let task_index_missing = !tables.contains("task_index");
-    let resources_missing = !tables.contains("task_index_resources");
-    if !task_index_missing && !resources_missing {
-        return Ok(false);
-    }
-
-    // A current-version store can lose either derived table independently.
-    // Recreate both in one transaction and clear every derived row so an old
-    // generation can never be advertised while the resource lookup is only
-    // partially present. The next bounded task read rebuilds the projection.
-    let txn = database.begin_write()?;
-    let mut task_index = txn.open_table(TASK_INDEX)?;
-    let mut resources = txn.open_table(TASK_INDEX_RESOURCES)?;
-    let task_keys = task_index
-        .iter()?
-        .map(|entry| entry.map(|(key, _)| key.value().to_string()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    for key in task_keys {
-        task_index.remove(key.as_str())?;
-    }
-    let resource_keys = resources
-        .iter()?
-        .map(|entry| entry.map(|(key, _)| key.value().to_string()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    for key in resource_keys {
-        resources.remove(key.as_str())?;
-    }
-    drop(resources);
-    drop(task_index);
-    txn.commit()?;
-    Ok(true)
-}
 
 impl Db {
     /// Open (creating if needed) the database at `<data_dir>/copal.redb`
@@ -502,7 +472,6 @@ impl Db {
     pub fn open_with_name(data_dir: &Path, store_name: &str) -> Result<Self> {
         fs::create_dir_all(data_dir)?;
         let assets_dir = data_dir.join("assets");
-        fs::create_dir_all(&assets_dir)?;
         let database_path = data_dir.join(format!("{store_name}.redb"));
         let database_preexisted = database_path.exists();
         let database = if database_preexisted {
@@ -528,9 +497,9 @@ impl Db {
         if database_preexisted && !tables.is_empty() && current_version.is_none() {
             return Err(err("database schema marker is missing or invalid; refusing to treat an existing store as new"));
         }
-        if current_version.is_some_and(|version| version > SCHEMA_VERSION) {
+        if current_version.is_some_and(|version| version != SCHEMA_VERSION) {
             return Err(err(format!(
-                "database schema {} is newer than supported schema {SCHEMA_VERSION}",
+                "unsupported database schema {}; run .clanker/tools/native/copal for current schema {SCHEMA_VERSION}",
                 current_version.unwrap()
             )));
         }
@@ -557,41 +526,14 @@ impl Db {
                         "initialize repository",
                         &BTreeMap::new(),
                     )?;
-                } else {
-                    let (head, view) = {
-                        let meta = txn.open_table(META)?;
-                        let head = meta
-                            .get(OP_HEAD_KEY)?
-                            .ok_or_else(|| err("schema migration has no operation head"))?
-                            .value()
-                            .to_string();
-                        drop(meta);
-                        let ops = txn.open_table(OPS)?;
-                        let record = ops
-                            .get(head.as_str())?
-                            .ok_or_else(|| err("schema migration operation head is missing"))?;
-                        let op: OpRecord = serde_json::from_str(record.value())?;
-                        (head, op.view)
-                    };
-                    put_op(
-                        &txn,
-                        Some(head),
-                        "schema-upgrade",
-                        &format!(
-                            "upgrade database schema {} to {SCHEMA_VERSION}",
-                            current_version.unwrap_or(1)
-                        ),
-                        &view,
-                    )?;
                 }
                 let target_version = SCHEMA_VERSION.to_string();
                 txn.open_table(META)?
                     .insert(SCHEMA_VERSION_KEY, target_version.as_str())?;
             }
             txn.commit()?;
-        } else {
-            repair_task_tables(&database)?;
         }
+        fs::create_dir_all(&assets_dir)?;
         Ok(Self {
             database,
             assets_dir,
@@ -1494,6 +1436,36 @@ impl Db {
         ))
     }
 
+    /// Canonical reference-bearing payloads, including tombstoned documents,
+    /// checkpoints and amended commits. This does not project current heads.
+    pub fn retained_reference_payloads(&self) -> Result<Value> {
+        let txn = self.database.begin_read()?;
+        let docs = txn.open_table(DOCS)?;
+        let commits = txn.open_table(COMMITS)?;
+        let blobs = txn.open_table(BLOBS)?;
+        let mut rows = Vec::new();
+        for entry in commits.iter()? {
+            let (commit_id, encoded) = entry?;
+            let commit: CommitRecord = serde_json::from_str(encoded.value())?;
+            let record = docs.get(commit.doc.as_str())?
+                .ok_or_else(|| err("retained commit has no document owner"))?;
+            let doc: DocRecord = serde_json::from_str(record.value())?;
+            let text = match &commit.content {
+                Content::Blob { hash } => {
+                    let bytes = blobs.get(hash.as_str())?
+                        .ok_or_else(|| err("retained reference payload is unavailable"))?;
+                    Some(String::from_utf8(bytes.value().to_vec())?)
+                }
+                Content::Conflict { .. } => return Err(err("unsupported retained conflict payload")),
+                _ => None,
+            };
+            rows.push(json!({"owner": doc.owner, "workspace_id": doc.workspace_id,
+                "document_id": commit.doc, "commit": commit_id.value(),
+                "content": commit.content, "text": text}));
+        }
+        Ok(json!({"contract": "openclank.attachment-reference-payloads/v1", "complete": true, "rows": rows}))
+    }
+
     pub fn owner_inventory(&self, owner: &str) -> Result<OwnerInventory> {
         validate_mutable_owner(owner)?;
         let txn = self.database.begin_read()?;
@@ -1544,9 +1516,7 @@ impl Db {
     ) -> Result<Option<Value>> {
         validate_owner_rename(old_owner, new_owner)?;
         let key = Self::owner_lifecycle_key(old_owner, new_owner);
-        // A write transaction lets old schema-v3 databases lazily create the
-        // coordinator table before the first account lifecycle operation.
-        let txn = self.database.begin_write()?;
+        let txn = self.database.begin_read()?;
         let record = {
             let table = txn.open_table(OWNER_LIFECYCLES)?;
             let encoded = table
@@ -1557,7 +1527,6 @@ impl Db {
                 .map(serde_json::from_str::<OwnerLifecycleRecord>)
                 .transpose()?
         };
-        txn.commit()?;
         if let Some(record) = record {
             if record.old_owner != old_owner || record.new_owner != new_owner {
                 return Err(err("Copal owner lifecycle journal key is inconsistent"));
@@ -2398,7 +2367,7 @@ impl Db {
                 return Err(err(format!("name already exists: {new_name}")));
             }
         }
-        self.rename_doc_unchecked(id, new_name)
+        self.rename_doc_unchecked(id, new_name, None, None)
     }
 
     pub fn delete_doc_scoped(&self, id: &str, owner: &str, workspace_id: &str) -> Result<()> {
@@ -2600,10 +2569,24 @@ impl Db {
                 return Err(err(format!("name already exists: {new_name}")));
             }
         }
-        self.rename_doc_unchecked(id, new_name)
+        self.rename_doc_unchecked(id, new_name, None, None)
     }
 
-    fn rename_doc_unchecked(&self, id: &str, new_name: &str) -> Result<DocView> {
+    /// Attachment-preserving callers bind rename to the source they prepared.
+    /// The expected head and location are checked in the mutation transaction.
+    pub fn rename_doc_scoped_if_head(
+        &self, id: &str, new_name: &str, owner: &str, workspace_id: &str,
+        expected_head: Option<&str>, expected_name: Option<&str>,
+    ) -> Result<DocView> {
+        self.require_write_scope(id, owner, workspace_id)?;
+        let current = self.get_doc(id)?.ok_or_else(|| err("doc not found in this scope"))?;
+        if let Some(existing) = self.find_doc_by_identity_scoped(new_name, &current.kind, &current.corpus, owner, workspace_id)? {
+            if existing.id != id { return Err(err(format!("name already exists: {new_name}"))); }
+        }
+        self.rename_doc_unchecked(id, new_name, expected_head, expected_name)
+    }
+
+    fn rename_doc_unchecked(&self, id: &str, new_name: &str, expected_head: Option<&str>, expected_name: Option<&str>) -> Result<DocView> {
         let txn = self.database.begin_write()?;
         let (mut view, parent_op) = self.write_view(&txn)?;
         let head = view.get(id).cloned().ok_or_else(|| err("doc not found"))?;
@@ -2612,6 +2595,10 @@ impl Db {
             return Err(err("doc not found"));
         }
         let target_scope = load_doc_record_in_txn(&txn, id)?;
+        if expected_head.is_some_and(|expected| expected != head.as_str())
+            || expected_name.is_some_and(|expected| expected != head_commit.name.as_str()) {
+            return Err(err("stale_cursor: document changed after move preparation"));
+        }
         let old_name = head_commit.name.clone();
 
         let mut reference_updates = Vec::new();
@@ -5981,7 +5968,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_upgrade_is_recorded_without_changing_document_heads() {
+    fn schema_admission_rejects_old_version_without_changes() {
         let (db, data_dir) = temp_db();
         let note = db.create_doc("note", "Upgrade", "payload", None).unwrap();
         {
@@ -5994,20 +5981,14 @@ mod tests {
         }
         drop(db);
 
-        let upgraded = Db::open(&data_dir).unwrap();
+        let before = fs::read(data_dir.join("copal.redb")).unwrap();
+        assert!(Db::open(&data_dir).is_err());
+        assert_eq!(before, fs::read(data_dir.join("copal.redb")).unwrap());
 
-        assert_eq!(upgraded.schema_version().unwrap(), 3);
-        assert_eq!(upgraded.get_doc(&note.id).unwrap().unwrap().head, note.head);
-        let operations = upgraded.ops(1, None).unwrap();
-        assert_eq!(operations["ops"][0]["kind"], "schema-upgrade");
-        assert!(operations["ops"][0]["description"]
-            .as_str()
-            .unwrap()
-            .contains("2 to 3"));
     }
 
     #[test]
-    fn future_database_schema_is_rejected_without_downgrade() {
+    fn schema_admission_rejects_future_version_without_downgrade() {
         let (db, data_dir) = temp_db();
         {
             let txn = db.database.begin_write().unwrap();
@@ -6021,7 +6002,7 @@ mod tests {
 
         let error = Db::open(&data_dir).err().unwrap();
 
-        assert!(error.to_string().contains("newer than supported schema 3"));
+        assert!(error.to_string().contains("unsupported database schema 99"));
         let database = Database::open(data_dir.join("copal.redb")).unwrap();
         let txn = database.begin_read().unwrap();
         assert_eq!(
@@ -6036,7 +6017,7 @@ mod tests {
     }
 
     #[test]
-    fn current_schema_repairs_missing_task_tables_without_touching_canonical_heads() {
+    fn schema_admission_rejects_missing_current_tables_without_changes() {
         for missing in ["task_index", "task_index_resources"] {
             let (db, data_dir) = temp_db();
             let note = db.create_doc("note", "Repair", "payload", None).unwrap();
@@ -6052,12 +6033,9 @@ mod tests {
             }
             drop(db);
 
-            let repaired = Db::open(&data_dir).unwrap();
-            assert_eq!(repaired.schema_version().unwrap(), SCHEMA_VERSION);
-            assert_eq!(repaired.get_doc(&note.id).unwrap().unwrap().head, note.head);
-            assert_eq!(repaired.task_index_generation("alice", "home").unwrap()["sourceRevision"], "");
-            assert_eq!(repaired.ops(100, None).unwrap()["ops"].as_array().unwrap().len(), operation_count);
-            drop(repaired);
+            let before = fs::read(data_dir.join("copal.redb")).unwrap();
+            assert!(Db::open(&data_dir).is_err());
+            assert_eq!(before, fs::read(data_dir.join("copal.redb")).unwrap());
             fs::remove_dir_all(data_dir).unwrap();
         }
     }

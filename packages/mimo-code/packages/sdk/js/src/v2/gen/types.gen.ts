@@ -1426,6 +1426,7 @@ export type CheckpointPart = {
   checkpointDir: string
   checkpointNumber: number
   coveredUpTo: string
+  digestUpTo?: string
 }
 
 export type CompactionPart = {

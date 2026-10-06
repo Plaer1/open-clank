@@ -60,8 +60,7 @@ def test_chat_module_graph_uses_one_url_per_stateful_module():
         Path("static/js/models.js").resolve(),
         Path("static/js/slashCommands.js").resolve(),
         Path("static/js/settings.js").resolve(),
-        # Gallery applet retired (S19): gallery.js is no longer part of the
-        # live module graph — images open in Files/Imps.
+        # Images are opened through Files and Imps rather than a separate applet.
     }
     identities = {target: set() for target in stateful_targets}
     ref_pattern = re.compile(

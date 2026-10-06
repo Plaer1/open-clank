@@ -1114,14 +1114,6 @@ def _import_session_routes_for_filename():
     return importlib.import_module("routes.session_routes")
 
 
-def _import_gallery_routes_for_filename():
-    # Same rationale as the session route helper: import _sanitize_gallery_filename
-    # against the real core.database and leave a clean, real module cached.
-    _drop_route_module_cache("routes.gallery.gallery_routes")
-    _drop_route_module_cache("routes.gallery.gallery_helpers")
-    return importlib.import_module("routes.gallery.gallery_routes")
-
-
 def test_export_filename_sanitizer_blocks_header_and_path_chars():
     mod = _import_session_routes_for_filename()
 
@@ -1139,22 +1131,6 @@ def test_export_filename_sanitizer_preserves_safe_names():
     assert mod._sanitize_export_filename("conversation_20260602.md") == "conversation_20260602.md"
     assert mod._sanitize_export_filename("") == ""
 
-
-def test_gallery_replace_filename_sanitizer_uses_basename():
-    mod = _import_gallery_routes_for_filename()
-
-    out = mod._sanitize_gallery_filename("../../etc/cron.d/evil image.png")
-
-    assert out == "evil_image.png"
-    assert "/" not in out
-    assert "\\" not in out
-
-
-def test_gallery_replace_filename_sanitizer_falls_back_when_empty(monkeypatch):
-    mod = _import_gallery_routes_for_filename()
-    monkeypatch.setattr(mod.uuid, "uuid4", lambda: types.SimpleNamespace(hex="abcdef1234567890"))
-
-    assert mod._sanitize_gallery_filename("../") == "abcdef123456"
 
 def test_chat_active_document_lookup_is_owner_scoped():
     """The explicit `active_doc_id` path in /api/chat_stream must scope the

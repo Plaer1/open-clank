@@ -12,10 +12,10 @@ import logging
 from core.session_manager import SessionManager
 from core.models import ChatMessage
 from src.request_models import SessionResponse
-from core.database import Session as DbSession, SessionLocal, Document, GalleryImage, utcnow_naive
-from src.auth_helpers import effective_user, _auth_disabled, owner_filter
+from core.database import Session as DbSession, SessionLocal, Document, FilesImageResource, utcnow_naive
+from src.auth_helpers import effective_user, owner_filter
 from src.generated_images import gallery_owner_key
-from src.session_image_cleanup import cleanup_session_image_files, session_image_refs
+from src.session_image_cleanup import retire_session_image_refs, session_image_refs
 from src.session_actions import is_session_recently_active
 from src.upload_handler import reserve_message_upload_references
 from src.openclank.chat_routing import (
@@ -122,9 +122,6 @@ async def _prepare_context_mutation(request: Request, session_id: str, *, sessio
         _verify_session_owner(request, session_id)
         if verified_owner is _UNVERIFIED_OWNER else verified_owner
     ) or session_owner
-    if not stored_owner and _auth_disabled():
-        from src.owner_identity import LOCAL_INSTALLATION_OWNER
-        stored_owner = LOCAL_INSTALLATION_OWNER
     from src.openclank.transcript_projection import purge_execution_projection
 
     try:
@@ -141,16 +138,9 @@ async def _prepare_context_mutation(request: Request, session_id: str, *, sessio
 
 
 def _verify_session_owner(request: Request, session_id: str, session_manager=None):
-    """Verify the current user owns the session, honoring single-user modes.
-
-    Authenticated requests must match the stored DB or in-memory owner. When
-    auth is disabled and no user is present, treat the app as single-user mode:
-    verify that the session exists, but do not compare its stored owner. This
-    keeps QA/dev instances with AUTH_ENABLED=false from rejecting owner-stamped
-    rows created while auth was previously enabled.
-    """
+    """Verify a middleware-authenticated owner matches the stored session."""
     user = effective_user(request)
-    if not user and not _auth_disabled():
+    if not getattr(request.state, "authenticated", False) or not user:
         raise HTTPException(401, "Authentication required")
     db = SessionLocal()
     try:
@@ -324,13 +314,22 @@ def setup_session_routes(
                     Document, user)
                 .distinct().all()
             )
-            img_session_ids = set(
-                r[0] for r in owner_filter(
-                    db.query(GalleryImage.session_id)
-                    .filter(GalleryImage.session_id != None),
-                    GalleryImage, user)
-                .distinct().all()
-            )
+            img_session_ids = {
+                str(session_id)
+                for (provenance,) in owner_filter(
+                    db.query(FilesImageResource.provenance).filter(
+                        FilesImageResource.kind == "image",
+                        FilesImageResource.is_active.is_(True),
+                    ),
+                    FilesImageResource,
+                    user,
+                ).all()
+                for session_id in (
+                    list((provenance or {}).get("session_ids", []))
+                    + [str((provenance or {}).get("session_id") or "")]
+                )
+                if session_id
+            }
         finally:
             db.close()
 
@@ -497,6 +496,7 @@ def setup_session_routes(
             raise HTTPException(404, f"Session {sid} not found")
         result = {"id": sid}
         workspace_supplied = isinstance(workspace_id, str)
+        prior_workspace = getattr(session, "workspace_id", None)
         if workspace_supplied:
             workspace_value = workspace_id.strip()
             if workspace_value:
@@ -512,6 +512,11 @@ def setup_session_routes(
             ):
                 raise HTTPException(404, f"Session {sid} not found")
             result["workspace_id"] = workspace_value or None
+            if workspace_value and workspace_value != prior_workspace:
+                from src.openclank.achievement_producers import record_activity
+                record_activity(request, "chat.workspace.rebound", str(uuid.uuid4()), {
+                    "sessionId": sid, "newWorkspaceId": workspace_value, "sessionIdPreserved": True,
+                }, workspace_id=workspace_value)
         if name is not None:
             session_manager.update_session_name(sid, name)
             result["name"] = name
@@ -886,6 +891,7 @@ def setup_session_routes(
                     owner,
                     message.get("content"),
                     message.get("metadata"),
+                    session_id=sid,
                 )
                 if missing_id:
                     raise HTTPException(
@@ -906,41 +912,44 @@ def setup_session_routes(
 
     @router.post("/sessions/bulk-delete")
     async def bulk_delete_sessions(request: Request):
-        """Delete multiple sessions (for compare cleanup via sendBeacon)."""
-        from core.database import ChatMessage as _CM
+        """Beacon cleanup uses the same owned, observable erasure path."""
         try:
             body = await request.json()
             ids = body.get("ids", [])
         except Exception:
             ids = []
+        if not isinstance(ids, list) or len(ids) > 500:
+            raise HTTPException(422, "ids must be a bounded list")
         deleted_count = 0
         for sid in ids:
             try:
-                _verify_session_owner(request, sid, session_manager)
-                
-                # Enforce "starred" protection consistent with single-session delete
-                db = SessionLocal()
-                try:
-                    db_sess = db.query(DbSession).filter(DbSession.id == sid).first()
-                    if db_sess and db_sess.is_important:
-                        continue
-                finally:
-                    db.close()
-
-                await _prepare_context_mutation(request, sid)
-                if session_manager.delete_session(sid):
-                    deleted_count += 1
-            except HTTPException:
+                await delete_session(request, str(sid))
+                deleted_count += 1
+            except HTTPException as exc:
+                if exc.status_code == 403 and isinstance(exc.detail, dict) and exc.detail.get("error") == "SESSION_STARRED":
+                    continue
                 raise
-            except Exception:
-                logger.exception("Bulk session delete failed for %s", sid)
-                raise HTTPException(500, f"Failed to delete session {sid}")
         return {"deleted": deleted_count}
+
+    @router.get("/session/{sid}/delete-impact")
+    def session_delete_impact(request: Request, sid: str):
+        owner = _verify_session_owner(request, sid, session_manager)
+        from src.openclank.session_deletion import deletion_impact
+        db = SessionLocal()
+        try:
+            result = deletion_impact(db, owner=owner, session_id=sid, upload_handler=upload_handler)
+            row = db.query(DbSession).filter(DbSession.id == sid).first()
+            result["protected"] = bool(row and row.is_important)
+            return result
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        finally:
+            db.close()
 
     @router.delete("/session/{sid}")
     async def delete_session(request: Request, sid: str):
         """Permanently delete a session and all its messages."""
-        _verify_session_owner(request, sid, session_manager)
+        owner = _verify_session_owner(request, sid, session_manager)
         try:
             # Block deletion of starred/favorited sessions
             db = SessionLocal()
@@ -954,16 +963,15 @@ def setup_session_routes(
             finally:
                 db.close()
 
-            await _prepare_context_mutation(request, sid)
-            # Delete the session and all its messages
-            if session_manager.delete_session(sid):
-                return {"status": "deleted"}
-            else:
-                raise HTTPException(404, "Session not found")
+            service = ChatLifecycleService(session_manager=session_manager,
+                mimo_supervisor=getattr(request.app.state, "mimo_supervisor", None),
+                memory_provider=getattr(request.app.state, "memory_provider", None))
+            try:
+                return await service.erase(owner=owner, session_id=sid)
+            except ChatLifecycleError as exc:
+                status = 409 if exc.code == "active_run" else 503
+                raise HTTPException(status, {"error": "SESSION_DELETE_INCOMPLETE", "message": str(exc), "retryable": exc.code == "erasure_pending"}) from exc
         except HTTPException:
-            raise
-        except HTTPException:
-            db.rollback()
             raise
         except Exception as e:
             logger.error(f"Error deleting session {sid}: {e}")
@@ -977,103 +985,54 @@ def setup_session_routes(
     
     @router.delete("/sessions/all")
     async def delete_all_sessions(request: Request):
-        """Admin only: permanently delete ALL sessions and their messages."""
+        """Admin deletion uses the same scoped erasure for every conversation."""
         from core.middleware import require_admin
         require_admin(request)
-
         db = SessionLocal()
         try:
-            from core.database import ChatMessage as DbChatMessage
-            session_rows = db.query(DbSession.id, DbSession.owner).all()
-            session_ids = {row[0] for row in session_rows}
-            session_owners = {
-                str(row[0]): str(row[1] or "")
-                for row in session_rows
-            }
-            from src.openclank.transcript_projection import (
-                list_projections,
-                purge_execution_projection,
-            )
-            projections = list_projections()
-            supervisor = getattr(request.app.state, "mimo_supervisor", None)
-            session_ids.update(
-                row["odysseus_session_id"] for row in projections
-            )
-            for row in projections:
-                session_owners.setdefault(
-                    str(row["odysseus_session_id"]),
-                    str(row.get("owner") or ""),
-                )
-            for session_id, session in session_manager.sessions.items():
-                session_owners.setdefault(
-                    str(session_id),
-                    str(getattr(session, "owner", None) or ""),
-                )
-            bridge = getattr(supervisor, "bridge", None) if supervisor else None
-            if bridge is not None:
-                session_ids.update(bridge.mapped_sessions())
-            for session_id in session_ids:
-                try:
-                    await purge_execution_projection(supervisor, session_id)
-                except RuntimeError as exc:
-                    raise HTTPException(503, str(exc)) from exc
-            from src import bg_jobs
-
-            for session_id, session_owner in session_owners.items():
-                bg_jobs.delete_for_session_owner(
-                    session_id=session_id,
-                    owner=session_owner,
-                )
-            count = db.query(DbSession).count()
-            image_row_ids: set[str] = set()
-            image_filenames: set[str] = set()
-            for sid in session_ids:
-                owner_key = gallery_owner_key(session_owners.get(str(sid)))
-                if owner_key is None:
-                    continue
-                ids, names = session_image_refs(db, sid, owner_key)
-                if not ids and not names:
-                    continue
-                from sqlalchemy import or_
-                clauses = [GalleryImage.session_id == sid]
-                if ids:
-                    clauses.append(GalleryImage.id.in_(list(ids)))
-                if names:
-                    clauses.append(GalleryImage.filename.in_(list(names)))
-                scoped = db.query(GalleryImage.id, GalleryImage.filename).filter(
-                    GalleryImage.owner == owner_key,
-                    or_(*clauses),
-                ).all()
-                image_row_ids.update(str(row[0]) for row in scoped)
-                image_filenames.update(str(row[1]) for row in scoped if row[1])
-            images = (
-                db.query(GalleryImage).filter(GalleryImage.id.in_(image_row_ids)).all()
-                if image_row_ids
-                else []
-            )
-            removed_images = 0
-            for img in images:
-                img.is_active = False
-                removed_images += 1
-            db.query(DbChatMessage).delete()
-            db.query(DbSession).delete()
-            db.commit()
-            try:
-                cleanup_session_image_files(image_filenames)
-            except Exception as exc:
-                logger.warning(
-                    "Generated-image GC failed after deleting all sessions: %s",
-                    exc,
-                )
-            session_manager.sessions.clear()
-            logger.info(f"Admin deleted all {count} sessions and {removed_images} linked images")
-            return {"status": "deleted", "count": count, "images_deleted": removed_images}
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error deleting all sessions: {e}")
-            raise HTTPException(500, "Failed to delete sessions")
+            rows = db.query(DbSession.id, DbSession.owner).all()
         finally:
             db.close()
+        identities = {str(row.id): str(row.owner or "") for row in rows}
+        identities.update({str(sid): str(getattr(session, "owner", "") or "") for sid, session in session_manager.sessions.items()})
+        # Engine-only projections remain part of the administrator's all
+        # operation. Their persisted owner is authoritative; an unowned
+        # bridge mapping cannot be erased under a guessed account.
+        from src.openclank.transcript_projection import list_projections, purge_execution_projection
+        supervisor = getattr(request.app.state, "mimo_supervisor", None)
+        projections = {str(row["odysseus_session_id"]): row for row in list_projections()}
+        bridge = getattr(supervisor, "bridge", None) if supervisor else None
+        mapped = bridge.mapped_sessions() if bridge is not None else {}
+        unknown = set(mapped) - set(identities) - set(projections)
+        if unknown:
+            raise HTTPException(409, "Engine mapping has no authoritative account identity; explicit reconciliation required")
+        deleted = []
+        for sid, projection in projections.items():
+            if sid in identities:
+                continue
+            owner = str(projection.get("owner") or "")
+            if not owner:
+                raise HTTPException(409, "Engine projection has no account identity; explicit conversion required")
+            _reject_compact_during_active_run(sid)
+            try:
+                await purge_execution_projection(supervisor, sid, owner=owner)
+            except Exception as exc:
+                raise HTTPException(503, {"error": "SESSION_DELETE_INCOMPLETE", "message": "Engine projection deletion incomplete", "deleted": deleted, "failed_session_id": sid}) from exc
+            deleted.append(sid)
+        for sid, owner in identities.items():
+            if not owner:
+                raise HTTPException(409, "Conversation has no account identity; explicit conversion required")
+            _reject_compact_during_active_run(sid)
+            supervisor = getattr(request.app.state, "mimo_supervisor", None)
+            service = ChatLifecycleService(session_manager=session_manager,
+                mimo_supervisor=supervisor,
+                memory_provider=getattr(request.app.state, "memory_provider", None))
+            try:
+                await service.erase(owner=owner, session_id=sid, allow_protected=True)
+            except ChatLifecycleError as exc:
+                raise HTTPException(503, {"error": "SESSION_DELETE_INCOMPLETE", "message": str(exc), "deleted": deleted, "failed_session_id": sid}) from exc
+            deleted.append(sid)
+        return {"status": "deleted", "count": len(deleted)}
 
     @router.post("/session/{sid}/archive")
     async def archive_session(request: Request, sid: str):
@@ -1130,15 +1089,6 @@ def setup_session_routes(
         finally:
             db.close()
 
-    @router.get("/history/{sid}")
-    def get_history(request: Request, sid: str):
-        _verify_session_owner(request, sid)
-        try:
-            session = session_manager.get_session(sid)
-        except KeyError:
-            raise HTTPException(404, f"Session {sid} not found")
-        return {"history": [msg.to_dict() for msg in session.history]}
-    
     @router.get("/session/{sid}/export")
     def export_session(request: Request, sid: str, fmt: str = "md", filename: str = ""):
         """Export conversation history as a downloadable file.
@@ -1299,134 +1249,6 @@ def setup_session_routes(
         except KeyError:
             raise HTTPException(404, f"Session {session_id} not found")
 
-    @router.post("/session/{session_id}/compact")
-    async def compact_session(request: Request, session_id: str):
-        """Summarize older messages into one compacted history entry.
-
-        Finite/plain host contexts only. ACP persistent sessions must use the
-        engine-side MiMo compactor (``session.summarize``); this route refuses
-        to become a second active compactor for those sessions. The host path
-        writes an active-context projection; original source parts remain
-        retrievable through the conversation archive.
-        """
-        verified_owner = _verify_session_owner(request, session_id)
-        try:
-            session = session_manager.get_session(session_id)
-        except KeyError:
-            raise HTTPException(404, f"Session {session_id} not found")
-
-        # Protocol binding, not UI mode: a session with a persistent engine
-        # conversation is owned by MiMo's compactor. Use the real ACP binding
-        # (model_target.transport), not missing Session attrs.
-        from src.context_compactor import session_has_persistent_engine
-
-        if session_has_persistent_engine(session):
-            raise HTTPException(
-                409,
-                "Persistent ACP sessions compact through the engine "
-                "(session.summarize); host compaction is reserved for "
-                "finite contexts.",
-            )
-
-        mutation_owner = await _prepare_context_mutation(
-            request, session_id, session_owner=getattr(session, "owner", None),
-            verified_owner=verified_owner,
-        )
-
-        history = list(session.history or [])
-        if len(history) < 6:
-            raise HTTPException(400, "Not enough messages to compact")
-
-        # Keep a small recent tail verbatim. The prior half-chat/20-message
-        # tail made manual compaction look like it did nothing on normal chats.
-        recent_keep = min(8, max(4, len(history) // 4))
-        older = history[:-recent_keep]
-        recent = history[-recent_keep:]
-        if not older:
-            raise HTTPException(400, "Nothing old enough to compact")
-
-        from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT
-        from src.openclank.modality_facade import complete_text
-
-        owner = getattr(session, "owner", None) or effective_user(request)
-        owner = mutation_owner or owner
-
-        prior_compactions = sum(
-            1 for m in history
-            if _message_metadata(m).get("compacted") or "[Conversation summary" in _message_text(m)
-        )
-        prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace(
-            "{count}", str(len(older))
-        ).replace(
-            "{n}", str(prior_compactions + 1)
-        )
-        convo_text = "\n".join(
-            f"{_message_role(m).upper()}: {_message_text(m)[:2000]}"
-            for m in older
-        )
-        try:
-            import hashlib
-
-            summary = await complete_text(
-                owner=owner or "local-installation",
-                purpose="utility",
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": convo_text},
-                ],
-                temperature=0.2,
-                max_output_tokens=1024,
-                idempotency_key=(
-                    "compact-session-"
-                    + hashlib.sha256(
-                        f"{session_id}\0{convo_text}".encode("utf-8")
-                    ).hexdigest()[:32]
-                ),
-            )
-        except Exception as e:
-            logger.error("Manual compaction failed: %s", e)
-            raise HTTPException(500, "Compaction failed")
-
-        if not (summary or "").strip():
-            # Unusable summary: rollback. Keep the live transcript unchanged.
-            raise HTTPException(502, "Compaction summary was empty; history unchanged")
-
-        summary_msg = ChatMessage(
-            role="system",
-            content=f"[Conversation summary]\n{summary}",
-            metadata={
-                "compacted": True,
-                "summarized_count": len(older),
-                "compaction_trigger": "manual",
-                "compaction_actor": "host_finite",
-                "source_boundary_split": len(older),
-                "timestamp": utcnow_naive().isoformat(),
-            },
-        )
-        new_history = [summary_msg] + recent
-        try:
-            replaced = session_manager.replace_messages(session_id, new_history)
-        except Exception as exc:
-            from src.openclank.conversation_archive import ArchiveUnavailableError
-
-            if isinstance(exc, ArchiveUnavailableError):
-                raise HTTPException(
-                    503,
-                    "conversation archive unavailable; history unchanged",
-                ) from exc
-            raise
-        if not replaced:
-            raise HTTPException(500, "Failed to save compacted history")
-
-        return {
-            "ok": True,
-            "summarized": len(older),
-            "kept": len(recent),
-            "message_count": len(new_history),
-            "projection": "host_finite",
-            "source_parts_retained": True,
-        }
-
     @router.post("/sessions/auto-sort")
     async def auto_sort_sessions(request: Request, skip_llm: bool = False):
         """Use AI to categorize all sessions into folders.
@@ -1438,7 +1260,9 @@ def setup_session_routes(
         """
         from src.openclank.modality_facade import complete_text
         user = effective_user(request)
-        single_user_mode = not user and _auth_disabled()
+        if not user:
+            raise HTTPException(401, "Authentication required")
+        single_user_mode = False
         user_sessions = session_manager.get_sessions_for_user(user)
 
         # Delete empty and throwaway sessions before sorting

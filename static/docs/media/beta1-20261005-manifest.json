@@ -1,0 +1,476 @@
+{
+  "schema": 1,
+  "capture_date": "2026-10-05",
+  "language": "English",
+  "capture_build": "Testing7796, current integrated working tree; no live deployment",
+  "records": [
+    {
+      "path": "static/docs/media/beta1-welcome-20261005/master.webp",
+      "width": 1280,
+      "height": 720,
+      "mime": "image/webp",
+      "bytes": 384814,
+      "sha256": "7d4144c7d1819d00adadd162c0f48014099e104809ded0b361268edbebbc5679"
+    },
+    {
+      "path": "static/docs/media/beta1-welcome-20261005/preview.webp",
+      "width": 1280,
+      "height": 720,
+      "mime": "image/webp",
+      "bytes": 89860,
+      "sha256": "3c0e50f2ddb7677967b44f8c0994b7c6417f6550acdac5e809904e0d71976c62"
+    },
+    {
+      "path": "static/docs/media/beta1-welcome-20261005/preview-960.webp",
+      "width": 960,
+      "height": 540,
+      "mime": "image/webp",
+      "bytes": 60682,
+      "sha256": "2b8683b5298cdd76fe5da9c7b1546c0bfbec278d6f1befffd48c742ba520750a"
+    },
+    {
+      "path": "static/docs/media/beta1-comments-20261005/master.webp",
+      "width": 982,
+      "height": 1011,
+      "mime": "image/webp",
+      "bytes": 337116,
+      "sha256": "6a025e5756769f87fba44d27cd7eabc156fe790c379a5c65b707be1f028140e4"
+    },
+    {
+      "path": "static/docs/media/beta1-comments-20261005/preview.webp",
+      "width": 982,
+      "height": 1011,
+      "mime": "image/webp",
+      "bytes": 101636,
+      "sha256": "5bf76c8888657133b499eaf07c7d304eadd833c17f4d3d3f7d5ff629b23b0f8d"
+    },
+    {
+      "path": "static/docs/media/beta1-comments-20261005/preview-960.webp",
+      "width": 960,
+      "height": 988,
+      "mime": "image/webp",
+      "bytes": 101822,
+      "sha256": "0f07431e82df06b4ee81e116e561d7e094fa5ad244e1b1a8545ea6bf8167cba6"
+    },
+    {
+      "path": "static/docs/media/beta1-help-20261005/master.webp",
+      "width": 982,
+      "height": 1011,
+      "mime": "image/webp",
+      "bytes": 262686,
+      "sha256": "08074b8078f0361e6ca9420b5fb7e3a769cc226bf8afd3b635d5b3c6f417e859"
+    },
+    {
+      "path": "static/docs/media/beta1-help-20261005/preview.webp",
+      "width": 982,
+      "height": 1011,
+      "mime": "image/webp",
+      "bytes": 83398,
+      "sha256": "cd6812e1779872542b7619c33adc25f156dc5ee8ba46e9988bd0301864f0c045"
+    },
+    {
+      "path": "static/docs/media/beta1-help-20261005/preview-960.webp",
+      "width": 960,
+      "height": 988,
+      "mime": "image/webp",
+      "bytes": 81898,
+      "sha256": "041253cbd3d9e096e60767e23abd703914cb44c6890f7f9dddb2818af65b48d8"
+    },
+    {
+      "path": "static/docs/media/beta1-files-20261005/master.webp",
+      "width": 982,
+      "height": 1011,
+      "mime": "image/webp",
+      "bytes": 123648,
+      "sha256": "7369f3f35da1ebfd85660ca26d92f2071b52cb9472a28b103fbbf4266df12bd3"
+    },
+    {
+      "path": "static/docs/media/beta1-files-20261005/preview.webp",
+      "width": 982,
+      "height": 1011,
+      "mime": "image/webp",
+      "bytes": 25152,
+      "sha256": "157e5ece318ebd4e5be9b21891a01598bd81547fa2bba7215ff41cf20b52b829"
+    },
+    {
+      "path": "static/docs/media/beta1-files-20261005/preview-960.webp",
+      "width": 960,
+      "height": 988,
+      "mime": "image/webp",
+      "bytes": 24702,
+      "sha256": "4b0863538d81a4c2a1aa53d31cf5b338644d8cc94180c897eede8e116e6c2da4"
+    },
+    {
+      "path": "static/docs/media/beta1-editor-20261005/master.webp",
+      "width": 1280,
+      "height": 720,
+      "mime": "image/webp",
+      "bytes": 339448,
+      "sha256": "e5c6730b6be18b8ab162d7f6109b5e6f6fab2d96282107fd943367fea7d4a5d6"
+    },
+    {
+      "path": "static/docs/media/beta1-editor-20261005/preview.webp",
+      "width": 1280,
+      "height": 720,
+      "mime": "image/webp",
+      "bytes": 117934,
+      "sha256": "9125e81f4417117ace9df4000b455a8875d449a984f5149dc8fa64d9a1a9a821"
+    },
+    {
+      "path": "static/docs/media/beta1-editor-20261005/preview-960.webp",
+      "width": 960,
+      "height": 540,
+      "mime": "image/webp",
+      "bytes": 75078,
+      "sha256": "d9236cac3cad9e1509fbe4759f52e01873f5927bb6b3f9561933e2d6b8994940"
+    },
+    {
+      "path": "static/docs/media/beta1-wiki-20261005/master.webp",
+      "width": 1280,
+      "height": 720,
+      "mime": "image/webp",
+      "bytes": 317104,
+      "sha256": "fbfcbe2019f2ead8791535e9242cd71f47c4c3cede53873f87b38c621dc08a3a"
+    },
+    {
+      "path": "static/docs/media/beta1-wiki-20261005/preview.webp",
+      "width": 1280,
+      "height": 720,
+      "mime": "image/webp",
+      "bytes": 108968,
+      "sha256": "76ceabdf1c2aeec5d550ce5bd52d15c41e3cb32f2141f435f102444b194517fe"
+    },
+    {
+      "path": "static/docs/media/beta1-wiki-20261005/preview-960.webp",
+      "width": 960,
+      "height": 540,
+      "mime": "image/webp",
+      "bytes": 68980,
+      "sha256": "f9829561d5e11f5c917e1226dd1651cb38b8575662615c48170973b78a58c4f3"
+    }
+  ],
+  "assets": {
+    "beta1-welcome-20261005": {
+      "id": "beta1-welcome-20261005",
+      "state": "ready",
+      "qualification": "current-visible-state",
+      "scene": "Current empty Chat welcome view with Calendar in the Copal navigation group.",
+      "alt": "Current empty Chat welcome view with Calendar in the Copal navigation group.",
+      "caption": "Empty Chat welcome view with the current sidebar and thin window frame; no model response is shown.",
+      "provenance": {
+        "kind": "actual native Testing CUA capture",
+        "capture_date": "2026-10-05",
+        "git_head": "ae8e108f08f1edead35c1f2fc1e244e31654c00d",
+        "revision": "Testing 7796, integrated current working-tree candidate, handbook seed16",
+        "source_frame": "welcome.jpg",
+        "source_sha256": "c5e2ce3c7a248d24743b9aba20eae4ddf1e70443d588275f118f19af41b35b8b",
+        "native_width": 1280,
+        "native_height": 720,
+        "capture_framing": "Complete native captured viewport; no crop, upscale, pixel replacement or screenshot redaction",
+        "variant_derivation": "Untouched JPEG decoded to lossless WebP master; quality92 WebP native preview and LANCZOS width960 derivative",
+        "data": "Synthetic Testing demonstration data; coordinator visually inspected for publication privacy",
+        "license": "Open Clank UI captured with synthetic demonstration data"
+      },
+      "masters": [
+        {
+          "path": "static/docs/media/beta1-welcome-20261005/master.webp",
+          "width": 1280,
+          "height": 720,
+          "mime": "image/webp",
+          "bytes": 384814,
+          "sha256": "7d4144c7d1819d00adadd162c0f48014099e104809ded0b361268edbebbc5679"
+        }
+      ],
+      "variants": [
+        {
+          "role": "image",
+          "url": "/static/docs/media/beta1-welcome-20261005/preview.webp",
+          "width": 1280,
+          "height": 720,
+          "mime": "image/webp",
+          "bytes": 89860,
+          "sha256": "3c0e50f2ddb7677967b44f8c0994b7c6417f6550acdac5e809904e0d71976c62"
+        },
+        {
+          "role": "image-960",
+          "url": "/static/docs/media/beta1-welcome-20261005/preview-960.webp",
+          "width": 960,
+          "height": 540,
+          "mime": "image/webp",
+          "bytes": 60682,
+          "sha256": "2b8683b5298cdd76fe5da9c7b1546c0bfbec278d6f1befffd48c742ba520750a"
+        }
+      ],
+      "reduced_motion_url": "/static/docs/media/beta1-welcome-20261005/preview.webp"
+    },
+    "beta1-comments-20261005": {
+      "id": "beta1-comments-20261005",
+      "state": "ready",
+      "qualification": "current-visible-state",
+      "scene": "Python source with click-in rich native comments, local image and explicit Save control.",
+      "alt": "Python source with click-in rich native comments, local image and explicit Save control.",
+      "caption": "Saved synthetic Python source shows rendered comments and docstring prose beside source code. Click-in edits still require explicit Save.",
+      "provenance": {
+        "kind": "actual native Testing CUA capture",
+        "capture_date": "2026-10-05",
+        "git_head": "ae8e108f08f1edead35c1f2fc1e244e31654c00d",
+        "revision": "Testing 7796, integrated current working-tree candidate, handbook seed16",
+        "source_frame": "comments.jpg",
+        "source_sha256": "d041f229e7cf66cb83b224220caf1aaa489a126793ef0ee62b111090221d7554",
+        "native_width": 982,
+        "native_height": 1011,
+        "capture_framing": "Complete native captured viewport; no crop, upscale, pixel replacement or screenshot redaction",
+        "variant_derivation": "Untouched JPEG decoded to lossless WebP master; quality92 WebP native preview and LANCZOS width960 derivative",
+        "data": "Synthetic Testing demonstration data; coordinator visually inspected for publication privacy",
+        "license": "Open Clank UI captured with synthetic demonstration data"
+      },
+      "masters": [
+        {
+          "path": "static/docs/media/beta1-comments-20261005/master.webp",
+          "width": 982,
+          "height": 1011,
+          "mime": "image/webp",
+          "bytes": 337116,
+          "sha256": "6a025e5756769f87fba44d27cd7eabc156fe790c379a5c65b707be1f028140e4"
+        }
+      ],
+      "variants": [
+        {
+          "role": "image",
+          "url": "/static/docs/media/beta1-comments-20261005/preview.webp",
+          "width": 982,
+          "height": 1011,
+          "mime": "image/webp",
+          "bytes": 101636,
+          "sha256": "5bf76c8888657133b499eaf07c7d304eadd833c17f4d3d3f7d5ff629b23b0f8d"
+        },
+        {
+          "role": "image-960",
+          "url": "/static/docs/media/beta1-comments-20261005/preview-960.webp",
+          "width": 960,
+          "height": 988,
+          "mime": "image/webp",
+          "bytes": 101822,
+          "sha256": "0f07431e82df06b4ee81e116e561d7e094fa5ad244e1b1a8545ea6bf8167cba6"
+        }
+      ],
+      "reduced_motion_url": "/static/docs/media/beta1-comments-20261005/preview.webp"
+    },
+    "beta1-help-20261005": {
+      "id": "beta1-help-20261005",
+      "state": "ready",
+      "qualification": "current-visible-state",
+      "scene": "Settings Help with exactly two maintained documentation destinations and component credits.",
+      "alt": "Settings Help with exactly two maintained documentation destinations and component credits.",
+      "caption": "Wiki documentation and Copal handbook open the same maintained read-only articles; component credits are visible.",
+      "provenance": {
+        "kind": "actual native Testing CUA capture",
+        "capture_date": "2026-10-05",
+        "git_head": "ae8e108f08f1edead35c1f2fc1e244e31654c00d",
+        "revision": "Testing 7796, integrated current working-tree candidate, handbook seed16",
+        "source_frame": "help.jpg",
+        "source_sha256": "06d795bf65b733a3c55099207c8b3feb411ade85e70d714ae6fd052ea97dd69c",
+        "native_width": 982,
+        "native_height": 1011,
+        "capture_framing": "Complete native captured viewport; no crop, upscale, pixel replacement or screenshot redaction",
+        "variant_derivation": "Untouched JPEG decoded to lossless WebP master; quality92 WebP native preview and LANCZOS width960 derivative",
+        "data": "Synthetic Testing demonstration data; coordinator visually inspected for publication privacy",
+        "license": "Open Clank UI captured with synthetic demonstration data"
+      },
+      "masters": [
+        {
+          "path": "static/docs/media/beta1-help-20261005/master.webp",
+          "width": 982,
+          "height": 1011,
+          "mime": "image/webp",
+          "bytes": 262686,
+          "sha256": "08074b8078f0361e6ca9420b5fb7e3a769cc226bf8afd3b635d5b3c6f417e859"
+        }
+      ],
+      "variants": [
+        {
+          "role": "image",
+          "url": "/static/docs/media/beta1-help-20261005/preview.webp",
+          "width": 982,
+          "height": 1011,
+          "mime": "image/webp",
+          "bytes": 83398,
+          "sha256": "cd6812e1779872542b7619c33adc25f156dc5ee8ba46e9988bd0301864f0c045"
+        },
+        {
+          "role": "image-960",
+          "url": "/static/docs/media/beta1-help-20261005/preview-960.webp",
+          "width": 960,
+          "height": 988,
+          "mime": "image/webp",
+          "bytes": 81898,
+          "sha256": "041253cbd3d9e096e60767e23abd703914cb44c6890f7f9dddb2818af65b48d8"
+        }
+      ],
+      "reduced_motion_url": "/static/docs/media/beta1-help-20261005/preview.webp"
+    },
+    "beta1-files-20261005": {
+      "id": "beta1-files-20261005",
+      "state": "ready",
+      "qualification": "current-visible-state",
+      "scene": "Files New file dialog over the synthetic EditorReview workspace.",
+      "alt": "Files New file dialog over the synthetic EditorReview workspace.",
+      "caption": "File \u2192 New file\u2026 opens the shared destination/name flow. This dialog alone does not establish a saved-file result.",
+      "provenance": {
+        "kind": "actual native Testing CUA capture",
+        "capture_date": "2026-10-05",
+        "git_head": "ae8e108f08f1edead35c1f2fc1e244e31654c00d",
+        "revision": "Testing 7796, integrated current working-tree candidate, handbook seed16",
+        "source_frame": "files.jpg",
+        "source_sha256": "015e786b9ec5db6ead6756311878e2395031b52a095dd3decc82c718847767c2",
+        "native_width": 982,
+        "native_height": 1011,
+        "capture_framing": "Complete native captured viewport; no crop, upscale, pixel replacement or screenshot redaction",
+        "variant_derivation": "Untouched JPEG decoded to lossless WebP master; quality92 WebP native preview and LANCZOS width960 derivative",
+        "data": "Synthetic Testing demonstration data; coordinator visually inspected for publication privacy",
+        "license": "Open Clank UI captured with synthetic demonstration data"
+      },
+      "masters": [
+        {
+          "path": "static/docs/media/beta1-files-20261005/master.webp",
+          "width": 982,
+          "height": 1011,
+          "mime": "image/webp",
+          "bytes": 123648,
+          "sha256": "7369f3f35da1ebfd85660ca26d92f2071b52cb9472a28b103fbbf4266df12bd3"
+        }
+      ],
+      "variants": [
+        {
+          "role": "image",
+          "url": "/static/docs/media/beta1-files-20261005/preview.webp",
+          "width": 982,
+          "height": 1011,
+          "mime": "image/webp",
+          "bytes": 25152,
+          "sha256": "157e5ece318ebd4e5be9b21891a01598bd81547fa2bba7215ff41cf20b52b829"
+        },
+        {
+          "role": "image-960",
+          "url": "/static/docs/media/beta1-files-20261005/preview-960.webp",
+          "width": 960,
+          "height": 988,
+          "mime": "image/webp",
+          "bytes": 24702,
+          "sha256": "4b0863538d81a4c2a1aa53d31cf5b338644d8cc94180c897eede8e116e6c2da4"
+        }
+      ],
+      "reduced_motion_url": "/static/docs/media/beta1-files-20261005/preview.webp"
+    },
+    "beta1-editor-20261005": {
+      "id": "beta1-editor-20261005",
+      "state": "ready",
+      "qualification": "current-visible-state",
+      "scene": "Current maintained handbook Home in Editor with tested Windows support prose and read-only status.",
+      "alt": "Read-only Open Clank Handbook in Editor with current Windows support guidance and retained sidebar.",
+      "caption": "Help opens the maintained read-only Home article in Editor. Current Windows Files, Editor and native thumbnail support is stated; only native ARM64/x64 frozen packages and Linux are unqualified.",
+      "provenance": {
+        "kind": "actual native Testing CUA capture",
+        "capture_date": "2026-10-05",
+        "revision": "Normal Testing7796 Help \u2192 Copal handbook after seed17 and normal-index refresh fix",
+        "git_head": "ae8e108f08f1edead35c1f2fc1e244e31654c00d",
+        "source_frame": "editor.jpg",
+        "source_sha256": "7b2916a6d16b7ddfaae3528113911465453466cc26f3cc456e0876a220900807",
+        "native_width": 1280,
+        "native_height": 720,
+        "capture_framing": "Complete native viewport; no crop, upscale, pixel replacement or screenshot redaction",
+        "variant_derivation": "Pixel-identical lossless WebP master; quality92 native and width960 LANCZOS previews",
+        "data": "Synthetic Testing account and EditorReview workspace; visually inspected by coordinator",
+        "license": "Open Clank UI captured with synthetic demonstration data"
+      },
+      "masters": [
+        {
+          "path": "static/docs/media/beta1-editor-20261005/master.webp",
+          "width": 1280,
+          "height": 720,
+          "mime": "image/webp",
+          "bytes": 339448,
+          "sha256": "e5c6730b6be18b8ab162d7f6109b5e6f6fab2d96282107fd943367fea7d4a5d6"
+        }
+      ],
+      "variants": [
+        {
+          "role": "image",
+          "url": "/static/docs/media/beta1-editor-20261005/preview.webp",
+          "width": 1280,
+          "height": 720,
+          "mime": "image/webp",
+          "bytes": 117934,
+          "sha256": "9125e81f4417117ace9df4000b455a8875d449a984f5149dc8fa64d9a1a9a821"
+        },
+        {
+          "role": "image-960",
+          "url": "/static/docs/media/beta1-editor-20261005/preview-960.webp",
+          "width": 960,
+          "height": 540,
+          "mime": "image/webp",
+          "bytes": 75078,
+          "sha256": "d9236cac3cad9e1509fbe4759f52e01873f5927bb6b3f9561933e2d6b8994940"
+        }
+      ],
+      "reduced_motion_url": "/static/docs/media/beta1-editor-20261005/preview.webp"
+    },
+    "beta1-wiki-20261005": {
+      "id": "beta1-wiki-20261005",
+      "state": "ready",
+      "qualification": "current-visible-state",
+      "scene": "Current maintained handbook Home in Wiki with tested Windows support prose and read-only status.",
+      "alt": "Read-only Open Clank Handbook in Wiki with current Windows support guidance and retained sidebar.",
+      "caption": "Help opens the same maintained read-only Home article in Wiki. This is its Wiki presentation, not an editable official copy.",
+      "provenance": {
+        "kind": "actual native Testing CUA capture",
+        "capture_date": "2026-10-06",
+        "revision": "Normal Testing7796 Help \u2192 Wiki documentation after seed17 and normal-index refresh fix",
+        "git_head": "ae8e108f08f1edead35c1f2fc1e244e31654c00d",
+        "source_frame": "wiki.jpg",
+        "source_sha256": "1e435c7d846aec7ed7a4c394cd8e257ad6709f9b211556ce55ae2ed62cca6032",
+        "native_width": 1280,
+        "native_height": 720,
+        "capture_framing": "Complete native viewport; no crop, upscale, pixel replacement or screenshot redaction",
+        "variant_derivation": "Pixel-identical lossless WebP master; quality92 native and width960 LANCZOS previews",
+        "data": "Synthetic Testing account and official OpenClank article tree; visually inspected by coordinator",
+        "license": "Open Clank UI captured with synthetic demonstration data"
+      },
+      "masters": [
+        {
+          "path": "static/docs/media/beta1-wiki-20261005/master.webp",
+          "width": 1280,
+          "height": 720,
+          "mime": "image/webp",
+          "bytes": 317104,
+          "sha256": "fbfcbe2019f2ead8791535e9242cd71f47c4c3cede53873f87b38c621dc08a3a"
+        }
+      ],
+      "variants": [
+        {
+          "role": "image",
+          "url": "/static/docs/media/beta1-wiki-20261005/preview.webp",
+          "width": 1280,
+          "height": 720,
+          "mime": "image/webp",
+          "bytes": 108968,
+          "sha256": "76ceabdf1c2aeec5d550ce5bd52d15c41e3cb32f2141f435f102444b194517fe"
+        },
+        {
+          "role": "image-960",
+          "url": "/static/docs/media/beta1-wiki-20261005/preview-960.webp",
+          "width": 960,
+          "height": 540,
+          "mime": "image/webp",
+          "bytes": 68980,
+          "sha256": "f9829561d5e11f5c917e1226dd1651cb38b8575662615c48170973b78a58c4f3"
+        }
+      ],
+      "reduced_motion_url": "/static/docs/media/beta1-wiki-20261005/preview.webp"
+    }
+  },
+  "previous_manifest": "beta1-20261004-manifest.json",
+  "previous_media": "Prior hashes/provenance unchanged; old captures remain historical.",
+  "capture_start_date": "2026-10-05",
+  "capture_end_date": "2026-10-06"
+}

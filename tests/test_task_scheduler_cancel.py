@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from sqlalchemy import Column, DateTime, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -103,3 +104,36 @@ def test_stop_task_cleans_up_queued_handle_and_run(tmp_path, monkeypatch):
         assert run.finished_at >= run.started_at
     finally:
         db.close()
+
+
+def test_cancelled_singleflight_waiter_does_not_cancel_owner_fetch(monkeypatch):
+    """One cancelled scheduled task cannot poison another task's shared fetch."""
+    import src.task_scheduler as scheduler_module
+
+    async def drive():
+        key = ("test", "singleflight-cancellation")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fetch():
+            started.set()
+            await release.wait()
+            return "fresh"
+
+        owner = asyncio.create_task(scheduler_module._cached(key, 60, fetch))
+        await started.wait()
+        waiter = asyncio.create_task(scheduler_module._cached(key, 60, fetch))
+        await asyncio.sleep(0)
+        pending = scheduler_module._shared_cache_pending[key]
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not pending.cancelled()
+
+        release.set()
+        assert await owner == "fresh"
+        assert key not in scheduler_module._shared_cache_pending
+
+    monkeypatch.setattr(scheduler_module, "_shared_cache", {})
+    monkeypatch.setattr(scheduler_module, "_shared_cache_pending", {})
+    asyncio.run(drive())

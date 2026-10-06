@@ -41,7 +41,7 @@
       ]
     },
     "support_tier": { "enum": ["tier-1", "experimental"] },
-    "bun_version": { "const": "1.3.14" },
+    "bun_version": { "const": "1.4.0" },
     "binary": {
       "type": "object",
       "additionalProperties": false,
@@ -85,7 +85,7 @@
       "properties": {
         "id": { "const": "https://openclank.dev/contracts/managed-provider/v2" },
         "version": { "const": 2 },
-        "sha256": { "const": "611c378cc61719f6290cd28e9c383b5a9f398fc174785c7c84b5269f366073ca" }
+        "sha256": { "const": "bcac868d6f2bd61ee7a62b8a35afc43f068590fe9a496f279774936cde4b3e31" }
       }
     },
     "source": {

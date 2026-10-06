@@ -75,7 +75,7 @@ async fn user_and_agent_envelopes_capture_once_and_keep_provenance() {
     let finished = adapter
         .finish(
             "action-1",
-            LiveReceipt {
+            LiveReceipt { committed_resources: Vec::new(),
                 action_id: "action-1".into(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("rev-after".into()),

@@ -14,7 +14,7 @@ const SURFACES = Object.freeze({
   files: { label: 'Files', lesson: 'fg-files', description: 'Browse authorized locations and open a resource in Editor.', next: 'Choose an authorized location, then select one file.' },
   assistant: { label: 'Assistant', lesson: 'fg-assistant', description: 'Ask for help with the current workflow while keeping resource contents in the workspace.', next: 'Attach only the current identifiers, then review the scope before sending.' },
   timeline: { label: 'Timeline', lesson: 'fg-timeline', description: 'Plan work with dated notes, spans, and relationships.', next: 'Open a day or task and inspect its linked note.' },
-  wiki: { label: 'Wiki in Editor', lesson: 'fg-wiki', description: 'Edit Wiki pages in the shared Editor while preserving their source content.', next: 'Open a Wiki page in Editor, then follow a link or edit its source.' },
+  wiki: { label: 'Wiki', lesson: 'fg-wiki', description: 'Edit Wiki pages in the dedicated Wiki applet, sharing source content and history with Editor.', next: 'Open a Wiki page, then follow a link or edit its source.' },
   bases: { label: 'Bases', lesson: 'fg-bases', description: 'Query notes with typed properties and keep the source document available.', next: 'Open a Base view and inspect one typed result.' },
   graph: { label: 'Graph', lesson: 'fg-connections', description: 'Explore links between the resources in this workspace.', next: 'Select a node to follow its source relationship.' },
   tasks: { label: 'Tasks', lesson: 'fg-tasks', description: 'Review actionable checkboxes projected from your notes.', next: 'Filter the list, then open the source note for an edit.' },
@@ -68,11 +68,15 @@ function mountedWindowVisible(id) {
   return !root.classList?.contains('hidden') && root.getAttribute('aria-hidden') !== 'true' && root.style?.display !== 'none';
 }
 
+function mountedFilesWindowVisible() {
+  return [...document.querySelectorAll('.files-window')].some(root => mountedWindowVisible(root.id));
+}
+
 function currentScope(preferredSurface = null) {
   let copal = {};
   let files = {};
   try { copal = window.__odysseusGetActiveCopalContext?.() || {}; } catch (_) {}
-  const filesVisible = mountedWindowVisible('files-window');
+  const filesVisible = mountedFilesWindowVisible();
   if (preferredSurface === 'files' || filesVisible) {
     try { files = window.__odysseusGetActiveFilesContext?.() || {}; } catch (_) {}
   }
@@ -140,7 +144,7 @@ function providerContext(surface) {
     const help = window.__odysseusGetActiveCopalHelpContext;
     if (typeof help === 'function') return help(surface) || {};
     const copal = window.__odysseusGetActiveCopalContext?.() || {};
-    if (surface || copal.view || !mountedWindowVisible('files-window')) return copal;
+    if (surface || copal.view || !mountedFilesWindowVisible()) return copal;
     return window.__odysseusGetActiveFilesContext?.() || copal;
   } catch (_) {
     return { sourceStatus: 'unavailable' };
@@ -468,9 +472,9 @@ function contextForButton(button) {
 function addSurfaceButtons(root = document) {
   root.querySelectorAll?.('.copal-workspace-header .copal-window-actions').forEach((actions) => {
     const windowRoot = actions.closest('.copal-view-window, .files-window');
-    if (!windowRoot || actions.querySelector('[data-contextual-help-button]')) return;
+    if (!windowRoot || windowRoot.id === 'copal-achievements-modal' || actions.querySelector('[data-contextual-help-button]')) return;
     const id = windowRoot.id || '';
-    let surface = id === 'files-window' ? 'files' : id.replace(/^copal-/, '').replace(/-modal$/, '');
+    let surface = windowRoot.classList.contains('files-window') ? 'files' : id.replace(/^copal-/, '').replace(/-modal$/, '');
     surface = surfaceKey(surface);
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'copal-btn contextual-help-button'; button.textContent = '?';

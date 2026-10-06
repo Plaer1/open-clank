@@ -1,7 +1,6 @@
 """S06 cold Tasks projection recovery through the keyed production bridge.
 
-The task index is a bounded Redb projection maintained by the Rust Copal
-bridge. Losing or corrupting that derived table must cause the authenticated
+The task index is a Files projection maintained by the Copal repository. Losing or corrupting that derived table must cause the authenticated
 Tasks route to rebuild from canonical native note records, preserving each
 note as the only task authority.
 """
@@ -16,7 +15,7 @@ from fastapi import FastAPI, Request
 from types import SimpleNamespace
 
 from routes.copal_routes import setup_copal_routes
-from src.openclank.copal_bridge import CopalBridge
+from src.openclank.copal_loose import LooseCopalBridge
 
 
 def _native_note(*, blocks):
@@ -48,11 +47,12 @@ def _app(bridge):
     @app.middleware("http")
     async def disposable_identity(request: Request, call_next):
         request.state.current_user = request.headers.get("x-test-user")
+        request.state.authenticated = request.state.current_user in {"alice", "bob"}
         return await call_next(request)
 
     app.include_router(setup_copal_routes())
     app.state.copal_bridge = bridge
-    app.state.auth_manager = SimpleNamespace(account_id=lambda username: f"account:{username}")
+    app.state.auth_manager = SimpleNamespace(users={"alice": {}, "bob": {}}, account_id=lambda username: f"account:{username}")
     return app
 
 
@@ -77,17 +77,19 @@ async def _tasks(http, user, workspace):
         headers={"x-test-user": user},
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    result = response.json()
+    result["items"] = [item for item in result["items"] if not (item.get("document") or {}).get("readOnly")]
+    return result
 
 
 @pytest.mark.asyncio
 async def test_keyed_tasks_rebuild_from_native_notes_after_stale_and_cold_projection(
     tmp_path,
 ):
-    """Exercise actual CopalBridge -> authenticated route -> keyed Redb index."""
+    """Exercise actual LooseCopalBridge -> authenticated route -> keyed Files index."""
 
     data_dir = tmp_path / "copal-keyed-cold"
-    bridge = CopalBridge(data_dir=data_dir)
+    bridge = LooseCopalBridge(data_dir)
     await bridge.start()
     try:
         alice_note = await _create(
@@ -123,7 +125,7 @@ async def test_keyed_tasks_rebuild_from_native_notes_after_stale_and_cold_projec
             task_documents = {
                 document_id: record
                 for document_id, record in indexed["documents"].items()
-                if record.get("items")
+                if record.get("items") and document_id == alice_note["id"]
             }
             assert set(task_documents) == {alice_note["id"]}
             cached = indexed["documents"][alice_note["id"]]
@@ -154,6 +156,12 @@ async def test_keyed_tasks_rebuild_from_native_notes_after_stale_and_cold_projec
             )
             assert updated["outcome"] == "committed"
             changed_head = updated["doc"]["head"]
+            # An incremental update must retain rows belonging to unchanged documents.
+            await _tasks(http, "alice", "personal")
+            patched_index = await bridge.call("task_index_get", {"owner": "alice", "workspace_id": "personal"})
+            untouched = {key: value for key, value in indexed["documents"].items() if key != alice_note["id"]}
+            assert untouched
+            assert all(patched_index["documents"].get(key) == value for key, value in untouched.items())
             # Deliberately make only the derived index stale/incorrect. The
             # canonical note bytes remain untouched and are the recovery source.
             await bridge.call(
@@ -183,11 +191,11 @@ async def test_keyed_tasks_rebuild_from_native_notes_after_stale_and_cold_projec
             source_after_repair = await bridge.call(
                 "get", {"owner": "alice", "workspace_id": "personal", "id": alice_note["id"]}
             )
-            assert source_after_repair["text"] == "- [x] Changed"
+            assert source_after_repair["text"] == updated_content
             assert source_after_repair["head"] == changed_head
 
             # Clear only the keyed derived table, then stop and recreate the
-            # actual bridge process. The restarted route must lazily rebuild.
+            # actual repository facade. The restarted route must lazily rebuild.
             await bridge.call(
                 "task_index_update",
                 {
@@ -206,7 +214,7 @@ async def test_keyed_tasks_rebuild_from_native_notes_after_stale_and_cold_projec
             assert cold_meta["total"] == 0
             assert cold_meta["sourceRevision"] == ""
             await bridge.stop()
-            reopened = CopalBridge(data_dir=data_dir)
+            reopened = LooseCopalBridge(data_dir)
             await reopened.start()
             try:
                 restarted_app = _app(reopened)

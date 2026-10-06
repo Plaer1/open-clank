@@ -1,8 +1,10 @@
-"""User-scoped Open Clank API for Copal's owned Redb bridge."""
+"""User-scoped Open Clank API for the current Copal Files repository."""
 
 from __future__ import annotations
 
 import asyncio
+from src.openclank.achievement_producers import record_activity
+from src.openclank.copal_history_wire import capture_metadata, mutation_failure_status
 import difflib
 import hashlib
 import json
@@ -30,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.middleware import require_admin
 from src.auth_helpers import copal_owner_for_user, require_user
-from src.openclank.copal_bridge import CopalBridgeError
+from src.openclank.copal_errors import CopalBridgeError
 from src.openclank.file_policy import FilePolicyRepository
 from src.openclank.history_client import HistoryClient, HistoryClientError
 from src.openclank.copal_resources import copal_resource_descriptor
@@ -56,7 +58,6 @@ from src.openclank.copal_planning import (
     canonical_documents,
     event_document_name,
     event_from_document,
-    legacy_inventory,
     merge_event,
     planning_projection,
     revision_fingerprint,
@@ -124,6 +125,8 @@ class _StrictModel(BaseModel):
 
 
 class CreateDocument(_StrictModel):
+    copySourceId: str | None = Field(default=None, min_length=1, max_length=128)
+    copySourceRevision: str | None = Field(default=None, min_length=1, max_length=128)
     actionId: str | None = Field(default=None, min_length=1, max_length=160)
     name: str = Field(min_length=1, max_length=512)
     kind: str = Field(default=_NOTE_KIND, min_length=1, max_length=64)
@@ -141,9 +144,6 @@ class WriteDocument(_StrictModel):
     relations: list[dict[str, Any]] | None = Field(default=None, max_length=10_000)
 
 
-class ConvertDocument(_StrictModel):
-    actionId: str | None = Field(default=None, min_length=1, max_length=160)
-    base: str | None = Field(default=None, max_length=128)
 
 
 class AttachmentMutation(_StrictModel):
@@ -191,8 +191,6 @@ class ValidateBase(_StrictModel):
     content: str = Field(max_length=262_144)
 
 
-class MigrateBase(_StrictModel):
-    base: str | None = Field(default=None, max_length=128)
 
 
 class TransformBase(_StrictModel):
@@ -241,8 +239,6 @@ class TrackMutation(_StrictModel):
     base: str | None = Field(default=None, max_length=128)
 
 
-class PlanningMigration(_StrictModel):
-    action: str = Field(default="apply", pattern="^(apply|rollback)$")
 
 
 class TaskMutation(_StrictModel):
@@ -459,18 +455,32 @@ def _note_blocks(
     deterministic_namespace: str | None = None,
 ) -> list[dict[str, Any]]:
     old = [block for block in previous or [] if isinstance(block, dict) and isinstance(block.get("id"), str)]
-    unused = {block["id"] for block in old}
+    old_by_id = {block["id"]: block for block in old}
+    unused = set(old_by_id)
     exact: dict[str, list[str]] = defaultdict(list)
     for block in old:
-        exact[json.dumps({key: value for key, value in block.items() if key not in {"id", "relationIds"}}, sort_keys=True)].append(block["id"])
-    blocks = [_block_from_line(line) for line in body.split("\n")]
+        exact[_block_line(block)].append(block["id"])
+    lines = body.split("\n")
+    blocks = []
+    multiline = [block for block in old if "\n" in _block_line(block)]
+    offset = 0
+    while offset < len(lines):
+        preserved = next((block for block in multiline if block["id"] in unused and lines[offset:offset + len(_block_line(block).split("\n"))] == _block_line(block).split("\n")), None)
+        if preserved:
+            blocks.append(dict(preserved)); unused.discard(preserved["id"])
+            offset += len(_block_line(preserved).split("\n"))
+        else:
+            blocks.append(_block_from_line(lines[offset])); offset += 1
     # Reserve exact matches first so inserting a same-type block cannot steal
     # the stable ID (and attached relations) of unchanged downstream content.
     for block in blocks:
-        signature = json.dumps(block, sort_keys=True)
+        if block.get("id") is not None:
+            continue
+        signature = _block_line(block)
         block_id = next((value for value in exact.get(signature, []) if value in unused), None)
         if block_id is not None:
-            block["id"] = block_id
+            original = old_by_id[block_id]
+            block.clear(); block.update(original)
             unused.discard(block_id)
     for index, block in enumerate(blocks):
         block_id = block.get("id")
@@ -479,6 +489,9 @@ def _note_blocks(
         seed = None
         if deterministic_namespace is not None:
             seed = f"{deterministic_namespace}\0block\0{index}\0{json.dumps(block, sort_keys=True, ensure_ascii=False)}"
+        if block_id and block.get("id") is None:
+            original = old_by_id[block_id]
+            block = {**original, **block}; blocks[index] = block
         block["id"] = block_id or _record_id("blk", seed)
         unused.discard(block["id"])
     return blocks
@@ -648,6 +661,7 @@ def _property_records(
     }
     return [
         {
+            **old.get(key, {}),
             "id": old.get(key, {}).get("id") or _record_id(
                 "prop",
                 f"{deterministic_namespace}\0property\0{key}" if deterministic_namespace is not None else None,
@@ -712,6 +726,7 @@ def _note_relations(
             supplied_block = None
         line = body.count("\n", 0, match.start())
         relation = {
+            **prior,
             "id": prior.get("id") or _record_id(
                 "rel",
                 f"{deterministic_namespace}\0body-relation\0{match.start()}\0{kind}\0{target}\0{fragment}"
@@ -749,6 +764,7 @@ def _note_relations(
         target_document = item.get("targetDocumentId")
         target_block = item.get("targetBlockId")
         relation = {
+            **prior,
             "id": prior.get("id") or _record_id(
                 "rel",
                 f"{deterministic_namespace}\0explicit-relation\0{explicit_index}\0{kind}\0{target}\0{fragment}"
@@ -764,7 +780,12 @@ def _note_relations(
         if fragment:
             relation["fragment"] = fragment
         relations.append(relation)
+    represented = {item.get("id") for item in relations}
+    for item in previous or []:
+        if isinstance(item, dict) and (item.get("kind") not in {"link", "embed", "parent", "collection", "asset", "tag"} or item.get("origin") not in {"body", "explicit"} and item.get("kind") != "tag") and item.get("id") not in represented:
+            relations.append(dict(item))
     return relations
+
 
 
 def _note_tags(body: str, properties: dict[str, Any]) -> list[str]:
@@ -886,6 +907,9 @@ def _encode_note(
         deterministic_namespace,
     )
     tags = _note_tags(body, clean)
+    if isinstance(previous, dict):
+        old_derived = set(_note_tags(_note_body_text(previous_body), _property_values(previous.get("properties"))))
+        tags = sorted(set(tags) | {tag for tag in previous.get("tags", []) if isinstance(tag, str) and tag not in old_derived}, key=str.casefold)
     previous_tags = {
         str(relation.get("target") or "").casefold(): relation
         for relation in (previous.get("relations") if isinstance(previous, dict) else []) or []
@@ -896,6 +920,7 @@ def _encode_note(
         line = body.count("\n", 0, match.start()) if match else None
         prior = previous_tags.get(tag.casefold(), {})
         relation_records.append({
+            **prior,
             "id": prior.get("id") or _record_id(
                 "rel",
                 f"{deterministic_namespace}\0tag\0{tag.casefold()}" if deterministic_namespace is not None else None,
@@ -913,9 +938,12 @@ def _encode_note(
     for block in blocks:
         if relation_ids.get(block["id"]):
             block["relationIds"] = relation_ids[block["id"]]
+        else:
+            block.pop("relationIds", None)
     record = {
+        **(previous if isinstance(previous, dict) else {}),
         "schemaVersion": _NOTE_SCHEMA_VERSION,
-        "body": {"type": "doc", "blocks": blocks},
+        "body": {**(previous_body if isinstance(previous_body, dict) else {}), "type": "doc", "blocks": blocks},
         "properties": _property_records(
             clean,
             previous.get("properties") if isinstance(previous, dict) else None,
@@ -1318,11 +1346,20 @@ def _prepare_import_tree(root: Path, preserved_paths: set[str] | None = None) ->
 
 async def _call(request: Request, operation: str, args: dict[str, Any], *, timeout: float = 20):
     bridge = _bridge(request)
+    journey_scope = {key: args[key] for key in ("owner", "workspace_id") if key in args}
     if not bridge.is_alive():
         try:
             await bridge.start()
         except (asyncio.TimeoutError, CopalBridgeError, OSError) as exc:
             raise HTTPException(503, "Copal storage bridge is unavailable") from exc
+    move_proof = None
+    if operation == "rename" and args.get("id"):
+        from src.openclank.document_journeys import prepare_move
+        try:
+            move_proof = await prepare_move(bridge, journey_scope, args["id"], args.get("name"),
+                lambda payload: _call(request, "write", payload, timeout=timeout))
+        except (ValueError, OSError) as exc:
+            raise HTTPException(409, "Attachment preservation could not be prepared; reload before moving") from exc
     # ``trash`` is a read-only listing used by GET endpoints.  Capturing it
     # would create fake history rows whenever a user opens the trash view.
     capture_operations = {"create", "write", "rename", "delete", "restore", "restore_deleted", "checkpoint", "move", "replace"}
@@ -1343,13 +1380,17 @@ async def _call(request: Request, operation: str, args: dict[str, Any], *, timeo
             history_client = HistoryClient(socket_path, actor_id=scope_owner, account_id=str(account_id))
             if args.get("id"):
                 try:
-                    history_before = await bridge.call("get", {"owner": scope_owner, "workspace_id": args.get("workspace_id"), "id": args["id"]}, timeout=timeout)
-                except Exception:
-                    history_before = None
+                    if operation == "restore_deleted":
+                        tombstones = await bridge.call("trash", {"owner": scope_owner, "workspace_id": args.get("workspace_id"), "corpus": args.get("corpus")}, timeout=timeout)
+                        history_before = next((document for document in tombstones.get("docs", []) if document.get("id") == args["id"]), None)
+                    else:
+                        history_before = await bridge.call("get", {"owner": scope_owner, "workspace_id": args.get("workspace_id"), "id": args["id"]}, timeout=timeout)
+                except Exception as exc:
+                    raise HTTPException(503, "Required recovery preimage is unavailable; original was preserved") from exc
             def managed_bytes(document: Any) -> bytes | None:
                 if not isinstance(document, dict):
                     return None
-                fields = {key: document.get(key) for key in ("id", "name", "kind", "text", "properties", "relations", "extensions", "attachments", "propertyDefinitions", "tags", "blocks") if key in document}
+                fields = {key: document.get(key) for key in ("id", "name", "kind", "text", "properties", "relations", "extensions", "attachments", "propertyDefinitions", "tags", "blocks", "trashed") if key in document}
                 return json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
             def history_fingerprint(data: bytes | None) -> str:
                 return "missing" if data is None else f"sha256:{hashlib.sha256(data).hexdigest()}:{len(data)}"
@@ -1364,13 +1405,20 @@ async def _call(request: Request, operation: str, args: dict[str, Any], *, timeo
                 "expected_after_revision": None, "original_locator": None, "destination_locator": None,
                 "timestamp_millis": int(time.time() * 1000), "coverage": {"metadata": {"coverage_kind": "KnownMutationHooks", "roots": [str(args.get("workspace_id") or "")], "exclusions": []}}, "per_resource_outcomes": None,
             }
+            envelope.update(capture_metadata(history_before, workspace=str(args.get("workspace_id") or ""), resource_id=resource_id, destination_name=args.get("name")))
             try:
+                if args.get("id") and not isinstance(history_before, dict):
+                    raise HistoryClientError("required Copal recovery preimage is unavailable")
                 await asyncio.to_thread(history_client.prepare, envelope, content=before_bytes, fingerprint=history_fingerprint(before_bytes))
                 history_status.update(status="prepared", durable=False, action_id=history_action_id, phase="before")
             except (HistoryClientError, OSError, asyncio.TimeoutError) as exc:
                 paused = "history_paused_budget" in str(exc)
                 history_status.update(status="paused" if paused else "failed", action_id=history_action_id, phase="budget" if paused else "before", error=str(exc))
-                history_client = None
+                raise HTTPException(503, "Required recovery preimage is unavailable; original was preserved") from exc
+    if move_proof:
+        args = {**args, "expected_head": move_proof["expectedHead"], "expected_name": move_proof["name"]}
+    if history_action_id and operation in capture_operations:
+        args = {**args, "action_id": history_action_id}
     try:
         result = await bridge.call(operation, args, timeout=timeout)
         if history_client is not None:
@@ -1417,25 +1465,48 @@ async def _call(request: Request, operation: str, args: dict[str, Any], *, timeo
                 else:
                     history_status.update(status="failed", phase="live_conflict")
             except (HistoryClientError, OSError, asyncio.TimeoutError) as exc:
+                if live_status == "Committed":
+                    try: await asyncio.to_thread(history_client.after_unavailable, history_action_id)
+                    except Exception: pass
                 paused = "history_paused_budget" in str(exc)
                 history_status.update(status="paused" if paused else "failed", phase="budget" if paused else "after", error=str(exc))
         if operation in capture_operations and isinstance(result, dict):
             result.setdefault("history", history_status)
+        if isinstance(result, dict) and result.get("outcome") not in {"conflict", "stale", "failed", "unsupported", "idempotency_conflict"}:
+            from src.openclank.document_journeys import committed, finish_move
+            emit = lambda family, occurrence, facts: record_activity(request, family, occurrence, facts, workspace_id=journey_scope.get("workspace_id"))
+            result_doc = result.get("doc")
+            committed_id = (result_doc.get("id") if isinstance(result_doc, dict) else None) or (args.get("id") if operation == "write" else None)
+            if operation == "commit_guarded":
+                committed_id = next((item.get("id") for item in args.get("operations", []) if item.get("kind") == "write"), committed_id)
+            if operation in {"create", "write", "commit_guarded"} and committed_id:
+                try:
+                    result["linkOccurrences"] = await committed(bridge, journey_scope, committed_id, emit)
+                except Exception:
+                    logging.getLogger(__name__).warning("Committed reference receipt pending reconciliation")
+            if move_proof:
+                try:
+                    await finish_move(bridge, journey_scope, move_proof, emit)
+                except (ValueError, OSError) as exc:
+                    # The name has committed; never encourage a blind mutation retry.
+                    result["attachmentVerification"] = {"outcome": "unavailable", "message": "Move committed; attachment verification needs reconciliation"}
         return result
     except asyncio.TimeoutError as exc:
         if history_client is not None:
             try:
-                await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": "NotCommitted", "fingerprint": None, "after_unavailable": True})
+                await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": mutation_failure_status(exc), "fingerprint": None, "after_unavailable": True})
             except Exception:
                 pass
-        raise HTTPException(504, "Copal database operation timed out") from exc
+        raise HTTPException(504, {"message": "Mutation outcome Unknown; reconcile before retrying", "live_status": "Unknown", "action_id": history_action_id}) from exc
     except CopalBridgeError as exc:
         if history_client is not None:
             try:
-                await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": "NotCommitted", "fingerprint": None, "after_unavailable": True})
+                await asyncio.to_thread(history_client.record_live, history_action_id, {"action_id": history_action_id, "status": mutation_failure_status(exc), "fingerprint": None, "after_unavailable": True})
             except Exception:
                 pass
         message = str(exc)
+        if operation in capture_operations and mutation_failure_status(exc) == "Unknown":
+            raise HTTPException(503, {"message": "Mutation outcome Unknown; reconcile before retrying", "live_status": "Unknown", "action_id": history_action_id}) from exc
         status = 404 if "not found" in message else 403 if "read-only" in message else 409 if "exists" in message or "stale_cursor" in message else 400
         raise HTTPException(status, message) from exc
 
@@ -1583,18 +1654,6 @@ async def _project_canonical_workspace(
         return {"enabled": True, "ok": False, "error": str(exc), "retryable": True}
 
 
-def _migration_report(planning_doc: dict[str, Any], inventory: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "schemaVersion": 1,
-        "legacyDocument": {"id": planning_doc.get("id"), "head": planning_doc.get("head")},
-        "tracks": len(inventory["tracks"]),
-        "events": len(inventory["events"]),
-        "sharedEvents": sum(bool(event.get("sharedTrackIds")) for event in inventory["events"]),
-        "fuzzyEvents": sum(event.get("startDate") == "FUZZY" or bool(event.get("fuzzy")) for event in inventory["events"]),
-        "stages": sum(len(event.get("stages") or []) for event in inventory["events"]),
-        "unknownFields": sum(len(event.get("copal_extra") or {}) for event in inventory["events"]),
-        "diagnostics": inventory["diagnostics"],
-    }
 
 
 def _safe_export_name(doc: dict[str, Any]) -> str:
@@ -2990,6 +3049,11 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         response = {"outcome": "applied", "actionId": action_id, "task": task, "revision": fresh.get("head"), "replayed": False, "projections": {"tasks": task_projection}}
         if not guarded:
             response = await _record_task_action(request, scope, action_id, digest, response)
+        if payload.checked and not row["done"] and task.get("checked"):
+            record_activity(request, "task.source.completed", action_id, {
+                "checkboxChange": "unchecked_to_checked", "documentId": str(stored["id"]),
+                "revisionId": str(fresh.get("head") or ""), "taskId": payload.taskId,
+            }, workspace_id=scope["workspace_id"])
         publish(scope, "task", response)
         return response
 
@@ -3053,166 +3117,6 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         publish(scope, "task", response)
         return response
 
-    @router.post("/planning/migrate")
-    async def migrate_planning(
-        payload: PlanningMigration,
-        request: Request,
-        workspace: str | None = None,
-        dry_run: bool = Query(True),
-    ):
-        scope = _scope(request, workspace)
-        docs = await _indexed_documents(request, scope)
-        registry_doc, marker_doc, canonical_events = canonical_documents(docs)
-        legacy = next((doc for doc in docs if doc.get("kind") == "planning"), None)
-        try:
-            if registry_doc:
-                track_registry_from_document(registry_doc)
-        except PlanningValidationError as exc:
-            raise HTTPException(422, str(exc)) from exc
-
-        if payload.action == "rollback":
-            if dry_run:
-                raise HTTPException(400, "Rollback requires dry_run=false")
-            if not marker_doc:
-                return {"ok": True, "action": "rollback", "changed": False, "reason": "No migration marker exists"}
-            try:
-                marker = json.loads(str(marker_doc.get("text") or "{}"))
-            except json.JSONDecodeError as exc:
-                raise HTTPException(409, "Migration marker is invalid; refusing unsafe rollback") from exc
-            current = {doc.get("id"): doc for doc in docs}
-            conflicts = []
-            for created in marker.get("created") or []:
-                doc = current.get(created.get("id"))
-                if doc and doc.get("head") != created.get("head"):
-                    conflicts.append({"id": doc.get("id"), "name": doc.get("name"), "expected": created.get("head"), "actual": doc.get("head")})
-            if conflicts:
-                raise HTTPException(409, detail={"message": "Canonical records changed after migration", "conflicts": conflicts})
-            removed = []
-            created_ids = {item.get("id") for item in marker.get("created") or []}
-            for doc in docs:
-                if doc.get("kind") == "calendar-projection" and any(
-                    str(doc.get("name") or "").endswith(f"-{document_id}.json")
-                    for document_id in created_ids
-                ):
-                    await _call(request, "delete", {**scope, "id": _doc_id(str(doc["id"]))})
-                    removed.append(doc["id"])
-            for created in reversed(marker.get("created") or []):
-                document_id = created.get("id")
-                if document_id in current:
-                    await _call(request, "delete", {**scope, "id": _doc_id(str(document_id))})
-                    removed.append(document_id)
-            await _call(request, "delete", {**scope, "id": _doc_id(str(marker_doc["id"]))})
-            projection = await _project_planning_document(request, scope, legacy) if legacy else None
-            result = {"ok": True, "action": "rollback", "changed": True, "removed": removed, "calendar_projection": projection}
-            publish(scope, "document", result)
-            return result
-
-        if not legacy:
-            return {"ok": True, "dryRun": dry_run, "changed": False, "reason": "No legacy planning document exists"}
-        try:
-            inventory = legacy_inventory(legacy)
-        except PlanningValidationError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        report = _migration_report(legacy, inventory)
-        report["eventNames"] = [event_document_name(event) for event in inventory["events"]]
-        if dry_run:
-            return {"ok": True, "dryRun": True, "changed": not bool(marker_doc), "report": report}
-
-        marker: dict[str, Any]
-        if marker_doc:
-            try:
-                marker = json.loads(str(marker_doc.get("text") or "{}"))
-            except json.JSONDecodeError as exc:
-                raise HTTPException(409, "Migration marker is invalid") from exc
-            if marker.get("state") == "complete":
-                return {"ok": True, "dryRun": False, "changed": False, "report": marker.get("report") or report, "marker": marker}
-        else:
-            marker = {
-                "schemaVersion": 1,
-                "state": "applying",
-                "legacyDocument": {"id": legacy.get("id"), "head": legacy.get("head")},
-                "preexistingIds": [event["id"] for event in canonical_events] + ([registry_doc["id"]] if registry_doc else []),
-                "created": [],
-                "mappings": {},
-                "report": report,
-            }
-            created_marker = await _call(
-                request,
-                "create",
-                {**scope, "name": MIGRATION_NAME, "kind": MIGRATION_KIND, "content": json.dumps(marker, sort_keys=True, separators=(",", ":"))},
-            )
-            marker_id = created_marker.get("doc", {}).get("id")
-            if not marker_id:
-                raise HTTPException(500, "Copal bridge did not return a migration marker id")
-            marker_doc = await _call(request, "get", {**scope, "id": marker_id})
-
-        preexisting = set(marker.get("preexistingIds") or [])
-        created_by_id = {item.get("id"): item for item in marker.get("created") or []}
-        mapping = dict(marker.get("mappings") or {})
-
-        if not registry_doc:
-            registry_content = serialize_track_registry(
-                inventory["tracks"],
-                {**inventory["metadata"], "legacyPlanningDocumentId": legacy.get("id")},
-            )
-            created_registry = await _call(
-                request,
-                "create",
-                {**scope, "name": TRACKS_NAME, "kind": TRACKS_KIND, "content": registry_content},
-            )
-            registry_id = created_registry.get("doc", {}).get("id")
-            if not registry_id:
-                raise HTTPException(500, "Copal bridge did not return a track registry id")
-            registry_doc = await _call(request, "get", {**scope, "id": registry_id})
-        if registry_doc["id"] not in preexisting and registry_doc["id"] not in created_by_id:
-            created_by_id[registry_doc["id"]] = {
-                "id": registry_doc["id"], "head": registry_doc.get("head"), "kind": TRACKS_KIND, "name": registry_doc.get("name"),
-            }
-
-        current_docs = await _indexed_documents(request, scope)
-        _, _, current_events = canonical_documents(current_docs)
-        by_legacy = {str(event.get("legacyId")): event for event in current_events if event.get("legacyId")}
-        tracks = track_registry_from_document(registry_doc).get("tracks") or []
-        for event in inventory["events"]:
-            legacy_id = str(event["legacyId"])
-            existing = by_legacy.get(legacy_id)
-            if existing:
-                event_doc = next(doc for doc in current_docs if doc.get("id") == existing["id"])
-            else:
-                created_event = await _call(
-                    request,
-                    "create",
-                    {
-                        **scope,
-                        "name": event_document_name(event),
-                        "kind": EVENT_KIND,
-                        "content": serialize_event(event, tracks=tracks),
-                    },
-                )
-                event_id = created_event.get("doc", {}).get("id")
-                if not event_id:
-                    raise HTTPException(500, f"Copal bridge did not return an id for {legacy_id}")
-                event_doc = await _call(request, "get", {**scope, "id": event_id})
-                current_docs.append(event_doc)
-                by_legacy[legacy_id] = event_from_document(event_doc) or {"id": event_id}
-            mapping[legacy_id] = event_doc["id"]
-            if event_doc["id"] not in preexisting and event_doc["id"] not in created_by_id:
-                created_by_id[event_doc["id"]] = {
-                    "id": event_doc["id"], "head": event_doc.get("head"), "kind": EVENT_KIND, "name": event_doc.get("name"),
-                }
-
-        marker.update({"state": "complete", "created": list(created_by_id.values()), "mappings": mapping, "report": report})
-        marker_write = await _call(
-            request,
-            "write",
-            {**scope, "id": marker_doc["id"], "content": json.dumps(marker, sort_keys=True, separators=(",", ":")), "base": marker_doc.get("head")},
-        )
-        if marker_write.get("outcome") == "stale":
-            raise HTTPException(409, "Migration marker changed concurrently; rerun to resume")
-        projection = await _project_canonical_workspace(request, scope)
-        result = {"ok": True, "dryRun": False, "changed": True, "report": report, "marker": marker, "calendar_projection": projection}
-        publish(scope, "document", result)
-        return result
 
     @router.post("/planning/events")
     async def create_event(payload: CreateEvent, request: Request, workspace: str | None = None):
@@ -3232,6 +3136,11 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         fresh = await _call(request, "get", {**scope, "id": result["doc"]["id"]})
         projection = await _project_canonical_workspace(request, scope)
         response = {**result, "doc": fresh, "event": event_from_document(fresh), "calendar_projection": projection}
+        committed_event = response.get("event") or {}
+        record_activity(request, "timeline.event.committed", f"{fresh['id']}:{fresh.get('head')}", {
+            "timelineEventId": str(fresh["id"]), "date": committed_event.get("startDate") or committed_event.get("dueDate") or "",
+            "track": committed_event.get("trackId") or "",
+        }, workspace_id=scope["workspace_id"])
         publish(scope, "document", response)
         return response
 
@@ -3275,6 +3184,13 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         fresh = await _call(request, "get", {**scope, "id": document_id})
         projection = await _project_canonical_workspace(request, scope)
         response = {**result, "doc": fresh, "event": event_from_document(fresh), "calendar_projection": projection}
+        committed_event = response.get("event") or {}
+        before_date = event.get("startDate") or event.get("dueDate") or ""
+        after_date = committed_event.get("startDate") or committed_event.get("dueDate") or ""
+        if after_date != before_date or committed_event.get("trackId") != event.get("trackId"):
+            record_activity(request, "timeline.event.moved", f"{fresh['id']}:{fresh.get('head')}", {
+                "timelineEventId": str(fresh["id"]), "date": after_date, "track": committed_event.get("trackId") or "", "committed": True,
+            }, workspace_id=scope["workspace_id"])
         publish(scope, "document", response)
         return response
 
@@ -3720,6 +3636,45 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             raise HTTPException(422, "Typed properties and relations belong to database notes")
         scope = _scope(request, workspace)
         content = _encode_note(payload.content, payload.properties, payload.relations) if kind in _NOTE_KINDS else payload.content
+        copy_record = None
+        if bool(payload.copySourceId) != bool(payload.copySourceRevision):
+            raise HTTPException(422, "A copy source ID and revision must be supplied together")
+        if payload.copySourceId:
+            if kind != _WIKI_KIND or payload.corpus != "wiki" or payload.content or payload.properties or payload.relations:
+                raise HTTPException(422, "A Wiki copy uses only its canonical source, name and expected revision")
+            if payload.actionId:
+                material = {"actionId": payload.actionId, "owner": scope["owner"], "workspaceId": scope["workspace_id"], "name": _name(payload.name), "kind": kind, "corpus": payload.corpus, "content": payload.content, "properties": payload.properties, "relations": payload.relations, "copySourceId": payload.copySourceId, "copySourceRevision": payload.copySourceRevision}
+                digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+                replay = await _find_document_action(request, scope, payload.actionId, digest)
+                if replay is not None:
+                    return replay
+            source = await _call(request, "get", {**scope, "id": _doc_id(payload.copySourceId)})
+            source_view = _note_view(source)
+            if source_view.get("kind") != _WIKI_KIND or source_view.get("deleted") or source_view.get("note_error") or source_view.get("rawPreserved"):
+                raise HTTPException(422, "Copy requires a readable supported native Wiki article")
+            if source_view.get("head") != payload.copySourceRevision:
+                raise HTTPException(409, detail={"outcome": "stale", "message": "The copy source changed; reopen it before copying"})
+            # Resolve virtual installed bodies only after the owner-scoped get
+            # admitted the canonical database-owned reference identity.
+            if source_view.get("readOnly") is True and source_view.get("officialRef"):
+                from src.openclank.official_docs import official_reference
+                reference = official_reference(source_view["officialRef"])
+                if reference is None:
+                    raise HTTPException(404, "Official copy source is no longer installed")
+                copy_record = _native_record(reference["content"])
+                # A personal copy must not inherit official identity markers.
+                copy_record["properties"] = [item for item in copy_record.get("properties", []) if item.get("key") not in {"product", "builtin", "docId"}]
+            else:
+                # list is the existing scoped raw native reader; get projects
+                # blocks and therefore cannot preserve unknown root/body fields.
+                listed = await _call(request, "list", {**scope, "corpus": "wiki"}, timeout=60)
+                raw = next((item for item in listed.get("docs", []) if item.get("id") == source_view.get("id")), None)
+                if not raw or raw.get("head") != payload.copySourceRevision:
+                    raise HTTPException(409, detail={"outcome": "stale", "message": "The copy source changed; reopen it before copying"})
+                copy_record = _native_record(str(raw.get("text") or ""))
+            if copy_record.get("schemaVersion") != _NOTE_SCHEMA_VERSION or not isinstance(copy_record.get("body"), dict):
+                raise HTTPException(422, "The native copy source is unsupported; its original remains preserved")
+            content = json.dumps(copy_record, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         action_id = payload.actionId
         action_digest = None
         if action_id:
@@ -3736,6 +3691,7 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
                 "content": payload.content,
                 "properties": payload.properties,
                 "relations": payload.relations,
+                **({"copySourceId": payload.copySourceId, "copySourceRevision": payload.copySourceRevision} if payload.copySourceId else {}),
             }
             action_digest = hashlib.sha256(json.dumps(action_material, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
             replay = await _find_document_action(request, scope, action_id, action_digest)
@@ -3767,7 +3723,7 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
                     and actual_relation_keys == requested_relation_keys
                 ):
                     candidates.append(view)
-            if len(candidates) == 1:
+            if len(candidates) == 1 and not payload.copySourceId:
                 recovered = {"outcome": "created", "actionId": action_id, "doc": candidates[0], "replayed": True}
                 recovered = _note_result(recovered)
                 recovered = await _record_document_action(request, scope, action_id, action_digest, recovered)
@@ -3822,6 +3778,14 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
                 previous = json.loads(str(stored.get("text") or "{}")) if existing.get("kind") in _NOTE_KINDS else None
             except json.JSONDecodeError:
                 previous = None
+        if existing.get("kind") == _WIKI_KIND:
+            listed = await _call(request, "list", {**scope, "corpus": "wiki"}, timeout=60)
+            raw = next((item for item in listed.get("docs", []) if item.get("id") == existing.get("id")), None)
+            if not raw or raw.get("head") != existing.get("head"):
+                raise HTTPException(409, detail={"outcome": "stale", "message": "The Wiki source changed; reopen before saving"})
+            previous = _native_record(str(raw.get("text") or ""))
+            if previous.get("schemaVersion") != _NOTE_SCHEMA_VERSION:
+                raise HTTPException(422, "The preserved native Wiki source cannot be edited")
         content = (
             _encode_note(
                 payload.content,
@@ -3862,105 +3826,7 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         publish(scope, "document", result)
         return result
 
-    @router.post("/documents/{document_id}/convert/preview")
-    async def preview_document_conversion(
-        document_id: str,
-        request: Request,
-        payload: ConvertDocument | None = None,
-        workspace: str | None = None,
-    ):
-        """Return a byte/projection diff without changing the Wiki record."""
-        scope = _scope(request, workspace)
-        stored = await _call(request, "get", {**scope, "id": _doc_id(document_id)})
-        current = _note_view(stored)
-        if current.get("kind") != _WIKI_KIND or current.get("recoveryState") != "legacy-import":
-            raise HTTPException(409, "Only a recognized legacy Markdown Wiki can be previewed")
-        source_bytes = _preserved_source_bytes(current)
-        source = str(current.get("text") or "")
-        preview_limit = 4 * 1024 * 1024
-        if source_bytes is not None and len(source_bytes) > preview_limit:
-            raise HTTPException(413, "The Wiki conversion preview is limited to 4 MiB of source")
-        if source_bytes is not None:
-            try:
-                source = source_bytes.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise HTTPException(409, "The preserved Wiki source is not valid UTF-8 Markdown") from exc
-        if not source:
-            raise HTTPException(409, "The preserved Wiki source is unavailable")
-        if len(source.encode("utf-8")) > preview_limit:
-            raise HTTPException(413, "The Wiki conversion preview is limited to 4 MiB of source")
-        content, diagnostics = _import_markdown_record(source, identity=str(stored.get("id") or document_id))
-        projected = _note_view({**stored, "text":content, "kind":_WIKI_KIND, "corpus":"wiki"})
-        converted = str(projected.get("text") or "")
-        diff = "".join(difflib.unified_diff(
-            source.splitlines(keepends=True), converted.splitlines(keepends=True),
-            fromfile="original source", tofile="native Wiki projection",
-        ))
-        max_preview_bytes = 512 * 1024
-        diff_bytes = diff.encode("utf-8")
-        diff_truncated = len(diff_bytes) > max_preview_bytes
-        if diff_truncated:
-            diff = diff_bytes[:max_preview_bytes].decode("utf-8", errors="ignore")
-        converted_bytes = converted.encode("utf-8")
-        after_limit = 64 * 1024
-        after_truncated = len(converted_bytes) > after_limit
-        return {
-            "preview": True,
-            "documentId": document_id,
-            "sourceBytes": len(source_bytes if source_bytes is not None else source.encode("utf-8")),
-            "sourceDigest": hashlib.sha256((source_bytes if source_bytes is not None else source.encode("utf-8"))).hexdigest(),
-            "diff": diff,
-            "diffTruncated": diff_truncated,
-            "after": {
-                "textBytes": len(converted_bytes),
-                "textDigest": hashlib.sha256(converted_bytes).hexdigest(),
-                "textExcerpt": converted_bytes[:after_limit].decode("utf-8", errors="ignore"),
-                "textTruncated": after_truncated,
-                "propertyCount": len(projected.get("properties") or {}),
-                "relationCount": len(projected.get("relations") or []),
-            },
-            "diagnostics": list(diagnostics or [])[:100],
-            "diagnosticsTruncated": len(diagnostics or []) > 100,
-            "base": payload.base if payload else stored.get("head"),
-        }
 
-    @router.post("/documents/{document_id}/convert")
-    async def convert_document(
-        document_id: str,
-        request: Request,
-        payload: ConvertDocument | None = None,
-        workspace: str | None = None,
-    ):
-        """Explicitly convert a preserved Markdown Wiki through normal CAS."""
-        # This endpoint is deliberately separate from PUT: recovery is a user
-        # choice and must never turn an unknown source into an empty document.
-        scope = _scope(request, workspace)
-        stored = await _call(request, "get", {**scope, "id": _doc_id(document_id)})
-        current = _note_view(stored)
-        if current.get("kind") != _WIKI_KIND or current.get("recoveryState") != "legacy-import":
-            raise HTTPException(409, "Only a recognized legacy Markdown Wiki can be converted")
-        source = str(current.get("text") or "")
-        if not source:
-            preserved = _preserved_source_bytes(current)
-            source = preserved.decode("utf-8", errors="strict") if preserved else ""
-        if not source:
-            raise HTTPException(409, "The preserved Wiki source is unavailable")
-        content, diagnostics = _import_markdown_record(source, identity=str(stored.get("id") or document_id))
-        result = await _call(request, "write", {
-            **scope,
-            "id": _doc_id(document_id),
-            "content": content,
-            "base": (payload.base if payload else None) or stored.get("head"),
-            "corpus": "wiki",
-            **({"action_id": payload.actionId} if payload and payload.actionId else {}),
-        })
-        if result.get("outcome") == "stale":
-            raise HTTPException(409, detail={"outcome": "stale", "doc": result.get("doc")})
-        fresh = _note_view(await _call(request, "get", {**scope, "id": _doc_id(document_id)}))
-        result = {**result, "doc": _resource_view(request, scope, fresh), "conversion": "markdown", "diagnostics": diagnostics}
-        _with_task_projection(result, await _task_projection_receipt(request, scope))
-        publish(scope, "document", result)
-        return result
 
     @router.delete("/documents/{document_id}")
     async def delete_document(document_id: str, request: Request, workspace: str | None = None):
@@ -4007,6 +3873,39 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
         _with_task_projection(result, await _task_projection_receipt(request, scope))
         publish(scope, "document", result)
         return result
+
+    @router.get("/documents/{document_id}/link-occurrences")
+    async def document_link_occurrences(document_id: str, request: Request, workspace: str | None = None):
+        from src.openclank.document_journeys import catalogue, occurrences
+        scope = _scope(request, workspace)
+        source = _note_view(await _call(request, "get", {**scope, "id": _doc_id(document_id)}))
+        links = occurrences(source, await catalogue(_bridge(request), scope))
+        return {"documentId": source["id"], "revisionId": str(source.get("head")), "links": links}
+
+    @router.post("/documents/{document_id}/link-navigation")
+    async def document_link_navigation(document_id: str, payload: dict, request: Request, workspace: str | None = None):
+        from src.openclank.document_journeys import catalogue, occurrences
+        scope = _scope(request, workspace)
+        source = _note_view(await _call(request, "get", {**scope, "id": _doc_id(document_id)}))
+        links = occurrences(source, await catalogue(_bridge(request), scope))
+        link = next((item for item in links if item["linkId"] == payload.get("linkId") and item["targetDocumentId"] == payload.get("targetDocumentId")), None)
+        if link is None or str(source.get("head")) != str(payload.get("sourceRevisionId")):
+            raise HTTPException(409, "The committed link occurrence changed; navigate from the current document")
+        target = await _call(request, "get", {**scope, "id": link["targetDocumentId"]})
+        if target.get("id") != link["targetDocumentId"]:
+            raise HTTPException(404, "Link destination is unavailable")
+        facts = {key: link[key] for key in ("linkId", "sourceDocumentId", "targetDocumentId")}
+        delivered = record_activity(request, "document.link.navigated", str(payload.get("occurrenceId") or uuid.uuid4()),
+                                   {**facts, "resolvedToDifferentDocument": True}, workspace_id=scope["workspace_id"], kind="U")
+        return {"outcome": "acknowledged", "delivered": delivered}
+
+    @router.post("/achievements/resume")
+    async def resume_document_receipts(request: Request):
+        from src.openclank.achievement_producers import resume_account_activity
+        account = _actor_account_id(request)
+        if not account:
+            raise HTTPException(401, "Authentication is required")
+        return {"ok": resume_account_activity(str(account), repository=getattr(request.app.state, "treehouse_repository", None))}
 
     @router.post("/documents/{document_id}/rename")
     async def rename_document(
@@ -4247,34 +4146,6 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
             **result,
         }
 
-    @router.post("/bases/{base_id}/migrate")
-    async def migrate_base_document(
-        base_id: str,
-        payload: MigrateBase,
-        request: Request,
-        workspace: str | None = None,
-        dry_run: bool = Query(True),
-    ):
-        scope = _scope(request, workspace)
-        base_doc = await _call(request, "get", {**scope, "id": _doc_id(base_id)})
-        if base_doc.get("kind") != "base":
-            raise HTTPException(400, "Document is not a Base")
-        try:
-            definition, diagnostics = parse_base_definition(base_doc.get("text") or "")
-        except BaseDefinitionError as exc:
-            raise HTTPException(422, detail={"diagnostics": exc.diagnostics}) from exc
-        canonical = dump_base_definition(definition)
-        if dry_run:
-            return {"ok": True, "dryRun": True, "changed": canonical != base_doc.get("text"), "canonical": canonical, "diagnostics": diagnostics}
-        result = await _call(
-            request,
-            "write",
-            {**scope, "id": _doc_id(base_id), "content": canonical, "base": payload.base or base_doc.get("head")},
-        )
-        if result.get("outcome") == "stale":
-            raise HTTPException(409, detail={"outcome": "stale", "doc": result.get("doc")})
-        publish(scope, "document", result)
-        return {"ok": True, "dryRun": False, "result": result, "diagnostics": diagnostics}
 
     @router.patch("/bases/{base_id}/rows/{document_id}")
     async def edit_base_row(
@@ -4519,78 +4390,17 @@ def setup_copal_routes(*, policy_repository: FilePolicyRepository | None = None)
     async def export_obsidian(request: Request, workspace: str | None = None):
         scope = _scope(request, workspace)
         snapshot = await _call(request, "export_snapshot", scope, timeout=60)
-        docs = [
-            _note_view(document)
-            for document in snapshot.get("docs", [])
-            if not document.get("readOnly")
-        ]
-        canonical = bool(next((doc for doc in docs if doc.get("kind") == TRACKS_KIND), None))
-        output = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
-        manifest = {
-            "format": "copal-obsidian-export-v1",
-            "exported_at": datetime.now(timezone.utc).isoformat(),
-            "workspace": scope["workspace_id"],
-            "documents": [],
-        }
+        from src.openclank.copal_transfer import CopalTransferError, create_export, load_download
         try:
-            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for doc in docs:
-                    export_name = _safe_export_name(doc)
-                    if event := event_from_document(doc):
-                        export_name = event_document_name(event)
-                    if doc.get("corpus") == "wiki":
-                        export_name = _name(f".copal/wiki/{export_name}")
-                    if canonical and doc.get("kind") == "planning":
-                        export_name = ".copal/planning.legacy.json"
-                    if _is_asset_kind(doc.get("kind")) or _is_compatibility_kind(doc.get("kind")):
-                        try:
-                            path, _ = await _asset_file(request, scope, doc["id"])
-                        except HTTPException as exc:
-                            if exc.status_code == 404:
-                                raise HTTPException(
-                                    409,
-                                    f"Export integrity failure: asset bytes are missing for {export_name}",
-                                ) from exc
-                            raise
-                        content_size = path.stat().st_size
-                        content_digest = hashlib.sha256()
-                        with path.open("rb") as source:
-                            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                                content_digest.update(chunk)
-                        archive.write(path, export_name)
-                    else:
-                        content = _note_markdown(doc) if doc.get("kind") in _NOTE_KINDS else str(doc.get("text") or "")
-                        content_bytes = content.encode("utf-8")
-                        content_size = len(content_bytes)
-                        content_digest = hashlib.sha256(content_bytes)
-                        archive.writestr(export_name, content_bytes)
-                    manifest["documents"].append({
-                        "id": doc["id"],
-                        "corpus": doc.get("corpus") or "system",
-                        "kind": doc["kind"],
-                        "path": export_name,
-                        "size": content_size,
-                        "sha256": content_digest.hexdigest(),
-                    })
-                archive.writestr(".copal/export-manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-            export_size = output.tell()
-            output.seek(0)
-        except BaseException:
-            output.close()
-            raise
-
-        async def export_chunks() -> AsyncIterator[bytes]:
-            try:
-                while chunk := output.read(1024 * 1024):
-                    yield chunk
-            finally:
-                output.close()
-
-        headers = {
-            "Content-Disposition": 'attachment; filename="copal-obsidian-export.zip"',
-            "Content-Length": str(export_size),
-        }
-        return StreamingResponse(export_chunks(), media_type="application/zip", headers=headers)
+            result = await create_export(
+                _bridge(request), snapshot=snapshot, owner=scope["owner"], workspace=scope["workspace_id"], options={},
+                on_completed=lambda occurrence, facts: record_activity(request, "export.manifest.validated", occurrence, facts, workspace_id=scope["workspace_id"]),
+            )
+            path, metadata = load_download(_bridge(request), download_id=result["downloadId"], owner=scope["owner"], workspace=scope["workspace_id"])
+        except CopalTransferError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return FileResponse(path, media_type="application/zip", filename=metadata["filename"],
+                            headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
     @router.get("/export/download/{download_id}")
     async def download_native_export(request: Request, download_id: str, workspace: str | None = None):

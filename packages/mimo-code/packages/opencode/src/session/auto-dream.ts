@@ -1,4 +1,5 @@
 import { Effect } from "effect"
+import { isMemoryWriteEnabled } from "@/memory/write-gate"
 import { Database, eq, desc, asc, isNull, and } from "@/storage"
 import { SessionTable } from "./session.sql"
 import { Log } from "@/util"
@@ -109,6 +110,7 @@ function shouldAutoRun(input: {
 }
 
 export function shouldAutoDream(cfg: Config.Info, projectID: ProjectID) {
+  if (!isMemoryWriteEnabled(cfg)) return Effect.succeed(false)
   const enabled = cfg.dream?.auto === true
   if (!enabled) return Effect.succeed(false)
   const now = Date.now()
@@ -119,6 +121,7 @@ export function shouldAutoDream(cfg: Config.Info, projectID: ProjectID) {
 }
 
 export function shouldAutoDistill(cfg: Config.Info, projectID: ProjectID) {
+  if (!isMemoryWriteEnabled(cfg)) return Effect.succeed(false)
   const enabled = cfg.distill?.auto === true
   if (!enabled) return Effect.succeed(false)
   const now = Date.now()

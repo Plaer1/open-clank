@@ -22,6 +22,7 @@ import {
   toolAttachmentFilename,
   toolAttachmentPlaceholder,
 } from "./tool-attachment"
+import { collapseCheckpointTail } from "./tail-digest"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -218,6 +219,9 @@ export const CheckpointPart = PartBase.extend({
   checkpointDir: z.string(),
   checkpointNumber: z.number(),
   coveredUpTo: MessageID.zod,
+  // The end of the assistant tail rendered into this boundary's Recent
+  // activity section. Older boundaries omit it and remain fully verbatim.
+  digestUpTo: MessageID.zod.optional(),
 }).meta({
   ref: "CheckpointPart",
 })
@@ -623,10 +627,13 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean },
+  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean },
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
+  // Only the main rebuild request opts in. Writers and compaction require the
+  // persisted transcript verbatim.
+  const source = options?.collapseCheckpointTail ? collapseCheckpointTail(input) : input
 
   const toModelOutput = (options: { toolCallId: string; input: unknown; output: unknown }) => {
     const output = options.output
@@ -676,7 +683,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
     return { type: "json", value: output as never }
   }
 
-  for (const msg of input) {
+  for (const msg of source) {
     if (msg.parts.length === 0) continue
 
     if (msg.info.role === "user") {
@@ -931,7 +938,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 export function toModelMessages(
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean },
+  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean },
 ): Promise<ModelMessage[]> {
   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
 }

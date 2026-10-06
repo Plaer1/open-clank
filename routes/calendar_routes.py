@@ -66,16 +66,12 @@ _SINGLE_USER_MODE = _os.environ.get("ODYSSEUS_SINGLE_USER", "1") != "0"
 
 
 def _require_user(request: Request) -> str:
-    """Return the authenticated user. Uses require_user so AUTH_ENABLED=false
-    and single-user mode both work: require_user returns "" when auth is
-    disabled or unconfigured, and only raises 401 when auth is configured but
-    the caller is unauthenticated. Falls back to FALLBACK_OWNER for calendar
-    writes so data isn't stored under an empty owner in single-user mode."""
+    """Return the verified account for owner-scoped calendar requests."""
     user = require_user(request)
     if user:
         return user
-    # require_user returned "" — auth is off or unconfigured (single-user).
-    # Use FALLBACK_OWNER so calendar rows have a stable owner for filtering.
+    # require_user rejects missing identities; this legacy fallback cannot
+    # admit an unauthenticated request.
     return FALLBACK_OWNER
 
 
@@ -701,11 +697,12 @@ def _expand_rrule(
 def setup_calendar_routes(upload_handler=None) -> APIRouter:
     router = APIRouter(prefix="/api/calendar", tags=["calendar"])
 
-    def _reserve_calendar_uploads(request: Request, *values) -> None:
+    def _reserve_calendar_uploads(request: Request, *values, db=None) -> None:
         missing_id = reserve_upload_references(
             upload_handler,
             effective_user(request),
             *values,
+            db=db,
         )
         if missing_id:
             raise HTTPException(409, f"Referenced upload is no longer available: {missing_id}")
@@ -1097,9 +1094,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
     @router.post("/events")
     async def create_event(request: Request, data: EventCreate):
         owner = _require_user(request)
-        _reserve_calendar_uploads(request, data.color, data.description, data.location)
         db = SessionLocal()
         try:
+            _reserve_calendar_uploads(request, data.color, data.description, data.location, db=db)
             cal = None
             if data.calendar_href:
                 cal = db.query(CalendarCal).filter(CalendarCal.id == data.calendar_href).first()
@@ -1159,13 +1156,13 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
     @router.put("/events/{uid}")
     async def update_event(request: Request, uid: str, data: EventUpdate):
         owner = _require_user(request)
-        _reserve_calendar_uploads(request, data.color, data.description, data.location)
         try:
             base_uid = _resolve_base_uid(uid)
         except ValueError as e:
             raise HTTPException(400, str(e))
         db = SessionLocal()
         try:
+            _reserve_calendar_uploads(request, data.color, data.description, data.location, db=db)
             ev = _get_or_404_event(db, base_uid, owner)
             if data.summary is not None:
                 ev.summary = data.summary
@@ -1253,9 +1250,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
     @router.post("/calendars")
     async def create_calendar(request: Request, name: str = "Imported", color: str = "#5b8abf"):
         owner = _require_user(request)
-        _reserve_calendar_uploads(request, color)
         db = SessionLocal()
         try:
+            _reserve_calendar_uploads(request, color, db=db)
             cal = CalendarCal(
                 id=str(uuid.uuid4()),
                 owner=owner,
@@ -1276,9 +1273,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
     @router.put("/calendars/{cal_id}")
     async def update_calendar(request: Request, cal_id: str, name: str = None, color: str = None):
         owner = _require_user(request)
-        _reserve_calendar_uploads(request, color)
         db = SessionLocal()
         try:
+            _reserve_calendar_uploads(request, color, db=db)
             cal = _get_or_404_calendar(db, cal_id, owner)
             if name is not None:
                 cal.name = name

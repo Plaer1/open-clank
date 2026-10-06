@@ -306,15 +306,17 @@ async def stream_agent_target(
 ) -> AsyncGenerator[str, None]:
     # Every strict/background origin converges here before a worker lease is
     # acquired. A fresh Rust AgentScope projection selects private file
-    # lifetools; native OpenCode filesystem/search/process aliases stay denied,
+    # lifetools; native OpenCode filesystem/search aliases stay denied,
     # so a caller cannot recover the old repo/home fallback by omitting the
     # route layer's disabled-tool list.
     from src.tool_security import (
         brokered_agent_file_tools,
         unavailable_strict_agent_tools,
     )
-    brokered_file_tools = brokered_agent_file_tools(owner, cwd)
-    unavailable_tools = unavailable_strict_agent_tools(owner, cwd)
+    supplied_envelope = kwargs.get("turn_envelope") or {}
+    authority_workspace = str(supplied_envelope.get("authority_workspace_id") or "")
+    brokered_file_tools = brokered_agent_file_tools(owner, cwd, workspace_id=authority_workspace, chat_id=session_id)
+    unavailable_tools = unavailable_strict_agent_tools(owner, cwd, workspace_id=authority_workspace, chat_id=session_id)
     if unavailable_tools:
         kwargs["disabled_tools"] = set(kwargs.get("disabled_tools") or ()) | unavailable_tools
         relevant = kwargs.get("relevant_tools")

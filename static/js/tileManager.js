@@ -1,3 +1,5 @@
+import { windowViewportBounds, observeWindowWorkspace, clampFloatingWindow, isBlockingAppletFrame } from './windowResize.js';
+
 /**
  * tileManager.js — desktop window tiling for tool modals.
  *
@@ -7,7 +9,6 @@
  * to fill that zone with a springy animation.
  *
  * Snap zones:
- *   - over top edge               → fullscreen
  *   - top strip                   → maximize
  *   - top edge                    → top half
  *   - left edge                   → left half
@@ -74,34 +75,14 @@ function _showGhost(rect) {
   g.classList.add('visible');
 }
 
-function _viewportSafeRect() {
-  // Account for the icon rail / sidebar on the left side of the viewport.
-  const sidebar = document.getElementById('sidebar');
-  const rail = document.querySelector('.icon-rail') || document.querySelector('#icon-rail');
-  let leftEdge = 0;
-  const sb = sidebar?.getBoundingClientRect();
-  if (sb && sb.right > 0 && !sidebar.classList.contains('hidden')) leftEdge = Math.max(leftEdge, sb.right);
-  const rr = rail?.getBoundingClientRect();
-  if (rr && rr.right > 0) leftEdge = Math.max(leftEdge, rr.right);
-  return {
-    left: leftEdge + 4,
-    top: 4,
-    right: window.innerWidth - 4,
-    bottom: window.innerHeight - 4,
-  };
-}
+function _viewportSafeRect() { return windowViewportBounds(); }
 
 function _zoneForPointer(x, y) {
   const safe = _viewportSafeRect();
   const W = safe.right - safe.left;
   const H = safe.bottom - safe.top;
 
-  // Dragged OVER the top edge (cursor at/past the very top) → TRUE fullscreen
-  // that covers everything, including the sidebar.
-  if (y <= 0) {
-    return { name: 'fullscreen', rect: { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight } };
-  }
-  // Near the top edge (but not over it) → "maximize": fill the safe area,
+  // At or near the top edge → maximize within the workspace,
   // which sits NEXT TO the sidebar/rail rather than covering it.
   if (y <= safe.top + TOP_FULL_STRIP_PX) {
     return { name: 'maximize', rect: { left: safe.left, top: safe.top, width: W, height: H } };
@@ -126,13 +107,6 @@ function _zoneForContent(content, x, y) {
   const modal = content && content.closest && content.closest('.modal, .research-overlay');
   const zone = _zoneForPointer(x, y);
   if (!zone) return null;
-  // Settings has a dense two-column layout; the full-height sidebar-style dock
-  // crushes it. Let it tile only into the normal right half, where the nav can
-  // flip to top tabs via CSS when the window gets narrow.
-  if (modal && modal.id === 'settings-modal' && zone.name !== 'right-half') return null;
-  if (modal && (modal.id === 'cookbook-modal'
-      || modal.id === 'theme-modal')
-      && zone.name !== 'fullscreen') return null;
   return zone;
 }
 
@@ -168,7 +142,18 @@ function _clearEdgeDockResidue(modal, content) {
   }
 }
 
-function _applySnap(content, rect, zoneName) {
+function _floatingSnapshot(content, rect = content.getBoundingClientRect()) {
+  if (content._preDockSnapshot?.rect) rect = content._preDockSnapshot.rect;
+  const style = content._preDockSnapshot?.style || content.style;
+  return { position:'fixed', left:rect.left + 'px', top:rect.top + 'px',
+    width:rect.width + 'px', height:rect.height + 'px',
+    maxHeight:style.maxHeight, maxWidth:style.maxWidth,
+    minWidth:style.minWidth, minHeight:style.minHeight,
+    right:style.right, bottom:style.bottom,
+    transform:'none', margin:'0' };
+}
+
+function _applySnap(content, rect, zoneName, previous = null) {
   // A tile-snap supersedes any edge-dock on this same modal. The two
   // systems (windowDrag→modalSnap edge-dock, and this tile manager) both
   // fire on a left/right-edge drag-release. If we leave modalSnap's
@@ -178,24 +163,14 @@ function _applySnap(content, rect, zoneName) {
   // double-count and jam the window to the right behind a massive empty
   // zone, which gets worse each time the sidebar is toggled. Clear the
   // orphaned edge-dock state so only the tile-snap positions the window.
-  const _modal = content.closest && content.closest('.modal, .research-overlay');
+  const _modal = content.closest && content.closest('.modal, .research-overlay, .notes-pane');
   const _fromRect = content.getBoundingClientRect();
   _clearEdgeDockResidue(_modal, content);
 
-  // Stash pre-snap geometry once; if we re-snap, keep the original. Capture a
-  // CONCRETE fixed position (from the rendered rect when the inline value is
-  // empty) and the position itself — otherwise un-snap restored empty left/top
-  // + no position, and the .modal flex parent re-centered the window.
+  // Capture the preceding floating geometry, before its drag reached a snap
+  // edge. Re-snapping keeps the same original rectangle until restore.
   if (!content.dataset._tilePreSnap) {
-    content.dataset._tilePreSnap = JSON.stringify({
-      position: 'fixed',
-      left:   content.style.left || (Math.round(_fromRect.left) + 'px'),
-      top:    content.style.top  || (Math.round(_fromRect.top)  + 'px'),
-      width:  content.style.width,
-      height: content.style.height,
-      maxHeight: content.style.maxHeight,
-      transform: content.style.transform,
-    });
+    content.dataset._tilePreSnap = JSON.stringify(previous || _floatingSnapshot(content, _fromRect));
   }
   content.style.transition = 'left 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), top 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), width 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), height 0.22s cubic-bezier(0.34, 1.56, 0.64, 1)';
   // Use !important — some modals (e.g. cookbook) carry inline width/height
@@ -207,6 +182,10 @@ function _applySnap(content, rect, zoneName) {
   content.style.setProperty('width',  rect.width  + 'px', 'important');
   content.style.setProperty('height', rect.height + 'px', 'important');
   content.style.setProperty('max-height', rect.height + 'px', 'important');
+  content.style.setProperty('max-width', rect.width + 'px', 'important');
+  content.style.setProperty('min-width', '0', 'important');
+  content.style.setProperty('min-height', '0', 'important');
+  content.style.removeProperty('right'); content.style.removeProperty('bottom');
   content.style.setProperty('margin', '0', 'important');
   content.style.setProperty('transform', 'none', 'important');
   content.dataset._tileZone = zoneName;
@@ -217,7 +196,7 @@ function _unsnap(content) {
   const pre = content.dataset._tilePreSnap;
   if (!pre) return;
   // Clear the !important snap props first — Object.assign can't override them.
-  ['position', 'left', 'top', 'width', 'height', 'max-height', 'margin', 'transform']
+  ['position', 'left', 'top', 'width', 'height', 'max-height', 'max-width', 'min-width', 'min-height', 'right', 'bottom', 'margin', 'transform']
     .forEach(p => content.style.removeProperty(p));
   try {
     const r = JSON.parse(pre);
@@ -228,31 +207,30 @@ function _unsnap(content) {
   if (!content.style.position) content.style.position = 'fixed';
   delete content.dataset._tilePreSnap;
   delete content.dataset._tileZone;
+  clampFloatingWindow(content);
 }
 
 function _findDragTarget(e) {
-  const header = e.target.closest('.modal-header');
+  const header = e.target.closest('.modal-header, .notes-pane-header');
   if (!header) return null;
-  // Skip clicks on header buttons (close, minimize, etc.)
-  if (e.target.closest('button')) return null;
-  const modal = header.closest('.modal, .research-overlay');
-  if (!modal) return null;
-  const content = modal.querySelector('.modal-content, .research-pane');
-  return content || null;
+  if (e.target.closest('button, input, select, textarea, a, [contenteditable="true"]')) return null;
+  const frame = header.closest('.oc-applet-frame');
+  return frame && !isBlockingAppletFrame(frame) ? frame : null;
 }
 
 if (typeof document !== 'undefined') document.addEventListener('pointerdown', (e) => {
   if (!_isDesktop()) return;
   const content = _findDragTarget(e);
   if (!content) return;
+  _activeZone = null;
 
   // If we're already snapped, dragging away should unsnap immediately so the
   // user can move freely.
   if (content.dataset._tileZone) {
     // Defer slightly so pointermove threshold is met before unsnap kicks in
-    _tracking = { content, startX: e.clientX, startY: e.clientY, willUnsnap: true };
+    _tracking = { content, startX:e.clientX, startY:e.clientY, willUnsnap:true, previous:JSON.parse(content.dataset._tilePreSnap || 'null') };
   } else {
-    _tracking = { content, startX: e.clientX, startY: e.clientY, willUnsnap: false };
+    _tracking = { content, startX:e.clientX, startY:e.clientY, willUnsnap:false, previous:_floatingSnapshot(content) };
   }
 });
 
@@ -286,7 +264,7 @@ if (typeof document !== 'undefined') document.addEventListener('pointerup', () =
   _tracking = null;
   _hideGhost();
   if (_activeZone && _isDesktop()) {
-    _applySnap(t.content, _activeZone.rect, _activeZone.name);
+    _applySnap(t.content, _activeZone.rect, _activeZone.name, t.previous);
   }
   _activeZone = null;
 });
@@ -294,14 +272,14 @@ if (typeof document !== 'undefined') document.addEventListener('pointerup', () =
 // Re-clamp every currently-snapped window so it keeps filling its zone after
 // the safe-rect changes (viewport resize, sidebar toggle, etc.).
 function _reclampAll(animate = false) {
-  document.querySelectorAll('.modal-content[data-_tile-zone], .research-pane[data-_tile-zone]').forEach(c => {
+  document.querySelectorAll('.oc-applet-frame[data-_tile-zone]').forEach(c => {
     const name = c.dataset._tileZone;
     if (!name) return;
     const safe = _viewportSafeRect();
     const W = safe.right - safe.left, H = safe.bottom - safe.top;
     let r;
     switch (name) {
-      case 'fullscreen':     r = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }; break;
+      case 'fullscreen':
       case 'maximize':       r = { left: safe.left, top: safe.top, width: W, height: H }; break;
       case 'top-half':       r = { left: safe.left, top: safe.top, width: W, height: H/2 }; break;
       case 'left-half':      r = { left: safe.left, top: safe.top, width: W/2, height: H }; break;
@@ -322,6 +300,7 @@ function _reclampAll(animate = false) {
     c.style.setProperty('width', r.width + 'px', 'important');
     c.style.setProperty('height', r.height + 'px', 'important');
     c.style.setProperty('max-height', r.height + 'px', 'important');
+    c.style.setProperty('max-width', r.width + 'px', 'important');
   });
 }
 
@@ -336,42 +315,7 @@ function _reclampAllThrottled(animate) {
 
 if (typeof window !== 'undefined') window.addEventListener('resize', () => _reclampAllThrottled(false));
 
-// Watch the sidebar's class attribute so toggling hidden/right-side re-tiles
-// any snapped modal that was anchored to the old safe-rect. The shell may
-// mount the sidebar after this module loads, so observe DOM insertions instead
-// of polling an absent sidebar once per animation frame.
-let _sidebarClassObserver = null;
-let _sidebarDomObserver = null;
-let _watchedSidebar = null;
-function _watchSidebar() {
-  if (_sidebarDomObserver) return;
-  const wire = sidebar => {
-    if (!sidebar || sidebar === _watchedSidebar) return;
-    _sidebarClassObserver?.disconnect();
-    _sidebarClassObserver = new MutationObserver(() => _reclampAllThrottled(true));
-    _sidebarClassObserver.observe(sidebar, { attributes: true, attributeFilter: ['class'] });
-    _watchedSidebar = sidebar;
-  };
-  const sync = () => {
-    const sidebar = document.getElementById('sidebar');
-    if (sidebar) wire(sidebar);
-    else {
-      _sidebarClassObserver?.disconnect();
-      _sidebarClassObserver = null;
-      _watchedSidebar = null;
-    }
-  };
-  sync();
-  const root = document.body || document.documentElement;
-  if (!root) return;
-  _sidebarDomObserver = new MutationObserver(sync);
-  _sidebarDomObserver.observe(root, { childList: true, subtree: true });
-}
-if (typeof document !== 'undefined' && document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', _watchSidebar);
-} else if (typeof document !== 'undefined') {
-  _watchSidebar();
-}
+if (typeof document !== 'undefined') observeWindowWorkspace(() => _reclampAllThrottled(false));
 
 // ── Public API for other drag sources (e.g. dragging a minimized dock chip
 // to a screen edge) to reuse the same snap zones + ghost preview + apply. ──
@@ -380,7 +324,7 @@ if (typeof document !== 'undefined' && document.readyState === 'loading') {
 export function previewZoneAt(x, y, target = null) {
   if (!_isDesktop()) { _hideGhost(); _activeZone = null; return null; }
   const content = target && target.querySelector
-    ? (target.querySelector('.modal-content, .research-pane') || target)
+    ? (target.matches?.('.oc-applet-frame') ? target : target.querySelector('.oc-applet-frame, .modal-content, .research-pane') || target)
     : null;
   const zone = content ? _zoneForContent(content, x, y) : _zoneForPointer(x, y);
   if (zone) { _showGhost(zone.rect); _activeZone = zone; }
@@ -406,7 +350,7 @@ export function snapModalToZone(modal, zone) {
   if (!modal || !zone) return;
   const content = modal.querySelector ? (modal.querySelector('.modal-content, .research-pane') || modal) : modal;
   if (!content) return;
-  if (modal.id === 'settings-modal' && zone.name !== 'right-half') return;
+  if (zone.name === 'fullscreen') zone = { name:'maximize', rect:windowViewportBounds() };
   _applySnap(content, zone.rect, zone.name);
 }
 

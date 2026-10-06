@@ -764,7 +764,7 @@
     },
     {
       "key": "award.oc.selective-menmery.title",
-      "source": "Selective Menmery",
+      "source": "Selective Memery",
       "kind": "structured-label",
       "status": "live",
       "locations": [
@@ -1264,7 +1264,7 @@
     },
     {
       "key": "treehouse.class.house-collaborate.summary",
-      "source": "Models, chat identity, tool authority, goals, schedules and the difference between Menmery and Lore.",
+      "source": "Models, chat identity, tool authority, goals, schedules and the difference between Memery and Lore.",
       "kind": "structured-label",
       "status": "live",
       "locations": [
@@ -1584,7 +1584,7 @@
     },
     {
       "key": "treehouse.lesson.house-collaborate.menmery-and-lore.body",
-      "source": "Open [Menmery](clank://memory) and review a pending candidate — accept one you actually want. Then search for a record and open it. Separately, open a document's history and look at the retained versions; those are Lore's material.\n\nRetention budgets live in [Settings → History](clank://settings/history). What is not retained cannot be restored.",
+      "source": "Open [Memery](clank://memory) and review a pending candidate — accept one you actually want. Then search for a record and open it. Separately, open a document's history and look at the retained versions; those are Lore's material.\n\nRetention budgets live in [Settings → History](clank://settings/history). What is not retained cannot be restored.",
       "kind": "structured-prose",
       "status": "live",
       "locations": [
@@ -1594,7 +1594,7 @@
     },
     {
       "key": "treehouse.lesson.house-collaborate.menmery-and-lore.explanation",
-      "source": "**Menmery** is the sidebar where memory lives: candidates waiting for your review, and search over what you kept. You accept a candidate explicitly; nothing is written behind your back. **Lore** is recovery: retained versions of your work and the receipts that let you restore them.",
+      "source": "**Memery** is the sidebar where memory lives: candidates waiting for your review, and search over what you kept. You accept a candidate explicitly; nothing is written behind your back. **Lore** is recovery: retained versions of your work and the receipts that let you restore them.",
       "kind": "structured-prose",
       "status": "live",
       "locations": [
@@ -1614,7 +1614,7 @@
     },
     {
       "key": "treehouse.lesson.house-collaborate.menmery-and-lore.title",
-      "source": "Menmery review and recall versus Lore recovery",
+      "source": "Memery review and recall versus Lore recovery",
       "kind": "structured-label",
       "status": "live",
       "locations": [
@@ -1624,7 +1624,7 @@
     },
     {
       "key": "treehouse.lesson.house-collaborate.menmery-and-lore.whyThisHelps",
-      "source": "Confusing the two wastes time. Menmery answers \"what does the assistant know about me?\" Lore answers \"how do I get yesterday's version back?\" Review is about the future; restore is about the past.",
+      "source": "Confusing the two wastes time. Memery answers \"what does the assistant know about me?\" Lore answers \"how do I get yesterday's version back?\" Review is about the future; restore is about the past.",
       "kind": "structured-prose",
       "status": "live",
       "locations": [

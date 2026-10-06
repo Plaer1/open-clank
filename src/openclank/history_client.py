@@ -15,6 +15,7 @@ import hashlib
 import os
 import secrets
 import socket
+from .history_transport import cleanup_endpoint, exchange, private_file_fd, publish_private_file
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -24,6 +25,14 @@ from typing import Any
 
 class HistoryClientError(RuntimeError):
     """The history worker rejected or failed an IPC request."""
+
+
+class HistoryAvailabilityError(HistoryClientError):
+    """A typed missing, revoked, pruned, or invalid History selection."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = str(code or "history_unavailable")
 
 
 @dataclass(frozen=True)
@@ -69,11 +78,14 @@ class HistoryServiceSupervisor:
         self.catalog_path = Path(catalog_path)
         self.lore_root = Path(lore_root)
         self.credential_file = Path(credential_file)
-        self.credentials = tuple(credentials)
+        self._base_credentials = tuple(credentials)
+        self.credentials = self._base_credentials
         self.host_root = Path(host_root) if host_root is not None else None
         self.receipt_root = Path(receipt_root) if receipt_root is not None else None
         self.resource_map = Path(resource_map) if resource_map is not None else None
         self.authorized_roots = tuple(dict(item) for item in (authorized_roots or ()))
+        self._root_actor_tokens: dict[tuple[str, str], str] = {}
+        self.credentials = self._root_actor_bindings(self._base_credentials, self.authorized_roots)
         self.authorized_roots_file = self.credential_file.with_name(
             f"{self.credential_file.stem}.roots.json"
         )
@@ -85,21 +97,36 @@ class HistoryServiceSupervisor:
         self.startup_timeout = startup_timeout
         self.process: Any = None
 
+    def _root_actor_bindings(self, credentials, roots):
+        """Exact human bindings are separate secrets from assigned-root agents."""
+        active = set()
+        exact = []
+        for root in roots:
+            for account in root.get("account_ids") or ():
+                base = next((item for item in credentials if item.account_id == account and item.actor_id == "*"), None)
+                for actor in root.get("actor_ids") or ():
+                    if not base or any(item.account_id == account and item.actor_id == actor for item in credentials):
+                        continue
+                    key = (str(account), str(actor))
+                    if key in active:
+                        continue
+                    active.add(key)
+                    token = self._root_actor_tokens.get(key) or secrets.token_urlsafe(32)
+                    self._root_actor_tokens[key] = token
+                    exact.append(ScopedHistoryCredential(actor_id=key[1], account_id=key[0], capabilities=base.capabilities, owner_accounts=base.owner_accounts, token=token))
+        self._root_actor_tokens = {key: token for key, token in self._root_actor_tokens.items() if key in active}
+        return tuple(credentials) + tuple(exact)
+
     def client_for(self, actor_id: str, account_id: str) -> HistoryClient:
-        for credential in self.credentials:
-            if credential.account_id == account_id and credential.actor_id in {actor_id, "*"}:
-                return HistoryClient(
-                    str(self.socket_path),
-                    actor_id=actor_id,
-                    account_id=credential.account_id,
-                    token=credential.token,
-                )
-        raise HistoryClientError("no supervisor-issued history credential for this owner")
+        return HistoryClient(str(self.socket_path), actor_id=actor_id, account_id=account_id, token=self.credential_token(actor_id, account_id))
 
     def credential_token(self, actor_id: str, account_id: str) -> str:
-        for credential in self.credentials:
-            if credential.account_id == account_id and credential.actor_id in {actor_id, "*"}:
-                return credential.token
+        # Prefer exact credentials. An agent:<owner> never matches the human
+        # actor, so it keeps its existing wildcard assigned-root token.
+        for match in (actor_id, "*"):
+            for credential in self.credentials:
+                if credential.account_id == account_id and credential.actor_id == match:
+                    return credential.token
         raise HistoryClientError("no supervisor-issued history credential for this owner")
 
     async def _cleanup_failed_start(self) -> None:
@@ -114,21 +141,19 @@ class HistoryServiceSupervisor:
                 process.kill()
                 await asyncio.to_thread(process.wait, 2)
         set_history_credential_provider(None)
-        self.socket_path.unlink(missing_ok=True)
-        self.socket_path.with_name(self.socket_path.name + ".lock").unlink(missing_ok=True)
+        cleanup_endpoint(self.socket_path)
 
     async def start(self) -> None:
         if self.process is not None and self.process.poll() is None:
             return
-        if self.socket_path.exists():
+        if os.name != "nt" and self.socket_path.exists():
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 if probe.connect_ex(str(self.socket_path)) == 0:
                     raise HistoryClientError("history worker socket is already in use")
             finally:
                 probe.close()
-            self.socket_path.unlink(missing_ok=True)
-            self.socket_path.with_name(self.socket_path.name + ".lock").unlink(missing_ok=True)
+            cleanup_endpoint(self.socket_path)
         self._write_credentials()
         self._write_authorized_roots()
         self._write_authority()
@@ -181,7 +206,7 @@ class HistoryServiceSupervisor:
                 suffix = f": {detail[-800:]}" if detail else ""
                 await self._cleanup_failed_start()
                 raise HistoryClientError(f"history worker exited during startup{suffix}")
-            if self.socket_path.exists():
+            if os.name == "nt" or self.socket_path.exists():
                 # Existence alone can be a stale endpoint or a worker that
                 # has not entered its accept loop.  Negotiate the protocol
                 # before publishing the supervisor to the application.
@@ -224,8 +249,7 @@ class HistoryServiceSupervisor:
         if process is None or process.poll() is not None:
             self.process = None
             set_history_credential_provider(None)
-            self.socket_path.unlink(missing_ok=True)
-            self.socket_path.with_name(self.socket_path.name + ".lock").unlink(missing_ok=True)
+            cleanup_endpoint(self.socket_path)
             return
         admin = next((item for item in self.credentials if "admin" in item.capabilities), None)
         if admin is not None:
@@ -250,8 +274,7 @@ class HistoryServiceSupervisor:
             await asyncio.to_thread(process.wait, 2)
         self.process = None
         set_history_credential_provider(None)
-        self.socket_path.unlink(missing_ok=True)
-        self.socket_path.with_name(self.socket_path.name + ".lock").unlink(missing_ok=True)
+        cleanup_endpoint(self.socket_path)
 
     async def _rotate_scope(
         self,
@@ -269,8 +292,9 @@ class HistoryServiceSupervisor:
         credentials: tuple[ScopedHistoryCredential, ...],
         authorized_roots: tuple[Mapping[str, Any], ...],
     ) -> None:
-        self.credentials = tuple(credentials)
+        self._base_credentials = tuple(credentials)
         self.authorized_roots = tuple(dict(item) for item in authorized_roots)
+        self.credentials = self._root_actor_bindings(self._base_credentials, self.authorized_roots)
         self._authority_generation += 1
         self._write_authority()
 
@@ -283,7 +307,7 @@ class HistoryServiceSupervisor:
         async with self._rotation_lock:
             projected = tuple(dict(item) for item in authorized_roots)
             if projected != self.authorized_roots:
-                self._publish_scope(self.credentials, projected)
+                self._publish_scope(self._base_credentials, projected)
                 if self.process is None or self.process.poll() is not None:
                     await self.start()
 
@@ -306,10 +330,11 @@ class HistoryServiceSupervisor:
         display keys. Existing account tokens survive a rename; deleted
         accounts are removed from the live worker authority snapshot.
         """
-        previous = {item.account_id: item for item in self.credentials}
+        previous = {item.account_id: item for item in self._base_credentials}
         refreshed: list[ScopedHistoryCredential] = []
+        from core.auth import normalize_known_username
         for _username, record in users.items():
-            if not isinstance(record, Mapping):
+            if not normalize_known_username(users, _username) or not isinstance(record, Mapping):
                 continue
             account_id = str(record.get("account_id") or "").strip()
             if not account_id:
@@ -337,21 +362,12 @@ class HistoryServiceSupervisor:
                 )
             )
         if not refreshed:
-            old = previous.get("local-installation")
+            old = previous.get("service:health")
             refreshed.append(
                 ScopedHistoryCredential(
-                    actor_id="*",
-                    account_id="local-installation",
-                    capabilities=frozenset(
-                        {
-                            "admin",
-                            "capture",
-                            "read",
-                            "restore",
-                            "settings-read",
-                            "settings-write",
-                        }
-                    ),
+                    actor_id="supervisor",
+                    account_id="service:health",
+                    capabilities=frozenset(),
                     token=old.token if old is not None else secrets.token_urlsafe(32),
                 )
             )
@@ -361,7 +377,7 @@ class HistoryServiceSupervisor:
             else self.authorized_roots
         )
         changed = (
-            [item.wire() for item in refreshed] != [item.wire() for item in self.credentials]
+            [item.wire() for item in refreshed] != [item.wire() for item in self._base_credentials]
             or projected_roots != self.authorized_roots
         )
         if changed:
@@ -371,17 +387,16 @@ class HistoryServiceSupervisor:
 
     def _write_credentials(self) -> None:
         self.credential_file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.credential_file.with_name(f".{self.credential_file.name}.tmp")
+        temporary = self.credential_file.with_name(f".{self.credential_file.name}.{secrets.token_hex(8)}.tmp")
         payload = json.dumps([item.wire() for item in self.credentials], separators=(",", ":"))
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        fd = os.open(temporary, flags, 0o600)
+        fd = private_file_fd(temporary)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(payload)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self.credential_file)
+            publish_private_file(temporary, self.credential_file)
         finally:
             try:
                 temporary.unlink()
@@ -392,19 +407,19 @@ class HistoryServiceSupervisor:
         """Atomically publish the current Files root snapshot for a live worker."""
         self.authorized_roots_file.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.authorized_roots_file.with_name(
-            f".{self.authorized_roots_file.name}.tmp"
+            f".{self.authorized_roots_file.name}.{secrets.token_hex(8)}.tmp"
         )
         payload = json.dumps(
             list(self.authorized_roots), separators=(",", ":"), sort_keys=True
         )
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = private_file_fd(temporary)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(payload)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self.authorized_roots_file)
+            publish_private_file(temporary, self.authorized_roots_file)
         finally:
             try:
                 temporary.unlink()
@@ -414,7 +429,7 @@ class HistoryServiceSupervisor:
     def _write_authority(self) -> None:
         """Atomically publish credentials and roots as one generation."""
         self.authority_file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.authority_file.with_name(f".{self.authority_file.name}.tmp")
+        temporary = self.authority_file.with_name(f".{self.authority_file.name}.{secrets.token_hex(8)}.tmp")
         payload = json.dumps(
             {
                 "generation": self._authority_generation,
@@ -424,14 +439,14 @@ class HistoryServiceSupervisor:
             separators=(",", ":"),
             sort_keys=True,
         )
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = private_file_fd(temporary)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(payload)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self.authority_file)
+            publish_private_file(temporary, self.authority_file)
         finally:
             try:
                 temporary.unlink()
@@ -471,18 +486,12 @@ class HistoryClient:
         raw = (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode()
         if len(raw) > MAX_FRAME_BYTES:
             raise HistoryClientError("history frame exceeds the 1 MiB service limit; use a provider chunk transport")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
-            channel.settimeout(self.timeout)
-            channel.connect(self.socket_path)
-            channel.sendall(raw)
-            response = bytearray()
-            while not response.endswith(b"\n"):
-                chunk = channel.recv(65536)
-                if not chunk:
-                    break
-                response.extend(chunk)
-                if len(response) > MAX_FRAME_BYTES:
-                    raise HistoryClientError("history response exceeds the 1 MiB service limit; use bounded readback")
+        try:
+            response = exchange(self.socket_path, raw, self.timeout, MAX_FRAME_BYTES)
+        except OSError as exc:
+            # Transport loss is best-effort Lore unavailability, distinct from
+            # local preimage validation errors at the mutation owner.
+            raise HistoryClientError("history worker transport is unavailable") from exc
         if not response:
             raise HistoryClientError("history worker returned no response")
         decoded = json.loads(response)
@@ -564,6 +573,14 @@ class HistoryClient:
 
     def record_live(self, action_id: str, receipt: Mapping[str, Any]) -> dict[str, Any]:
         return self._call({"RecordLive": {"envelope": self._control_envelope(action_id), "receipt": dict(receipt)}})
+
+    def get_capture_action(self, action_id: str) -> dict[str, Any]:
+        """Private selected capture metadata, authorized to the exact actor."""
+        return self._call({"GetCaptureAction": self._control_envelope(action_id)})
+
+    def after_unavailable(self, action_id: str) -> dict[str, Any]:
+        """Persist recovery failure for a known committed action; never replay."""
+        return self._call({"AfterUnavailable": self._control_envelope(action_id)})
 
     def rebind_resource(self, action_id: str, resource_id: str) -> dict[str, Any]:
         """Bind a create action to the provider id allocated by its commit."""
@@ -694,6 +711,200 @@ class HistoryClient:
         if len(content) != content_length:
             raise HistoryClientError("history worker returned an incomplete version payload")
         return bytes(content)
+
+    @staticmethod
+    def _raise_if_unavailable(response: Mapping[str, Any]) -> None:
+        unavailable = response.get("Unavailable")
+        if not isinstance(unavailable, Mapping):
+            return
+        code = str(unavailable.get("code") or "history_unavailable")
+        message = str(unavailable.get("message") or "selected History data is unavailable")
+        raise HistoryAvailabilityError(code, message)
+
+    def list_resource_versions(
+        self,
+        resource_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """List one bounded page from the owning Files resource's Lore history."""
+        resource_id = str(resource_id or "").strip()
+        if not resource_id:
+            raise HistoryClientError("history resource id is required")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise HistoryClientError("history version page size must be between 1 and 100")
+        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 2048):
+            raise HistoryClientError("history page cursor is invalid")
+        response = self._call(
+            {
+                "ListResourceVersions": {
+                    "envelope": self._control_envelope("history-resource-versions"),
+                    "resource_id": resource_id,
+                    "cursor": cursor,
+                    "limit": limit,
+                }
+            }
+        )
+        self._raise_if_unavailable(response)
+        page = response.get("Versions")
+        if not isinstance(page, Mapping) or not isinstance(page.get("items"), list):
+            raise HistoryClientError("history worker returned an invalid resource-version page")
+        items = page["items"]
+        if len(items) > limit or not all(isinstance(item, Mapping) for item in items):
+            raise HistoryClientError("history worker returned an unbounded resource-version page")
+        next_cursor = page.get("next_cursor")
+        if next_cursor is not None and (not isinstance(next_cursor, str) or len(next_cursor) > 2048):
+            raise HistoryClientError("history worker returned an invalid page cursor")
+        return {"items": [dict(item) for item in items], "next_cursor": next_cursor}
+
+    def resolve_resource_version(self, resource_id: str, version_ref: str) -> dict[str, Any]:
+        """Resolve a selected opaque version to the existing RestoreHost receipt."""
+        resource_id = str(resource_id or "").strip()
+        version_ref = str(version_ref or "").strip()
+        if not resource_id or not version_ref or len(version_ref) > 1024:
+            raise HistoryClientError("history resource and version identities are required")
+        response = self._call(
+            {
+                "ResolveResourceVersion": {
+                    "envelope": self._control_envelope("history-resource-version-restore"),
+                    "resource_id": resource_id,
+                    "version_ref": version_ref,
+                }
+            }
+        )
+        self._raise_if_unavailable(response)
+        selection = response.get("ResourceVersionSelection")
+        if not isinstance(selection, Mapping):
+            raise HistoryClientError("history worker returned an invalid restore selection")
+        resource = selection.get("resource")
+        version = selection.get("version")
+        receipt = selection.get("receipt")
+        if not all(isinstance(value, Mapping) for value in (resource, version, receipt)):
+            raise HistoryClientError("history worker returned an incomplete restore selection")
+        return {
+            "resource": dict(resource),
+            "version": dict(version),
+            "receipt": dict(receipt),
+        }
+
+    def read_resource_version_chunk(
+        self,
+        resource_id: str,
+        version_ref: str,
+        *,
+        offset: int = 0,
+        length: int = 64 * 1024,
+    ) -> dict[str, Any]:
+        """Read a bounded chunk for the exact resource/version selection."""
+        resource_id = str(resource_id or "").strip()
+        version_ref = str(version_ref or "").strip()
+        if not resource_id or not version_ref or len(version_ref) > 1024:
+            raise HistoryClientError("history resource and version identities are required")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise HistoryClientError("history read offset must be non-negative")
+        if isinstance(length, bool) or not isinstance(length, int) or not 1 <= length <= 256 * 1024:
+            raise HistoryClientError("history read chunk must be between 1 and 256 KiB")
+        response = self._call(
+            {
+                "ReadResourceVersionChunk": {
+                    "envelope": self._control_envelope("history-resource-version-read"),
+                    "resource_id": resource_id,
+                    "version_ref": version_ref,
+                    "offset": offset,
+                    "length": length,
+                }
+            }
+        )
+        self._raise_if_unavailable(response)
+        chunk = response.get("ResourceVersionChunk")
+        if not isinstance(chunk, Mapping):
+            raise HistoryClientError("history worker returned an invalid resource-version chunk")
+        version = chunk.get("version")
+        returned_offset = chunk.get("offset")
+        if not isinstance(version, Mapping) or returned_offset != offset:
+            raise HistoryClientError("history worker returned an out-of-order resource-version chunk")
+        raw = chunk.get("content")
+        content = None if raw is None else self._decode_bytes(raw)
+        if content is not None and len(content) > length:
+            raise HistoryClientError("history worker returned an oversized resource-version chunk")
+        return {
+            "version": dict(version),
+            "offset": offset,
+            "content": content,
+            "eof": chunk.get("eof") is True,
+        }
+
+    def preview_resource_version_restore(
+        self,
+        resource_id: str,
+        version_ref: str,
+    ) -> dict[str, Any]:
+        """Preview a version against the current private Files destination."""
+        resource_id = str(resource_id or "").strip()
+        version_ref = str(version_ref or "").strip()
+        if not resource_id or not version_ref or len(version_ref) > 1024:
+            raise HistoryClientError("history resource and version identities are required")
+        response = self._call(
+            {
+                "PreviewResourceVersionRestore": {
+                    "envelope": self._control_envelope("history-resource-version-restore-preview"),
+                    "resource_id": resource_id,
+                    "version_ref": version_ref,
+                }
+            }
+        )
+        self._raise_if_unavailable(response)
+        preview = response.get("ResourceVersionRestorePreview")
+        if not isinstance(preview, Mapping):
+            raise HistoryClientError("history worker returned an invalid restore preview")
+        resource = preview.get("resource")
+        source = preview.get("source")
+        destination = preview.get("destination")
+        if not all(isinstance(value, Mapping) for value in (resource, source, destination)):
+            raise HistoryClientError("history worker returned an incomplete restore preview")
+        if (
+            str(resource.get("resource_id") or "") != resource_id
+            or not isinstance(destination.get("expected_fingerprint"), str)
+            or not destination.get("expected_fingerprint")
+            or not isinstance(destination.get("exists"), bool)
+            or preview.get("effect") not in {"create", "replace"}
+            or preview.get("requires_confirmation") is not True
+            or preview.get("captures_current_destination") is not True
+        ):
+            raise HistoryClientError("history worker returned an invalid destination precondition")
+        return dict(preview)
+
+    def restore_resource_version(
+        self,
+        restore_id: str,
+        resource_id: str,
+        version_ref: str,
+        *,
+        expected_destination_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Confirm an opaque-resource restore using the fingerprint just reviewed."""
+        restore_id = str(restore_id or "").strip()
+        resource_id = str(resource_id or "").strip()
+        version_ref = str(version_ref or "").strip()
+        expected_destination_fingerprint = str(expected_destination_fingerprint or "")
+        if not restore_id or len(restore_id) > 256:
+            raise HistoryClientError("history restore id is required")
+        if not resource_id or not version_ref or len(version_ref) > 1024:
+            raise HistoryClientError("history resource and version identities are required")
+        if not expected_destination_fingerprint or len(expected_destination_fingerprint) > 256:
+            raise HistoryClientError("history restore requires the reviewed destination fingerprint")
+        return self._call(
+            {
+                "RestoreResourceVersion": {
+                    "envelope": self._control_envelope(restore_id),
+                    "restore_id": restore_id,
+                    "resource_id": resource_id,
+                    "version_ref": version_ref,
+                    "expected_destination_fingerprint": expected_destination_fingerprint,
+                }
+            }
+        )
 
     @staticmethod
     def _decode_bytes(value: Any) -> bytes:
@@ -902,6 +1113,57 @@ class HistoryClient:
                 }
             }
         )
+
+    def list_registered_resources(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List private account-owned registry candidates for the Files adapter.
+
+        This local IPC result includes paths and must stay inside trusted
+        server code. HTTP routes project matches back to the public Files ID.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise HistoryClientError("registered resource page size must be between 1 and 100")
+        if cursor is not None and (
+            not isinstance(cursor, str)
+            or len(cursor) > 20
+            or not cursor.isdecimal()
+        ):
+            raise HistoryClientError("registered resource cursor is invalid")
+        response = self._call(
+            {
+                "ListRegisteredResources": {
+                    "envelope": self._control_envelope("files-history-identity"),
+                    "cursor": cursor,
+                    "limit": limit,
+                }
+            }
+        )
+        self._raise_if_unavailable(response)
+        page = response.get("RegisteredResources")
+        if not isinstance(page, Mapping) or not isinstance(page.get("items"), list):
+            raise HistoryClientError("history worker returned an invalid registered-resource page")
+        items = page["items"]
+        if len(items) > limit or not all(isinstance(item, Mapping) for item in items):
+            raise HistoryClientError("history worker returned an unbounded registered-resource page")
+        for item in items:
+            for field_name in ("resource_id", "account_id", "workspace_id", "root_path", "relative_path"):
+                value = item.get(field_name)
+                if not isinstance(value, str) or len(value) > 4096:
+                    raise HistoryClientError("history worker returned an invalid registered-resource identity")
+            if not isinstance(item.get("active"), bool):
+                raise HistoryClientError("history worker returned an invalid registered-resource state")
+        next_cursor = page.get("next_cursor")
+        if next_cursor is not None and (
+            not isinstance(next_cursor, str)
+            or len(next_cursor) > 20
+            or not next_cursor.isdecimal()
+        ):
+            raise HistoryClientError("history worker returned an invalid registered-resource cursor")
+        return {"items": [dict(item) for item in items], "next_cursor": next_cursor}
 
     def get_policy(self) -> dict[str, Any]:
         return self._call({"GetPolicy": self._control_envelope("settings")})

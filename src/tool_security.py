@@ -327,8 +327,6 @@ def non_admin_filesystem_scope_available(owner: Optional[str]) -> bool:
             if registry_path
             else FilesystemRootRegistry()
         )
-        if not os.path.exists(registry.rust_snapshot_path()):
-            return False
         scope = registry.app_scope(str(owner), is_admin=False)
         return bool(scope.get("visible_root_ids"))
     except Exception as exc:
@@ -346,30 +344,16 @@ def is_scoped_file_tool_allowed(tool_name: Optional[str], owner: Optional[str]) 
 
 
 def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
-    """Return True for admins, or in intentional single-user mode.
-
-    Single-user mode means the operator explicitly disabled auth
-    (``AUTH_ENABLED=false``) — the local/self-host default where the owner has
-    full access to their own box.
-
-    The pre-setup window (auth ENABLED but no admin created yet) is treated as
-    NON-admin: returning True there would hand server-execution tools
-    (``bash``/``python``) to any caller before setup completes. The auth
-    middleware already 401s ``/api/`` requests pre-setup, so this is
-    defense-in-depth for callers that bypass it (e.g. trusted loopback).
-    """
+    """Return True only for a named, configured administrator."""
+    if not owner or not str(owner).strip():
+        return False
     try:
-        from src.auth_helpers import _auth_disabled
-
-        if _auth_disabled():
-            return True
-
         from core.auth import AuthManager
 
         auth = AuthManager()
         if not auth.is_configured:
             return False
-        return bool(owner and auth.is_admin(owner))
+        return auth.is_admin(str(owner).strip().lower()) is True
     except Exception as exc:
         logger.warning("Unable to evaluate owner admin status: %s", exc)
         return False
@@ -385,7 +369,7 @@ def blocked_tools_for_owner(owner: Optional[str]) -> Set[str]:
     return blocked
 
 
-def brokered_agent_file_tools(owner: Optional[str], active_workspace: Optional[str] = None) -> Set[str]:
+def brokered_agent_file_tools(owner: Optional[str], active_workspace: Optional[str] = None, *, workspace_id: str = "", chat_id: str = "") -> Set[str]:
     """Return the file tools backed by this turn's Rust AgentScope.
 
     This is an advertisement/dispatch projection, not the authority check.
@@ -402,14 +386,13 @@ def brokered_agent_file_tools(owner: Optional[str], active_workspace: Optional[s
 
         configured = os.environ.get("ODYSSEUS_FILES_REGISTRY")
         registry = FilesystemRootRegistry(configured) if configured else FilesystemRootRegistry()
-        if not os.path.exists(registry.rust_snapshot_path()):
-            return set()
         is_admin = owner_is_admin_or_single_user(normalized_owner)
         visibility = None if is_admin else registry.visibility_for_subject(normalized_owner)
         scope = registry.agent_scope(
             normalized_owner,
             str(active_workspace or "").strip() or None,
             app_visibility=visibility,
+            workspace_id=workspace_id, chat_id=chat_id,
         )
         root_capabilities = {
             str(root_id): set(map(str, capabilities or ()))
@@ -462,7 +445,7 @@ def strict_native_agent_tools_blocked(owner: Optional[str]) -> Set[str]:
 
 
 def unavailable_strict_agent_tools(
-    owner: Optional[str], active_workspace: Optional[str] = None,
+    owner: Optional[str], active_workspace: Optional[str] = None, *, workspace_id: str = "", chat_id: str = "",
 ) -> Set[str]:
     """Return public tool names unavailable to one strict Agent turn.
 
@@ -473,5 +456,5 @@ def unavailable_strict_agent_tools(
     it. Process tools (``bash``/``python``/``manage_bg_jobs``) are available;
     destructive commands still pass through interactive approval.
     """
-    brokered = brokered_agent_file_tools(owner, active_workspace)
+    brokered = brokered_agent_file_tools(owner, active_workspace, workspace_id=workspace_id, chat_id=chat_id)
     return set(SCOPED_FILE_TOOLS) - brokered

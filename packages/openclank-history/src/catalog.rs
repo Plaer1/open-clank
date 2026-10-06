@@ -4,7 +4,7 @@
 //! receipts. It never performs a live mutation and never replays one during reconciliation.
 
 use crate::retention::{BudgetError, ExpiryRecord, ExpiryState, PersistedReservation, PolicySet};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -233,11 +233,25 @@ pub enum LiveStatus {
     Unknown,
 }
 
+/// Payload-independent original after-state, supplied by the committed byte owner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommittedResource {
+    pub resource_key: ResourceKey,
+    pub locator: Option<Locator>,
+    pub existence: ResourceExistence,
+    pub resource_type: ResourceType,
+    pub metadata: ResourceMetadata,
+    pub fingerprint: String,
+    pub coverage: CaptureManifest,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveReceipt {
     pub action_id: String,
     pub status: LiveStatus,
     pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub committed_resources: Vec<CommittedResource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -440,7 +454,18 @@ pub struct Catalog {
 impl Catalog {
     pub fn open(path: impl AsRef<Path>, account_id: &str) -> CatalogResult<Self> {
         let path = path.as_ref().to_path_buf();
-        let db = Database::create(&path)?;
+        let existing = path.exists();
+        let db = if existing { Database::open(&path)? } else { Database::create(&path)? };
+        if existing {
+            let read = db.begin_read()?;
+            let meta = read.open_table(META).map_err(|_| "missing history catalog metadata; use .clanker/tools/native/history catalog conversion")?;
+            let schema = meta.get("schema")?.ok_or("unversioned history catalog; use .clanker/tools/native/history catalog conversion")?;
+            let stored: u32 = serde_json::from_slice(schema.value())?;
+            if stored != SCHEMA_VERSION { return Err(format!("unsupported history catalog schema {stored}").into()); }
+            for table in [ACTIONS, POLICIES, RESERVATIONS, EXPIRY, RESTORES] {
+                read.open_table(table).map_err(|_| "missing current history catalog table; use .clanker/tools/native/history catalog conversion")?;
+            }
+        }
         let catalog = Self {
             db: Arc::new(db),
             path,
@@ -461,6 +486,10 @@ impl Catalog {
                     return Err(format!("unsupported history catalog schema {stored}").into());
                 }
             } else {
+                if meta.len()? > 0 || _actions.len()? > 0 || _policies.len()? > 0
+                    || _reservations.len()? > 0 || _expiry.len()? > 0 || _restores.len()? > 0 {
+                    return Err("unversioned populated history catalog; use explicit .clanker/tools conversion".into());
+                }
                 meta.insert("schema", serde_json::to_vec(&SCHEMA_VERSION)?.as_slice())?;
             }
             let mut wanted = owner_partition(account_id);
@@ -1029,6 +1058,22 @@ impl Catalog {
             if record.state != ActionState::Applying || receipt.action_id != record.action_id {
                 return Err(CatalogConflict::InvalidTransition.into());
             }
+            if !receipt.committed_resources.is_empty() {
+                if receipt.status != LiveStatus::Committed
+                    || receipt.committed_resources.len() != record.before_resources.len() {
+                    return Err("committed proof must cover the exact prepared batch".into());
+                }
+                let mut seen = std::collections::HashSet::new();
+                for proof in &receipt.committed_resources {
+                    if !seen.insert(proof.resource_key.resource_id.clone())
+                        || !record.before_resources.iter().any(|before| before.resource_key == proof.resource_key)
+                        || proof.fingerprint.is_empty()
+                        || (proof.existence == ResourceExistence::Present
+                            && (proof.coverage.content_digest.is_none() || proof.coverage.byte_len.is_none())) {
+                        return Err("invalid committed resource proof".into());
+                    }
+                }
+            }
             record.state = match receipt.status {
                 LiveStatus::Committed => ActionState::Applied,
                 LiveStatus::NotCommitted => ActionState::Failed,
@@ -1087,6 +1132,21 @@ impl Catalog {
                 )
             {
                 return Err(CatalogConflict::InvalidTransition.into());
+            }
+            if let Some(live) = &record.live {
+                if !live.committed_resources.is_empty() {
+                    if live.committed_resources.len() != after_resources.len() {
+                        return Err("after capture does not cover committed proof".into());
+                    }
+                    for proof in &live.committed_resources {
+                        if !after_resources.iter().any(|after| after.resource_key == proof.resource_key
+                            && after.locator == proof.locator && after.existence == proof.existence
+                            && after.resource_type == proof.resource_type && after.metadata == proof.metadata
+                            && after.fingerprint == proof.fingerprint && after.coverage == proof.coverage) {
+                            return Err("after capture differs from original committed proof".into());
+                        }
+                    }
+                }
             }
             record.after = after_resources.first().map(|resource| resource.after.clone());
             record.after_resources = after_resources;
@@ -1182,6 +1242,7 @@ impl Catalog {
                 action_id: record.action_id.clone(),
                 status: LiveStatus::Unknown,
                 fingerprint: None,
+                committed_resources: Vec::new(),
             });
             let update_result = self.update(&record.action_id, |current| {
                 if receipt.action_id != current.action_id {

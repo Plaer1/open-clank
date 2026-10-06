@@ -128,9 +128,13 @@ export function handleUIControl(uiData) {
           var fn = mod.openLibrary || (mod.default && mod.default.openLibrary);
           if (fn) fn();
         }).catch(function(){});
-      } else if (panel === 'gallery') {
-        // Gallery applet retired: open Imps (the Image Processing Suite).
-        import('./galleryEditor.js').then(function(mod) {
+      } else if (panel === 'files' || panel === 'gallery') {
+        import('./files.js').then(function(mod) {
+          var fn = mod.open || (mod.default && mod.default.open);
+          if (fn) fn();
+        }).catch(function(){});
+      } else if (panel === 'imps') {
+        import('./imps.js').then(function(mod) {
           var fn = mod.openEditor || (mod.default && mod.default.openEditor);
           if (fn) fn(null, null, null, 'Imps');
         }).catch(function(){});

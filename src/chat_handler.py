@@ -37,24 +37,11 @@ def _sync_upload_vision_to_gallery(file_info: Dict[str, Any], owner: Optional[st
     if not file_hash or not text or owner_key is None:
         return
     try:
-        from core.database import GalleryImage, SessionLocal
-        db = SessionLocal()
-        try:
-            q = db.query(GalleryImage).filter(
-                GalleryImage.file_hash == file_hash,
-                GalleryImage.is_active == True,  # noqa: E712
-                GalleryImage.owner == owner_key,
-            )
-            img = q.first()
-            if not img:
-                return
-            img.caption = text.strip()
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        from src.openclank.files_image_store import FilesImageStore
+        store = FilesImageStore()
+        image = store.find_by_digest(owner_key, str(file_hash))
+        if image is not None:
+            store.update_provenance(owner_key, image.id, caption=text.strip())
     except Exception as e:
         logger.warning("Failed to sync upload vision text to gallery: %s", e)
 

@@ -2,7 +2,6 @@
   "schema": 1,
   "operation": "translation-recovery",
   "donor": {
-    "checkout": "/Users/e/sauce/ai/agents/odysisussies/odysseus-vanilla",
     "revision": "08eeb26a4e9b28190e6832f88b7d6e1d0a12646a",
     "license": "AGPL-3.0",
     "license_sha256": "d8a6cc31abc16b6748c7a21f21611f5a1ec33f67d22ca23d7da1c19b95496bee",
@@ -217,7 +216,9 @@
         "committed_sha256": "6b53c1bb1c35d19dcdc1e875e8319d3beb39b4652eac36e21a52e071f78124ee",
         "working_sha256": "48867f1809f753a76f9a3d992bdc75ee97f65019a576be6da785d8d8800d980b"
       }
-    ]
+    ],
+    "source": "https://github.com/odysseus-dev/odysseus",
+    "checkout_scope": "Local source checkout; absolute operator path omitted from published provenance"
   },
   "current": {
     "english_sha256": "16112394ca501deb1a8d05aad2aea99061d6ed626793904bb191b68a3028131b",

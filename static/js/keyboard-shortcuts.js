@@ -11,7 +11,7 @@ const _defaultKeybinds = {
   incognito: 'ctrl+alt+i', settings: 'ctrl+,', focus_input: 'ctrl+/',
   // Open-tool shortcuts (Calendar bound by default; rest unbound).
   open_calendar: 'ctrl+alt+c', open_compare: '', open_cookbook: '',
-  open_research: '', open_gallery: '', open_library: '', open_memory: '',
+  open_research: '', open_library: '', open_memory: '',
   open_notes: '', open_tasks: '', open_theme: '', open_usage: '',
 };
 
@@ -101,8 +101,7 @@ export function initKeyboardShortcuts(modules) {
     'tasks-modal':            'tool-tasks-btn',
     'notes-panel':            'tool-notes-btn',
     'memory-modal':           'tool-memory-btn',
-    'doclib-modal':           'tool-library-btn',
-    'gallery-modal':          'tool-gallery-btn',
+    'doclib-modal':           'tool-files-btn',
     'research-overlay':       'tool-research-btn',
     'cookbook-modal':         'tool-cookbook-btn',
     'compare-model-overlay':  'tool-compare-btn',
@@ -262,13 +261,16 @@ export function initKeyboardShortcuts(modules) {
     }
     // Open-tool shortcuts — click the sidebar tool button so each tool's
     // own open/toggle logic runs. Unbound (empty) combos never match.
+    if (_matchesCombo(e, kb.open_library)) {
+      e.preventDefault();
+      window.filesModule?.openLibraryCollection('documents');
+      return;
+    }
     const _toolBtns = {
       open_calendar: 'tool-calendar-btn',
       open_compare:  'tool-compare-btn',
       open_cookbook: 'tool-cookbook-btn',
       open_research: 'tool-research-btn',
-      open_gallery:  'tool-gallery-btn',
-      open_library:  'tool-library-btn',
       open_memory:   'tool-memory-btn',
       open_notes:    'tool-notes-btn',
       open_tasks:    'tool-tasks-btn',

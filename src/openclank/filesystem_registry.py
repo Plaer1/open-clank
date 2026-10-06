@@ -1,8 +1,7 @@
 """Persistent owner-scoped agent filesystem roots.
 
-This is the app/settings authority for the registry. The Rust service consumes
-its serialized snapshot for enforcement; it is intentionally separate from
-per-operation approval grants and Copal content.
+The legacy class and wire shape are canonical SQLite adapters. Rust consumes a
+derived read-only snapshot; JSON is never queried as permission authority.
 """
 
 from __future__ import annotations
@@ -18,7 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from src.constants import DATA_DIR
+from src.constants import DATA_DIR, APP_DB
+from src.openclank.file_policy import FilePolicyRepository, FilePolicyError
 
 
 class FilesystemRegistryError(ValueError):
@@ -31,46 +31,34 @@ class FilesystemRootRegistry:
     VERSION = 1
     KINDS = {"exact_file", "recursive_directory"}
     CAPABILITIES = {"read", "write", "execute"}
+    _snapshot_lock = threading.RLock()
 
-    def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
+    def __init__(self, path: str | os.PathLike[str] | None = None, *, repository: FilePolicyRepository | None = None) -> None:
+        # path is a transport/source hint only; it never selects another policy
+        # database. Explicit authority overrides support isolated installations.
         self.path = Path(path) if path else Path(DATA_DIR) / "odysseus-file-roots.json"
+        self.repository = repository or FilePolicyRepository(os.environ.get("OPEN_CLANK_AUTHORITY_DB_PATH") or APP_DB)
         self._lock = threading.RLock()
+        self._preimage = None
 
     def _load_locked(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {"version": self.VERSION, "generation": 0, "roots": {}, "visibility_assignments": {}}
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise FilesystemRegistryError("filesystem root registry is unreadable", code="registry_unavailable") from error
-        if not isinstance(data, dict) or data.get("version") != self.VERSION or not isinstance(data.get("roots"), dict):
-            raise FilesystemRegistryError("filesystem root registry has an unsupported format", code="registry_unavailable")
-        data.setdefault("generation", 0)
-        data.setdefault("visibility_assignments", {})
-        if not isinstance(data["visibility_assignments"], dict) or not isinstance(data["generation"], int):
-            raise FilesystemRegistryError("filesystem root registry has an unsupported format", code="registry_unavailable")
+        data = self.repository.registry_projection()
+        self._preimage = copy.deepcopy(data)
         return data
 
     @staticmethod
     def _bump_generation(data: dict[str, Any]) -> int:
-        data["generation"] = int(data.get("generation") or 0) + 1
-        return data["generation"]
+        # Only the canonical SQLite mutation may advance the policy generation.
+        return int(data["generation"])
 
     def _write_locked(self, data: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=str(self.path.parent))
+        if self._preimage is None:
+            raise FilesystemRegistryError("missing canonical mutation preimage", code="registry_unavailable")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+            self.repository.apply_registry_projection(self._preimage, data)
+        except FilePolicyError as error:
+            raise FilesystemRegistryError(str(error), code=error.code) from error
+        self._preimage = None
 
     @staticmethod
     def _canonical(path: str) -> Path:
@@ -203,30 +191,9 @@ class FilesystemRootRegistry:
             }
 
     def rename_owner(self, old_owner: str, new_owner: str) -> None:
-        """Move registry ownership and user assignments during account rename.
-
-        Account names are still a compatibility wire field today; updating all
-        references in one locked generation prevents a renamed account from
-        losing its roots or a recreated name from inheriting stale rows.
-        """
-        old, new = str(old_owner), str(new_owner)
-        if not old or not new or old == new:
-            return
-        with self._lock:
-            data = self._load_locked()
-            changed = False
-            for root in data.get("roots", {}).values():
-                if root.get("owner_id") == old:
-                    root["owner_id"] = new
-                    changed = True
-            for assignment in data.get("visibility_assignments", {}).values():
-                for key in ("subject_id", "issuer_id"):
-                    if assignment.get(key) == old:
-                        assignment[key] = new
-                        changed = True
-            if changed:
-                self._bump_generation(data)
-                self._write_locked(data)
+        subject = self.repository.subject_for_username(old_owner) or self.repository.subject_for_username(new_owner)
+        if subject:
+            self.repository.move_subject_alias(old_owner, new_owner, subject)
 
     def owner_inventory(self, owner: str) -> dict[str, Any]:
         """Return a content-free CAS inventory for one account owner."""
@@ -247,14 +214,18 @@ class FilesystemRootRegistry:
                 )
                 or str(assignment.get("root_id") or "") in root_ids
             )
+        subject = self.repository.subject_for_username(target)
+        migration_ids = [row["id"] for row in self.repository.migration_state(subject_id=subject, include_inactive=True)["items"] if row["status"] == "unresolved"] if subject else []
         material = json.dumps(
-            {"roots": root_ids, "assignments": assignment_ids},
+            {"roots": root_ids, "assignments": assignment_ids, "subject_id": subject, "migration_ids": migration_ids},
             sort_keys=True,
             separators=(",", ":"),
         )
         return {
             "owner": target,
-            "count": len(root_ids) + len(assignment_ids),
+            "count": len(root_ids) + len(assignment_ids) + len(migration_ids) + int(bool(subject)),
+            "subject_id": subject,
+            "migration_ids": migration_ids,
             "root_ids": root_ids,
             "assignment_ids": assignment_ids,
             "fingerprint": hashlib.sha256(material.encode("utf-8")).hexdigest(),
@@ -263,7 +234,7 @@ class FilesystemRootRegistry:
     def preview_owner_rename(self, source_owner: str, target_owner: str) -> dict[str, Any]:
         source = self.owner_inventory(source_owner)
         target = self.owner_inventory(target_owner)
-        if source["count"] and target["count"]:
+        if target.get("subject_id") or target["count"]:
             raise FilesystemRegistryError(
                 "filesystem registry rename target already contains state",
                 code="owner_conflict",
@@ -318,7 +289,7 @@ class FilesystemRootRegistry:
         expected: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         before = self.owner_inventory(owner)
-        if expected is not None and not self._inventory_matches(before, expected):
+        if expected is not None and before["count"] and not self._inventory_matches(before, expected):
             raise FilesystemRegistryError(
                 "filesystem registry owner state changed before purge",
                 code="owner_conflict",
@@ -333,30 +304,9 @@ class FilesystemRootRegistry:
         return {"state": "purged", "before": before, "after": after}
 
     def delete_owner(self, owner: str) -> None:
-        """Remove an account's roots and dependent visibility assignments."""
-        target = str(owner)
-        with self._lock:
-            data = self._load_locked()
-            roots = data.setdefault("roots", {})
-            removed_root_ids = {
-                root_id for root_id, root in roots.items()
-                if root.get("owner_id") == target
-            }
-            changed = bool(removed_root_ids)
-            for root_id in removed_root_ids:
-                roots.pop(root_id, None)
-            assignments = data.setdefault("visibility_assignments", {})
-            for assignment_id, assignment in list(assignments.items()):
-                if (
-                    assignment.get("subject_id") == target
-                    or assignment.get("issuer_id") == target
-                    or assignment.get("root_id") in removed_root_ids
-                ):
-                    assignments.pop(assignment_id, None)
-                    changed = True
-            if changed:
-                self._bump_generation(data)
-                self._write_locked(data)
+        subject = self.repository.subject_for_username(owner)
+        if subject:
+            self.repository.purge_subject(subject, actor_subject_id=subject)
 
     def list_visibility(self) -> list[dict[str, Any]]:
         """Return administrator-issued assignments, without trusting a caller path."""
@@ -476,23 +426,22 @@ class FilesystemRootRegistry:
             return sorted(result, key=lambda item: str(item["root"].get("display_path", "")).casefold())
 
     def app_scope(self, subject_id: str, *, is_admin: bool, groups: list[str] | None = None) -> dict[str, Any]:
+        from src.openclank.operation_approvals import _authority_context
+        _authority_context(subject_id, repository=self.repository)
         with self._lock:
-            generation = int(self._load_locked().get("generation") or 0)
+            data = self._load_locked()
+        generation = int(data["generation"])
         if is_admin:
-            return {
-                "host": True,
-                "visible_root_ids": [],
-                "capabilities": [],
-                "root_capabilities": {},
-                "generation": generation,
-                "active_folder": None,
-            }
-        assignments = [
-            assignment
-            for assignment in self.visibility_for_subject(subject_id, groups)
-            if assignment.get("root", {}).get("enabled")
-            and assignment.get("root", {}).get("availability") == "available"
-        ]
+            return {"host": True, "visible_root_ids": [], "capabilities": [],
+                "root_capabilities": {}, "generation": generation, "active_folder": None}
+        assignments = []
+        for assignment in data["visibility_assignments"].values():
+            kind = assignment.get("subject_kind", "user")
+            if (kind == "user" and assignment["subject_id"] != subject_id) or (kind == "group" and assignment["subject_id"] not in (groups or [])):
+                continue
+            root = data["roots"].get(assignment["root_id"])
+            if assignment.get("enabled") and root and root.get("enabled") and root.get("availability") == "available":
+                assignments.append(dict(assignment, capabilities=sorted(set(assignment["capabilities"]) & set(root["capabilities"]))))
         root_capabilities: dict[str, set[str]] = {}
         for assignment in assignments:
             root_id = str(assignment["root_id"])
@@ -520,13 +469,38 @@ class FilesystemRootRegistry:
             "active_folder": None,
         }
 
-    def rust_snapshot_path(self) -> str:
-        return str(self.path)
+    def rust_snapshot_path(self, *, expected_generation: int | None = None) -> str:
+        # Generation-addressed, immutable transport artifact. No request-time
+        # publication; a process startup prepares only its current generation.
+        with self._snapshot_lock:
+            snapshot = self.snapshot()
+            if expected_generation is not None and snapshot["generation"] != expected_generation:
+                raise FilesystemRegistryError("File access changed; retry with a fresh scope", code="policy_generation_changed")
+            destination = Path(self.repository.db_path).parent / f"file-policy-derived-roots-{snapshot['generation']}.json"
+            if destination.is_file():
+                return str(destination)
+            for root in snapshot["roots"].values():
+                # Physical metadata alone never authorizes: the signed scope
+                # supplies the canonical effective intersection for each root.
+                if "physical_capabilities" in root:
+                    root["capabilities"] = root["physical_capabilities"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=".file-policy-roots-", dir=str(destination.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(snapshot, handle, sort_keys=True)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chmod(temporary, 0o400)
+                os.replace(temporary, destination)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            return str(destination)
 
     def generation(self) -> int:
         """Return the current policy generation without projecting any scope."""
-        with self._lock:
-            return int(self._load_locked().get("generation") or 0)
+        return self.repository.generation()
 
     def snapshot(self) -> dict[str, Any]:
         """Return one locked, immutable-by-convention registry projection.
@@ -546,96 +520,69 @@ class FilesystemRootRegistry:
         except ValueError:
             return False
 
-    def agent_scope(
-        self,
-        owner: str,
-        active_workspace: str | None = None,
-        app_visibility: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Build the narrow Rust ``AgentScope`` for one authenticated turn.
-
-        An active workspace never expands permissions: it selects the most
-        specific enabled recursive root that contains the folder and binds an
-        active-folder narrowing. If no root contains the folder, the returned
-        approved set is empty, which makes the Rust service deny the request.
-        With no active workspace, all enabled roots remain available for the
-        caller that intentionally operates without a workspace binding.
-        """
-        roots = [root for root in self.list(owner) if root.get("enabled") and root.get("availability") == "available"]
-        scoped_capabilities: dict[str, set[str]] = {
-            str(root["id"]): set(str(value) for value in (root.get("capabilities") or []))
-            for root in roots
-        }
-        if app_visibility is not None:
-            # A non-admin agent root may only be a narrowing inside an
-            # administrator-issued user-visible root, with no capability
-            # elevation. The app scope is a ceiling; it is never inferred
-            # from the active folder or from the request payload.
-            ceilings = [
-                item
-                for item in app_visibility
-                if isinstance(item, dict)
-                and isinstance(item.get("root"), dict)
-                and item["root"].get("enabled")
-                and item["root"].get("availability") == "available"
-            ]
-            narrowed = []
-            for root in roots:
-                root_path = str(root.get("canonical_path") or "")
-                root_caps = set(root.get("capabilities") or [])
-                effective: set[str] | None = None
-                for assignment in ceilings:
-                    ceiling = assignment["root"]
-                    ceiling_path = str(ceiling.get("canonical_path") or "")
-                    contains = (
-                        ceiling.get("kind") == "recursive_directory"
-                        and self._contains(ceiling_path, root_path)
-                    ) or (
-                        ceiling.get("kind") == "exact_file"
-                        and root.get("kind") == "exact_file"
-                        and root_path == ceiling_path
-                    )
-                    if not contains:
-                        continue
-                    assignment_caps = set(str(value) for value in (assignment.get("capabilities") or []))
-                    ceiling_caps = set(str(value) for value in (ceiling.get("capabilities") or []))
-                    candidate = root_caps & assignment_caps & ceiling_caps
-                    effective = candidate if effective is None else effective | candidate
-                if effective:
-                    narrowed.append(root)
-                    scoped_capabilities[str(root["id"])] = effective
-            roots = narrowed
+    def agent_scope(self, owner: str, active_workspace: str | None = None,
+                    app_visibility: list[dict[str, Any]] | None = None, *,
+                    workspace_id: str | None = None, chat_id: str | None = None) -> dict[str, Any]:
+        """Mint one canonical AgentScope; paths only narrow existing bindings."""
+        empty = {"approved_root_ids": [], "root_capabilities": {}, "active_folder": None}
+        from src.openclank.operation_approvals import _authority_context
+        context = _authority_context(owner, repository=self.repository)
+        subject = context[1] if context else None
+        generation = self.repository.generation()
+        empty["generation"] = generation
+        def finish(scope):
+            if self.repository.generation() != generation:
+                raise FilesystemRegistryError("File access changed; retry with a fresh scope", code="policy_generation_changed")
+            return dict(scope, generation=generation)
+        if not subject or str(owner).startswith("deleted:"):
+            return finish(empty)
+        workspace = None
+        stable_id = str(workspace_id or "")
+        if stable_id:
+            stable_id = self.repository.legacy_target("workspace", subject + ":" + stable_id, fallback=stable_id)
+            try:
+                workspace = self.repository.get_workspace(stable_id)
+                location = self.repository.get_location(workspace.location_id)
+            except FilePolicyError:
+                return finish(empty)
+            if workspace.owner_subject_id != subject or workspace.archived or not location.enabled or location.availability != "available":
+                return finish(empty)
+            bound_path = str(Path(location.canonical_path).joinpath(*workspace.relative_folder.split("/")))
+            candidate = str(Path(active_workspace).expanduser().resolve(strict=False)) if active_workspace else bound_path
+            if not self._contains(bound_path, candidate):
+                return finish(empty)
+            active_workspace = candidate
+        roots = []
+        root_caps = {}
+        is_admin = self.repository.subject_is_admin(subject)
+        for root in self.list(owner):
+            if not root.get("enabled") or root.get("availability") != "available":
+                continue
+            if root.get("workspace_id") and root["workspace_id"] != stable_id:
+                continue
+            if root.get("chat_id") and root["chat_id"] != chat_id:
+                continue
+            if root.get("lifetime", "always") == "workspace" and not stable_id:
+                continue
+            if root.get("lifetime") == "chat" and not chat_id:
+                continue
+            target_location = workspace.location_id if workspace else root["location_id"]
+            caps = self.repository.people_capabilities(subject, target_location, workspace_id=stable_id or None,
+                chat_id=chat_id, binding_class="agent") & set(root.get("physical_capabilities", root.get("capabilities")) or [])
+            if not is_admin:
+                caps &= self.repository.people_capabilities(subject, target_location, workspace_id=stable_id or None, chat_id=chat_id)
+            if caps:
+                roots.append(root)
+                root_caps[root["id"]] = caps
         if not active_workspace:
-            return {
-                "approved_root_ids": sorted(str(root["id"]) for root in roots),
-                "root_capabilities": {
-                    root_id: sorted(scoped_capabilities[root_id])
-                    for root_id in sorted(scoped_capabilities)
-                    if root_id in {str(root["id"]) for root in roots}
-                },
-                "active_folder": None,
-            }
-
-        workspace = str(Path(active_workspace).expanduser().resolve(strict=False))
-        candidates = [
-            root for root in roots
-            if root.get("kind") == "recursive_directory"
-            and self._contains(str(root.get("canonical_path") or ""), workspace)
-        ]
+            return finish({"approved_root_ids": sorted(root_caps), "root_capabilities": {key: sorted(value) for key, value in root_caps.items()}, "active_folder": None})
+        path = str(Path(active_workspace).expanduser().resolve(strict=False))
+        candidates = [root for root in roots if root["kind"] == "recursive_directory" and self._contains(root["canonical_path"], path)]
         if not candidates:
-            return {"approved_root_ids": [], "root_capabilities": {}, "active_folder": None}
-        root = max(candidates, key=lambda value: len(str(value.get("canonical_path") or "")))
-        root_id = str(root["id"])
-        capabilities = sorted(scoped_capabilities.get(root_id, set()))
-        if not capabilities:
-            return {"approved_root_ids": [], "root_capabilities": {}, "active_folder": None}
-        return {
-            "approved_root_ids": [root_id],
-            "root_capabilities": {root_id: capabilities},
-            "active_folder": {
-                "id": f"folder-{root_id}-{uuid.uuid5(uuid.NAMESPACE_URL, workspace).hex}",
-                "root_id": root_id,
-                "canonical_path": workspace,
-                "capabilities": capabilities,
-            },
-        }
+            return finish(empty)
+        root = max(candidates, key=lambda row: len(row["canonical_path"]))
+        identifier = root["id"]
+        caps = sorted(root_caps[identifier])
+        return finish({"approved_root_ids": [identifier], "root_capabilities": {identifier: caps},
+                "active_folder": {"id": "folder-" + uuid.uuid5(uuid.NAMESPACE_URL, (stable_id or path) + ":" + identifier).hex,
+                    "root_id": identifier, "canonical_path": path, "capabilities": caps}})

@@ -1,3 +1,5 @@
+import { drainAchievementNotifications } from '../achievementClient.js';
+import { uiIcon } from '../uiIcons.js';
 import { copalStorageKey } from './storage.js';
 import { filesFacadeClient } from '../filesFacadeClient.js';
 import { FILES_TRANSFER_MIME, parseInternalDragPayload } from '../filesSelectionModel.js';
@@ -107,7 +109,17 @@ export async function prepareTreeHouseLessonAttachment({ handle, source, filesCl
   return { outcome:'prepared', operationId:op, preparation:prepared };
 }
 
-export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, openDocument, filesClient = filesFacadeClient, getScope = null }) {
+export function createTreeHouseFeature({ h: makeElement, api, setStatus, renderMarkdown, openDocument, filesClient = filesFacadeClient, getScope = null }) {
+  // Only explicit chrome IDs are decorated; authored track/lesson emoji stays text.
+  function h(tag, { icon, ...attrs } = {}, ...children) {
+    const node = makeElement(tag, attrs, ...children);
+    if (icon) {
+      node.insertAdjacentHTML('afterbegin', uiIcon(icon, 14, { style: attrs.text ? 'margin-right:4px;' : '' }));
+      if (!attrs.text && !attrs['aria-label']) node.setAttribute('aria-label', attrs.title || icon);
+    }
+    return node;
+  }
+
   const ui = {
     actorId: 'owner',
     mode: 'learner',
@@ -212,6 +224,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
 
   function suspendScope() {
     ui.token += 1;
+    achievementPanelBody = null;
     ui.lessonDropRoot?.removeEventListener?.('dragover', ui.lessonDragOver);
     ui.lessonDropRoot?.removeEventListener?.('drop', ui.lessonDrop);
     ui.lessonDropRoot = null;
@@ -358,7 +371,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       ui.actorId = 'owner'; localStorage.setItem(copalStorageKey('odysseus-treehouse-actor'), ui.actorId); return load();
     }
     // Best-effort toast drain after a successful load (S12 task-identity).
-    void pollAchievementNotifications();
+    void drainAchievementNotifications();
     return true;
   }
 
@@ -415,8 +428,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       } }));
     }
     toolbar.append(modes);
-    if (adminMode() && snapshot.permissions.admin && !snapshot.accountId) toolbar.append(h('button', { class: 'copal-btn', text: '+ Profile', onclick: createProfile }));
-    if (adminMode() && snapshot.permissions.author) toolbar.append(h('button', { class: 'copal-btn', text: 'Import legacy', onclick: migrateLegacy }));
+    if (adminMode() && snapshot.permissions.admin && !snapshot.accountId) toolbar.append(h('button', { class: 'copal-btn', icon: 'add', text: 'Profile', onclick: createProfile }));
     root.append(toolbar);
   }
 
@@ -453,21 +465,6 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
         { value: 'admin,instructor,learner', label: 'Administrator' },
       ] },
     ], 'Create', ({ displayName, roles }) => command('profile.create', { displayName, roles: csv(roles) }));
-  }
-
-  async function migrateLegacy() {
-    const dry = await api('/treehouse/migrate?dry_run=true', {
-      method: 'POST',
-      body: JSON.stringify({ actorId: ui.actorId, commandId: treeHouseCommandId('migration-dry'), expectedRevision: ui.snapshot.state.revision }),
-    });
-    const counts = dry.plan.counts;
-    if (!counts.documents) { setStatus('TreeHouse legacy import: no new documents'); return; }
-    if (!await styledConfirm(`Import ${counts.documents} legacy document(s) as ${counts.courses} course(s), ${counts.skills} skill(s), and ${counts.tasks} assignment(s)? Source documents will not be changed.`, { title: 'Import TreeHouse content', confirmText: 'Import' })) return;
-    const applied = await api('/treehouse/migrate?dry_run=false', {
-      method: 'POST',
-      body: JSON.stringify({ actorId: ui.actorId, commandId: treeHouseCommandId('migration'), expectedRevision: ui.snapshot.state.revision }),
-    });
-    ui.snapshot = applied; setStatus(`TreeHouse imported ${applied.result.imported.documents} documents`); renderLoaded();
   }
 
   function createCourse() {
@@ -600,7 +597,8 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     const capability = ui.snapshot.courseCapabilities?.[course.id] || {};
     if (adminMode() && capability.edit) {
       actions.append(h('button', { class: 'copal-btn', text: 'Edit', onclick: () => editCourse(course) }));
-      actions.append(h('button', { class: 'copal-btn', text: '+ Module', onclick: () => createModule(course.id) }));
+      actions.append(h('button', { class: 'copal-btn', icon: 'add', text: 'Module', onclick: () => createModule(course.id) }));
+      if (course.status === 'draft' && capability.owner) actions.append(h('button', { class: 'copal-btn', text: 'Preview as learner', onclick: () => previewAsLearner(course.id) }));
       if (course.status === 'draft') actions.append(h('button', { class: 'copal-btn primary', text: 'Publish', onclick: () => command('course.publish', { courseId: course.id }) }));
       if (course.status !== 'archived') actions.append(h('button', { class: 'copal-btn danger', text: 'Archive', onclick: () => command('course.archive', { courseId: course.id }) }));
       actions.append(h('button', { class: 'copal-btn danger', text: 'Delete', onclick: async () => { if (await styledConfirm('Delete this course and all its content? This cannot be undone.', { title: 'Delete course', confirmText: 'Delete course', danger: true })) await command('course.delete', { courseId: course.id }); } }));
@@ -613,29 +611,29 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     card.append(actions); root.append(card);
   }
 
-  function courseDetail(course, root) {
+  function courseDetail(course, root, { preview = false } = {}) {
     if (!course) return;
     const state = ui.snapshot.state; const progress = learnerProjection();
     const moduleProgress = progress.courses?.[course.id]?.modules || {};
-    const detail = h('section', { class: 'copal-treehouse-detail' }, h('h2', { text: course.title }));
+    const detail = h('section', { class: 'copal-treehouse-detail', ...(preview ? { inert: true } : {}) }, h('h2', { text: course.title }));
     for (const [moduleIndex, moduleId] of course.moduleIds.entries()) {
       const module = state.modules[moduleId]; if (!module) continue;
       const mp = moduleProgress[moduleId];
       const moduleHeader = h('header', {}, h('h3', { text: module.title }), h('small', { text: mp ? `${mp.completed}/${mp.total} items · ${mp.percent}%` : `${module.activityIds.length} activities · ${module.assignmentIds.length} assignments` }));
-      if (courseCanEdit(course.id)) moduleHeader.append(h('div', { class: 'copal-treehouse-order' },
+      if (!preview && courseCanEdit(course.id)) moduleHeader.append(h('div', { class: 'copal-treehouse-order' },
         h('button', { class: 'copal-btn', text: 'Edit', 'aria-label': `Edit ${module.title}`, onclick: () => editModule(module) }),
-        h('button', { class: 'copal-btn', text: '↑', title: 'Move module earlier', 'aria-label': `Move ${module.title} earlier`, disabled: moduleIndex === 0, onclick: () => command('course.reorder_modules', { courseId: course.id, moduleIds: moveTreeHouseItem(course.moduleIds, module.id, -1) }) }),
-        h('button', { class: 'copal-btn', text: '↓', title: 'Move module later', 'aria-label': `Move ${module.title} later`, disabled: moduleIndex === course.moduleIds.length - 1, onclick: () => command('course.reorder_modules', { courseId: course.id, moduleIds: moveTreeHouseItem(course.moduleIds, module.id, 1) }) }),
+        h('button', { class: 'copal-btn', icon: 'up', text: '', title: 'Move module earlier', 'aria-label': `Move ${module.title} earlier`, disabled: moduleIndex === 0, onclick: () => command('course.reorder_modules', { courseId: course.id, moduleIds: moveTreeHouseItem(course.moduleIds, module.id, -1) }) }),
+        h('button', { class: 'copal-btn', icon: 'chevron-down', text: '', title: 'Move module later', 'aria-label': `Move ${module.title} later`, disabled: moduleIndex === course.moduleIds.length - 1, onclick: () => command('course.reorder_modules', { courseId: course.id, moduleIds: moveTreeHouseItem(course.moduleIds, module.id, 1) }) }),
         h('button', { class: 'copal-btn danger', text: 'Delete', 'aria-label': `Delete ${module.title}`, onclick: async () => { if (await styledConfirm(`Delete module "${module.title}" and all its content?`, { title: 'Delete module', confirmText: 'Delete module', danger: true })) await command('module.delete', { moduleId: module.id }); } })));
-      const moduleCard = h('article', { class: 'copal-card copal-treehouse-module', 'data-copal-context-object':'treehouse', 'data-treehouse-id':module.id }, moduleHeader);
+      const moduleCard = h('article', { class: 'copal-card copal-treehouse-module', 'data-copal-context-object':preview ? '' : 'treehouse', 'data-treehouse-id':module.id }, moduleHeader);
       if (module.description) moduleCard.append(h('p', { text: module.description }));
       for (const [activityIndex, activityId] of module.activityIds.entries()) {
-        const activity = state.activities[activityId]; if (!activity || activity.status === 'archived') continue;
+        const activity = state.activities[activityId]; if (!activity || activity.status === 'archived' || (preview && activity.status !== 'published')) continue;
         const complete = progress.completedActivityIds?.includes(activityId);
-        const row = h('div', { class: `copal-treehouse-activity${complete ? ' complete' : ''}`, 'data-copal-context-object':'treehouse', 'data-treehouse-id':activity.id, 'data-field-guide-surface': activity.surface?.key || '', 'data-field-guide-lesson': activity.fieldGuideKey || activity.id },
+        const row = h('div', { class: `copal-treehouse-activity${complete ? ' complete' : ''}`, 'data-copal-context-object':preview ? '' : 'treehouse', 'data-treehouse-id':activity.id, 'data-field-guide-surface': activity.surface?.key || '', 'data-field-guide-lesson': activity.fieldGuideKey || activity.id },
           h('div', {}, h('strong', { text: activity.title }), h('small', { text: `${activity.activityType} · ${activity.points} points${activity.skillIds?.length ? ` · ${activity.skillIds.length} skills` : ''}` })),
           h('span', { text: complete ? 'Completed' : activity.status }));
-        if (activity.content) row.append(h('details', {}, h('summary', { text: 'Open lesson' }), h('div', { class: 'copal-meme-body' }, renderMarkdown(activity.content))));
+        if (activity.content) row.append(h('details', { open: preview }, h('summary', { text: 'Open lesson' }), h('div', { class: 'copal-meme-body' }, renderMarkdown(activity.content))));
         const practice = activity.practice || {};
         if (practice.seed || activity.verifierSpec?.evidence) {
           const practiceBody = h('div', { class: 'copal-treehouse-practice', 'aria-label': 'Disposable practice and verifier' },
@@ -647,7 +645,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
         // Hidden achievement-linked components.  Learner mode never names an
         // unearned ultra rare and shows mystery entries as ???.  Ultra-rares
         // are omitted entirely so no empty secret container is rendered.
-        const adminSpoilers = adminMode() && ui.snapshot?.permissions?.admin;
+        const adminSpoilers = !preview && root !== achievementPanelBody && adminMode() && ui.snapshot?.permissions?.admin;
         const hints = activity.achievementHints || [];
         const visibleHints = hints.filter((hint) => hint.rarity !== 'ultra' || adminSpoilers);
         if (visibleHints.length) {
@@ -660,14 +658,14 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
         }
         const surface = activity.surface || {};
         const lessonActions = h('div', { class: 'copal-treehouse-actions', 'aria-label': 'Lesson actions' });
-        const openDestination = (event) => {
+        const openDestination = async (event) => {
           // Shared app-link resolver: focus the destination view while
           // preserving chat identity and unsaved editor drafts. Never a
           // full page reload and never a legacy /copal/* route.
           const target = String(surface.appLink || (surface.key ? `clank://${surface.key}` : '')).trim();
           if (target) {
             event?.preventDefault?.();
-            const opened = openAppDestination(target, event);
+            const opened = await openAppDestination(target, event, { sourceKind:'treehouse' });
             if (opened && opened.ok === false) setStatus(opened.error || `Could not open ${target}`, true);
             return;
           }
@@ -684,25 +682,47 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
           onclick: openDestination,
         }));
         lessonActions.append(h('button', { type: 'button', class: 'copal-btn', 'aria-label': `Ask for help with ${activity.title}`, title: 'Attach this lesson and its active workspace context to help', text: 'Ask for help', onclick: () => requestLessonHelp(course, activity) }));
-        if (courseCanEdit(course.id)) lessonActions.append(h('button', { type:'button', class:'copal-btn', 'aria-label':`Attach Files resource to ${activity.title}`, title:'Drop one readable Files resource here to attach it to this lesson', text:'Attach Files resource', onclick:() => setStatus('Drop one readable Files resource on this lesson to attach it.', false) }));
-        row.append(lessonActions);
-        if (courseCanEdit(course.id)) row.append(h('div', { class: 'copal-treehouse-order' },
+        if (!preview && courseCanEdit(course.id)) lessonActions.append(h('button', { type:'button', class:'copal-btn', 'aria-label':`Attach Files resource to ${activity.title}`, title:'Drop one readable Files resource here to attach it to this lesson', text:'Attach Files resource', onclick:() => setStatus('Drop one readable Files resource on this lesson to attach it.', false) }));
+        if (!preview) row.append(lessonActions);
+        if (!preview && courseCanEdit(course.id)) row.append(h('div', { class: 'copal-treehouse-order' },
           h('button', { class: 'copal-btn', text: 'Edit', 'aria-label': `Edit ${activity.title}`, onclick: () => editActivity(activity) }),
-          h('button', { class: 'copal-btn', text: '↑', title: 'Move activity earlier', 'aria-label': `Move ${activity.title} earlier`, disabled: activityIndex === 0, onclick: () => command('module.reorder_items', { moduleId: module.id, activityIds: moveTreeHouseItem(module.activityIds, activity.id, -1), assignmentIds: module.assignmentIds }) }),
-          h('button', { class: 'copal-btn', text: '↓', title: 'Move activity later', 'aria-label': `Move ${activity.title} later`, disabled: activityIndex === module.activityIds.length - 1, onclick: () => command('module.reorder_items', { moduleId: module.id, activityIds: moveTreeHouseItem(module.activityIds, activity.id, 1), assignmentIds: module.assignmentIds }) }),
-          h('button', { class: 'copal-btn danger', text: '×', title: 'Delete activity', 'aria-label': `Delete ${activity.title}`, onclick: async () => { if (await styledConfirm(`Delete activity "${activity.title}"?`, { title: 'Delete activity', confirmText: 'Delete activity', danger: true })) await command('activity.delete', { activityId: activity.id }); } })));
-        if (ui.snapshot.permissions.learner && currentEnrollment(course.id) && activity.status === 'published' && !complete) row.append(h('button', { class: 'copal-btn primary', text: 'Mark complete', onclick: () => command('activity.complete', { activityId }) }));
+          h('button', { class: 'copal-btn', icon: 'up', text: '', title: 'Move activity earlier', 'aria-label': `Move ${activity.title} earlier`, disabled: activityIndex === 0, onclick: () => command('module.reorder_items', { moduleId: module.id, activityIds: moveTreeHouseItem(module.activityIds, activity.id, -1), assignmentIds: module.assignmentIds }) }),
+          h('button', { class: 'copal-btn', icon: 'chevron-down', text: '', title: 'Move activity later', 'aria-label': `Move ${activity.title} later`, disabled: activityIndex === module.activityIds.length - 1, onclick: () => command('module.reorder_items', { moduleId: module.id, activityIds: moveTreeHouseItem(module.activityIds, activity.id, 1), assignmentIds: module.assignmentIds }) }),
+          h('button', { class: 'copal-btn danger', icon: 'trash', text: '', title: 'Delete activity', 'aria-label': `Delete ${activity.title}`, onclick: async () => { if (await styledConfirm(`Delete activity "${activity.title}"?`, { title: 'Delete activity', confirmText: 'Delete activity', danger: true })) await command('activity.delete', { activityId: activity.id }); } })));
+        if (!preview && ui.snapshot.permissions.learner && currentEnrollment(course.id) && activity.status === 'published' && !complete) row.append(h('button', { class: 'copal-btn primary', text: 'Mark complete', onclick: () => command('activity.complete', { activityId }) }));
         moduleCard.append(row);
       }
-      if (courseCanEdit(course.id)) moduleCard.append(h('button', { class: 'copal-btn', text: '+ Activity', onclick: () => createActivity(module.id) }), h('button', { class: 'copal-btn', text: '+ Assignment', onclick: () => createAssignment(module.id) }));
+      if (!preview && courseCanEdit(course.id)) moduleCard.append(h('button', { class: 'copal-btn', icon: 'add', text: 'Activity', onclick: () => createActivity(module.id) }), h('button', { class: 'copal-btn', icon: 'add', text: 'Assignment', onclick: () => createAssignment(module.id) }));
       detail.append(moduleCard);
     }
     root.append(detail);
   }
 
+  async function previewAsLearner(courseId) {
+    const token = ui.token;
+    try {
+      const snapshot = await api(`/treehouse/courses/${encodeURIComponent(courseId)}/learner-preview`);
+      if (token !== ui.token) return;
+      const preview = h('section', { class: 'copal-treehouse-learner-preview', 'aria-label': 'Preview as learner' },
+        h('h2', { text: 'Preview as learner' }),
+        h('p', { text: 'Read your draft as a learner. Editing and progress are disabled in this preview.' }),
+        h('button', { class: 'copal-btn', text: 'Back to authoring', onclick: () => renderLoaded() }));
+      const original = ui.snapshot;
+      ui.snapshot = snapshot;
+      try { courseDetail(snapshot.state.courses[courseId], preview, { preview: true }); }
+      finally { ui.snapshot = original; }
+      ui.body.replaceChildren(preview);
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      if (token !== ui.token || !preview.isConnected || !preview.getClientRects().length || document.visibilityState !== 'visible') return;
+      await api(`/treehouse/courses/${encodeURIComponent(courseId)}/learner-preview`, { method: 'POST',
+        body: JSON.stringify({ accountId: snapshot.accountId, revision: snapshot.preview.revision, visible: true }) });
+      setStatus('Learner preview recorded. Publish this revision to finish your Class.');
+    } catch (error) { setStatus(error?.message || String(error), true); }
+  }
+
   function renderCourses(root) {
     const toolbar = h('div', { class: 'copal-treehouse-section-head' }, h('div', {}, h('h2', { text: 'Courses' }), h('p', { text: 'Author, publish, enroll, navigate, and complete durable learning paths.' })));
-    if (adminMode()) toolbar.append(h('button', { class: 'copal-btn primary', text: '+ Course', onclick: createCourse }), h('button', { class: 'copal-btn', text: 'Import course', onclick: importCoursePackage }));
+    if (adminMode()) toolbar.append(h('button', { class: 'copal-btn primary', icon: 'add', text: 'Course', onclick: createCourse }), h('button', { class: 'copal-btn', text: 'Import course', onclick: importCoursePackage }));
     root.append(toolbar);
     const grid = h('div', { class: 'copal-card-grid' });
     const courses = values(ui.snapshot.state.courses).filter((item) => adminMode() ? item.status !== 'archived' : item.status === 'published');
@@ -804,7 +824,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
   function renderSkills(root) {
     const state = ui.snapshot.state; const progress = learnerProjection();
     const toolbar = h('div', { class: 'copal-treehouse-section-head' }, h('div', {}, h('h2', { text: 'Skills & evidence' }), h('p', { text: 'Prerequisites gate evidence. Every proficiency point links back to a durable event.' })));
-    if (adminMode()) toolbar.append(h('button', { class: 'copal-btn primary', text: '+ Skill', onclick: createSkill }), h('button', { class: 'copal-btn', text: '+ Badge', onclick: createBadge }), h('button', { class: 'copal-btn', text: '+ Quest', onclick: createQuest }));
+    if (adminMode()) toolbar.append(h('button', { class: 'copal-btn primary', icon: 'add', text: 'Skill', onclick: createSkill }), h('button', { class: 'copal-btn', icon: 'add', text: 'Badge', onclick: createBadge }), h('button', { class: 'copal-btn', icon: 'add', text: 'Quest', onclick: createQuest }));
     root.append(toolbar);
     const map = h('section', { class: 'copal-card copal-treehouse-skill-map', 'aria-label': 'Skill prerequisite map' }, h('h3', { text: 'Prerequisite map' }));
     const mapList = h('ul');
@@ -825,7 +845,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       if (ui.snapshot.permissions.learner && item.unlocked) card.append(h('button', { class: 'copal-btn', text: 'Submit evidence', onclick: () => submitEvidence(skill.id) }));
       if (adminMode()) {
         card.append(h('button', { class: 'copal-btn', text: 'Edit skill', onclick: () => editSkill(skill) }));
-        card.append(h('button', { class: 'copal-btn danger', text: '×', title: 'Delete skill', onclick: async () => { if (await styledConfirm(`Delete skill "${skill.title}"?`, { title: 'Delete skill', confirmText: 'Delete skill', danger: true })) await command('skill.delete', { skillId: skill.id }); } }));
+        card.append(h('button', { class: 'copal-btn danger', icon: 'trash', text: '', title: 'Delete skill', onclick: async () => { if (await styledConfirm(`Delete skill "${skill.title}"?`, { title: 'Delete skill', confirmText: 'Delete skill', danger: true })) await command('skill.delete', { skillId: skill.id }); } }));
       }
       grid.append(card);
     }
@@ -847,7 +867,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       const row = h('p', { text: `${earned ? '✓' : '○'} ${badge.title}` });
       if (adminMode()) {
         row.append(h('button', { class: 'copal-btn', text: 'Edit', onclick: () => editBadge(badge) }));
-        row.append(h('button', { class: 'copal-btn danger', text: '×', title: 'Delete badge', onclick: async () => { if (await styledConfirm(`Delete badge "${badge.title}"?`, { title: 'Delete badge', confirmText: 'Delete badge', danger: true })) await command('badge.delete', { badgeId: badge.id }); } }));
+        row.append(h('button', { class: 'copal-btn danger', icon: 'trash', text: '', title: 'Delete badge', onclick: async () => { if (await styledConfirm(`Delete badge "${badge.title}"?`, { title: 'Delete badge', confirmText: 'Delete badge', danger: true })) await command('badge.delete', { badgeId: badge.id }); } }));
       }
       badgeSection.append(row);
     }
@@ -859,7 +879,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       const row = h('p', { text: `${done ? '✓' : '○'} ${quest.title} · ${quest.rewardPoints} points` });
       if (adminMode()) {
         row.append(h('button', { class: 'copal-btn', text: 'Edit', onclick: () => editQuest(quest) }));
-        row.append(h('button', { class: 'copal-btn danger', text: '×', title: 'Delete quest', onclick: async () => { if (await styledConfirm(`Delete quest "${quest.title}"?`, { title: 'Delete quest', confirmText: 'Delete quest', danger: true })) await command('quest.delete', { questId: quest.id }); } }));
+        row.append(h('button', { class: 'copal-btn danger', icon: 'trash', text: '', title: 'Delete quest', onclick: async () => { if (await styledConfirm(`Delete quest "${quest.title}"?`, { title: 'Delete quest', confirmText: 'Delete quest', danger: true })) await command('quest.delete', { questId: quest.id }); } }));
       }
       questSection.append(row);
     }
@@ -910,7 +930,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
   function renderAssignments(root) {
     const state = ui.snapshot.state;
     const toolbar = h('div', { class: 'copal-treehouse-section-head' }, h('div', {}, h('h2', { text: 'Assignments' }), h('p', { text: 'Draft, publish, submit, retry, grade, and explain progress end to end.' })));
-    if (adminMode()) toolbar.append(h('button', { class: 'copal-btn primary', text: '+ Assignment', onclick: () => createAssignment() }));
+    if (adminMode()) toolbar.append(h('button', { class: 'copal-btn primary', icon: 'add', text: 'Assignment', onclick: () => createAssignment() }));
     root.append(toolbar);
     const list = h('div', { class: 'copal-card-grid' });
     for (const assignment of values(state.assignments)) {
@@ -919,7 +939,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       if (submission) card.append(h('p', { text: `Your submission: ${submission.status} · attempt ${submission.attempts}${submission.grade != null ? ` · ${submission.grade}/${assignment.maxPoints}` : ''}${submission.feedback ? ` · ${submission.feedback}` : ''}` }));
       if (courseCanEdit(assignment.courseId)) card.append(h('button', { class: 'copal-btn', text: 'Edit', onclick: () => editAssignment(assignment) }));
       if (courseCanEdit(assignment.courseId) && assignment.status === 'draft') card.append(h('button', { class: 'copal-btn primary', text: 'Publish', onclick: () => command('assignment.publish', { assignmentId: assignment.id }) }));
-      if (courseCanEdit(assignment.courseId)) card.append(h('button', { class: 'copal-btn danger', text: '×', title: 'Delete assignment', onclick: async () => { if (await styledConfirm(`Delete assignment "${assignment.title}"?`, { title: 'Delete assignment', confirmText: 'Delete assignment', danger: true })) await command('assignment.delete', { assignmentId: assignment.id }); } }));
+      if (courseCanEdit(assignment.courseId)) card.append(h('button', { class: 'copal-btn danger', icon: 'trash', text: '', title: 'Delete assignment', onclick: async () => { if (await styledConfirm(`Delete assignment "${assignment.title}"?`, { title: 'Delete assignment', confirmText: 'Delete assignment', danger: true })) await command('assignment.delete', { assignmentId: assignment.id }); } }));
       if (ui.snapshot.permissions.learner && assignment.status === 'published' && currentEnrollment(assignment.courseId)) card.append(h('button', { class: 'copal-btn primary', text: submission ? 'Submit another attempt' : 'Submit', onclick: () => submitAssignment(assignment) }));
       list.append(card);
     }
@@ -943,108 +963,44 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     return api(`/treehouse/achievements${path}`, options);
   }
 
-  async function showAchievementToast(note) {
-    // S12 task-identity: when the award evidence names an original task chat,
-    // the toast action opens that durable session — never a substitute chat.
-    const openOriginal = () => {
-      if (note.sessionId && window.sessionModule?.selectSession) {
-        window.sessionModule.selectSession(note.sessionId);
-      }
-    };
-    let showToast = window.uiModule?.showToast;
-    if (!showToast) {
-      try {
-        const ui = await import('../ui.js');
-        showToast = ui.showToast;
-      } catch (_) { showToast = null; }
-    }
-    const label = note.title || note.achievementKey || 'Achievement';
-    const body = note.rarity === 'ultra' ? `Ultra rare earned: ${label}` : `Achievement earned: ${label}`;
-    if (showToast) {
-      showToast(body, {
-        duration: 12000,
-        action: note.sessionId ? { label: 'Open task', onClick: openOriginal } : undefined,
-      });
-    }
-    // Also fire a browser Notification when permitted; clicking opens the
-    // same original task chat when the award names one.
-    try {
-      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-        const ntf = new Notification(body, {
-          tag: 'achievement-' + (note.achievementId || note.outboxId || label),
-          icon: '/static/favicon.ico',
-        });
-        if (note.sessionId) ntf.onclick = () => { window.focus(); openOriginal(); };
-      }
-    } catch (_) {}
-  }
-
-  async function pollAchievementNotifications() {
-    // Dedupe by award ID across reconnects/tabs via the durable outbox.
-    // Grouped bursts (historical backfill) emit one summary toast.
-    if (!ui.snapshot?.accountId) return;
-    if (ui._achievementPolling) return;
-    ui._achievementPolling = true;
-    try {
-      const data = await achievementApi('/notifications?limit=20');
-      const notes = data.notifications || [];
-      if (!notes.length) return;
-      const batches = new Map();
-      for (const note of notes) batches.set(note.batchId || note.achievementId, note);
-      if (batches.size === 1 && (notes[0].batchId === 'backfill' || notes.length > 1)) {
-        // One catch-up summary rather than dozens of toasts.
-        if (notes.length > 1) {
-          await showAchievementToast({ title: `${notes.length} achievements from earlier activity`, achievementId: 'batch', outboxId: notes[0].outboxId });
-          for (const note of notes) {
-            try { await achievementApi(`/notifications/${encodeURIComponent(note.outboxId)}/delivered`, { method: 'POST' }); } catch (_) {}
-          }
-          return;
-        }
-      }
-      for (const note of notes) {
-        await showAchievementToast(note);
-        try { await achievementApi(`/notifications/${encodeURIComponent(note.outboxId)}/delivered`, { method: 'POST' }); }
-        catch (_) {
-          // A failed toast cannot erase the durable award; leave the outbox
-          // row for retry rather than marking delivered.
-          try { await achievementApi(`/notifications/${encodeURIComponent(note.outboxId)}/failed`, { method: 'POST' }); } catch (_) {}
-        }
-      }
-    } catch (_) {
-      // Polling is best-effort; the achievements view remains the durable record.
-    } finally {
-      ui._achievementPolling = false;
-    }
-  }
-
   function renderAchievements(root) {
-    const toolbar = h('div', { class: 'copal-treehouse-section-head' }, h('div', {}, h('h2', { text: 'Achievements' }), h('p', { text: 'Account-wide lifetime awards earned from real activity. Deterministic receipts only — no model judges your work.' })));
+    const toolbar = h('div', { class: 'copal-treehouse-section-head' }, h('div', {}, h('h2', { text: 'Achievements' }), h('p', { text: 'Account-wide awards earned from real activity.' })));
     const host = h('div', { class: 'copal-empty', text: 'Loading achievements…' });
     root.append(toolbar, host);
-    const adminSpoilers = adminMode() && ui.snapshot?.permissions?.admin;
+    const adminSpoilers = root !== achievementPanelBody && adminMode() && ui.snapshot?.permissions?.admin;
     achievementApi(`?admin=${adminSpoilers ? 'true' : 'false'}`).then((presentation) => {
+      if (!host.isConnected) return;
       const counter = h('section', { class: 'copal-card' },
         h('h3', { text: 'Progress' }),
-        h('strong', { text: presentation.counter || '0/34' }),
-        h('small', { text: adminSpoilers ? 'admin spoilers on' : 'mystery entries show ??? until earned' }),
+        h('p', {}, h('strong', { text: `${presentation.counter || '0/34'} earned` })),
+        h('p', {}, h('small', { text: adminSpoilers ? 'Admin spoilers on' : 'Mystery entries show ??? until earned' })),
       );
       const list = h('div', { class: 'copal-treehouse-achievements', role: 'list', 'aria-label': 'Achievement catalog' });
-      for (const entry of presentation.entries || []) {
-        const locked = entry.locked && !entry.earned;
-        const title = entry.earned ? entry.title : (entry.rarity === 'mystery' ? '???' : (adminSpoilers ? entry.title : entry.title));
-        const item = h('article', {
-          class: `copal-card copal-achievement copal-achievement-${entry.rarity}${entry.earned ? ' earned' : ''}`,
-          role: 'listitem',
-          'data-achievement-id': entry.id,
-        },
-          h('h4', { text: title }),
-          h('p', { text: entry.earned || adminSpoilers || entry.rarity === 'normal' ? (entry.summary || '') : '' }),
-          h('small', { text: entry.earned ? 'Earned' : (entry.rarity === 'ultra' ? 'Ultra rare' : (entry.rarity === 'mystery' ? '???' : 'Locked')) }),
-        );
-        list.append(item);
-      }
-      host.replaceChildren(counter, list);
-      void pollAchievementNotifications();
+      let filter = 'earned';
+      const filters = h('div', { class: 'copal-treehouse-actions', role: 'group', 'aria-label': 'Achievement filter' });
+      const draw = () => {
+        list.replaceChildren();
+        for (const entry of presentation.entries || []) {
+          if (filter === 'earned' && !entry.earned || filter === 'locked' && entry.earned) continue;
+          const title = !entry.earned && entry.rarity === 'mystery' && !adminSpoilers ? '???' : entry.title;
+          const item = h('article', {
+            class: `copal-card copal-achievement copal-achievement-${entry.rarity}${entry.earned ? ' earned' : ' locked'}`,
+            role: 'listitem',
+            'data-achievement-id': entry.id,
+          },
+            h('h4', { text: title }),
+            h('p', { text: entry.earned || adminSpoilers || entry.rarity === 'normal' ? (entry.summary || '') : '' }),
+            h('small', { text: entry.earned ? 'Earned' : (entry.rarity === 'ultra' ? 'Ultra rare' : (entry.rarity === 'mystery' ? '???' : 'Locked')) }),
+          );
+          list.append(item);
+        }
+        if (!list.childNodes.length) list.append(h('p', { text: filter === 'earned' ? 'No achievements earned yet.' : 'No achievements in this filter.' }));
+        filters.querySelectorAll('button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.filter === filter)));
+      };
+      for (const [id, label] of [['earned', 'Earned'], ['all', 'All'], ['locked', 'Locked']]) filters.append(h('button', { class: 'copal-btn', text: label, 'data-filter': id, onclick: () => { filter = id; draw(); } }));
+      host.replaceChildren(counter, filters, list);
+      draw();
+      void drainAchievementNotifications();
     }).catch((error) => {
       host.replaceChildren(h('div', { class: 'copal-empty' }, h('p', { text: error.message || 'Achievements unavailable' })));
     });
@@ -1153,7 +1109,7 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
       // context-menu activation focuses the same view as the lesson action,
       // preserving chat identity and unsaved drafts. Failures surface in the
       // status line instead of vanishing.
-      const opened = openAppDestination(appLink, null);
+      const opened = await openAppDestination(appLink, null, { sourceKind:'treehouse' });
       if (opened && opened.ok === false) setStatus(opened.error || `Could not open ${appLink}`, true);
     } else if (href && href !== '#') {
       window.location.assign(href);
@@ -1161,11 +1117,26 @@ export function createTreeHouseFeature({ h, api, setStatus, renderMarkdown, open
     return true;
   }
 
+  let achievementPanelBody = null;
+  function renderAchievementsPanel(body) {
+    achievementPanelBody = body;
+    body.replaceChildren();
+    renderAchievements(body);
+  }
+
+  const refreshAchievementPanels = event => {
+    if (achievementPanelBody?.isConnected) renderAchievementsPanel(achievementPanelBody);
+    if (ui.snapshot?.accountId !== event.detail?.accountId) return;
+    if (ui.body?.isConnected && ui.section === 'achievements') renderLoaded();
+  };
+  document.addEventListener('openclank:achievements-reset', refreshAchievementPanels);
+  document.addEventListener('openclank:achievement-unlocked', refreshAchievementPanels);
+
   async function render(body) {
     ui.body = body;
     body.replaceChildren(h('div', { class: 'copal-empty', text: 'Loading TreeHouse domain…' }));
     try { if (await load()) renderLoaded(); } catch (error) { if (ui.body === body) renderFailure(error); }
   }
 
-  return { render, command, handleContextCommand, loadState, suspendScope, attachLessonResource, exportCoursePackageToFiles, get snapshot() { return ui.snapshot; } };
+  return { render, renderAchievementsPanel, command, handleContextCommand, loadState, suspendScope, attachLessonResource, exportCoursePackageToFiles, get snapshot() { return ui.snapshot; } };
 }

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from core.atomic_io import AtomicFileChange, atomic_write_batch, atomic_write_json
-from core.database import GalleryImage, PublishedFile, Session
+from core.database import FilesImageResource, PublishedFile, Session
 from services.memory.skill_lifecycle import locked
 
 
@@ -157,11 +157,16 @@ class AccountAncillaryLifecycle:
         db = self._session_factory()
         try:
             gallery = [
-                {"id": str(row.id), "name": str(row.filename)}
-                for row in db.query(GalleryImage.id, GalleryImage.filename)
-                .filter(GalleryImage.owner == owner)
-                .order_by(GalleryImage.id)
+                {"id": str(row.id), "name": str(row.locator)}
+                for row in db.query(FilesImageResource.id, FilesImageResource.locator)
+                .filter(
+                    FilesImageResource.owner == owner,
+                    FilesImageResource.kind == "image",
+                    FilesImageResource.is_active.is_(True),
+                )
+                .order_by(FilesImageResource.id)
                 .all()
+                if row.locator
             ]
             published = [
                 {"id": str(row.id)}

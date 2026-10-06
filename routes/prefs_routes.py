@@ -1,6 +1,10 @@
 """User preferences API — per-user key/value store backed by a JSON file."""
 import json
 import os
+import threading
+import tempfile
+
+PREFERENCE_LOCK = threading.RLock()
 from typing import Iterable, Optional
 from fastapi import APIRouter, HTTPException, Request
 from src.auth_helpers import get_current_user
@@ -28,7 +32,8 @@ def _load():
 
 def _save(prefs):
     os.makedirs(os.path.dirname(PREFS_FILE) or ".", exist_ok=True)
-    tmp = f"{PREFS_FILE}.tmp.{os.getpid()}"
+    fd, tmp = tempfile.mkstemp(prefix=".prefs-", dir=os.path.dirname(PREFS_FILE) or ".")
+    os.close(fd)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(prefs, f, indent=2)
         f.flush()
@@ -45,11 +50,12 @@ def _load_for_user(user: Optional[str] = None) -> dict:
             users = all_prefs["_users"]
             return dict(next(iter(users.values()), {}))
         return dict(all_prefs["_users"].get(user, {}))
-    # Legacy flat format — return as-is
+    if user is not None and all_prefs:
+        raise ValueError("Legacy preferences require .clanker/tools/migrations/python/secondary.py prefs")
     return dict(all_prefs)
 
 
-def _save_for_user(user: Optional[str], prefs: dict):
+def _save_for_user_unlocked(user: Optional[str], prefs: dict):
     """Save preferences for a specific user."""
     all_prefs = _load()
     if user is None:
@@ -68,9 +74,31 @@ def _save_for_user(user: Optional[str], prefs: dict):
         _save(prefs)
         return
     if "_users" not in all_prefs:
+        if all_prefs:
+            raise ValueError("Legacy preferences require .clanker/tools/migrations/python/secondary.py prefs")
         all_prefs = {"_users": {}}
     all_prefs["_users"][user] = prefs
     _save(all_prefs)
+
+
+def _save_for_user(user: Optional[str], prefs: dict, *, allow_logging=False):
+    with PREFERENCE_LOCK:
+        updated = dict(prefs)
+        if not allow_logging:
+            current = _load_for_user(user)
+            if "logging_preferences" in current:
+                updated["logging_preferences"] = current["logging_preferences"]
+            else:
+                updated.pop("logging_preferences", None)
+        return _save_for_user_unlocked(user, updated)
+
+
+def _update_for_user(user, patch):
+    with PREFERENCE_LOCK:
+        current = _load_for_user(user)
+        current.update(patch)
+        _save_for_user(user, current)
+        return current
 
 
 def _mobile_control_side(value) -> str:
@@ -82,56 +110,6 @@ def _mobile_control_side(value) -> str:
     return "system"
 
 
-def backfill_memory_modes(existing_users: Iterable[str] = ()) -> bool:
-    """Freeze pre-v2 account behavior before the missing default becomes manual."""
-    all_prefs = _load()
-    users = [str(user or "").strip().lower() for user in existing_users]
-    users = list(dict.fromkeys(user for user in users if user))
-    changed = False
-
-    def freeze(prefs: dict) -> None:
-        nonlocal changed
-        raw = str(prefs.get("memory_mode") or "").strip().lower()
-        if raw in _MEMORY_MODES:
-            if prefs.get("memory_mode") != raw:
-                prefs["memory_mode"] = raw
-                changed = True
-            return
-        prefs["memory_mode"] = "off" if prefs.get("auto_memory") is False else "automatic"
-        changed = True
-
-    scoped = all_prefs.get("_users")
-    if isinstance(scoped, dict):
-        targets = users or [str(user) for user in scoped]
-        for user in targets:
-            prefs = scoped.get(user)
-            if not isinstance(prefs, dict):
-                prefs = {}
-                scoped[user] = prefs
-                changed = True
-            freeze(prefs)
-    elif users:
-        # The historical flat store belonged to the sole configured account.
-        # Database startup already performs this conversion; retain the same
-        # deterministic rule here for startup orders that reach prefs first.
-        if len(users) == 1:
-            prefs = dict(all_prefs)
-            freeze(prefs)
-            all_prefs = {"_users": {users[0]: prefs}}
-            changed = True
-        else:
-            all_prefs = {"_users": {}}
-            for user in users:
-                prefs = {}
-                freeze(prefs)
-                all_prefs["_users"][user] = prefs
-            changed = True
-    elif all_prefs:
-        freeze(all_prefs)
-
-    if changed:
-        _save(all_prefs)
-    return changed
 
 
 def setup_prefs_routes():
@@ -187,8 +165,9 @@ def setup_prefs_routes():
                     detail="mobile_control_side must be left, right, or system",
                 )
             value = value.strip().lower()
-        prefs[key] = value
-        _save_for_user(user, prefs)
+        if key == "logging_preferences":
+            raise HTTPException(422, "Use the validated Logging policy endpoint")
+        prefs = _update_for_user(user, {key: value})
         return {"key": key, "value": prefs[key]}
 
     return router

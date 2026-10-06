@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-app engine verification and atomic provider migration bootstrap."""
+"""Service engine verification and read-only provider store admission."""
 
 from __future__ import annotations
 
@@ -58,16 +58,6 @@ def _normalize_application_environment(
         target.pop("DEBUG", None)
 
 
-def __getattr__(name: str):
-    # Compatibility for diagnostics/tests without importing migration code (and
-    # therefore application constants/state) during the frozen entrypoint load.
-    if name == "PROVIDER_ENV_AUTHORITIES":
-        from src.openclank.provider_migration import PROVIDER_ENV_AUTHORITIES
-
-        return PROVIDER_ENV_AUTHORITIES
-    raise AttributeError(name)
-
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -120,20 +110,24 @@ def verify_portable_payload() -> dict | None:
         "public_entrypoint",
         "contents_directory",
         "engine",
+        "helpers",
     }
     if not isinstance(manifest, dict) or set(manifest) != expected_manifest_fields:
         raise EngineBuildError("portable provenance fields are incompatible")
     expected_values = {
-        "schema_version": 1,
+        "schema_version": 2,
         "product": "Open Clank",
-        "artifact_kind": "windows-x64-portable",
-        "target": "windows-x64",
         "public_entrypoint": "openclank.exe",
         "contents_directory": "_internal",
     }
     for field, expected in expected_values.items():
         if manifest.get(field) != expected:
             raise EngineBuildError(f"portable provenance {field} is incompatible")
+    target_name = manifest.get("target")
+    if target_name not in {"windows-x64", "windows-arm64"} or manifest.get("artifact_kind") != f"{target_name}-portable":
+        raise EngineBuildError("portable target/artifact kind is incompatible")
+    from src.openclank.engine_build import _verify_pe_target
+    _verify_pe_target(Path(sys.executable), target_name)
     if Path(sys.executable).name.casefold() != "openclank.exe":
         raise EngineBuildError("portable public entrypoint has an unexpected name")
     internal_root = (bundle_root / "_internal").resolve()
@@ -155,6 +149,50 @@ def verify_portable_payload() -> dict | None:
         if _sha256_file(target) != digest:
             raise EngineBuildError(f"portable payload checksum mismatch: {relative}")
         checksums[relative] = digest
+
+    helpers = manifest.get("helpers")
+    if not isinstance(helpers, dict) or set(helpers) != {"inventory_path", "inventory_sha256"}:
+        raise EngineBuildError("portable helper inventory fields are incompatible")
+    inventory_relative = "_internal/bin/helper-artifacts.json"
+    if helpers.get("inventory_path") != inventory_relative or checksums.get(inventory_relative) != helpers.get("inventory_sha256"):
+        raise EngineBuildError("portable helper inventory is missing or stale")
+    try:
+        inventory = json.loads(_portable_child(bundle_root, inventory_relative, "helper inventory").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise EngineBuildError("portable helper inventory is invalid") from exc
+    if not isinstance(inventory, dict) or inventory.get("schema_version") != 1 or inventory.get("target") != target_name:
+        raise EngineBuildError("portable helper inventory target/schema disagrees")
+    required_helpers = {"odysseus-files-service.exe", "odysseus-shell-thumbnail-helper.exe", "openclank-history-service.exe", "fm-mcp.exe", "openclank-windows-host-apps.exe", "openclank-windows-desktop-capture.exe"}
+    admitted_helpers = set()
+    artifacts = inventory.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise EngineBuildError("portable helper artifacts are malformed")
+    for helper in artifacts:
+        if not isinstance(helper, dict):
+            raise EngineBuildError("portable helper metadata is malformed")
+        name = helper.get("name")
+        if not isinstance(name, str):
+            raise EngineBuildError("portable helper name is malformed")
+        if name not in required_helpers or name in admitted_helpers:
+            raise EngineBuildError("portable helper name is invalid/duplicated")
+        admitted_helpers.add(name)
+        relative = "_internal/bin/" + name
+        binary = _portable_child(bundle_root, relative, "helper")
+        if helper.get("target") != target_name or checksums.get(relative) != helper.get("sha256") or binary.stat().st_size != helper.get("size"):
+            raise EngineBuildError("portable helper target/hash/size disagrees")
+        inputs = helper.get("source_inputs")
+        if not isinstance(inputs, list) or not inputs:
+            raise EngineBuildError("portable helper source provenance is missing")
+        for item in inputs:
+            if not isinstance(item, dict) or set(item) != {"path", "sha256"} or not _SHA256_RE.fullmatch(str(item.get("sha256", ""))):
+                raise EngineBuildError("portable helper source provenance is malformed")
+            _portable_child(bundle_root, str(item["path"]), "helper source identity")
+        source_hash = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if source_hash != helper.get("source_sha256"):
+            raise EngineBuildError("portable helper source fingerprint disagrees")
+        _verify_pe_target(binary, target_name)
+    if not required_helpers.issubset(admitted_helpers):
+        raise EngineBuildError("portable payload omits required helpers")
 
     engine = manifest.get("engine")
     expected_engine_fields = {
@@ -261,7 +299,7 @@ def _data_dir(value: Path | None) -> Path:
 
 
 def _configured_provider_environment() -> list[str]:
-    from src.openclank.provider_migration import PROVIDER_ENV_AUTHORITIES
+    from src.openclank.provider_startup import PROVIDER_ENV_AUTHORITIES
 
     return sorted(
         name
@@ -283,25 +321,17 @@ def _reject_provider_environment() -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openclank bootstrap",
-        description="Verify the private engine and complete the provider hard cut before app import",
+        description="Verify the private engine and validate the current store before app import",
     )
     parser.add_argument("--data-dir", type=Path)
     sub = parser.add_subparsers(dest="command")
 
-    serve = sub.add_parser("serve", help="migrate if needed and start the complete service")
+    serve = sub.add_parser("serve", help="validate the current store and start the complete service")
     serve.add_argument("--host", default=os.environ.get("APP_BIND", "127.0.0.1"))
     serve.add_argument("--port", type=int, default=int(os.environ.get("APP_PORT", "7777")))
-    serve.add_argument("--owner")
     serve.add_argument("uvicorn_args", nargs=argparse.REMAINDER)
 
-    migrate = sub.add_parser("migrate", help="run a pre-app migration without starting the server")
-    migrate_sub = migrate.add_subparsers(dest="migration", required=True)
-    providers = migrate_sub.add_parser("providers")
-    providers.add_argument("--owner")
-    providers.add_argument("--auth-disabled", action="store_true")
-
-    check = sub.add_parser("check", help="verify engine and current provider cutover state")
-    check.add_argument("--owner")
+    check = sub.add_parser("check", help="verify engine and current provider store")
 
     runtime = sub.add_parser(
         "runtime",
@@ -310,62 +340,20 @@ def _parser() -> argparse.ArgumentParser:
     runtime.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     runtime.add_argument("--browser", action="store_true")
 
-    restore = sub.add_parser("restore", help="restore one whole rollback archive")
-    restore.add_argument("archive", type=Path)
-    restore.add_argument("--accept-post-cut-data-loss", action="store_true")
     return parser
 
 
-def _cutover(data: Path, *, owner: str | None, auth_enabled: bool = True):
-    from src.openclank.provider_cutover import run_provider_cutover
-    from src.openclank.provider_migration import ProviderMigrationError
-
-    try:
-        return run_provider_cutover(
-            data_dir=data,
-            explicit_owner=owner,
-            auth_enabled=auth_enabled,
-            verify_engine=False,
-        )
-    except ProviderMigrationError as exc:
-        raise BootstrapError(str(exc)) from exc
-
-
 def _report(result, engine) -> dict:
-    return {
-        "ok": result.complete,
-        "engine": {
-            "version": engine.version,
-            "target": engine.target,
-            "source_sha256": engine.source_sha256,
-        },
-        "provider_cutover": {
-            "needed": result.needed,
-            "phase": result.phase,
-            "archive": result.archive,
-            "counts": dict(result.counts or {}),
-        },
-    }
+    return {"ok": result["complete"], "engine": {"version": engine.version, "target": engine.target, "source_sha256": engine.source_sha256}, "provider_store": result}
 
 
 def prepare_service(
     data_dir: Path | None = None,
-    *,
-    owner: str | None = None,
-    auth_enabled: bool | None = None,
 ):
-    """Verify the exact engine and complete the provider cut before app import.
-
-    The source launcher and frozen Windows entrypoint share this function so
-    packaged startup cannot quietly bypass the same fail-closed invariants.
-    The returned environment is ready for importing ``app``; this function
-    itself never imports it.
-    """
+    """Verify the engine and read-only provider state before importing app."""
 
     _normalize_application_environment()
     verify_portable_payload()
-    # Importing application constants may migrate a legacy data-directory name;
-    # it therefore occurs only after the frozen payload integrity gate.
     from src.constants import APP_VERSION
 
     data = _data_dir(data_dir)
@@ -373,15 +361,14 @@ def prepare_service(
     expected_url = f"sqlite:///{data / 'app.db'}"
     if database_url and database_url != expected_url:
         raise BootstrapError(
-            "the atomic provider cutover currently requires the installation SQLite database"
+            "service startup validation requires the installation SQLite database"
         )
     engine = ensure_engine_ready(version=APP_VERSION).require()
-    effective_auth = (
-        os.environ.get("AUTH_ENABLED", "true").lower() != "false"
-        if auth_enabled is None
-        else bool(auth_enabled)
-    )
-    result = _cutover(data, owner=owner, auth_enabled=effective_auth)
+    from src.openclank.provider_startup import validate_provider_store
+    try:
+        result = validate_provider_store(data)
+    except RuntimeError as exc:
+        raise BootstrapError(str(exc)) from exc
     _reject_provider_environment()
     os.environ["OPEN_CLANK_DATA_DIR"] = str(data)
     os.environ["OPEN_CLANK_ENGINE_BIN"] = str(engine.binary)
@@ -394,7 +381,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         args.host = os.environ.get("APP_BIND", "127.0.0.1")
         args.port = int(os.environ.get("APP_PORT", "7777"))
-        args.owner = None
         args.uvicorn_args = []
     try:
         verify_portable_payload()
@@ -419,43 +405,20 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"ok": True, **report}, sort_keys=True))
             return 0
         data = _data_dir(args.data_dir)
-        if command == "restore":
-            from src.openclank.migration_snapshot import (
-                MigrationSnapshotError,
-                restore_rollback_archive,
-                verify_rollback_archive,
-            )
-
-            try:
-                report = verify_rollback_archive(args.archive)
-                restored = restore_rollback_archive(
-                    args.archive,
-                    data,
-                    accept_post_cut_data_loss=args.accept_post_cut_data_loss,
-                )
-            except MigrationSnapshotError as exc:
-                raise BootstrapError(str(exc)) from exc
-            print(json.dumps({"ok": True, "verified": report, **restored}, sort_keys=True))
-            return 0
-
-        owner = getattr(args, "owner", None)
-        auth_enabled = os.environ.get("AUTH_ENABLED", "true").lower() != "false"
-        if bool(getattr(args, "auth_disabled", False)):
-            auth_enabled = False
-        data, result, engine = prepare_service(
-            data,
-            owner=owner,
-            auth_enabled=auth_enabled,
-        )
+        data, result, engine = prepare_service(data)
         report = _report(result, engine)
 
-        if command in {"migrate", "check"}:
+        if command == "check":
             print(json.dumps(report, sort_keys=True))
             return 0
 
         if not 1 <= int(args.port) <= 65535:
             raise BootstrapError("server port must be between 1 and 65535")
         environment = os.environ.copy()
+        # The launchers pass an explicit --port.  Preserve that selected port
+        # for the application as well: callback and internal URL builders use
+        # APP_PORT rather than inspecting uvicorn's command line.
+        environment["APP_PORT"] = str(args.port)
         environment["OPEN_CLANK_DATA_DIR"] = os.environ["OPEN_CLANK_DATA_DIR"]
         environment["OPEN_CLANK_ENGINE_BIN"] = os.environ["OPEN_CLANK_ENGINE_BIN"]
         command_line = [
@@ -467,6 +430,8 @@ def main(argv: list[str] | None = None) -> int:
             str(args.host),
             "--port",
             str(args.port),
+            "--timeout-graceful-shutdown",
+            "10",
             *list(args.uvicorn_args or []),
         ]
         os.execvpe(command_line[0], command_line, environment)

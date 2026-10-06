@@ -98,6 +98,39 @@ def test_kill_finished_job_is_noop(store):
     assert store["killed"] == []  # no signal sent to an already-finished job
 
 
+def test_exited_pending_capture_becomes_terminal_after_failed(store):
+    rec = _seed(job_id="pending1")
+    state_path = store["dir"] / "pending1.capture.json"
+    exit_path = store["dir"] / "pending1.exit"
+    rec["capture_state_path"] = str(state_path)
+    rec["exit_path"] = str(exit_path)
+    jobs = bg_jobs._load()
+    jobs["pending1"] = rec
+    bg_jobs._save(jobs)
+    state_path.write_text(
+        json.dumps({
+            "action_id": "shell:sess-a:pending1",
+            "phase": "pending",
+            "result": {
+                "history_status": "failed",
+                "capture_phase": "after_failed",
+                "error": "late writer outlived the worker",
+            },
+        }),
+        encoding="utf-8",
+    )
+    exit_path.write_text("1", encoding="utf-8")
+
+    first = bg_jobs.refresh()["pending1"]
+    second = bg_jobs.refresh()["pending1"]
+    assert first["status"] == "failed"
+    assert first["capture_phase"] == "after_failed"
+    assert first["capture_result"]["capture_phase"] == "after_failed"
+    assert first["ended_at"] is not None
+    assert second["status"] == "failed"
+    assert second["ended_at"] == first["ended_at"]
+
+
 def test_result_text_reports_killed(store):
     rec = _seed(job_id="job0001")
     bg_jobs.kill("job0001")
@@ -371,3 +404,198 @@ def test_non_bg_messages_do_not_trip_files_domain(msg):
     from src.agent_loop import _classify_agent_request
     r = _classify_agent_request([{"role": "user", "content": msg}], msg)
     assert "files" not in r["domains"]
+
+
+def test_exited_pending_terminalization_abandons_root_journal(store):
+    rec = _seed(job_id="journal1")
+    state_path = store["dir"] / "journal1.capture.json"
+    journal_path = store["dir"] / "journal1.root-journal.json"
+    exit_path = store["dir"] / "journal1.exit"
+    rec["capture_state_path"] = str(state_path)
+    rec["root_journal_path"] = str(journal_path)
+    rec["exit_path"] = str(exit_path)
+    jobs = bg_jobs._load()
+    jobs["journal1"] = rec
+    bg_jobs._save(jobs)
+
+    from src.openclank.history_capture import RootJournal, WriterOwner
+
+    owner = WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:journal1",
+    )
+    RootJournal(str(journal_path)).open(
+        action_id="shell:sess-a:journal1",
+        writer_owner=owner,
+        roots=[str(store["dir"])],
+    )
+    state_path.write_text(
+        json.dumps({
+            "action_id": "shell:sess-a:journal1",
+            "phase": "pending",
+            "result": {
+                "history_status": "failed",
+                "capture_phase": "after_failed",
+                "error": "late writer outlived the worker",
+            },
+        }),
+        encoding="utf-8",
+    )
+    exit_path.write_text("1", encoding="utf-8")
+
+    updated = bg_jobs.refresh()["journal1"]
+    assert updated["status"] == "failed"
+    assert updated["capture_phase"] == "after_failed"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["phase"] == "abandoned"
+    assert journal["result"]["history_status"] == "failed"
+
+
+def test_restart_shaped_capture_state_with_open_journal_terminalizes_honestly(store):
+    rec = _seed(job_id="restart1", pid=4321)
+    state_path = store["dir"] / "restart1.capture.json"
+    journal_path = store["dir"] / "restart1.root-journal.json"
+    exit_path = store["dir"] / "restart1.exit"
+    rec["capture_state_path"] = str(state_path)
+    rec["root_journal_path"] = str(journal_path)
+    rec["exit_path"] = str(exit_path)
+    jobs = bg_jobs._load()
+    jobs["restart1"] = rec
+    bg_jobs._save(jobs)
+
+    from src.openclank.history_capture import RootJournal, WriterOwner
+
+    owner = WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:restart1",
+    )
+    journal = RootJournal(str(journal_path))
+    journal.open(
+        action_id="shell:sess-a:restart1",
+        writer_owner=owner,
+        roots=[str(store["dir"])],
+    )
+    # Restart-shaped: durable running phase, no exit file yet, worker gone.
+    state_path.write_text(
+        json.dumps({
+            "action_id": "shell:sess-a:restart1",
+            "phase": "running",
+            "roots": [str(store["dir"])],
+        }),
+        encoding="utf-8",
+    )
+    # Simulate the vanished worker by writing the exit file as the wrapper would.
+    exit_path.write_text("1", encoding="utf-8")
+
+    updated = bg_jobs.refresh()["restart1"]
+    assert updated["status"] == "failed"
+    assert updated["capture_phase"] == "after_failed"
+    assert updated["ended_at"] is not None
+    journal_state = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal_state["phase"] == "abandoned"
+    assert journal_state["result"]["history_status"] == "failed"
+    assert journal_state["result"]["capture_phase"] == "after_failed"
+
+
+def test_timed_out_dead_worker_abandons_root_journal(store, monkeypatch):
+    rec = _seed(job_id="timeout1", pid=4321)
+    state_path = store["dir"] / "timeout1.capture.json"
+    journal_path = store["dir"] / "timeout1.root-journal.json"
+    exit_path = store["dir"] / "timeout1.exit"
+    rec["capture_state_path"] = str(state_path)
+    rec["root_journal_path"] = str(journal_path)
+    rec["exit_path"] = str(exit_path)
+    rec["started_at"] = time.time() - 7200
+    rec["capture_result"] = {
+        "history_status": "complete",
+        "capture_phase": "complete",
+    }
+    jobs = bg_jobs._load()
+    jobs["timeout1"] = rec
+    bg_jobs._save(jobs)
+
+    from src.openclank.history_capture import RootJournal, WriterOwner
+
+    owner = WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:timeout1",
+    )
+    RootJournal(str(journal_path)).open(
+        action_id="shell:sess-a:timeout1",
+        writer_owner=owner,
+        roots=[str(store["dir"])],
+    )
+    # Still alive at timeout: reconciling, journal left open for the worker.
+    updated = bg_jobs.refresh()["timeout1"]
+    assert updated["timed_out"] is True
+    assert updated["status"] == "reconciling"
+    assert updated["ended_at"] is None
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["phase"] == "open"
+
+    # Worker dies without writing exit_path: same abandon path as vanished,
+    # including stripping any false success. Must not stay immortal reconciling.
+    monkeypatch.setattr(bg_jobs, "_pid_alive", lambda pid: False)
+    updated = bg_jobs.refresh()["timeout1"]
+    assert updated["status"] == "failed"
+    assert updated["timed_out"] is True
+    assert updated["died"] is True
+    assert updated["ended_at"] is not None
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["phase"] == "abandoned"
+    assert journal["result"]["history_status"] == "failed"
+    assert journal["result"]["capture_phase"] == "after_failed"
+
+
+def test_timed_out_already_dead_worker_abandons_root_journal(store, monkeypatch):
+    monkeypatch.setattr(bg_jobs, "_pid_alive", lambda pid: False)
+    rec = _seed(job_id="timeout2", pid=4321)
+    journal_path = store["dir"] / "timeout2.root-journal.json"
+    exit_path = store["dir"] / "timeout2.exit"
+    rec["root_journal_path"] = str(journal_path)
+    rec["exit_path"] = str(exit_path)
+    rec["started_at"] = time.time() - 7200
+    jobs = bg_jobs._load()
+    jobs["timeout2"] = rec
+    bg_jobs._save(jobs)
+
+    from src.openclank.history_capture import RootJournal, WriterOwner
+
+    owner = WriterOwner(
+        owner_id="alice",
+        session_id="sess-a",
+        action_id="shell:sess-a:timeout2",
+    )
+    RootJournal(str(journal_path)).open(
+        action_id="shell:sess-a:timeout2",
+        writer_owner=owner,
+        roots=[str(store["dir"])],
+    )
+
+    updated = bg_jobs.refresh()["timeout2"]
+    assert updated["status"] == "failed"
+    assert updated["timed_out"] is True
+    assert updated["died"] is True
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["phase"] == "abandoned"
+    assert journal["result"]["history_status"] == "failed"
+
+
+def test_vanished_read_only_worker_does_not_mint_phantom_root_journal(store, monkeypatch):
+    monkeypatch.setattr(bg_jobs, "_pid_alive", lambda pid: False)
+    rec = _seed(job_id="readonly1", pid=4321)
+    journal_path = store["dir"] / "readonly1.root-journal.json"
+    exit_path = store["dir"] / "readonly1.exit"
+    rec["root_journal_path"] = str(journal_path)
+    rec["exit_path"] = str(exit_path)
+    jobs = bg_jobs._load()
+    jobs["readonly1"] = rec
+    bg_jobs._save(jobs)
+
+    updated = bg_jobs.refresh()["readonly1"]
+    assert updated["status"] == "failed"
+    assert updated["died"] is True
+    assert not journal_path.exists()

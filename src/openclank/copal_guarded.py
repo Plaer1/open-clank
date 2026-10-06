@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from src.openclank.copal_bridge import CopalBridgeError
+from src.openclank.copal_errors import CopalBridgeError
 
 
 def _canonical(value: Any) -> str:
@@ -39,21 +39,13 @@ class GuardedCommitCoordinator:
             raise CopalBridgeError("guarded commit journal is unreadable") from exc
         if not isinstance(value, dict) or value.get("schemaVersion") != self.VERSION:
             raise CopalBridgeError("guarded commit journal schema is unsupported")
-        # Read the pre-compaction shape once and rewrite it on the next sync.
-        if isinstance(value.get("actions"), dict):
-            pending = {key: entry for key, entry in value["actions"].items() if isinstance(entry, dict) and entry.get("status") == "pending"}
-            receipts = {key: entry.get("receipt", entry) for key, entry in value["actions"].items() if isinstance(entry, dict) and entry.get("status") == "complete"}
-            return {"schemaVersion": self.VERSION, "pending": pending, "receipts": receipts}
         if not isinstance(value.get("pending"), dict) or not isinstance(value.get("receipts"), dict):
             raise CopalBridgeError("guarded commit journal schema is unsupported")
-        return value
         return value
 
     def _write(self, value: dict[str, Any]) -> None:
         from src.openclank.copal_loose import LooseCopalRepository
         receipts = dict(value.get("receipts") or {})
-        if len(receipts) > 1000:
-            receipts = dict(list(receipts.items())[-1000:])
         value = {"schemaVersion": self.VERSION, "pending": dict(value.get("pending") or {}), "receipts": receipts}
         LooseCopalRepository._atomic_write(self.path, _canonical(value))
 

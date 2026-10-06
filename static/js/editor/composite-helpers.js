@@ -4,7 +4,7 @@
  *
  * Both helpers are stateless: the caller passes everything they need
  * (layer list, canvas dimensions, an offsets lookup). The legacy
- * gallery editor's module-level functions wrap these with their own
+ * Imps module-level functions wrap these with their own
  * state.
  */
 

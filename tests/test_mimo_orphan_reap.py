@@ -35,13 +35,13 @@ def test_spares_own_child():
 def test_spares_concurrent_app_py_child():
     assert _is_orphaned_open_clank_agent_worker(
         f"{_BUNDLED_MIMO} acp", ppid=999999, me=1447823,
-        parent_cmd="/usr/bin/python /home/e/sauce/ai/open-clank/app.py",
+        parent_cmd="/usr/bin/python /workspace/open-clank/app.py",
     ) is False
 
 
 def test_ignores_personal_mimo_serve():
     assert _is_orphaned_open_clank_agent_worker(
-        "/home/e/bin/mimo serve --hostname 127.0.0.1 --port 0",
+        "/workspace/bin/mimo serve --hostname 127.0.0.1 --port 0",
         ppid=1,
         me=1447823,
         parent_cmd=None,

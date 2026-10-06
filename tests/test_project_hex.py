@@ -54,7 +54,7 @@ def test_hex_is_nearest_and_parse_only(tmp_path: Path) -> None:
 
 def test_canonical_v2_contract_is_discovered_before_legacy_names(tmp_path: Path) -> None:
     _git(tmp_path)
-    canonical = tmp_path / ".clankers" / "hexes" / "contract.yaml"
+    canonical = tmp_path / ".clanker" / "hexes" / "contract.yaml"
     canonical.parent.mkdir(parents=True)
     canonical.write_text("contract: open-clank-hexes/v2\nhexes: []\n", encoding="utf-8")
     (tmp_path / ".hex").write_text("contract: open-clank-hexes/v1\nhexes: []\n", encoding="utf-8")
@@ -62,6 +62,38 @@ def test_canonical_v2_contract_is_discovered_before_legacy_names(tmp_path: Path)
     assert result.contract_path == str(canonical)
     assert result.contract["contract"] == "open-clank-hexes/v2"
     assert any("canonical v2" in item for item in result.diagnostics)
+
+
+def test_plural_contract_activation_remains_current_until_explicit_migration(tmp_path: Path) -> None:
+    _git(tmp_path)
+    legacy = tmp_path / ".clankers" / "hexes" / "contract.yaml"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("contract: open-clank-hexes/v2\nhexes: []\n", encoding="utf-8")
+    db = str(tmp_path / "fm.db")
+    resolution = resolve_hex(tmp_path)
+    activate_hex(resolution, owner="alice", project_id="project", db_path=db)
+    reread = require_hex_activation(tmp_path, owner="alice", project_id="project", db_path=db)
+    assert reread.contract_path == str(legacy)
+    assert reread.contract_hash == resolution.contract_hash
+    assert not (tmp_path / ".clanker").exists()
+
+    canonical = tmp_path / ".clanker" / "hexes" / "contract.yaml"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(legacy.read_bytes())
+    selected = resolve_hex(tmp_path)
+    assert selected.contract_path == str(canonical)
+    assert any(".clankers/hexes/contract.yaml" in value for value in selected.diagnostics)
+    assert not hex_activation_current(selected, owner="alice", project_id="project", db_path=db)
+
+
+def test_malformed_singular_contract_does_not_fall_back_to_plural(tmp_path: Path) -> None:
+    _git(tmp_path)
+    for layout, payload in ((".clanker", "contract: [broken"), (".clankers", "hexes: []\n")):
+        contract = tmp_path / layout / "hexes" / "contract.yaml"
+        contract.parent.mkdir(parents=True)
+        contract.write_text(payload, encoding="utf-8")
+    with pytest.raises(HexResolutionError, match="safe YAML"):
+        resolve_hex(tmp_path)
 
 
 def test_every_same_directory_contract_duplicate_fails_closed(tmp_path: Path) -> None:
@@ -357,9 +389,10 @@ def test_global_policy_context_is_canonical_and_owner_scoped(tmp_path: Path) -> 
     assert unregistered["enforced"] is False
     assert unregistered["activation"]["contract_version"] == "open-clank-hexes/v2"
     assert unregistered["canonical_paths"] == {
+        "archive": ".clanker/archive/",
         "plans": ".clanker/futures/",
-        "hexes": ".clankers/hexes/",
-        "robonotes": ".clankers/robonotes/",
+        "hexes": ".clanker/hexes/",
+        "robonotes": ".clanker/robonotes/",
     }
     assert ".clanker/futures" not in unregistered["explain"]
     assert "contract.yaml" in unregistered["explain"]
@@ -719,19 +752,20 @@ def test_executable_policy_requires_exact_expiring_revocable_trust(tmp_path: Pat
     assert events[1][1] == events[0][2]
 
 
-def test_canonical_v2_checks_are_bound_into_executable_manifest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("layout", [".clanker", ".clankers"])
+def test_canonical_v2_checks_are_bound_into_executable_manifest(tmp_path: Path, layout: str) -> None:
     """A trusted v2 policy must be invalidated when auto-loaded checks drift."""
     _git(tmp_path)
-    checks = tmp_path / ".clankers" / "hexes" / "checks"
+    checks = tmp_path / layout / "hexes" / "checks"
     checks.mkdir(parents=True)
     check = checks / "project_checks.py"
     check.write_text("def canonical_layout_paths(*_args, **_kwargs): return []\n", encoding="utf-8")
-    contract = tmp_path / ".clankers" / "hexes" / "contract.yaml"
+    contract = tmp_path / layout / "hexes" / "contract.yaml"
     contract.write_text("contract: open-clank-hexes/v2\nhexes: []\n", encoding="utf-8")
     resolution = resolve_hex(tmp_path)
     manifest = policy_executable_manifest(resolution)
     assert [item["path"] for item in manifest["files"]] == [
-        ".clankers/hexes/checks/project_checks.py"
+        f"{layout}/hexes/checks/project_checks.py"
     ]
     db = str(tmp_path / "fm.db")
     activate_hex(resolution, owner="alice", project_id="project", db_path=db)
@@ -819,6 +853,56 @@ def test_bare_executable_import_must_resolve_inside_project(tmp_path: Path) -> N
             project_id="project",
             db_path=db,
             expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        )
+
+
+def test_manifest_binds_selected_checks_and_workspace_imports_without_execution(tmp_path: Path) -> None:
+    _git(tmp_path)
+    for layout in (".clanker", ".clankers"):
+        checks = tmp_path / layout / "hexes" / "checks"
+        checks.mkdir(parents=True)
+        (checks / "local.py").write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
+    canonical = tmp_path / ".clanker" / "hexes" / "contract.yaml"
+    canonical.write_text(
+        "contract: open-clank-hexes/v2\nhexes: []\nimports: [helpers.rules]\n",
+        encoding="utf-8",
+    )
+    helpers = tmp_path / "helpers"
+    helpers.mkdir()
+    (helpers / "rules.py").write_text("raise RuntimeError('must not execute')\n", encoding="utf-8")
+    manifest = policy_executable_manifest(resolve_hex(tmp_path))
+    assert [item["path"] for item in manifest["files"]] == [
+        ".clanker/hexes/checks/local.py", "helpers/rules.py",
+    ]
+    assert manifest["unresolved_modules"] == []
+
+
+@pytest.mark.parametrize(
+    ("reference", "message"),
+    [("missing.py", "missing"), ("../outside.py", "escapes"), ("helpers/rules.txt", "Python file")],
+)
+def test_manifest_rejects_invalid_explicit_imports(tmp_path: Path, reference: str, message: str) -> None:
+    _git(tmp_path)
+    (tmp_path / ".hex").write_text(f"hexes: []\nimports: ['{reference}']\n", encoding="utf-8")
+    with pytest.raises(HexResolutionError, match=message):
+        policy_executable_manifest(resolve_hex(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "candidate", [".clanker/hexes/contract.yaml", ".clankers/hexes/contract.yaml",
+                  "subproject/.clanker/hexes/contract.yaml", "subproject/.clankers/hexes/contract.yaml"],
+)
+def test_canonical_contract_candidates_require_transition_journal(tmp_path: Path, monkeypatch, candidate: str) -> None:
+    from src import project_hex
+
+    _git(tmp_path)
+    (tmp_path / ".hex").write_text("hexes: []\n", encoding="utf-8")
+    monkeypatch.setattr(project_hex, "hex_activation_current", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(project_hex, "require_executable_trust", lambda *_args, **_kwargs: None)
+    with pytest.raises(HexResolutionError, match="transition journal"):
+        validate_project_file_candidates(
+            resolve_hex(tmp_path), owner="alice", project_id="project", db_path=str(tmp_path / "unused.db"),
+            candidates={candidate: b"hexes: []\n"},
         )
 
 

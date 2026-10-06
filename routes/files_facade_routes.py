@@ -20,14 +20,14 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from core.database import SessionLocal
-from src.auth_helpers import get_current_user
 from src.openclank.file_policy import FilePolicyError, FilePolicyRepository
 from src.openclank.chat_lifecycle import ChatLifecycleService
 from src.openclank.files_facade import FilesFacade, FilesFacadeError, ProviderContext
 from src.openclank.files_host_provider import HostFilesProvider
+from src.openclank.files_principal import files_principal
 from src.openclank.files_managed_providers import (
     CopalFilesProvider,
-    GalleryFilesProvider,
+    FilesImagesProvider,
     LibraryFilesProvider,
 )
 from src.openclank.files_service_client import client_for_owner, close_all_clients
@@ -136,7 +136,7 @@ class PlaceRequest(_StrictModel):
 
 class SavedSearchRequest(_StrictModel):
     name: str = Field(min_length=1, max_length=200)
-    provider: Literal["all", "host", "copal", "gallery", "library"] = "all"
+    provider: Literal["all", "host", "copal", "files", "library"] = "all"
     query: str = Field(min_length=1, max_length=512)
     sort: dict[str, Any] = Field(default_factory=dict)
 
@@ -322,27 +322,10 @@ def setup_files_facade_routes(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/files-v1", tags=["files-v1"])
     repository = policy_repository or FilePolicyRepository()
-    host_registry = filesystem_registry or FilesystemRootRegistry()
+    host_registry = filesystem_registry or FilesystemRootRegistry(repository=repository)
 
     def context(request: Request, *, workspace: str = "default") -> ProviderContext:
-        username = str(get_current_user(request) or "").strip().lower()
-        # AUTH_ENABLED=false is the documented single-user/local mode.  It
-        # has no cookie session, but Files still needs a stable principal so
-        # opaque refs remain owner-bound across requests.
-        local_mode = os.getenv("AUTH_ENABLED", "true").lower() == "false"
-        if not username and local_mode:
-            username = "local-installation"
-        if not username:
-            raise HTTPException(401, "Authentication required")
-        auth_manager = getattr(getattr(request.app, "state", None), "auth_manager", None)
-        account_id = auth_manager.account_id(username) if auth_manager and hasattr(auth_manager, "account_id") else None
-        if not account_id and local_mode and username == "local-installation":
-            account_id = "local-installation"
-        if not account_id:
-            # Never fall back to the mutable username; that would let account
-            # deletion/recreation inherit old ResourceRefs.
-            raise HTTPException(503, "Immutable account identity is unavailable")
-        is_admin = bool(auth_manager and auth_manager.is_admin(username))
+        account_id, username, is_admin = files_principal(request, repository=repository)
         return ProviderContext(
             owner_subject_id=str(account_id),
             owner_username=username,
@@ -378,7 +361,7 @@ def setup_files_facade_routes(
         host_provider = HostFilesProvider(registry=host_registry, client_factory=host_client_factory, operation_store=repository)
         providers = [
             host_provider,
-            GalleryFilesProvider(session_factory),
+            FilesImagesProvider(session_factory),
             LibraryFilesProvider(session_factory, chat_lifecycle=chat_lifecycle),
         ]
         if bridge is not None:
@@ -998,7 +981,15 @@ def setup_files_facade_routes(
             response_size = 0 if size == 0 else end - start + 1
             ascii_name, encoded_name = _download_filename(source.filename)
             declared_type = str(source.media_type or "application/octet-stream").split(";", 1)[0].strip().lower()
-            active_type = declared_type in _ACTIVE_DOWNLOAD_TYPES
+            # SVG is inert in an image destination. Permit this one preview
+            # presentation after opaque-ref authorization; downloads and active
+            # document/frame/fetch destinations retain attachment treatment.
+            image_svg_preview = (
+                purpose == "preview"
+                and declared_type == "image/svg+xml"
+                and request.headers.get("sec-fetch-dest", "").lower() == "image"
+            )
+            active_type = declared_type in _ACTIVE_DOWNLOAD_TYPES and not image_svg_preview
             media_type = "application/octet-stream" if active_type else source.media_type
             disposition = "inline" if purpose == "preview" and not active_type else "attachment"
             headers = {
@@ -1079,6 +1070,7 @@ def setup_files_facade_routes(
         width: int = Query(default=160, ge=1, le=1024),
         height: int = Query(default=160, ge=1, le=1024),
         scale: float = Query(default=1.0, ge=1.0, le=3.0),
+        icon: bool = Query(default=False),
     ):
         try:
             png = await facade(request).thumbnail(
@@ -1087,6 +1079,7 @@ def setup_files_facade_routes(
                 width=width,
                 height=height,
                 scale=scale,
+                **({"icon": True} if icon else {}),
             )
             return Response(
                 png,

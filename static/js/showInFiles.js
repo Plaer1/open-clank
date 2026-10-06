@@ -8,11 +8,10 @@ export async function showResourceInFiles(resourceRef) {
   const files = installed ? null : await import('./files.js');
   const reveal = installed?.revealResource || files?.revealResource || files?.default?.revealResource;
   if (typeof reveal !== 'function') throw new Error('Files integration is unavailable');
-  // Reveal is an explicit, current identity handoff.  Do the reissue in the
-  // owning Files facade immediately before handing the ref to the window so a
-  // cached Gallery ref can never select a same-name sibling or an old revision.
-  const currentRef = await reissueExactResourceRef(value);
-  return Boolean(await reveal(currentRef));
+  // Files reveal validates the current exact opaque identity in its facade.
+  // Its stale-ref fallback renews eligible managed resources; Host refs have
+  // no renewal lane and must reach reveal directly while still authorized.
+  return Boolean(await reveal(value));
 }
 
 /** Mint a current ref after the provider reauthorizes an exact managed item. */

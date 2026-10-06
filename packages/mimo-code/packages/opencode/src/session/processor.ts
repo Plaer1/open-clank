@@ -592,6 +592,7 @@ export const layer: Layer.Layer<
             const usage = Session.getUsage({
               model: ctx.model,
               usage: value.usage,
+              captureScope: ManagedProvider.currentScope(ctx.sessionID),
               metadata: value.providerMetadata,
             })
             ctx.assistantMessage.finish = value.finishReason

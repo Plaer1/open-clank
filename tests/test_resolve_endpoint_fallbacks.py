@@ -211,7 +211,7 @@ def test_mimo_resolution_requires_model_in_callers_catalogue(monkeypatch):
                 return [{"modelId": "alice/private-model"}]
             return []
 
-    monkeypatch.setattr(model_dispatch, "_mimo_supervisor", OwnerPool())
+    monkeypatch.setattr(model_dispatch, "_agent_supervisor", OwnerPool())
     assert resolve_endpoint("default", owner="alice") == (
         "mimo://acp", "alice/private-model", {},
     )

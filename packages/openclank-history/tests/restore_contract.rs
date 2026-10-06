@@ -68,7 +68,7 @@ async fn exact_version_restore_requires_current_capture_and_keeps_provenance() {
     adapter
         .finish(
             "action-1",
-            LiveReceipt {
+            LiveReceipt { committed_resources: Vec::new(),
                 action_id: "action-1".into(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("after".into()),
@@ -232,7 +232,7 @@ async fn authorized_restore_persists_proof_and_is_idempotent_after_reopenable_jo
     adapter
         .finish(
             "action-restore",
-            LiveReceipt {
+            LiveReceipt { committed_resources: Vec::new(),
                 action_id: "action-restore".into(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("after".into()),
@@ -252,6 +252,10 @@ async fn authorized_restore_persists_proof_and_is_idempotent_after_reopenable_jo
         expected_destination_fingerprint: Some("after".into()),
         require_current_capture: true,
     };
+    let conflict = prepare_restore_authorized(&coordinator, &request, &source, Some("changed"))
+        .await
+        .unwrap_err();
+    assert_eq!(conflict, RestoreOutcome::Conflict);
     let plan = prepare_restore_authorized(&coordinator, &request, &source, Some("after"))
         .await
         .unwrap();
@@ -271,8 +275,11 @@ async fn authorized_restore_persists_proof_and_is_idempotent_after_reopenable_jo
     .await
     .unwrap();
     assert_eq!(receipt.outcome, RestoreOutcome::Complete);
+    let proof = receipt.verification.as_ref().unwrap();
+    assert_eq!(proof.status, "Verified");
+    assert_eq!(proof.restored_content_hash.as_ref(), Some(&proof.content_hash));
     assert_eq!(provider.bytes, b"before");
-    assert_eq!(provider.captures, 1);
+    assert_eq!(provider.captures, 2);
     let mut interrupted = coordinator
         .catalog()
         .get_restore::<RestoreJournal>("restore-1")
@@ -298,7 +305,7 @@ async fn authorized_restore_persists_proof_and_is_idempotent_after_reopenable_jo
     .await
     .unwrap();
     assert_eq!(again.outcome, RestoreOutcome::Complete);
-    assert_eq!(provider.captures, 1);
+    assert_eq!(provider.captures, 3);
 }
 
 #[test]
@@ -479,7 +486,7 @@ async fn capture_usage_attribution_is_frozen_across_move_policy_edit_and_reopen(
     capture
         .finish(
             "frozen-usage",
-            LiveReceipt {
+            LiveReceipt { committed_resources: Vec::new(),
                 action_id: "frozen-usage".into(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("new".into()),
@@ -531,7 +538,7 @@ async fn batch_restore_reports_partial_per_resource_outcomes_without_overwrite()
     adapter
         .finish(
             "batch-source",
-            LiveReceipt {
+            LiveReceipt { committed_resources: Vec::new(),
                 action_id: "batch-source".into(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("source".into()),
@@ -559,7 +566,7 @@ async fn batch_restore_reports_partial_per_resource_outcomes_without_overwrite()
     adapter
         .finish(
             "batch-source-b",
-            LiveReceipt {
+            LiveReceipt { committed_resources: Vec::new(),
                 action_id: "batch-source-b".into(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("source-b".into()),

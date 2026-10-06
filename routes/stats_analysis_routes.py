@@ -13,18 +13,20 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Mapping
 from typing import Any, Protocol
+from datetime import timezone
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.database import ChatMessage, Session as DbSession, SessionLocal
 from core.stats_models import StatsEvent
-from src.auth_helpers import _auth_disabled, effective_user, require_user
-from src.owner_identity import LOCAL_INSTALLATION_OWNER
+from src.auth_helpers import effective_user, require_authenticated_request
 from services.stats.quality import QualityError, capability, project_quality
 from services.stats.trends import TrendError, project_trends
 from services.stats.query import _install_progress_handler, StatsQueryError
 from services.stats.query import admitted_events, parse_scope
+from services.stats.tool_evidence import load_evidence, quality_events
+from services.stats.privacy import identity_handle
 
 _ANALYSIS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="stats-analysis")
 _ANALYSIS_CAPACITY = threading.BoundedSemaphore(2)
@@ -57,7 +59,7 @@ class DatabaseStatsAnalysisLoader:
             raise TimeoutError("Stats analysis deadline exceeded")
 
     @staticmethod
-    def _flags(row: StatsEvent) -> dict[str, object]:
+    def _flags(row: StatsEvent, *, session_owner_verified=False) -> dict[str, object]:
         metadata = row.event_metadata if isinstance(row.event_metadata, Mapping) else {}
         allowed = {"prompt_unverified", "prompt_missing_verification", "context_pressure",
                     "compacted", "mid_task_compaction", "abandoned", "edit_churn",
@@ -65,7 +67,11 @@ class DatabaseStatsAnalysisLoader:
         flags = {key: metadata[key] for key in allowed if isinstance(metadata.get(key), bool)}
         outcome = "success" if row.status == "complete" else "failure" if row.status == "failed" else "unknown"
         evidence = hashlib.sha256(f"s09\0{row.owner}\0{row.id}".encode()).hexdigest()[:24]
-        flags.update({"outcome": outcome, "evidence_id": f"event_{evidence}"})
+        flags.update({"owner": row.owner, "outcome": outcome, "evidence_id": f"event_{evidence}",
+                      "event_time_ms": (row.event_time.replace(tzinfo=timezone.utc) if row.event_time.tzinfo is None else row.event_time).timestamp() * 1000 if row.event_time else None})
+        session = identity_handle(row.owner, "session_id", row.session_id) if row.session_id and session_owner_verified else None
+        flags.update(session_handle=session, source_state="available" if session else "unavailable", body_state="unavailable",
+                     source_ref={"authority": "stats_event", "session_handle": session, "event_handle": f"event_{evidence}"} if session else None)
         return flags
 
     def load_quality(self, owner: str, *, deadline: float, cancel_event=None, scope=None):
@@ -83,9 +89,24 @@ class DatabaseStatsAnalysisLoader:
                 self._check(deadline, cancel_event)
                 truncated = len(rows) > self.MAX_ROWS
                 rows = rows[:self.MAX_ROWS]
-            events = [self._flags(row) for row in reversed(rows)]
+            identifiers = sorted({row.session_id for row in rows if row.session_id})
+            owned = set()
+            for index in range(0, len(identifiers), 500):
+                self._check(deadline, cancel_event)
+                owned.update(value[0] for value in db.query(DbSession.id).filter(
+                    DbSession.owner == owner, DbSession.id.in_(identifiers[index:index + 500])).all())
+            events = [self._flags(row, session_owner_verified=row.session_id in owned) for row in reversed(rows)]
+            ordinary = load_evidence(owner, start_utc=scope.start_utc if scope else None,
+                                     end_utc=scope.end_utc if scope else None,
+                                     cancel_event=cancel_event, deadline=deadline)
+            events.extend(quality_events(owner, ordinary))
+            events.sort(key=lambda event: (event.get("event_time_ms") or 0, event["evidence_id"]))
+            if len(events) > self.MAX_ROWS:
+                events = events[-self.MAX_ROWS:]
+                truncated = True
+            truncated = truncated or ordinary["coverage"].get("state") == "partial"
             return events, {"covered": len(events), "total": len(events) + int(truncated),
-                            "truncated": truncated}
+                            "truncated": truncated, "ordinary_evidence": ordinary["coverage"]}
         finally:
             if raw is not None:
                 raw.set_progress_handler(None, 0)
@@ -121,20 +142,11 @@ class TrendQuery(BaseModel):
 
 
 def _trusted_owner(request: Request, *, allow_test_owner_state: bool = False) -> str:
-    owner = str(effective_user(request) or "").strip()
-    # This opt-in fixture seam is intentionally checked before the
-    # auth-disabled installation fallback.  It cannot affect production,
-    # where allow_test_owner_state is false.
-    if not owner and allow_test_owner_state:
-        owner = str(getattr(request.state, "stats_owner", "") or "").strip()
-    if not owner and _auth_disabled():
-        owner = LOCAL_INSTALLATION_OWNER
+    require_authenticated_request(request)
+    owner = str(effective_user(request) or "").strip().lower()
     if not owner:
-        require_user(request)
-        owner = str(effective_user(request) or "").strip()
-    if not owner:
-        raise HTTPException(status_code=401, detail="trusted Stats owner scope is required")
-    return owner.lower()
+        raise HTTPException(401, "trusted Stats owner scope is required")
+    return owner
 
 
 def _loader(request: Request) -> StatsAnalysisLoader:

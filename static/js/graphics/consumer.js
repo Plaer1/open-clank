@@ -40,6 +40,8 @@ function defaultCreateCanvas(doc) {
  * @param {object} [options.win] Window-like object (tests).
  * @param {object} [options.doc] Document-like object (tests).
  * @param {object} [options.createWebGL2] Injected GL factory (tests).
+ * @param {(canvas:HTMLCanvasElement, previousCanvas:HTMLCanvasElement|null)=>void} [options.onCanvasChange]
+ *   Receives a replacement canvas after a WebGL-to-Canvas2D handoff.
  */
 export function createGraphicsConsumer(options = {}) {
   const {
@@ -54,6 +56,7 @@ export function createGraphicsConsumer(options = {}) {
     win = typeof window !== 'undefined' ? window : globalThis,
     doc = typeof document !== 'undefined' ? document : null,
     createWebGL2 = null,
+    onCanvasChange = null,
   } = options;
 
   if (typeof draw !== 'function') {
@@ -87,6 +90,7 @@ export function createGraphicsConsumer(options = {}) {
   let backendKind = null;
   let accelerated = false;
   let fallbackReason = null;
+  let latestResize = null;
   let detachContextWatch = () => {};
   let disposed = false;
   let initialized = false;
@@ -100,6 +104,14 @@ export function createGraphicsConsumer(options = {}) {
   function adoptCanvas(nextCanvas) {
     const previous = canvas;
     if (previous && previous !== nextCanvas && typeof nextCanvas.getContext === 'function') {
+      // A fallback replacement must remain the same accessible/decorative
+      // surface. Copy all DOM attributes, including class and aria/data hooks,
+      // before swapping it into the host.
+      if (previous.attributes && typeof nextCanvas.setAttribute === 'function') {
+        for (const attribute of Array.from(previous.attributes)) {
+          nextCanvas.setAttribute(attribute.name, attribute.value);
+        }
+      }
       // Preserve layout box from the old surface.
       if (nextCanvas.style && previous.style) {
         nextCanvas.style.cssText = previous.style.cssText;
@@ -119,6 +131,9 @@ export function createGraphicsConsumer(options = {}) {
     canvas = nextCanvas;
     // The replacement was created here, so this consumer owns it for dispose.
     canvas.__graphicsOwned = true;
+    if (typeof onCanvasChange === 'function') {
+      try { onCanvasChange(canvas, previous); } catch (_) { /* surface hooks cannot break fallback */ }
+    }
   }
 
   function createBackendFor(currentCanvas, probe) {
@@ -171,6 +186,17 @@ export function createGraphicsConsumer(options = {}) {
     backendKind = BACKEND_CANVAS2D;
     accelerated = false;
     fallbackReason = reason || fallbackReason || 'canvas2d';
+    // Context loss may replace a DPR-sized surface between paints. Reapply
+    // the saved CSS/logical extent immediately so its first fallback frame
+    // maps the whole viewport into the copied/clamped backing store.
+    if (latestResize) {
+      backend.resize(
+        latestResize.allocation.width,
+        latestResize.allocation.height,
+        latestResize.allocation.dpr,
+        latestResize.logicalExtent,
+      );
+    }
     return backend;
   }
 
@@ -259,10 +285,15 @@ export function createGraphicsConsumer(options = {}) {
     resize(cssWidth, cssHeight, dpr = 1) {
       if (disposed) return null;
       const limits = (backend && backend.limits) || {};
-      const allocation = clampCanvasAllocation(cssWidth, cssHeight, dpr, limits);
-      scene.resize(allocation.width, allocation.height, allocation.dpr);
+      const logicalExtent = {
+        width: Math.max(1, Number(cssWidth) || 1),
+        height: Math.max(1, Number(cssHeight) || 1),
+      };
+      const allocation = clampCanvasAllocation(logicalExtent.width, logicalExtent.height, dpr, limits);
+      latestResize = { allocation, logicalExtent };
+      scene.resize(logicalExtent.width, logicalExtent.height, allocation.dpr);
       if (backend && typeof backend.resize === 'function') {
-        backend.resize(allocation.width, allocation.height, allocation.dpr);
+        backend.resize(allocation.width, allocation.height, allocation.dpr, logicalExtent);
       }
       owner.invalidate();
       return allocation;

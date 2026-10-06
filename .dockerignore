@@ -37,7 +37,11 @@ secrets.env~
 .archive/
 .references/
 references/
-**/.clanker/futures/
+# Every singular Clanker workspace is private, including tools and Hexes.
+**/.clanker/
+# History credentials and their authority/root sidecars are runtime state.
+**/history-credentials*.json
+**/.history-credentials*.tmp
 **/.clankers/robonotes/
 .mimocode/
 .mimocode-test-fixtures-*/
@@ -50,7 +54,8 @@ references/
 .vscode/
 .idea/
 dev-docs/
-docs/
+# Operator guides only; static/docs is shipped handbook media.
+/docs/
 *.md
 *.db
 *.sqlite
@@ -85,3 +90,19 @@ timetree*.png
 *_signin_page.png
 *_calendar_view.png
 .gitignore
+
+# Local capture harness and personal workstation launcher; never release inputs.
+/.s26-visual/
+/packages/Copal/move-timeline.desktop
+/packages/Copal/worklog.md
+/packages/Copal/public/data/
+
+# Keep the assembled offline pack in images; omit duplicate release part files.
+**/emoji-assets.pack.part-*
+**/emoji-assets.parts.json
+
+# Local Mimo scheduler coordination, never a publication artifact.
+.mimocode/.cron-lock
+
+# Standalone/native and hosted mutable planning payloads stay operator-local.
+**/move-data.json

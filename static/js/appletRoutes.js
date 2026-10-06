@@ -9,8 +9,8 @@
 export const SHELL_PATHS = Object.freeze([
   '/',
   '/editor',
-  '/files',
   '/wiki',
+  '/files',
   '/graph',
   '/treehouse',
   '/timeline',
@@ -23,7 +23,6 @@ export const SHELL_PATHS = Object.freeze([
   '/galaxy',
   '/email',
   '/memory',
-  '/gallery',
   '/tasks',
   '/library',
   '/cookbook',
@@ -38,17 +37,18 @@ export const SHELL_PATH_PREFIXES = Object.freeze(['/settings/', '/copal/']);
 // Editor workspace; they only differ by view/mode intent.
 const DIRECT = Object.freeze({
   editor: '/editor',
-  wiki: '/editor',
+  wiki: '/wiki',
   graph: '/graph',
   treehouse: '/treehouse',
+  achievements: '/treehouse',
   timeline: '/timeline',
   todo: '/todo',
   files: '/files',
   calendar: '/calendar',
   email: '/email',
   memory: '/memory',
-  // Gallery applet retired: the legacy /gallery entry resolves to Files,
-  // where the provisioned Gallery folder now lives.
+  // Compatibility /gallery links resolve to Files, where the provisioned
+  // Gallery folder lives.
   gallery: '/files',
   tasks: '/tasks',
   library: '/library',
@@ -71,11 +71,12 @@ const SEGMENTS = {
   mind:      { target: 'editor', view: 'graph', mode: 'mind' },
   galaxy:    { target: 'editor', view: 'graph', mode: 'galaxy' },
   treehouse: { target: 'editor', view: 'treehouse' },
+  achievements: { target: 'editor', view: 'achievements' },
   files:     { target: 'files' },
   calendar:  { target: 'calendar' },
   email:     { target: 'email' },
   memory:    { target: 'memory' },
-  // Gallery applet retired — legacy /gallery links resolve to Files.
+  // Compatibility /gallery links resolve to Files.
   gallery:   { target: 'files' },
   tasks:     { target: 'tasks' },
   library:   { target: 'library' },
@@ -87,11 +88,12 @@ const SEGMENTS = {
 // Editor-family view -> canonical address.
 const VIEW_PATH = Object.freeze({
   notes: '/editor',
-  wiki: '/editor',
+  wiki: '/wiki',
   timeline: '/timeline',
   todo: '/todo',
   graph: '/graph',
   treehouse: '/treehouse',
+  achievements: '/treehouse',
 });
 
 function normalizeSearch(search) {
@@ -145,6 +147,8 @@ export function appletPath(name, opts = {}) {
     path = DIRECT[seg.target] || '/';
   }
   const params = normalizeSearch(opts.search);
+  if (seg.view === 'achievements') params.set('section', 'achievements');
+  else if (seg.view === 'treehouse') params.delete('section');
   // A newly built address never inherits a one-shot TreeHouse share token.
   // opts.liveSearch is the live address being rewritten: unconsumed one-shot
   // tokens from it ride along so their consumer stays the only stripper.
@@ -205,10 +209,12 @@ export function resolveAppletLocation(pathname, search) {
     segment = 'settings';
   }
 
-  const seg = SEGMENTS[segment];
+  let seg = SEGMENTS[segment];
   if (!seg) return null;
 
   const params = normalizeSearch(search);
+  if (seg.view === 'treehouse' && params.get('section') === 'achievements') seg = SEGMENTS.achievements;
+  if (seg.view === 'achievements') params.set('section', 'achievements');
   const mode = params.get('mode') || seg.mode || null;
   const doc = params.get('doc');
   // `open=bases` on an editor address is the Bases leaf intent (bookmark or

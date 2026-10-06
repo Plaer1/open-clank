@@ -56,9 +56,8 @@ def get_default_data_dir() -> str:
     if getattr(sys, "frozen", False):
         home = Path(os.path.expanduser("~"))
         current = home / ".open-clank"
-        legacy = home / ".odysseus"
-        if legacy.is_dir() and not current.exists():
-            legacy.rename(current)
+        if (home / ".odysseus").is_dir() and not current.exists():
+            raise RuntimeError("Legacy home requires .clanker/tools/migrations/python/secondary.py home-root")
         return str(current / "data")
     return os.path.join(get_app_root(), "data")
 
@@ -191,6 +190,7 @@ def resolve_fm_mcp(repo_root: Path | str | None = None) -> RuntimeIdentity:
     candidates = _executable_candidates(
         root,
         ("FM_MCP_COMMAND", "OPEN_CLANK_FM_MCP"),
+        (("bin/fm-mcp.exe",) if os.name == "nt" else ("bin/fm-mcp",)) +
         ("mcp_servers/frankenmemory/target/release/fm-mcp", "mcp_servers/frankenmemory/target/release/fm-mcp.exe"),
         ("fm-mcp",),
     )

@@ -465,12 +465,15 @@ def test_authenticated_project_route_issues_profile_without_accepting_uid(
 
 
 @pytest.mark.parametrize(
-    "source_contract",
-    [REPO_ROOT / "henxels.yaml", REPO_ROOT / "packages" / "Copal" / "henxels.yaml"],
+    ("project_id", "original"),
+    [
+        ("open_clank", b"# legacy root policy\nsettings: {}\nhenxels:\n  - henxel: Markdown plans\n    in: ./.futures/*\n    allowed_filetypes: .md\n"),
+        ("copal", b"# legacy nested policy\nsettings:\n  confirm_before_deleting: {over_lines: 5}\nhenxels: []\n"),
+    ],
     ids=("open-clank-root", "copal"),
 )
 def test_isolated_first_party_legacy_hex_round_trip_is_exact_and_journaled(
-    tmp_path: Path, source_contract: Path
+    tmp_path: Path, project_id: str, original: bytes
 ) -> None:
     live_paths = (
         REPO_ROOT / "henxels.yaml",
@@ -483,8 +486,8 @@ def test_isolated_first_party_legacy_hex_round_trip_is_exact_and_journaled(
         for path in live_paths
         if path.exists()
     }
-    original = source_contract.read_bytes()
-    project_id = source_contract.parent.name.lower().replace("-", "_") or "root"
+    # Legacy filenames have retired from the live repo. Keep compatibility
+    # fixtures self-contained rather than depending on those files returning.
     root, db_path = _active_project(
         tmp_path,
         contract=original,

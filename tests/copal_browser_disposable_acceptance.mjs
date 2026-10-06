@@ -115,8 +115,7 @@ const environment = {
   OPEN_CLANK_DATA_DIR: data,
   ODYSSEUS_DATA_DIR: data,
   DATABASE_URL: `sqlite:///${path.join(data, 'app.db')}`,
-  COPAL_DATA_DIR: copal,
-  COPAL_STORAGE: 'redb',
+  COPAL_LOOSE_ROOT: copal,
   PYTHONUNBUFFERED: '1',
 };
 

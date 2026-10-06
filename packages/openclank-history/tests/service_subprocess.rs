@@ -9,7 +9,9 @@ use openclank_history::protocol::{
     AuthContext, BatchPrepareEntry, ControlEnvelope, RequestEnvelope, ServiceRequest,
     ServiceResponse, PROTOCOL_VERSION,
 };
-use openclank_history::restore::{RestoreOutcome, RestoreRequest};
+use openclank_history::restore::{
+    FilesystemRestoreProvider, RestoreOutcome, RestoreProvider, RestoreRequest,
+};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -357,7 +359,7 @@ async fn server_issued_credentials_isolate_two_account_partitions() {
         &mut stream,
         ServiceRequest::RecordLive {
             envelope: control_as("alice-action", "bob-session", "bob", "bob-token"),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: "alice-action".into(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("alice-after".into()),
@@ -842,7 +844,7 @@ async fn staged_capture_handles_incompressible_payloads_beyond_one_frame_and_cle
         &mut stream,
         ServiceRequest::RecordLive {
             envelope: control("service-action"),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: "service-action".into(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("live-after".into()),
@@ -2528,7 +2530,7 @@ async fn subprocess_service_prepare_live_complete_read_and_shutdown() {
             &mut stream,
             ServiceRequest::RecordLive {
                 envelope: wrong_actor,
-                receipt: LiveReceipt {
+                receipt: LiveReceipt { committed_resources: Vec::new(),
                     action_id: action.action_id.clone(),
                     status: LiveStatus::Committed,
                     fingerprint: Some("live".into())
@@ -2602,7 +2604,7 @@ async fn subprocess_service_prepare_live_complete_read_and_shutdown() {
         &mut stream,
         ServiceRequest::RecordLive {
             envelope: control(&action.action_id),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("live".into()),
@@ -2615,7 +2617,7 @@ async fn subprocess_service_prepare_live_complete_read_and_shutdown() {
         &mut stream,
         ServiceRequest::RecordLive {
             envelope: control(&action.action_id),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::Committed,
                 fingerprint: Some("live".into()),
@@ -2668,6 +2670,40 @@ async fn subprocess_service_prepare_live_complete_read_and_shutdown() {
         other => panic!("unexpected restore response: {other:?}"),
     }
     assert_eq!(std::fs::read(&destination_path).unwrap(), b"after");
+    let expected_after_restore = FilesystemRestoreProvider::new_with_receipt_root(
+        &destination_path,
+        dir.path().join("restore-fingerprint-receipts"),
+    )
+    .current_fingerprint()
+    .unwrap();
+    std::fs::write(&destination_path, b"unrelated later write").unwrap();
+    let guarded_conflict = send(
+        &mut stream,
+        ServiceRequest::RestoreHost {
+            envelope: control("restore-later-write-conflict"),
+            request: RestoreRequest {
+                restore_id: "restore-later-write-conflict".into(),
+                account_id: "account".into(),
+                source_action_id: action.action_id.clone(),
+                source_version_id: after.version_id.clone(),
+                destination: action.resource_key.clone(),
+                expected_destination_fingerprint: expected_after_restore,
+                require_current_capture: true,
+            },
+            source: after.clone(),
+            destination_path: destination_path.to_string_lossy().into_owned(),
+            source_host_metadata: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(guarded_conflict, ServiceResponse::Error { ref code } if code.contains("Conflict")),
+        "unexpected guarded restore response: {guarded_conflict:?}"
+    );
+    assert_eq!(
+        std::fs::read(&destination_path).unwrap(),
+        b"unrelated later write"
+    );
     let tampered_path = dir.path().join("tampered-note.md");
     let tampered = send(
         &mut stream,
@@ -2859,7 +2895,7 @@ async fn subprocess_service_prepare_live_complete_read_and_shutdown() {
             &mut stream,
             ServiceRequest::RecordLive {
                 envelope: control(action_id),
-                receipt: LiveReceipt {
+                receipt: LiveReceipt { committed_resources: Vec::new(),
                     action_id: action_id.into(),
                     status,
                     fingerprint: None,
@@ -3127,7 +3163,7 @@ async fn restore_service_reopens_after_each_durable_phase() {
             &mut stream,
             ServiceRequest::RecordLive {
                 envelope: control(&action.action_id),
-                receipt: LiveReceipt {
+                receipt: LiveReceipt { committed_resources: Vec::new(),
                     action_id: action.action_id.clone(),
                     status: LiveStatus::Committed,
                     fingerprint: Some("live".into())
@@ -3301,7 +3337,7 @@ async fn child_kill_leaves_reopenable_catalog_and_lore() {
         &mut reopened,
         ServiceRequest::Reconcile {
             envelope: control(&action.action_id),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::NotCommitted,
                 fingerprint: None,
@@ -3411,7 +3447,7 @@ async fn child_abort_after_lore_flush_reopens_without_catalog_reference() {
         &mut reopened,
         ServiceRequest::Reconcile {
             envelope: control(&action.action_id),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::Unknown,
                 fingerprint: None,
@@ -3431,7 +3467,7 @@ async fn child_abort_after_lore_flush_reopens_without_catalog_reference() {
         &mut reopened,
         ServiceRequest::Reconcile {
             envelope: control(&action.action_id),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::NotCommitted,
                 fingerprint: None,
@@ -3518,7 +3554,7 @@ async fn child_abort_before_lore_write_reopens_without_bytes() {
         &mut stream,
         ServiceRequest::Reconcile {
             envelope: control(&action.action_id),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::Unknown,
                 fingerprint: None,
@@ -3538,7 +3574,7 @@ async fn child_abort_before_lore_write_reopens_without_bytes() {
         &mut stream,
         ServiceRequest::Reconcile {
             envelope: control(&action.action_id),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::NotCommitted,
                 fingerprint: None,
@@ -3623,7 +3659,7 @@ async fn child_abort_applying_and_after_durable_reopen_without_live_replay() {
     let mut stream = connect(&socket).await;
     let live_request = ServiceRequest::RecordLive {
         envelope: control(&action.action_id),
-        receipt: LiveReceipt {
+        receipt: LiveReceipt { committed_resources: Vec::new(),
             action_id: action.action_id.clone(),
             status: LiveStatus::Committed,
             fingerprint: Some("must-not-replay".into()),
@@ -3643,7 +3679,7 @@ async fn child_abort_applying_and_after_durable_reopen_without_live_replay() {
         &mut stream,
         ServiceRequest::Reconcile {
             envelope: control(&action.action_id),
-            receipt: LiveReceipt {
+            receipt: LiveReceipt { committed_resources: Vec::new(),
                 action_id: action.action_id.clone(),
                 status: LiveStatus::NotCommitted,
                 fingerprint: None,
@@ -3725,7 +3761,7 @@ async fn child_abort_committed_before_after_capture_marks_uncertain_without_repl
             &mut stream,
             ServiceRequest::RecordLive {
                 envelope: control(&action.action_id),
-                receipt: LiveReceipt {
+                receipt: LiveReceipt { committed_resources: Vec::new(),
                     action_id: action.action_id.clone(),
                     status: LiveStatus::Committed,
                     fingerprint: Some("live".into())
@@ -3784,7 +3820,7 @@ async fn child_abort_committed_before_after_capture_marks_uncertain_without_repl
             &mut stream,
             ServiceRequest::Reconcile {
                 envelope: control(&action.action_id),
-                receipt: LiveReceipt {
+                receipt: LiveReceipt { committed_resources: Vec::new(),
                     action_id: action.action_id.clone(),
                     status: LiveStatus::Unknown,
                     fingerprint: None
@@ -3802,7 +3838,7 @@ async fn child_abort_committed_before_after_capture_marks_uncertain_without_repl
             &mut stream,
             ServiceRequest::Reconcile {
                 envelope: control(&action.action_id),
-                receipt: LiveReceipt {
+                receipt: LiveReceipt { committed_resources: Vec::new(),
                     action_id: action.action_id.clone(),
                     status: LiveStatus::NotCommitted,
                     fingerprint: None
@@ -3984,7 +4020,7 @@ async fn child_abort_after_durable_capture_preserves_after_bytes() {
             &mut stream,
             ServiceRequest::RecordLive {
                 envelope: control(&action.action_id),
-                receipt: LiveReceipt {
+                receipt: LiveReceipt { committed_resources: Vec::new(),
                     action_id: action.action_id.clone(),
                     status: LiveStatus::Committed,
                     fingerprint: Some("live".into())
@@ -4055,7 +4091,7 @@ async fn child_abort_after_durable_capture_preserves_after_bytes() {
             &mut stream,
             ServiceRequest::Reconcile {
                 envelope: control(&action.action_id),
-                receipt: LiveReceipt {
+                receipt: LiveReceipt { committed_resources: Vec::new(),
                     action_id: action.action_id.clone(),
                     status: LiveStatus::NotCommitted,
                     fingerprint: None
@@ -4135,7 +4171,7 @@ async fn child_abort_after_complete_keeps_idempotent_complete_receipt() {
             &mut stream,
             ServiceRequest::RecordLive {
                 envelope: control(&action.action_id),
-                receipt: LiveReceipt {
+                receipt: LiveReceipt { committed_resources: Vec::new(),
                     action_id: action.action_id.clone(),
                     status: LiveStatus::Committed,
                     fingerprint: Some("live".into())

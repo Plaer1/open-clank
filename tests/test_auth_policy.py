@@ -345,7 +345,10 @@ def test_login_form_permits_blank_login_but_requires_creation_passwords():
 def test_setup_accepts_exactly_min_length_password(tmp_path):
     mgr = _make_manager(tmp_path)
     endpoint, SetupRequest = _setup_endpoint(mgr)
-    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        app=SimpleNamespace(state=SimpleNamespace()),
+    )
     body = SetupRequest(username="admin", password="12345678")
 
     result = asyncio.run(endpoint(body=body, request=request))
@@ -550,6 +553,28 @@ def test_no_remember_omits_cookie_max_age(tmp_path):
 
     # Without "remember", the cookie is a session cookie (no max_age).
     assert "max_age" not in response.cookie_kwargs
+
+
+def test_unset_secure_cookie_policy_follows_asgi_https_scheme_not_forwarded_header(tmp_path, monkeypatch):
+    mgr = _make_manager(tmp_path)
+    mgr.create_user("scheme-user", "scheme-password", is_admin=False)
+    endpoint, LoginRequest = _login_endpoint(mgr)
+    monkeypatch.delenv("SECURE_COOKIES", raising=False)
+    body = LoginRequest(username="scheme-user", password="scheme-password", remember=False)
+
+    for scheme, forwarded, expected in (
+        ("http", None, False),
+        ("https", None, True),
+        ("http", "https", False),
+    ):
+        request = SimpleNamespace(
+            client=SimpleNamespace(host="203.0.113.7"),
+            url=SimpleNamespace(scheme=scheme, hostname="openclank.dev"),
+            headers={} if forwarded is None else {"X-Forwarded-Proto": forwarded},
+        )
+        response = _CapturingResponse()
+        assert asyncio.run(endpoint(body=body, request=request, response=response))["ok"] is True
+        assert response.cookie_kwargs["secure"] is expected
 
 
 def test_secure_cookie_setting_allows_only_direct_loopback_http_login(tmp_path, monkeypatch):

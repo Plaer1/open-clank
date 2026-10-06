@@ -58,16 +58,22 @@ class DocsService:
         except TypeError:
             # Narrow compatibility for older injected test/extension doubles.
             results = self.rag.search(query, k=top_k)
-        return [
-            DocChunk(
-                text=r.get("document", r.get("text", r.get("content", ""))),
-                source=r.get("source", r.get("metadata", {}).get("source", "unknown")),
-                score=r.get("similarity", r.get("score", 0.0)),
-                metadata=r.get("metadata"),
+        chunks = []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            metadata = result.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            chunks.append(
+                DocChunk(
+                    text=result.get("document", result.get("text", result.get("content", ""))),
+                    source=result.get("source", metadata.get("source", "unknown")),
+                    score=result.get("similarity", result.get("score", 0.0)),
+                    metadata=metadata,
+                )
             )
-            for r in results
-            if isinstance(r, dict)
-        ]
+        return chunks
 
     async def index(self, directory: str, owner: Optional[str] = None) -> IndexResult:
         """

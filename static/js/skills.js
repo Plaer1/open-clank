@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // skills.js — Skills tab in the Memory modal.
 //
 // Skills are SKILL.md files (frontmatter + body) under data/skills/.
@@ -402,11 +403,11 @@ function _duplicatePriorityPill(sk) {
 function _auditMarks(sk) {
   let html = '';
   if (sk.audit_verdict === 'pass') {
-    html += `<span class="skill-verified" title="Passed an automated test"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>`;
+    html += `<span class="skill-verified" title="Passed an automated test">${uiIcon("check", 12, {"role":"success"})}</span>`;
   }
   if (sk.audit_by_teacher) {
     const teacher = sk.audit_teacher_model ? `: ${sk.audit_teacher_model}` : '';
-    html += `<span class="skill-teachermark" title="Teacher rewrote this skill; audit model passed after the rewrite${esc(teacher)}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1 3 2 6 2s6-1 6-2v-5"/></svg></span>`;
+    html += `<span class="skill-teachermark" title="Teacher rewrote this skill; audit model passed after the rewrite${esc(teacher)}">${uiIcon("learn", 13)}</span>`;
   }
   return html;
 }
@@ -426,16 +427,9 @@ function _confColor(conf) {
 }
 
 // Shared action icons (collapsed kebab menu + expanded footer use the same).
-const _ICON = {
-  del:   '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>',
-  edit:  '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>',
-  approve: '<polyline points="20 6 9 17 4 12"/>',
-  unpublish: '<path d="M5 12l5 5L20 7"/>',
-  test:  '<polygon points="5 3 19 12 5 21 5 3"/>',
-};
-function _svg(paths, { fill = 'none', size = 13 } = {}) {
-  const stroke = fill === 'currentColor' ? '' : 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="${fill}" ${stroke} style="vertical-align:-2px;flex-shrink:0;">${paths}</svg>`;
+const _ICON = { del: 'trash', edit: 'edit', approve: 'check', unpublish: 'check', test: 'play' };
+function _svg(id, { size = 13 } = {}) {
+  return uiIcon(id, size, { style: 'vertical-align:-2px;flex-shrink:0;', role: id === 'check' ? 'success' : 'inherit' });
 }
 
 // Kebab dropdown for a collapsed skill card — same actions + icons as the
@@ -457,7 +451,7 @@ function _openSkillMenu(btn, card, sk, name, isPublished) {
   // (bulk actions cluster at the top of the menu).
   const selItem = document.createElement('button');
   selItem.className = 'skill-kebab-item';
-  selItem.innerHTML = '<svg class="memory-select-btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg><span>Select</span>';
+  selItem.innerHTML = uiIcon("select", 14, {"className":"memory-select-btn-icon","style":"flex-shrink:0;"}) + "<span>Select</span>";
   selItem.addEventListener('click', (e) => {
     e.stopPropagation();
     close();
@@ -481,7 +475,7 @@ function _openSkillMenu(btn, card, sk, name, isPublished) {
   // already dismisses cleanly.
   const cancelItem = document.createElement('button');
   cancelItem.className = 'skill-kebab-item dropdown-cancel-mobile';
-  cancelItem.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>Cancel</span>';
+  cancelItem.innerHTML = uiIcon("close", 14) + "<span>Cancel</span>";
   cancelItem.addEventListener('click', (e) => { e.stopPropagation(); close(); });
   menu.appendChild(cancelItem);
 
@@ -532,7 +526,7 @@ function _buildBuiltinCards() {
         </div>
         ${b.description ? `<div class="doclib-card-session" title="${esc(b.description)}" style="font-size:10px;opacity:0.55;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(b.description)}</div>` : ''}
       </div>
-      <span class="doclib-card-chevron"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+      <span class="doclib-card-chevron">${uiIcon("chevron-down", 14)}</span>
     `;
     card.appendChild(header);
 
@@ -554,13 +548,13 @@ function _buildBuiltinCards() {
 
     const revertBtn = document.createElement('button');
     revertBtn.className = 'doclib-card-text-btn doclib-card-action-btn doclib-card-text-btn-danger';
-    revertBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>Revert';
+    revertBtn.innerHTML = uiIcon("restore", 11, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Revert";
     revertBtn.title = 'Restore the original shipped instructions';
     revertBtn.addEventListener('click', (e) => { e.stopPropagation(); _revertBuiltin(b.name); });
 
     const editBtn = document.createElement('button');
     editBtn.className = 'doclib-card-text-btn doclib-card-action-btn';
-    editBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit';
+    editBtn.innerHTML = uiIcon("edit", 11, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Edit";
     editBtn.addEventListener('click', (e) => { e.stopPropagation(); _toggleBuiltinEdit(card, b.name); });
 
     const rightGroup = document.createElement('div');
@@ -625,7 +619,7 @@ function _toggleBuiltinEdit(card, name) {
   preview.insertBefore(ta, preview.querySelector('.doclib-card-expanded-actions'));
   ta.focus();
   const editBtn = [...preview.querySelectorAll('.doclib-card-action-btn')].find(b => /Edit|Save/.test(b.textContent));
-  if (editBtn) editBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save';
+  if (editBtn) editBtn.innerHTML = uiIcon("save", 11, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Save";
 }
 
 async function _saveBuiltinEdit(card, name) {
@@ -758,8 +752,8 @@ function renderSkillsList() {
         ${_necessityPill(sk)}
         ${_duplicatePriorityPill(sk)}
         <span class="skill-stats">${_auditMarks(sk)}<span class="skill-conf" style="color:${confColor};">${conf}%</span> · ${uses}u</span>
-        <span class="skill-chevron-up" title="Collapse"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg></span>
-        <button class="skill-kebab-btn" title="Actions" aria-label="Actions"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></button>
+        <span class="skill-chevron-up" title="Collapse">${uiIcon("chevron-up", 14)}</span>
+        <button class="skill-kebab-btn" title="Actions" aria-label="Actions">${uiIcon("more", 16)}</button>
       </div>
     `;
     card.appendChild(header);
@@ -803,22 +797,22 @@ function renderSkillsList() {
 
     const delBtn = document.createElement('button');
     delBtn.className = 'doclib-card-text-btn doclib-card-action-btn doclib-card-text-btn-danger';
-    delBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>Delete';
+    delBtn.innerHTML = uiIcon("trash", 11, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Delete";
     delBtn.addEventListener('click', (e) => { e.stopPropagation(); _deleteSkill(name, card); });
 
     const editBtn = document.createElement('button');
     editBtn.className = 'doclib-card-text-btn doclib-card-action-btn';
-    editBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit';
+    editBtn.innerHTML = uiIcon("edit", 11, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Edit";
     editBtn.addEventListener('click', (e) => { e.stopPropagation(); _toggleSkillEdit(card, name); });
 
     const pubBtn = document.createElement('button');
     pubBtn.className = 'doclib-card-text-btn doclib-card-action-btn';
     if (isPublished) {
-      pubBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg>Unpublish';
+      pubBtn.innerHTML = uiIcon("check", 11, {"role":"success"}) + "Unpublish";
       pubBtn.title = 'Move back to draft';
       pubBtn.addEventListener('click', (e) => { e.stopPropagation(); _setSkillStatus(name, 'draft'); });
     } else {
-      pubBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>Publish';
+      pubBtn.innerHTML = uiIcon("check", 11, {"role":"success"}) + "Publish";
       pubBtn.title = 'Publish — appears in the skills index';
       pubBtn.style.color = 'var(--color-success, #4caf50)';
       pubBtn.addEventListener('click', (e) => { e.stopPropagation(); _setSkillStatus(name, 'published'); });
@@ -937,7 +931,7 @@ function renderSkillsList() {
     hdr.className = 'skills-section-label skills-section-header' + (collapsed ? ' collapsed' : '');
     hdr.dataset.section = sectionId;
     hdr.innerHTML =
-      `<svg class="skills-section-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>` +
+      `${uiIcon("chevron-down", 10, {"className":"skills-section-chevron"})}` +
       `<span>${esc(title)}</span>` +
       `<span class="skills-section-count">${count}</span>`;
     hdr.addEventListener('click', () => {
@@ -1133,7 +1127,7 @@ function _toggleSkillEdit(card, name) {
   ta.focus();
   // Flip the Edit button label to "Save".
   const editBtn = [...preview.querySelectorAll('.doclib-card-action-btn')].find(b => /Edit|Save/.test(b.textContent));
-  if (editBtn) editBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save';
+  if (editBtn) editBtn.innerHTML = uiIcon("save", 11, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Save";
 }
 
 async function _saveSkillEdit(card, name) {
@@ -1348,10 +1342,10 @@ function _applyVerdictToHeader(card, verdict) {
     // Inline glyphs for the per-verdict pill — appear next to the "checked"
     // label so the verdict reads as a real badge.
     const ICON = {
-      pass: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="20 6 9 17 4 12"/></svg>',
-      needs_work: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="17" x2="12" y2="17"/></svg>',
-      inconclusive: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="17" x2="12" y2="17"/></svg>',
-      fail: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+      pass: uiIcon("check", 10, {"style":"vertical-align:-1px;margin-right:3px;","role":"success"}),
+      needs_work: uiIcon("warning", 10, {"style":"vertical-align:-1px;margin-right:3px;"}),
+      inconclusive: uiIcon("warning", 10, {"style":"vertical-align:-1px;margin-right:3px;"}),
+      fail: uiIcon("close", 10, {"style":"vertical-align:-1px;margin-right:3px;"}),
     }[verdict];
     // Wash the pill's bg + tint the text so a glance at the badge tells you
     // pass/needs-work/fail without expanding the card.
@@ -1416,7 +1410,7 @@ function _renderTestVerdict(el, v, card, name) {
         '<button class="doclib-card-text-btn doclib-card-action-btn" data-act="retry" title="Run the test again">Retry</button>' +
         '<button class="doclib-card-text-btn doclib-card-action-btn" data-act="copy" title="Copy the run output + verdict">Copy</button>' +
         '<button class="doclib-card-text-btn doclib-card-action-btn" data-act="edit">Edit</button>' +
-        '<button class="doclib-card-text-btn doclib-card-action-btn doclib-card-text-btn-danger" data-act="del"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>Delete</button>' +
+        "<button class=\"doclib-card-text-btn doclib-card-action-btn doclib-card-text-btn-danger\" data-act=\"del\">" + uiIcon("trash", 11, {"style":"vertical-align:-1px;margin-right:3px;"}) + "Delete</button>" +
       '</div></div>' +
     '</div>';
   _applyVerdictToHeader(card, verdict);
@@ -1705,8 +1699,8 @@ function _renderAuditPanel(panel, st) {
 
 // ---- Select mode / bulk actions ----
 
-const _SKILLS_SELECT_BTN_DOT_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px;"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>';
-const _SKILLS_SELECT_BTN_X_SVG = '<svg class="memory-select-btn-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:3px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+const _SKILLS_SELECT_BTN_DOT_SVG = uiIcon("select", 11, {"className":"memory-select-btn-icon","style":"vertical-align:-2px;margin-right:3px;"});
+const _SKILLS_SELECT_BTN_X_SVG = uiIcon("close", 11, {"className":"memory-select-btn-icon","style":"vertical-align:-2px;margin-right:3px;"});
 
 function _enterSelectMode() {
   _selectMode = true;

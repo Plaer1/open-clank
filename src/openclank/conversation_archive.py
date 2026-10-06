@@ -27,12 +27,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 # Target paging bounds (from the memory/goals audit). Kept as named constants
 # so tests and callers share one authority.
@@ -42,6 +43,7 @@ AROUND_AFTER_MAX = 50
 GET_LENGTH_MAX_UTF16 = 8000
 GET_TEXT_PAGE_BYTES = 16000
 TOOL_ENVELOPE_BYTES = 20 * 1024
+INDEX_PREVIEW_FIELD_BYTES = 4000
 
 OUTBOX_PENDING = "pending"
 OUTBOX_RUNNING = "running"
@@ -57,6 +59,19 @@ EVENT_ASSET_REF = "asset_ref"
 EVENT_COMPACTION_PROJECTION = "compaction_projection"
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversation_archive_deleted_chats (
+    owner TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    erased_at INTEGER NOT NULL,
+    PRIMARY KEY(owner, chat_id)
+);
+
+CREATE TABLE IF NOT EXISTS conversation_archive_owner_aliases (
+    owner_alias TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS conversation_parts (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     owner TEXT NOT NULL,
@@ -165,6 +180,19 @@ CREATE TABLE IF NOT EXISTS conversation_archive_cursor (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (owner, chat_id, consumer)
 );
+
+CREATE TABLE IF NOT EXISTS conversation_archive_migration_envelopes (
+    owner TEXT NOT NULL,
+    source_fingerprint TEXT NOT NULL,
+    record_kind TEXT NOT NULL CHECK(record_kind IN ('session', 'message')),
+    source_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    time_created INTEGER NOT NULL,
+    PRIMARY KEY (owner, source_fingerprint, record_kind, source_id)
+);
+CREATE INDEX IF NOT EXISTS ix_conv_migration_envelopes_scope
+    ON conversation_archive_migration_envelopes(owner, source_fingerprint, record_kind);
 """
 
 
@@ -195,43 +223,188 @@ def _json_loads(raw: Optional[str], default: Any) -> Any:
         return default
 
 
+_DATA_MIME = re.compile(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+")
+_DATA_PARAM = re.compile(r";[A-Za-z0-9!#$&^_.+-]+=[A-Za-z0-9!#$&^_.+%/-]+")
+_DATA_PREFIX = re.compile(r"data:", re.IGNORECASE)
+_BASE64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+_DATA_PRECEDING_BOUNDARY = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/+%-")
+_BASE64_VALUES = {
+    char: value
+    for value, char in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+}
+_LARGE_INDEX_FIELD_MARKER = "[large field omitted; use history get part_id]"
+
+
+def _valid_base64_payload(payload: str) -> bool:
+    """Validate standard padded or complete unpadded base64 without decoding it."""
+    if not payload:
+        return False
+    padding = payload.find("=")
+    if padding >= 0:
+        if (
+            len(payload) % 4
+            or padding < len(payload) - 2
+            or len(payload) - padding > 2
+            or any(ch != "=" for ch in payload[padding:])
+        ):
+            return False
+        encoded = payload[:padding]
+        tail_modulo = len(encoded) % 4
+        if (len(payload) - padding == 1 and tail_modulo != 3) or (
+            len(payload) - padding == 2 and tail_modulo != 2
+        ):
+            return False
+    else:
+        encoded = payload
+        tail_modulo = len(encoded) % 4
+        if tail_modulo == 1:
+            return False
+    if not encoded or any(char not in _BASE64_VALUES for char in encoded):
+        return False
+    last_value = _BASE64_VALUES[encoded[-1]]
+    if tail_modulo == 2 and last_value & 0b1111:
+        return False
+    if tail_modulo == 3 and last_value & 0b11:
+        return False
+    return True
+
+
+def _replace_data_urls(text: str) -> tuple[str, bool]:
+    """Replace only complete, single-line media data URLs in one linear scan.
+
+    Ordinary ``metadata:`` / ``form-data:`` prose, malformed tokens and base64
+    folded across lines remain source text.  Search invokes this only after its
+    pure-SQL projection has bounded the value to four KiB.
+    """
+    pieces: list[str] = []
+    cursor = 0
+    omitted = False
+    while True:
+        prefix = _DATA_PREFIX.search(text, cursor)
+        if prefix is None:
+            pieces.append(text[cursor:])
+            break
+        start = prefix.start()
+        if start and text[start - 1] in _DATA_PRECEDING_BOUNDARY:
+            pieces.append(text[cursor:start + 5])
+            cursor = start + 5
+            continue
+        mime_match = _DATA_MIME.match(text, start + 5)
+        if mime_match is None:
+            pieces.append(text[cursor:start + 5])
+            cursor = start + 5
+            continue
+        pos = mime_match.end()
+        while True:
+            parameter = _DATA_PARAM.match(text, pos)
+            if parameter is None:
+                break
+            pos = parameter.end()
+        if not text[pos:pos + 8].lower() == ";base64,":
+            pieces.append(text[cursor:start + 5])
+            cursor = start + 5
+            continue
+        payload_start = pos + 8
+        payload_end = payload_start
+        while payload_end < len(text) and text[payload_end] in _BASE64_CHARS:
+            payload_end += 1
+        payload = text[payload_start:payload_end]
+        # Newline-separated base64 must stay readable source rather than being
+        # mistaken for a completed URL's first physical line.
+        if (
+            not _valid_base64_payload(payload)
+            or (text[payload_end:payload_end + 1] in {"\r", "\n"}
+                and text[payload_end + 1:payload_end + 2] in _BASE64_CHARS)
+        ):
+            pieces.append(text[cursor:start + 5])
+            cursor = start + 5
+            continue
+        pieces.append(text[cursor:start])
+        pieces.append(f"[media {mime_match.group(0)}]")
+        cursor = payload_end
+        omitted = True
+    return "".join(pieces), omitted
+
+
+def _utf8_prefix(text: str, budget: int) -> tuple[str, bool]:
+    """Return complete code points within a UTF-8 byte budget."""
+    used = 0
+    end = 0
+    for index, ch in enumerate(text):
+        size = len(ch.encode("utf-8", errors="replace"))
+        if used + size > budget:
+            return text[:end], True
+        used += size
+        end = index + 1
+    return text, False
+
+
+def _index_preview(value: Any) -> tuple[str, bool]:
+    """Project canonical content into a bounded, media-safe index preview."""
+    text = value if isinstance(value, str) else _canonical_json(value)
+    text, media_omissions = _replace_data_urls(text)
+    visible, clipped = _utf8_prefix(text, INDEX_PREVIEW_FIELD_BYTES)
+    if clipped:
+        # Reserve the ellipsis bytes inside the advertised 4 KiB maximum.
+        visible, _ = _utf8_prefix(visible, INDEX_PREVIEW_FIELD_BYTES - len("…".encode("utf-8")))
+        visible += "…"
+    return visible, media_omissions or clipped
+
+
 def _utf16_len(text: str) -> int:
     """UTF-16 code-unit length, matching the target paging semantics."""
     return len(text.encode("utf-16-le")) // 2
 
 
-def _clamp_get_text(text: str) -> tuple[str, int, bool]:
-    """Clamp a full-part body to the target get bounds.
+def _normalize_get_length(length: Optional[int]) -> int:
+    try:
+        requested = GET_LENGTH_MAX_UTF16 if length is None else int(length)
+    except (TypeError, ValueError):
+        requested = GET_LENGTH_MAX_UTF16
+    return max(1, min(requested, GET_LENGTH_MAX_UTF16))
 
-    Returns (visible_text, next_offset, has_more). ``next_offset`` is a
-    UTF-16 cursor so surrogate pairs are never split.
-    """
+
+def _slice_at_utf16_offset(text: str, offset: int) -> tuple[str, int]:
+    """Advance a UTF-16 cursor to the next complete code-point boundary."""
+    target = max(0, int(offset))
+    units = 0
+    for index, ch in enumerate(text):
+        next_units = units + (2 if ord(ch) > 0xFFFF else 1)
+        if next_units > target:
+            if units == target:
+                return text[index:], units
+            # An arbitrary caller landed inside an astral character.  Advance
+            # past it; issued cursors are always exact and never take this path.
+            return text[index + 1:], next_units
+        if next_units == target:
+            return text[index + 1:], next_units
+        units = next_units
+    return "", units
+
+
+def _clamp_get_text(text: str, *, length: Optional[int] = None) -> tuple[str, int, bool]:
+    """Page a body by UTF-16 units and UTF-8 bytes without splitting code points."""
     if text is None:
         return "", 0, False
-    # Prefer the byte page when it is tighter; both bounds must hold.
-    byte_limited = text
-    if len(text.encode("utf-8", errors="replace")) > GET_TEXT_PAGE_BYTES:
-        raw = text.encode("utf-8", errors="replace")[:GET_TEXT_PAGE_BYTES]
-        byte_limited = raw.decode("utf-8", errors="ignore")
-
-    total_units = _utf16_len(byte_limited)
-    if total_units <= GET_LENGTH_MAX_UTF16:
-        has_more = byte_limited != text
-        return byte_limited, total_units if has_more else 0, has_more
-
-    # Walk the string in code points until the UTF-16 budget is hit. Never
-    # cut a surrogate pair in half (Python str is code-point safe already).
-    units = 0
-    cut = 0
-    for index, ch in enumerate(byte_limited):
-        units += 2 if ord(ch) > 0xFFFF else 1
-        if units > GET_LENGTH_MAX_UTF16:
-            cut = index
+    unit_budget = _normalize_get_length(length)
+    bytes_used = 0
+    units_used = 0
+    end = 0
+    for index, ch in enumerate(text):
+        ch_units = 2 if ord(ch) > 0xFFFF else 1
+        ch_bytes = len(ch.encode("utf-8", errors="replace"))
+        if units_used + ch_units > unit_budget or bytes_used + ch_bytes > GET_TEXT_PAGE_BYTES:
+            # A one-unit request cannot represent an astral character. Return
+            # that whole character rather than emitting an empty, non-advancing
+            # page or splitting its surrogate pair.
+            if end == 0:
+                return ch, ch_units, len(text) > 1
             break
-        cut = index + 1
-    visible = byte_limited[:cut]
-    has_more = visible != text
-    return visible, _utf16_len(visible), has_more
+        units_used += ch_units
+        bytes_used += ch_bytes
+        end = index + 1
+    visible = text[:end]
+    return visible, units_used, end < len(text)
 
 
 @dataclass(frozen=True)
@@ -296,12 +469,28 @@ class ConversationArchive:
     """SQLite-backed lossless ordered source-part archive + idempotent outbox."""
 
     db_path: str
+    owner_resolver: Optional[Callable[[str], Optional[str]]] = field(default=None, repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
         parent = os.path.dirname(os.path.abspath(self.db_path))
         if parent:
             os.makedirs(parent, exist_ok=True)
+        if os.path.isfile(self.db_path) and os.path.getsize(self.db_path):
+            # Validate existing stores through a read-only handle before any
+            # WAL pragma or CREATE can modify historical bytes.
+            from urllib.parse import quote
+            uri = "file:" + quote(os.path.abspath(self.db_path), safe="/") + "?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                required = set(self._OWNER_TABLES) | {"conversation_archive_owner_aliases", "conversation_archive_deleted_chats"}
+                if not required.issubset(tables):
+                    raise ArchiveUnavailableError(message="archive schema requires explicit offline conversion")
+                if not {"owner_alias", "account_id", "updated_at"}.issubset({row[1] for row in conn.execute("PRAGMA table_info(conversation_archive_owner_aliases)")}):
+                    raise ArchiveUnavailableError(message="archive identity schema requires explicit offline conversion")
+                if not {"owner", "chat_id", "erased_at"}.issubset({row[1] for row in conn.execute("PRAGMA table_info(conversation_archive_deleted_chats)")}):
+                    raise ArchiveUnavailableError(message="archive deletion schema requires explicit offline conversion")
+            return
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
 
@@ -312,6 +501,169 @@ class ConversationArchive:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
+
+    _OWNER_TABLES = (
+        "conversation_parts", "conversation_part_aliases", "conversation_part_assets",
+        "conversation_archive_outbox", "conversation_compaction_projections",
+        "conversation_archive_cursor", "conversation_archive_migration_envelopes",
+    )
+
+    def resolve_owner(self, owner: str) -> str:
+        """Resolve a real current account; offline explicit stores accept IDs."""
+        value = str(owner or "").strip()
+        if not value:
+            raise ValueError("archive owner is required")
+        if self.owner_resolver is None:
+            return value
+        account_id = self.owner_resolver(value)
+        if not account_id:
+            raise ValueError("archive owner has no authenticated account identity")
+        account_id = str(account_id)
+        if value != account_id:
+            with self._connect() as conn:
+                if any(conn.execute(f"SELECT 1 FROM {table} WHERE owner=? LIMIT 1", (value,)).fetchone() for table in self._OWNER_TABLES):
+                    raise ArchiveUnavailableError(message="legacy archive ownership requires explicit account-ID conversion")
+        return account_id
+
+    def owner_inventory(self, owner: str) -> dict[str, Any]:
+        try:
+            account_id = self._lifecycle_owner(owner, bind=True)
+        except ValueError:
+            with self._connect() as conn:
+                if any(conn.execute(f"SELECT 1 FROM {table} WHERE owner=? LIMIT 1", (owner,)).fetchone() for table in self._OWNER_TABLES):
+                    raise ArchiveUnavailableError(message="archive owner requires explicit identity conversion")
+            return {"owner_account_id": None, "count": 0, "tables": {table: 0 for table in self._OWNER_TABLES}}
+        with self._lock, self._connect() as conn:
+            counts = {table: int(conn.execute(
+                f"SELECT count(*) FROM {table} WHERE owner=?", (account_id,)
+            ).fetchone()[0]) for table in self._OWNER_TABLES}
+        return {"owner_account_id": account_id, "count": sum(counts.values()), "tables": counts}
+
+    def _lifecycle_owner(self, owner: str, *, bind: bool = False) -> str:
+        try:
+            account_id = self.resolve_owner(owner)
+        except ValueError:
+            with self._lock, self._connect() as conn:
+                row = conn.execute(
+                    "SELECT account_id FROM conversation_archive_owner_aliases WHERE owner_alias=?",
+                    (owner,),
+                ).fetchone()
+            if row is None:
+                raise
+            account_id = str(row[0])
+        if bind:
+            with self._lock, self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO conversation_archive_owner_aliases VALUES (?,?,?) "
+                    "ON CONFLICT(owner_alias) DO UPDATE SET account_id=excluded.account_id, updated_at=excluded.updated_at",
+                    (owner, account_id, _now_ms()),
+                )
+        return account_id
+
+    def rename_owner(self, old_owner: str, new_owner: str) -> dict[str, Any]:
+        """Rename lifecycle alias; immutable source keys never change."""
+        try:
+            account_id = self._lifecycle_owner(old_owner)
+        except ValueError:
+            # A prior rename may already have moved its content-free alias.
+            account_id = self._lifecycle_owner(new_owner)
+            return {"owner_account_id": account_id, "alias_renamed": False, "already_applied": True}
+        try:
+            target_id = self.resolve_owner(new_owner)
+        except ValueError:
+            target_id = None
+        if target_id and target_id != account_id:
+            raise ValueError("archive target owner belongs to another account")
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT account_id FROM conversation_archive_owner_aliases WHERE owner_alias=?", (new_owner,)
+                ).fetchone()
+                if row and row[0] != account_id:
+                    raise ValueError("archive owner alias conflicts")
+                conn.execute("DELETE FROM conversation_archive_owner_aliases WHERE owner_alias=?", (old_owner,))
+                conn.execute("INSERT OR REPLACE INTO conversation_archive_owner_aliases VALUES (?,?,?)",
+                             (new_owner, account_id, _now_ms()))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {"owner_account_id": account_id, "alias_renamed": True}
+
+    def purge_owner(self, owner: str) -> dict[str, Any]:
+        account_id = self._lifecycle_owner(owner)
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                counts = {table: conn.execute(
+                    f"DELETE FROM {table} WHERE owner=?", (account_id,)
+                ).rowcount for table in self._OWNER_TABLES}
+                residual = sum(int(conn.execute(
+                    f"SELECT count(*) FROM {table} WHERE owner=?", (account_id,)
+                ).fetchone()[0]) for table in self._OWNER_TABLES)
+                if residual:
+                    raise RuntimeError("archive owner purge has residual records")
+                # Keep only the content-free tombstone mapping so retries can
+                # verify the same immutable owner after credentials are gone.
+                conn.execute("DELETE FROM conversation_archive_owner_aliases WHERE account_id=? AND owner_alias NOT LIKE 'deleted:%'", (account_id,))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {"owner_account_id": account_id, "erased": counts, "residual": 0}
+
+    def begin_chat_erasure(self, *, owner: str, chat_id: str) -> None:
+        """Persist content-free deletion intent before cross-store mutations."""
+        account_id = self.resolve_owner(owner)
+        if not chat_id:
+            raise ValueError("archive chat id is required")
+        with self._lock, self._connect() as conn:
+            conn.execute("INSERT OR IGNORE INTO conversation_archive_deleted_chats VALUES (?,?,?)", (account_id, chat_id, _now_ms()))
+
+    def chat_erasure_started(self, *, owner: str, chat_id: str) -> bool:
+        account_id = self.resolve_owner(owner)
+        with self._connect() as conn:
+            return conn.execute("SELECT 1 FROM conversation_archive_deleted_chats WHERE owner=? AND chat_id=?", (account_id, chat_id)).fetchone() is not None
+
+    def erase_chat(self, *, owner: str, chat_id: str) -> dict[str, Any]:
+        account_id = self.resolve_owner(owner)
+        if not chat_id:
+            raise ValueError("archive chat id is required")
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("INSERT OR IGNORE INTO conversation_archive_deleted_chats VALUES (?,?,?)", (account_id, chat_id, _now_ms()))
+                counts = {table: conn.execute(
+                    f"DELETE FROM {table} WHERE owner=? AND chat_id=?", (account_id, chat_id)
+                ).rowcount for table in self._OWNER_TABLES}
+                residual = sum(int(conn.execute(
+                    f"SELECT count(*) FROM {table} WHERE owner=? AND chat_id=?", (account_id, chat_id)
+                ).fetchone()[0]) for table in self._OWNER_TABLES)
+                if residual:
+                    raise RuntimeError("archive erasure has residual records")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {"owner_account_id": account_id, "chat_id": chat_id, "erased": counts, "residual": 0}
+
+    @staticmethod
+    def _reject_erased_chat(conn, owner: str, chat_id: str) -> None:
+        if conn.execute("SELECT 1 FROM conversation_archive_deleted_chats WHERE owner=? AND chat_id=?", (owner, chat_id)).fetchone():
+            raise ValueError("conversation was deleted; retained history writes are closed")
+
+    def chat_inventory(self, *, owner: str, chat_id: str) -> dict[str, Any]:
+        account_id = self.resolve_owner(owner)
+        with self._lock, self._connect() as conn:
+            counts = {table: int(conn.execute(
+                f"SELECT count(*) FROM {table} WHERE owner=? AND chat_id=?", (account_id, chat_id)
+            ).fetchone()[0]) for table in self._OWNER_TABLES}
+            assets = [row[0] for row in conn.execute(
+                "SELECT DISTINCT asset_id FROM conversation_part_assets WHERE owner=? AND chat_id=?",
+                (account_id, chat_id),
+            )]
+        return {"owner_account_id": account_id, "count": sum(counts.values()), "tables": counts, "asset_ids": assets, "erasure_started": self.chat_erasure_started(owner=account_id, chat_id=chat_id)}
 
     # ------------------------------------------------------------------
     # Write path: archive + outbox in one immediate transaction
@@ -342,6 +694,7 @@ class ConversationArchive:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 for part in normalized:
+                    self._reject_erased_chat(conn, part.owner, part.chat_id)
                     existing = conn.execute(
                         """
                         SELECT seq, content_hash, tombstone FROM conversation_parts
@@ -455,6 +808,217 @@ class ConversationArchive:
             "consumer_hint": consumer_hint,
         }
 
+    def append_managed_parts(
+        self,
+        parts: Sequence[SourcePart | Mapping[str, Any]],
+        *,
+        consumer_hint: str = "managed-history",
+    ) -> dict[str, Any]:
+        """Host-assign revisions for managed engine events.
+
+        The engine has no durable history writer, so its timestamp cannot be a
+        revision authority.  A single immediate transaction assigns and writes
+        each revision.  It reuses only the current canonical revision for an
+        exact replay; any different payload advances it, including a reversion
+        to content from an older revision.  This keeps concurrent live and
+        backfill deliveries lossless while restart replays remain no-ops.
+        """
+        accepted = duplicate = enqueued = 0
+        part_ids: list[str] = []
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for raw_part in parts:
+                    part = self._coerce_part(raw_part)
+                    self._reject_erased_chat(conn, part.owner, part.chat_id)
+                    content_hash = part.content_hash or _content_hash(part.content)
+                    latest = conn.execute(
+                        """
+                        SELECT revision, content_hash, tombstone, role, part_type FROM conversation_parts
+                        WHERE owner=? AND chat_id=? AND actor_id=? AND message_id=? AND part_id=?
+                        ORDER BY revision DESC LIMIT 1
+                        """,
+                        (part.owner, part.chat_id, part.actor_id, part.message_id, part.part_id),
+                    ).fetchone()
+                    now = part.time_updated or _now_ms()
+                    if (
+                        latest is not None
+                        and latest["content_hash"] == content_hash
+                        and not latest["tombstone"]
+                        and latest["role"] == part.role
+                        and latest["part_type"] == part.part_type
+                    ):
+                        duplicate += 1
+                        part_ids.append(part.part_id)
+                        enqueued += self._enqueue_outbox(
+                            conn,
+                            replace(part, revision=int(latest["revision"]), content_hash=content_hash),
+                            event_kind=EVENT_PART_TOMBSTONE if part.tombstone else EVENT_PART_UPSERT,
+                            now=now,
+                        )
+                        continue
+
+                    revision = int(latest["revision"]) + 1 if latest is not None else 1
+                    assigned = replace(part, revision=revision, content_hash=content_hash)
+                    conn.execute(
+                        """
+                        INSERT INTO conversation_parts(
+                            owner, chat_id, actor_id, message_id, part_id, revision,
+                            runtime_generation, event_sequence, event_workspace,
+                            event_project, role, part_type, content, content_hash,
+                            time_created, time_updated, tombstone, tombstone_reason
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            assigned.owner,
+                            assigned.chat_id,
+                            assigned.actor_id,
+                            assigned.message_id,
+                            assigned.part_id,
+                            assigned.revision,
+                            assigned.runtime_generation,
+                            assigned.event_sequence,
+                            assigned.event_workspace,
+                            assigned.event_project,
+                            assigned.role,
+                            assigned.part_type,
+                            None if assigned.content is None else (
+                                assigned.content if isinstance(assigned.content, str) else _canonical_json(assigned.content)
+                            ),
+                            content_hash,
+                            assigned.time_created or now,
+                            now,
+                            1 if assigned.tombstone else 0,
+                            assigned.tombstone_reason,
+                        ),
+                    )
+                    accepted += 1
+                    part_ids.append(assigned.part_id)
+                    for alias_kind, alias_id in assigned.aliases:
+                        if not alias_kind or not alias_id:
+                            continue
+                        conn.execute(
+                            """
+                            INSERT INTO conversation_part_aliases(
+                                alias_kind, alias_id, owner, chat_id, message_id, part_id, revision
+                            ) VALUES (?,?,?,?,?,?,?)
+                            ON CONFLICT(alias_kind, alias_id, owner) DO UPDATE SET
+                                chat_id=excluded.chat_id,
+                                message_id=excluded.message_id,
+                                part_id=excluded.part_id,
+                                revision=excluded.revision
+                            """,
+                            (
+                                str(alias_kind),
+                                str(alias_id),
+                                assigned.owner,
+                                assigned.chat_id,
+                                assigned.message_id,
+                                assigned.part_id,
+                                assigned.revision,
+                            ),
+                        )
+                    for asset in assigned.assets:
+                        self._upsert_asset(conn, assigned, asset, now=now)
+                        enqueued += self._enqueue_outbox(
+                            conn,
+                            assigned,
+                            event_kind=EVENT_ASSET_REF,
+                            now=now,
+                            payload_extra={"asset": dict(asset)},
+                        )
+                    enqueued += self._enqueue_outbox(
+                        conn,
+                        assigned,
+                        event_kind=EVENT_PART_TOMBSTONE if assigned.tombstone else EVENT_PART_UPSERT,
+                        now=now,
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return {
+            "accepted": accepted,
+            "duplicate": duplicate,
+            "enqueued": enqueued,
+            "part_ids": part_ids,
+            "consumer_hint": consumer_hint,
+        }
+
+    def record_migration_envelopes(
+        self,
+        *,
+        owner: str,
+        source_fingerprint: str,
+        sessions: Sequence[Mapping[str, Any]],
+        messages: Sequence[Mapping[str, Any]],
+    ) -> dict[str, int]:
+        """Durably account for source envelopes that have no canonical parts.
+
+        Empty MiMo sessions/messages are execution records, but intentionally
+        do not become synthetic history parts or outbox events.  Their source
+        payload remains owner- and source-fingerprint-scoped so a retry can
+        distinguish a durable duplicate from a skipped record.
+        """
+        owner = self.resolve_owner(owner)
+        records: list[tuple[str, str, str, Mapping[str, Any], int]] = []
+        for session in sessions:
+            source_id = str(session.get("id") or "")
+            if not source_id:
+                raise ValueError("migration session envelope requires id")
+            records.append(("session", source_id, source_id, session, int(session.get("time_created") or 0)))
+        for message in messages:
+            source_id = str(message.get("id") or "")
+            chat_id = str(message.get("session_id") or "")
+            if not source_id or not chat_id:
+                raise ValueError("migration message envelope requires id and session_id")
+            records.append(("message", source_id, chat_id, message, int(message.get("time_created") or 0)))
+
+        accepted_sessions = duplicate_sessions = accepted_messages = duplicate_messages = 0
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for kind, source_id, chat_id, payload, time_created in records:
+                    self._reject_erased_chat(conn, owner, chat_id)
+                    encoded = _canonical_json(dict(payload))
+                    existing = conn.execute(
+                        """
+                        SELECT payload_json FROM conversation_archive_migration_envelopes
+                        WHERE owner=? AND source_fingerprint=? AND record_kind=? AND source_id=?
+                        """,
+                        (owner, source_fingerprint, kind, source_id),
+                    ).fetchone()
+                    if existing is not None:
+                        if existing["payload_json"] != encoded:
+                            raise ValueError("migration envelope identity already exists with different content")
+                        if kind == "session":
+                            duplicate_sessions += 1
+                        else:
+                            duplicate_messages += 1
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO conversation_archive_migration_envelopes(
+                            owner, source_fingerprint, record_kind, source_id, chat_id, payload_json, time_created
+                        ) VALUES (?,?,?,?,?,?,?)
+                        """,
+                        (owner, source_fingerprint, kind, source_id, chat_id, encoded, time_created),
+                    )
+                    if kind == "session":
+                        accepted_sessions += 1
+                    else:
+                        accepted_messages += 1
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return {
+            "accepted_sessions": accepted_sessions,
+            "duplicate_sessions": duplicate_sessions,
+            "accepted_messages": accepted_messages,
+            "duplicate_messages": duplicate_messages,
+        }
+
     def tombstone_part(
         self,
         *,
@@ -467,9 +1031,11 @@ class ConversationArchive:
         reason: Optional[str] = None,
     ) -> dict[str, Any]:
         """Version a destructive change as a tombstone; never prune the source row."""
+        owner = self.resolve_owner(owner)
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                self._reject_erased_chat(conn, owner, chat_id)
                 row = conn.execute(
                     """
                     SELECT * FROM conversation_parts
@@ -481,6 +1047,9 @@ class ConversationArchive:
                 if row is None:
                     conn.execute("ROLLBACK")
                     return {"ok": False, "error": "not_found"}
+                if row["tombstone"]:
+                    conn.execute("ROLLBACK")
+                    return {"ok": True, "tombstoned": False, "duplicate": True}
                 now = _now_ms()
                 conn.execute(
                     """
@@ -526,10 +1095,12 @@ class ConversationArchive:
         model_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Record an active-context compaction projection. Source parts stay."""
+        owner = self.resolve_owner(owner)
         now = _now_ms()
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                self._reject_erased_chat(conn, owner, chat_id)
                 conn.execute(
                     """
                     INSERT INTO conversation_compaction_projections(
@@ -699,6 +1270,7 @@ class ConversationArchive:
         consumer: str = "default",
     ) -> list[dict[str, Any]]:
         """Claim pending/reconciling events for delivery. Restart-safe."""
+        owner = self.resolve_owner(owner) if owner is not None else None
         now = _now_ms()
         clauses = ["state IN ('pending','reconciling')"]
         params: list[Any] = []
@@ -771,6 +1343,7 @@ class ConversationArchive:
             return cur.rowcount > 0
 
     def outbox_pending_count(self, *, owner: Optional[str] = None, chat_id: Optional[str] = None) -> int:
+        owner = self.resolve_owner(owner) if owner is not None else None
         clauses = ["state IN ('pending','running','reconciling')"]
         params: list[Any] = []
         if owner:
@@ -800,6 +1373,7 @@ class ConversationArchive:
             return int(row["n"])
 
     def advance_cursor(self, *, owner: str, chat_id: str, consumer: str, last_outbox_seq: int) -> None:
+        owner = self.resolve_owner(owner)
         now = _now_ms()
         with self._lock, self._connect() as conn:
             conn.execute(
@@ -814,6 +1388,7 @@ class ConversationArchive:
             )
 
     def cursor(self, *, owner: str, chat_id: str, consumer: str) -> int:
+        owner = self.resolve_owner(owner)
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -835,6 +1410,7 @@ class ConversationArchive:
         alias_kind: str,
         alias_id: str,
     ) -> Optional[dict[str, Any]]:
+        owner = self.resolve_owner(owner)
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -858,6 +1434,7 @@ class ConversationArchive:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Full-part get. Reads the canonical part, never an FTS preview."""
+        owner = self.resolve_owner(owner)
         params: list[Any] = [owner, chat_id, actor_id, message_id, part_id]
         sql = """
             SELECT * FROM conversation_parts
@@ -885,22 +1462,12 @@ class ConversationArchive:
                     body = parsed
                 elif isinstance(parsed, Mapping) and isinstance(parsed.get("text"), str):
                     body = parsed["text"]
-            budget = GET_LENGTH_MAX_UTF16 if length is None else min(int(length), GET_LENGTH_MAX_UTF16)
-            offset = max(0, int(offset))
-            if offset:
-                # UTF-16 safe skip: slice by code points accumulating units.
-                units = 0
-                slice_at = 0
-                for index, ch in enumerate(body):
-                    units += 2 if ord(ch) > 0xFFFF else 1
-                    if units >= offset:
-                        slice_at = index + (1 if units == offset else 0)
-                        # If the skip lands mid-pair it cannot: Python code points
-                        # are atomic, so units never split a surrogate pair.
-                        break
-                    slice_at = index + 1
-                body = body[slice_at:]
-            visible, consumed, has_more = _clamp_get_text(body)
+            try:
+                requested_offset = max(0, int(offset))
+            except (TypeError, ValueError):
+                requested_offset = 0
+            body, actual_offset = _slice_at_utf16_offset(body, requested_offset)
+            visible, consumed, has_more = _clamp_get_text(body, length=length)
             assets = [
                 dict(r)
                 for r in conn.execute(
@@ -935,7 +1502,7 @@ class ConversationArchive:
                     "tombstone_reason": row["tombstone_reason"],
                     "assets": assets,
                 },
-                "next_offset": (offset + consumed) if has_more else None,
+                "next_offset": (actual_offset + consumed) if has_more else None,
                 "has_more": has_more,
             }
 
@@ -948,6 +1515,7 @@ class ConversationArchive:
         message_id: str,
         include_tombstones: bool = True,
     ) -> dict[str, Any]:
+        owner = self.resolve_owner(owner)
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -975,6 +1543,7 @@ class ConversationArchive:
         scope: str = "chat",
         actor_id: Optional[str] = None,
         part_types: Optional[Sequence[str]] = None,
+        kinds: Optional[Sequence[str]] = None,
         tool_name: Optional[str] = None,
         time_after: Optional[int] = None,
         time_before: Optional[int] = None,
@@ -986,6 +1555,7 @@ class ConversationArchive:
         ``scope='global'`` is same-owner scope only — never cross-account.
         Guessed ids from another owner fail closed (empty result).
         """
+        owner = self.resolve_owner(owner)
         limit = max(1, min(int(limit), SEARCH_LIMIT_MAX))
         # Owner is mandatory. chat_id is optional only under explicit global.
         if not owner:
@@ -1023,10 +1593,91 @@ class ConversationArchive:
             clauses.append("(content LIKE ? ESCAPE '\\' OR part_type LIKE ? ESCAPE '\\')")
             params.extend([like, like])
 
+        source_text = """
+            CASE WHEN content IS NULL THEN ''
+                 WHEN json_valid(content) THEN
+                     CASE WHEN json_type(content)='object'
+                                   AND json_type(content, '$.text')='text'
+                              THEN json_extract(content, '$.text')
+                          WHEN json_type(content)='text' THEN json_extract(content, '$')
+                          ELSE content
+                     END
+                 ELSE content
+            END
+        """
+        # The semantic fields feed both filter predicates and host projection.
+        # Live MiMo parts keep their payload at the top level; migrated rows
+        # retain it under mimo.part.  Keep this in SQLite so filtering happens
+        # before LIMIT and cannot disagree with a later Python projection.
+        tool_name_expr = """
+            CASE WHEN json_valid(content) THEN
+                COALESCE(
+                    json_extract(content, '$.mimo.part.tool'),
+                    json_extract(content, '$.tool'),
+                    CASE WHEN json_type(content)='object'
+                              AND json_type(content, '$.tool_name')='text'
+                         THEN json_extract(content, '$.tool_name')
+                    END
+                )
+            END
+        """
+        tool_status_expr = """
+            CASE WHEN part_type='tool' AND json_valid(content) THEN
+                COALESCE(
+                    json_extract(content, '$.mimo.part.state.status'),
+                    json_extract(content, '$.state.status')
+                )
+            END
+        """
+        history_kind_expr = f"""
+            CASE
+                WHEN part_type='text' AND role='user' THEN 'user_text'
+                WHEN part_type='text' THEN 'assistant_text'
+                WHEN part_type='reasoning' THEN 'reasoning'
+                WHEN part_type='tool' AND ({tool_status_expr})='error' THEN 'tool_error'
+                WHEN part_type='tool' AND ({tool_status_expr})='completed' THEN 'tool_output'
+                WHEN part_type='tool' THEN 'tool_input'
+                ELSE 'assistant_text'
+            END
+        """
+        semantic_clauses: list[str] = []
+        if kinds:
+            marks = ",".join("?" for _ in kinds)
+            semantic_clauses.append(f"history_kind IN ({marks})")
+            params.extend(kinds)
+        if tool_name:
+            semantic_clauses.append("history_tool_name=?")
+            params.append(tool_name)
         params.append(limit)
+        base_columns = """
+            seq, owner, chat_id, actor_id, message_id, part_id, revision,
+            runtime_generation, event_sequence, event_workspace, event_project,
+            role, part_type, content_hash, time_created, time_updated,
+            tombstone, tombstone_reason
+        """
+        projection_columns = base_columns + ", history_kind, history_tool_name"
+        filtered_columns = base_columns + ", source_text, history_kind, history_tool_name"
+        if include_snippets:
+            projection_columns += f""",
+            CASE WHEN length(CAST(source_text AS BLOB)) > 4000
+                 THEN '{_LARGE_INDEX_FIELD_MARKER}'
+                 ELSE source_text
+            END AS index_preview,
+            CASE WHEN length(CAST(source_text AS BLOB)) > 4000 THEN 1 ELSE 0 END
+                AS index_preview_large_omitted
+            """
         sql = f"""
-            SELECT * FROM conversation_parts
-            WHERE {' AND '.join(clauses)}
+            WITH scoped_parts AS (
+                SELECT {base_columns}, {source_text} AS source_text,
+                       {history_kind_expr} AS history_kind,
+                       {tool_name_expr} AS history_tool_name
+                FROM conversation_parts
+                WHERE {' AND '.join(clauses)}
+            ), filtered_parts AS (
+                SELECT {filtered_columns} FROM scoped_parts
+                {'WHERE ' + ' AND '.join(semantic_clauses) if semantic_clauses else ''}
+            )
+            SELECT {projection_columns} FROM filtered_parts
             ORDER BY time_created DESC, seq DESC
             LIMIT ?
         """
@@ -1034,19 +1685,9 @@ class ConversationArchive:
             rows = conn.execute(sql, params).fetchall()
             hits = []
             for row in rows:
-                if tool_name:
-                    meta = _json_loads(row["content"], {})
-                    if isinstance(meta, Mapping) and meta.get("tool_name") != tool_name:
-                        continue
-                item = self._part_dict(row)
+                item = self._search_part_dict(row)
                 if not include_snippets:
                     item.pop("snippet", None)
-                elif include_snippets and "text" in item:
-                    text = item.pop("text", "") or ""
-                    item["snippet"] = text[:240]
-                    # Media-safe: never stuff base64 into search results.
-                    if text.startswith("data:") or "base64," in text[:32]:
-                        item["snippet"] = f"[{item.get('part_type', 'part')}]"
                 hits.append(item)
             return {
                 "ok": True,
@@ -1070,6 +1711,7 @@ class ConversationArchive:
         Guessed message/part ids cannot bypass scope: the anchor must resolve
         under the caller's ``owner`` and ``chat_id``.
         """
+        owner = self.resolve_owner(owner)
         before = max(0, min(int(before), AROUND_BEFORE_MAX))
         after = max(0, min(int(after), AROUND_AFTER_MAX))
         with self._connect() as conn:
@@ -1148,6 +1790,7 @@ class ConversationArchive:
         dereferences network URLs. Missing/revoked assets are explicit
         recoverable results.
         """
+        owner = self.resolve_owner(owner)
         if not owner or not asset_id:
             return {"ok": False, "error": "owner_and_asset_required"}
         clauses = ["owner=?", "asset_id=?"]
@@ -1221,6 +1864,7 @@ class ConversationArchive:
         chat_id: str,
         actor_id: str = "main",
     ) -> list[dict[str, Any]]:
+        owner = self.resolve_owner(owner)
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -1247,6 +1891,7 @@ class ConversationArchive:
             return out
 
     def count_parts(self, *, owner: str, chat_id: str) -> dict[str, int]:
+        owner = self.resolve_owner(owner)
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -1270,7 +1915,7 @@ class ConversationArchive:
 
     def _coerce_part(self, part: SourcePart | Mapping[str, Any]) -> SourcePart:
         if isinstance(part, SourcePart):
-            return part
+            return replace(part, owner=self.resolve_owner(part.owner))
         data = dict(part)
         aliases = data.pop("aliases", ()) or ()
         assets = data.pop("assets", ()) or ()
@@ -1282,7 +1927,7 @@ class ConversationArchive:
                 kind, alias = item
                 normalized_aliases.append((str(kind), str(alias)))
         return SourcePart(
-            owner=str(data["owner"]),
+            owner=self.resolve_owner(str(data["owner"])),
             chat_id=str(data["chat_id"]),
             actor_id=str(data.get("actor_id") or "main"),
             message_id=str(data["message_id"]),
@@ -1336,6 +1981,44 @@ class ConversationArchive:
             "tombstone_reason": row["tombstone_reason"],
         }
 
+    @staticmethod
+    def _search_part_dict(row: sqlite3.Row) -> dict[str, Any]:
+        """Build a search hit from SQL's bounded projection, never source text."""
+        item = {
+            "owner": row["owner"],
+            "chat_id": row["chat_id"],
+            "actor_id": row["actor_id"],
+            "message_id": row["message_id"],
+            "part_id": row["part_id"],
+            "revision": row["revision"],
+            "runtime_generation": row["runtime_generation"],
+            "event_sequence": row["event_sequence"],
+            "event_workspace": row["event_workspace"],
+            "event_project": row["event_project"],
+            "role": row["role"],
+            "part_type": row["part_type"],
+            "content_hash": row["content_hash"],
+            "time_created": row["time_created"],
+            "time_updated": row["time_updated"],
+            "tombstone": bool(row["tombstone"]),
+            "tombstone_reason": row["tombstone_reason"],
+        }
+        if "index_preview" in row.keys():
+            # SQL has already enforced the 4 KiB cap.  Python only cleans the
+            # bounded value for inline-media markers; it never sees full rows.
+            preview, media_omitted = _index_preview(row["index_preview"] or "")
+            snippet, clipped = _utf8_prefix(preview, 240)
+            item["snippet"] = snippet
+            item["index_preview_omitted"] = (
+                bool(row["index_preview_large_omitted"])
+                or media_omitted
+                or clipped
+            )
+        if "history_kind" in row.keys():
+            item["history_kind"] = row["history_kind"]
+            item["history_tool_name"] = row["history_tool_name"]
+        return item
+
     def _outbox_dict(self, row: sqlite3.Row, *, state: Optional[str] = None, attempts: Optional[int] = None) -> dict[str, Any]:
         return {
             "outbox_seq": row["outbox_seq"],
@@ -1362,16 +2045,41 @@ class ConversationArchive:
 
 _ARCHIVE: Optional[ConversationArchive] = None
 _ARCHIVE_LOCK = threading.Lock()
+_OWNER_RESOLVER: Optional[Callable[[str], Optional[str]]] = None
+
+
+def configure_conversation_archive_owner_resolver(resolve_account_id, resolve_username) -> None:
+    """Bind real AuthManager identity without adopting legacy username rows."""
+    global _OWNER_RESOLVER
+    def resolve(value: str) -> Optional[str]:
+        direct = resolve_account_id(value)
+        if direct:
+            return direct
+        return value if resolve_username(value) else None
+    with _ARCHIVE_LOCK:
+        _OWNER_RESOLVER = resolve
+        if _ARCHIVE is not None:
+            _ARCHIVE.owner_resolver = resolve
+
 
 
 def default_db_path() -> str:
-    """Archive lives beside the host conversation database."""
+    """Resolve the canonical configured root without orphaning prior storage."""
     env = os.environ.get("OPENCLANK_CONVERSATION_ARCHIVE_DB")
     if env:
-        return env
-    from src.runtime_paths import get_default_data_dir  # local import: keep module import-light
+        return os.path.abspath(os.path.expanduser(env))
+    # DATA_DIR is the same resolved authority used by the host core database.
+    # Imports remain local so standalone archive conversion stays import-light.
+    from src.constants import DATA_DIR
+    from src.runtime_paths import get_default_data_dir
 
-    return os.path.join(str(get_default_data_dir()), "conversation_archive.sqlite3")
+    selected = os.path.abspath(os.path.join(DATA_DIR, "conversation_archive.sqlite3"))
+    prior = os.path.abspath(os.path.expanduser(os.path.join(str(get_default_data_dir()), "conversation_archive.sqlite3")))
+    if not os.path.exists(selected) and os.path.normcase(os.path.realpath(selected)) != os.path.normcase(os.path.realpath(prior)) and os.path.exists(prior):
+        raise ArchiveUnavailableError(
+            message=f"Canonical archive target {selected} is absent, but a prior default archive exists at {prior}. Explicitly relocate that archive to the configured data root or set OPENCLANK_CONVERSATION_ARCHIVE_DB to its intended absolute path; automatic fallback and relocation are disabled."
+        )
+    return selected
 
 
 def get_conversation_archive(db_path: Optional[str] = None) -> ConversationArchive:
@@ -1380,7 +2088,9 @@ def get_conversation_archive(db_path: Optional[str] = None) -> ConversationArchi
         return ConversationArchive(db_path=db_path)
     with _ARCHIVE_LOCK:
         if _ARCHIVE is None:
-            _ARCHIVE = ConversationArchive(db_path=default_db_path())
+            if _OWNER_RESOLVER is None:
+                raise ArchiveUnavailableError("archive authenticated identity resolver is unavailable")
+            _ARCHIVE = ConversationArchive(db_path=default_db_path(), owner_resolver=_OWNER_RESOLVER)
         return _ARCHIVE
 
 

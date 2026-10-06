@@ -1,0 +1,39 @@
+/* Layer colors follow the owning destination. No gradients or filters. */
+.oc-icon { display:inline-block; vertical-align:middle; flex-shrink:0; overflow:visible; pointer-events:none; }
+.oc-icon .oc-icon-body { fill:var(--oc-icon-body,currentColor); stroke:var(--oc-icon-outline,color-mix(in srgb,currentColor 65%,var(--bg,#202733))); stroke-width:1.5; }
+.oc-icon .oc-icon-detail { stroke:var(--oc-icon-detail,var(--bg,#202733)); stroke-width:1.8; }
+.oc-icon .oc-icon-ink { stroke:var(--oc-icon-outline,currentColor); stroke-width:2.6; }
+.oc-icon .oc-icon-dot { fill:var(--oc-icon-detail,var(--bg,#202733)); }
+.oc-icon .oc-icon-ink-dot { fill:currentColor; }
+.oc-icon .oc-icon-highlight { stroke:var(--oc-icon-highlight,#fff); opacity:.58; stroke-width:1.3; }
+.oc-icon .oc-icon-shade { fill:#000; opacity:.16; }
+.oc-icon--artwork .oc-icon-body { fill:var(--oc-icon-body,color-mix(in srgb,currentColor 90%,#fff)); stroke-width:1.1; }
+.oc-icon--artwork .oc-icon-detail { stroke-width:1.5; }
+.oc-icon--artwork .oc-icon-ink { stroke-width:2.2; }
+.oc-icon-state .oc-icon-body { stroke-width:1.8; }
+.oc-icon-state .oc-icon-ink { stroke-width:3; }
+/* Theme authors can opt into one ink; status also has a distinct shape. */
+[data-icon-mode="monochrome"] .oc-icon .oc-icon-body { fill:none; stroke:currentColor; }
+[data-icon-mode="monochrome"] .oc-icon .oc-icon-detail,
+[data-icon-mode="monochrome"] .oc-icon .oc-icon-ink { stroke:currentColor; }
+[data-icon-mode="monochrome"] .oc-icon .oc-icon-dot { fill:currentColor; }
+[data-icon-mode="monochrome"] .oc-icon .oc-icon-highlight,
+[data-icon-mode="monochrome"] .oc-icon .oc-icon-shade { display:none; }
+@media (forced-colors:active) {
+  .oc-icon { color:CanvasText !important; forced-color-adjust:auto; }
+  .oc-icon .oc-icon-body { fill:Canvas; stroke:CanvasText; }
+  .oc-icon .oc-icon-detail, .oc-icon .oc-icon-ink { stroke:CanvasText; }
+  .oc-icon .oc-icon-dot, .oc-icon .oc-icon-ink-dot { fill:CanvasText; }
+  .oc-icon .oc-icon-highlight, .oc-icon .oc-icon-shade { display:none; }
+  .oc-icon .oc-icon-state-ground { fill:Canvas; }
+}
+
+/* Keep the existing toast draw animation when its checkmark uses shared paths. */
+.toast .toast-checkmark svg.oc-icon[data-icon="check"] .oc-icon-ink {
+  stroke-dasharray:24;
+  stroke-dashoffset:24;
+  animation:toastCheckDraw 420ms ease-out 120ms forwards;
+}
+
+/* Shared command checkmarks replace the menu's legacy Unicode pseudo-glyph. */
+.workbench-command-label[data-ui-icons]::before { content:none !important; }

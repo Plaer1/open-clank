@@ -1221,14 +1221,16 @@ async function _cmdOpen(args, ctx) {
       else clickFirst('user-bar-settings', 'rail-settings');
       return true;
     }
+    if (['library', 'documents', 'docs', 'archive'].includes(target)) {
+      const files = await import('./files.js');
+      await files.openLibraryCollection(target === 'archive' ? 'archive' : 'documents');
+      return true;
+    }
     const targets = {
-      gallery: ['tool-gallery-btn', 'rail-gallery'],
+      files: ['tool-files-btn'],
+      gallery: ['tool-files-btn'],
       notes: ['tool-notes-btn', 'rail-notes'],
       tasks: ['tool-tasks-btn', 'rail-tasks'],
-      library: ['tool-library-btn', 'rail-archive'],
-      documents: ['tool-library-btn', 'rail-archive'],
-      docs: ['tool-library-btn', 'rail-archive'],
-      archive: ['tool-library-btn', 'rail-archive'],
       brain: ['tool-memory-btn', 'rail-memory'],
       memory: ['tool-memory-btn', 'rail-memory'],
       memories: ['tool-memory-btn', 'rail-memory'],
@@ -3379,220 +3381,6 @@ async function _cmdTourSettings(args, ctx) {
   return true;
 }
 
-// ── Gallery tour ──
-async function _cmdTourGallery(args, ctx) {
-  // Clear the chat input so "/tour-gallery" doesn't linger.
-  const _msgEl = document.getElementById('message');
-  if (_msgEl) {
-    _msgEl.value = '';
-    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-  try { localStorage.setItem('odysseus-notes-first-open-hint-v1', '1'); } catch (_) {}
-  document.getElementById('notes-first-open-hint')?.remove();
-
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
-
-  // Open the gallery modal.
-  let modal = document.getElementById('gallery-modal');
-  if (!modal || modal.classList.contains('hidden')) {
-    const opener = document.getElementById('tool-gallery-btn')
-      || document.getElementById('rail-gallery');
-    if (opener) opener.click();
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 80));
-      modal = document.getElementById('gallery-modal');
-      if (modal && !modal.classList.contains('hidden')) break;
-    }
-  }
-  if (!modal || modal.classList.contains('hidden')) {
-    slashReply('Could not open Gallery. Try clicking the Gallery tool first.');
-    return true;
-  }
-
-  document.body.classList.add('tour-active');
-  const tooltip = document.createElement('div');
-  tooltip.id = 'tour-tooltip';
-  document.body.appendChild(tooltip);
-
-  let _halos = [];
-  function _makeHalo(target) {
-    const halo = document.createElement('div');
-    halo.className = 'tour-halo';
-    document.body.appendChild(halo);
-    const update = () => {
-      const r = target.getBoundingClientRect();
-      halo.style.top    = (r.top - 4) + 'px';
-      halo.style.left   = (r.left - 4) + 'px';
-      halo.style.width  = (r.width + 8) + 'px';
-      halo.style.height = (r.height + 8) + 'px';
-    };
-    update();
-    const _tStart = performance.now();
-    let _rafId = 0;
-    const tick = () => {
-      update();
-      if (performance.now() - _tStart < 500) _rafId = requestAnimationFrame(tick);
-    };
-    _rafId = requestAnimationFrame(tick);
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
-    return { destroy() {
-      if (_rafId) cancelAnimationFrame(_rafId);
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      halo.remove();
-    } };
-  }
-  function _clearHalos() {
-    _halos.forEach(h => h.destroy());
-    _halos = [];
-    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  }
-  const _clear = () => {
-    _clearHalos();
-    tooltip.remove();
-    document.body.classList.remove('tour-active');
-  };
-
-  function _positionTooltip(target, placement) {
-    tooltip.style.visibility = 'hidden';
-    tooltip.style.display = '';
-    const tw = tooltip.offsetWidth || 260;
-    const th = tooltip.offsetHeight || 100;
-    if (placement === 'center-above') {
-      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
-      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
-      tooltip.style.top = top + 'px';
-      tooltip.style.left = left + 'px';
-      tooltip.style.visibility = '';
-      return;
-    }
-    const r = target.getBoundingClientRect();
-    const gap = 12;
-    let top, left;
-    if (r.bottom + gap + th < window.innerHeight - 10) {
-      top = r.bottom + gap;
-      left = r.left + r.width / 2 - tw / 2;
-    } else if (r.top - gap - th > 10) {
-      top = r.top - gap - th;
-      left = r.left + r.width / 2 - tw / 2;
-    } else {
-      top = r.top + r.height / 2 - th / 2;
-      left = r.right + gap;
-      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
-    }
-    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
-    if (left < 10) left = 10;
-    if (top < 10) top = 10;
-    tooltip.style.top = top + 'px';
-    tooltip.style.left = left + 'px';
-    tooltip.style.visibility = '';
-  }
-
-  function _showStep(sel, text, opts) {
-    opts = opts || {};
-    const isFirst = !!opts.isFirst;
-    const isLast = !!opts.isLast;
-    const before = opts.before;
-    const placement = opts.placement;
-    return new Promise(resolve => {
-      _clearHalos();
-      if (before) { try { before(); } catch (_) {} }
-      setTimeout(() => {
-        const target = document.querySelector(sel);
-        if (!target) return resolve('skip');
-        _halos.push(_makeHalo(target));
-        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-        tooltip.classList.remove('tour-fade-in');
-        tooltip.innerHTML =
-          '<div class="tour-text">' + text + '</div>' +
-          '<div class="tour-nav">' +
-            '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
-            '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
-            '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
-          '</div>';
-        requestAnimationFrame(() => {
-          _positionTooltip(target, placement);
-          tooltip.classList.add('tour-fade-in');
-        });
-
-        const onClick = (e) => {
-          const hit = e.target.closest && e.target.closest('[data-act]');
-          const act = hit && hit.dataset.act;
-          if (!act) return;
-          tooltip.removeEventListener('click', onClick);
-          resolve(act);
-        };
-        tooltip.addEventListener('click', onClick);
-      }, before ? 160 : 0);
-    });
-  }
-
-  function _clickTab(tab) {
-    const btn = modal.querySelector('.gallery-tab[data-tab="' + tab + '"]');
-    if (btn) btn.click();
-  }
-
-  const steps = [
-    { sel: '#gallery-modal .modal-content',
-      text: '<b>Welcome to Gallery.</b> Photos and albums live here.',
-      placement: 'center-above',
-      before: () => _clickTab('images') },
-    { sel: '#gallery-modal .gallery-tab[data-tab="images"]',
-      text: '<b>Photos</b> — every image you\'ve uploaded, in one grid.',
-      before: () => _clickTab('images') },
-    { sel: '#gallery-upload-tile',
-      text: 'Drop or click this tile to <b>upload</b> photos and videos.',
-      before: () => _clickTab('images') },
-    { sel: '#gallery-modal .gallery-tab[data-tab="albums"]',
-      text: '<b>Albums</b> — group images into collections.',
-      before: () => _clickTab('albums') },
-    { sel: '#gallery-modal .gallery-tab[data-tab="editor"]',
-      text: '<b>Editor</b> — honestly still WIP, so explore as you want.',
-      before: () => _clickTab('editor') },
-  ];
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: i === 0,
-      isLast: i === steps.length - 1,
-      before: step.before,
-      placement: step.placement,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  // Land on Photos so the user has a familiar starting point.
-  _clickTab('images');
-  _clear();
-  await typewriterReply('That\'s Gallery. Editor is rough — feedback welcome.');
-  return true;
-}
 
 // ── Notes tour ──
 async function _cmdTourNotes(args, ctx) {
@@ -4437,14 +4225,11 @@ async function _cmdTourResearch(args, ctx) {
     const _body = await typewriterReply('That’s Deep Research — hit Start or queue up many. You can also view past research in your ');
     const libLink = document.createElement('button');
     libLink.type = 'button';
-    libLink.textContent = 'Library';
+    libLink.textContent = 'Files';
     libLink.style.cssText = 'background:none;border:none;padding:0;margin:0;color:var(--accent,var(--red));font:inherit;text-decoration:underline;cursor:pointer;';
-    libLink.addEventListener('click', () => {
-      if (window.documentModule && window.documentModule.openLibrary) {
-        window.documentModule.openLibrary({ tab: 'research' });
-      } else {
-        document.getElementById('tool-library-btn')?.click();
-      }
+    libLink.addEventListener('click', async () => {
+      const files = await import('./files.js');
+      await files.openLibraryCollection('research');
     });
     _body.appendChild(libLink);
     _body.appendChild(document.createTextNode('.'));
@@ -4452,282 +4237,25 @@ async function _cmdTourResearch(args, ctx) {
   return true;
 }
 
-// ── Tour: Library + Document editor ──
+// ── Tour: Library collections in Files ──
 
 async function _cmdTourLibrary(args, ctx) {
-  // Clear the chat input so "/tour-library" doesn't linger.
-  const _msgEl = document.getElementById('message');
-  if (_msgEl) {
-    _msgEl.value = '';
-    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
+  const input = document.getElementById('message');
+  if (input) {
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
   }
-
-  // Shared tour-styles injection.
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
-
-  // Open the library modal if it's not already up.
-  let libModal = document.getElementById('doclib-modal');
-  if (!libModal) {
-    const opener = document.getElementById('tool-library-btn') || document.getElementById('rail-archive');
-    if (opener) opener.click();
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 80));
-      libModal = document.getElementById('doclib-modal');
-      if (libModal) break;
-    }
-  }
-  if (!libModal) {
-    slashReply('Could not open Library. Try clicking the Library tool first.');
+  const files = await import('./files.js');
+  const opened = await files.openLibraryCollection('documents');
+  if (!opened) {
+    slashReply('The Documents collection is unavailable. Open Files and select a Library collection.');
     return true;
   }
-
-  document.body.classList.add('tour-active');
-  const tooltip = document.createElement('div');
-  tooltip.id = 'tour-tooltip';
-  document.body.appendChild(tooltip);
-
-  let _halos = [];
-  function _makeHalo(target) {
-    const halo = document.createElement('div');
-    halo.className = 'tour-halo';
-    document.body.appendChild(halo);
-    const update = () => {
-      const r = target.getBoundingClientRect();
-      halo.style.top    = (r.top - 4) + 'px';
-      halo.style.left   = (r.left - 4) + 'px';
-      halo.style.width  = (r.width + 8) + 'px';
-      halo.style.height = (r.height + 8) + 'px';
-    };
-    update();
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
-    return { destroy() {
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      halo.remove();
-    } };
-  }
-  function _clearHalos() {
-    _halos.forEach(h => h.destroy());
-    _halos = [];
-    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  }
-  const _clear = () => {
-    document.querySelectorAll('.odysseus-highlight').forEach(e => e.classList.remove('odysseus-highlight'));
-    _clearHalos();
-    tooltip.remove();
-    document.body.classList.remove('tour-active');
-  };
-
-  function _positionTooltip(target, placement) {
-    tooltip.style.visibility = 'hidden';
-    tooltip.style.display = '';
-    const tw = tooltip.offsetWidth || 260;
-    const th = tooltip.offsetHeight || 100;
-    if (placement === 'center-above') {
-      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
-      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
-      tooltip.style.top = top + 'px';
-      tooltip.style.left = left + 'px';
-      tooltip.style.visibility = '';
-      return;
-    }
-    const r = target.getBoundingClientRect();
-    const gap = 12;
-    let top, left;
-    if (r.bottom + gap + th < window.innerHeight - 10) {
-      top = r.bottom + gap;
-      left = r.left + r.width / 2 - tw / 2;
-    } else if (r.top - gap - th > 10) {
-      top = r.top - gap - th;
-      left = r.left + r.width / 2 - tw / 2;
-    } else {
-      top = r.top + r.height / 2 - th / 2;
-      left = r.right + gap;
-      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
-    }
-    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
-    if (left < 10) left = 10;
-    if (top < 10) top = 10;
-    tooltip.style.top = top + 'px';
-    tooltip.style.left = left + 'px';
-    tooltip.style.visibility = '';
-  }
-
-  function _showStep(sel, text, opts) {
-    opts = opts || {};
-    const isFirst = !!opts.isFirst;
-    const isLast = !!opts.isLast;
-    const before = opts.before;
-    const placement = opts.placement;
-    const interactive = !!opts.interactive;
-    const optional = !!opts.optional;
-    return new Promise(resolve => {
-      _clearHalos();
-      if (before) { try { before(); } catch (_) {} }
-      const target = document.querySelector(sel);
-      if (!target) return resolve(optional ? 'next' : 'skip');
-      _halos.push(_makeHalo(target));
-      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-      tooltip.classList.remove('tour-fade-in');
-      tooltip.innerHTML =
-        '<div class="tour-text">' + text + '</div>' +
-        '<div class="tour-nav">' +
-          '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
-          '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
-          '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
-        '</div>';
-      requestAnimationFrame(() => {
-        _positionTooltip(target, placement);
-        tooltip.classList.add('tour-fade-in');
-      });
-
-      let _onTarget;
-      const cleanup = () => {
-        tooltip.removeEventListener('click', onClick);
-        if (_onTarget) target.removeEventListener('click', _onTarget, true);
-      };
-      const onClick = (e) => {
-        const hit = e.target.closest && e.target.closest('[data-act]');
-        const act = hit && hit.dataset.act;
-        if (!act) return;
-        cleanup();
-        resolve(act);
-      };
-      tooltip.addEventListener('click', onClick);
-      // Interactive steps advance when the user clicks the highlighted
-      // element — letting the original click through so the real action
-      // (open the Create modal, in the Library case) actually fires.
-      if (interactive) {
-        _onTarget = () => { cleanup(); resolve('next'); };
-        target.addEventListener('click', _onTarget, true);
-      }
-    });
-  }
-
-  // ── Phase 1: Library overview ──
-  const libSteps = [
-    { sel: '#doclib-modal .doclib-modal-content',
-      text: '<b>Welcome to Library!</b> Your hub for <b>Chats</b>, <b>Documents</b>, <b>Research</b>, and <b>Archive</b> — search, sort and tidy!',
-      placement: 'center-above',
-      before: () => {
-        // Force the modal box to fill its intended frame so the halo wraps the
-        // whole library window, not just the (possibly collapsed) content.
-        const c = document.querySelector('#doclib-modal .doclib-modal-content');
-        if (c) {
-          c.style.height = '85vh';
-          c.style.minHeight = '85vh';
-        }
-      } },
-    { sel: '#doclib-create-btn',
-      text: '<b>Create</b> a fresh blank document — click it to try it out! (Or hit <b>Import</b> next to it to bring in a file from disk.)',
-      interactive: true },
-    { sel: '#doclib-grid .doclib-card',
-      text: 'Each card is a saved document. It’s linked to the chat you created it in — so either <b>clone</b> it for a new chat, or <b>open</b> it in its original.',
-      optional: true },
-  ];
-
-  for (let i = 0; i < libSteps.length; i++) {
-    const step = libSteps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: i === 0,
-      isLast: false,
-      before: step.before,
-      placement: step.placement,
-      interactive: step.interactive,
-      optional: step.optional,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  // ── Phase 2: open a document & walk the editor ──
-  // Try to load the user's most recent document. If none exist, end with a hint.
-  let firstDocId = null;
-  try {
-    const r = await fetch('/api/documents/library?limit=1&sort=recent', { credentials: 'same-origin' });
-    if (r.ok) {
-      const data = await r.json();
-      if (data.documents && data.documents.length) firstDocId = data.documents[0].id;
-    }
-  } catch (_) {}
-
-  if (!firstDocId || !window.documentModule || !window.documentModule.loadDocument) {
-    _clear();
-    await typewriterReply('All yours — create or import a doc, then run /tour-library again to see the editor.');
-    return true;
-  }
-
-  // Close library, open the doc in the editor, wait for the pane to mount.
-  document.getElementById('doclib-close')?.click();
-  await new Promise(r => setTimeout(r, 200));
-  try { await window.documentModule.loadDocument(firstDocId); } catch (_) {}
-  for (let i = 0; i < 25; i++) {
-    if (document.getElementById('doc-editor-pane')) break;
-    await new Promise(r => setTimeout(r, 80));
-  }
-  if (!document.getElementById('doc-editor-pane')) {
-    _clear();
-    await typewriterReply('All yours — open a doc and run /tour-library again for the editor walkthrough.');
-    return true;
-  }
-
-  const editorSteps = [
-    { sel: '#doc-editor-pane',
-      text: '<b>This is your document editor.</b> You can write here, but so can your model.',
-      placement: 'center-above' },
-    { sel: '#message',
-      text: 'Just tell your model what to write or edit.',
-      placement: 'center-above' },
-    { sel: '#doc-tab-bar',
-      text: 'Multiple docs as <b>tabs</b>. Drag to reorder, click <b>+</b> for a new one, click the dots for rename / clone / export / delete.' },
-    { sel: '#doc-language-select',
-      text: 'Switch the <b>document type</b> — markdown shows a preview, email shows To/Subject/Send, PDF lets you fill blanks with AI.' },
-    { sel: '#doc-editor-textarea',
-      text: 'Ask the LLM to <i>draft</i>, <i>rewrite</i>, <i>summarize</i>, <i>feedback</i> — edits stream live.' },
-  ];
-
-  for (let i = 0; i < editorSteps.length; i++) {
-    const step = editorSteps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: false,
-      isLast: i === editorSteps.length - 1,
-      before: step.before,
-      placement: step.placement,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  _clear();
-  await typewriterReply('All yours — write away!');
+  await typewriterReply('Your Library lives in Files. Documents is open now. Choose Chats, Research or Archive from the Library collections to browse saved work. Open an item to read or edit it; use the Files toolbar to search, sort and change the view.');
   return true;
 }
 
-// ── Prompt ──
+// ── /prompt ──
 
 async function _cmdPrompt(args, ctx) {
   // Pull chat-appropriate prompts from compare templates. Skip the
@@ -5492,13 +5020,6 @@ const COMMANDS = {
     handler: _cmdTourSettings,
     usage: '/tour-settings'
   },
-  'tour-gallery': {
-    alias: ['gallery-tour'],
-    category: 'Tours',
-    help: 'Gallery tour: photos, albums, editor',
-    handler: _cmdTourGallery,
-    usage: '/tour-gallery'
-  },
   'tour-brain': {
     alias: ['brain-tour', 'tour-memory', 'memory-tour'],
     category: 'Tours',
@@ -5594,8 +5115,8 @@ const COMMANDS = {
   gallery: {
     alias: ['photos'],
     category: 'Tools',
-    help: 'Open Gallery',
-    handler: (args, ctx) => _cmdToolPanel('gallery', args, ctx),
+    help: 'Open the Gallery folder in Files',
+    handler: (args, ctx) => _cmdOpen(['files'], ctx),
     usage: '/gallery'
   },
   research: {

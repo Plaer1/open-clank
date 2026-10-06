@@ -1,7 +1,8 @@
 import { type SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
-import { migrate } from "drizzle-orm/bun-sqlite/migrator"
+import { currentSchema, currentObjects, currentStamp } from "./current-schema"
 import { type SQLiteTransaction } from "drizzle-orm/sqlite-core"
 export * from "drizzle-orm"
+export type { SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
 import { LocalContext } from "../util"
 import { lazy } from "../util/lazy"
 import { Global } from "../global"
@@ -9,14 +10,13 @@ import { Log } from "../util"
 import { NamedError } from "@mimo-ai/shared/util/error"
 import z from "zod"
 import path from "path"
-import { readFileSync, readdirSync, existsSync } from "fs"
+import { chmodSync } from "fs"
 import { Flag } from "../flag/flag"
 import { InstallationChannel } from "../installation/version"
 import { InstanceState } from "@/effect"
 import { iife } from "@/util/iife"
 import { init } from "#db"
 
-declare const OPENCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
 export const NotFoundError = NamedError.create(
   "NotFoundError",
@@ -44,47 +44,36 @@ export const Path = iife(() => {
 
 export type Transaction = SQLiteTransaction<"sync", void>
 
-type Client = SQLiteBunDatabase
+type Client = ReturnType<typeof init>
 
-type Journal = { sql: string; timestamp: number; name: string }[]
-
-function time(tag: string) {
-  const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(tag)
-  if (!match) return 0
-  return Date.UTC(
-    Number(match[1]),
-    Number(match[2]) - 1,
-    Number(match[3]),
-    Number(match[4]),
-    Number(match[5]),
-    Number(match[6]),
-  )
-}
-
-function migrations(dir: string): Journal {
-  const dirs = readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-
-  const sql = dirs
-    .map((name) => {
-      const file = path.join(dir, name, "migration.sql")
-      if (!existsSync(file)) return
-      return {
-        sql: readFileSync(file, "utf-8"),
-        timestamp: time(name),
-        name,
-      }
-    })
-    .filter(Boolean) as Journal
-
-  return sql.sort((a, b) => a.timestamp - b.timestamp)
+function admit(db: Client) {
+  const count = db.all<{ count: number }>("SELECT count(*) AS count FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'")[0]!.count
+  if (count === 0) {
+    db.run("BEGIN EXCLUSIVE")
+    try { db.$client.exec(currentSchema); db.run("COMMIT") }
+    catch (error) { db.run("ROLLBACK"); throw error }
+    return
+  }
+  const refuse = (detail: string): never => { throw new Error(`${detail}; stop writers and retain a complete backup. Restore the matching release or prepare an offline conversion. A fresh installation needs a separate empty data directory. No runtime conversion was performed`) }
+  for (const object of currentObjects) {
+    const escaped = object.name.replaceAll("'", "''")
+    const actual = db.all<{ sql: string }>(`SELECT sql FROM sqlite_schema WHERE name='${escaped}'`)[0]?.sql
+    const normalize = (value: string) => value.split(/\s+/).join(" ").trim()
+    if (object.type === "table") {
+      const columns = db.all<Record<string,unknown>>(`PRAGMA table_info('${escaped}')`).map(({cid,...rest})=>rest).sort((a,b)=>String(a.name).localeCompare(String(b.name)))
+      if (JSON.stringify(columns) !== JSON.stringify(object.columns)) refuse(`Incompatible Mimo table ${object.name}`)
+    } else if (!actual || normalize(actual) !== normalize(object.sql)) refuse(`Incompatible Mimo schema object ${object.name}`)
+  }
+  const stamp = db.all<{ created_at: number }>("SELECT created_at FROM __drizzle_migrations ORDER BY created_at DESC LIMIT 1")[0]?.created_at
+  if (stamp !== currentStamp) refuse(`Incompatible Mimo schema journal ${stamp}`)
 }
 
 export const Client = lazy(() => {
   log.info("opening database", { path: Path })
 
   const db = init(Path)
+  try { admit(db) } catch (error) { db.$client.close(); throw error }
+  if (Path !== ":memory:") chmodSync(Path, 0o600)
 
   // The WAL pragma itself takes a lock. Install the busy handler first so
   // simultaneous engine connections do not fail before reaching title CAS.
@@ -94,24 +83,6 @@ export const Client = lazy(() => {
   db.run("PRAGMA cache_size = -64000")
   db.run("PRAGMA foreign_keys = ON")
   db.run("PRAGMA wal_checkpoint(PASSIVE)")
-
-  // Apply schema migrations
-  const entries =
-    typeof OPENCODE_MIGRATIONS !== "undefined"
-      ? OPENCODE_MIGRATIONS
-      : migrations(path.join(import.meta.dirname, "../../migration"))
-  if (entries.length > 0) {
-    log.info("applying migrations", {
-      count: entries.length,
-      mode: typeof OPENCODE_MIGRATIONS !== "undefined" ? "bundled" : "dev",
-    })
-    if (Flag.MIMOCODE_SKIP_MIGRATIONS) {
-      for (const item of entries) {
-        item.sql = "select 1;"
-      }
-    }
-    migrate(db, entries)
-  }
 
   return db
 })

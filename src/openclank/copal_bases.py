@@ -85,23 +85,6 @@ def _bounded_walk(value: Any) -> None:
             stack.extend(current)
 
 
-def _repair_invalid_legacy_layout(content: str) -> str | None:
-    """Repair the one shipped pre-v1 shape that is not valid YAML at all.
-
-    Its ``filters`` list contains scalar expressions followed by mapping keys
-    indented as though a scalar list item could own them.  Move that mapping to
-    an explicit migration-only root key; the canonicalizer consumes it below.
-    """
-    lines = content.splitlines()
-    nested = next((index for index, line in enumerate(lines) if re.match(r"^    (filters|order|sort):\s*$", line)), None)
-    if nested is None or not any(line.strip() == "filters:" and not line.startswith(" ") for line in lines[:nested]):
-        return None
-    repaired = [*lines[:nested], "legacyNested:"]
-    for line in lines[nested:]:
-        if line.strip() and not line.startswith("    "):
-            return None
-        repaired.append(line[2:] if line.startswith("  ") else line)
-    return "\n".join(repaired) + ("\n" if content.endswith("\n") else "")
 
 
 def _property(value: Any, path: str) -> str:
@@ -518,72 +501,36 @@ def _canonical_view(raw: dict[str, Any], index: int, inherited: dict[str, Any]) 
 def parse_base_definition(content: str) -> tuple[dict[str, Any], list[dict[str, str]]]:
     if len(content.encode()) > MAX_DEFINITION_BYTES:
         raise BaseDefinitionError("Base definition exceeds 256 KiB", code="definition_too_large")
-    repaired_legacy = False
     try:
         raw = yaml.safe_load(content) if content.strip() else {}
     except yaml.YAMLError as exc:
-        repaired = _repair_invalid_legacy_layout(content)
-        if repaired is not None:
-            try:
-                raw = yaml.safe_load(repaired)
-                repaired_legacy = True
-            except yaml.YAMLError:
-                raw = None
-        else:
-            raw = None
-        if raw is None:
-            mark = getattr(exc, "problem_mark", None)
-            path = f"line {mark.line + 1}, column {mark.column + 1}" if mark else "$"
-            raise BaseDefinitionError(f"YAML/JSON parse error: {exc}", path=path, code="parse_error") from exc
+        mark = getattr(exc, "problem_mark", None)
+        path = f"line {mark.line + 1}, column {mark.column + 1}" if mark else "$"
+        raise BaseDefinitionError("Base source is malformed; preserve the original and repair or convert it offline before reimporting.", path=path, code="parse_error") from exc
+
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
         raise BaseDefinitionError("Base definition root must be an object")
     _bounded_walk(raw)
-    has_explicit_version = "version" in raw or "schemaVersion" in raw
     version = raw.get("version", raw.get("schemaVersion", 1))
-    if version not in {0, 1, "1"}:
+    if str(version) == "0" or "legacyNested" in raw:
+        raise BaseDefinitionError("This Base uses an unsupported source format. Preserve it and convert it offline to the current Base definition before reimporting.", path="$.version", code="manual_migration_required")
+    if version not in {1, "1"}:
         raise BaseDefinitionError(f"Unsupported Base version: {version}", path="$.version", code="unsupported_version")
 
     diagnostics: list[dict[str, str]] = []
-    # v0 was Copal's view-only schema: its root filter is inherited by views,
-    # but only when explicitly identified as that schema. Native Obsidian
-    # files commonly omit ``version`` and still use global root filters.
-    legacy_compat = (has_explicit_version and str(version) == "0") or repaired_legacy
-    source_version = 0 if legacy_compat else (int(version) if str(version).isdigit() else 1)
+    source_version = 1
     root_filter = raw.get("globalFilters", raw.get("filters", raw.get("filter")))
     inherited = {
         "columns": raw.get("columns"),
         "columnSize": raw.get("columnSize", raw.get("columnSizes", {})),
-        "filters": root_filter if legacy_compat else None,
+        "filters": None,
         "sort": raw.get("sort", raw.get("sorts", [])),
         "groupBy": raw.get("groupBy", raw.get("group_by")),
         "summaries": raw.get("summaries", {}),
         "limit": raw.get("limit", 1000),
     }
-    legacy_nested = raw.get("legacyNested") if isinstance(raw.get("legacyNested"), dict) else {}
-    if repaired_legacy:
-        nested_filters = legacy_nested.get("filters", {}).get("and", []) if isinstance(legacy_nested.get("filters"), dict) else []
-        current_filters = inherited["filters"] if isinstance(inherited["filters"], list) else []
-        inherited["filters"] = [*current_filters, *nested_filters]
-        inherited["columns"] = inherited["columns"] or legacy_nested.get("order")
-        inherited["sort"] = inherited["sort"] or legacy_nested.get("sort", [])
-        diagnostics.append({"path": "$.filters", "code": "legacy_nested_view_fields", "message": "Recovered invalid nested filters/order/sort from the shipped legacy fixture"})
-    # The shipped Copal fixture accidentally nested order/sort under a filter
-    # entry.  Recover those keys explicitly and report the migration instead
-    # of silently pretending the malformed shape was canonical.
-    if legacy_compat and isinstance(inherited["filters"], list):
-        filters = []
-        for item in inherited["filters"]:
-            if isinstance(item, dict) and any(key in item for key in ("filters", "order", "sort")):
-                filters.extend(item.get("filters", {}).get("and", []) if isinstance(item.get("filters"), dict) else [])
-                inherited["columns"] = inherited["columns"] or item.get("order")
-                inherited["sort"] = inherited["sort"] or item.get("sort", [])
-                diagnostics.append({"path": "$.filters", "code": "legacy_nested_view_fields", "message": "Recovered nested filters/order/sort from legacy fixture"})
-            else:
-                filters.append(item)
-        inherited["filters"] = filters
-
     views_raw = raw.get("views") or [{"name": "Table", "type": "table"}]
     if not isinstance(views_raw, list) or not views_raw:
         raise BaseDefinitionError("views must be a non-empty list", path="$.views")
@@ -594,18 +541,14 @@ def parse_base_definition(content: str) -> tuple[dict[str, Any], list[dict[str, 
     definition = {
         "version": 1,
         "sourceVersion": source_version,
-        "globalFilters": _canonical_filter(root_filter, "$.filters") if not legacy_compat else None,
+        "globalFilters": _canonical_filter(root_filter, "$.filters"),
         "views": views,
         "extensions": extensions,
     }
-    if legacy_compat:
-        diagnostics.append({"path": "$.version", "code": "legacy_version", "message": "Legacy Base normalized to version 1"})
-    source_node = None
-    if not repaired_legacy:
-        try:
-            source_node = yaml.compose(content)
-        except yaml.YAMLError:
-            source_node = None
+    try:
+        source_node = yaml.compose(content)
+    except yaml.YAMLError:
+        source_node = None
     return BaseDefinition(definition, source_text=content, source_node=source_node), diagnostics
 
 
@@ -727,12 +670,6 @@ def _source_preserving_dump(definition: BaseDefinition) -> str:
     source = definition.source_text
     root = definition._source_node
     if not source or root is None:
-        if source and definition._allow_structural_edits:
-            # A malformed legacy source (the bundled To Watch fixture is the
-            # known example) has no YAML node spans.  An explicit typed
-            # command may cross that migration boundary, while a direct
-            # mutation still receives the safer unsupported-edit diagnostic.
-            return dump_base_definition(dict(definition))
         raise BaseDefinitionError("Edited Base has no safe source map", code="unsupported_edit")
     before = _edit_projection(definition._source_snapshot)
     after = _edit_projection(dict(definition))

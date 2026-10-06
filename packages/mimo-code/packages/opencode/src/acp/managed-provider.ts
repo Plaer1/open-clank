@@ -2,6 +2,7 @@ import type { AgentSideConnection } from "@agentclientprotocol/sdk"
 import { Schema } from "effect"
 import path from "node:path"
 import { Auth } from "@/auth"
+import { installCaptureScope, flushCaptures, markCaptureRetry } from "@/provider/logging-transport"
 import { AccountSelection } from "@/provider/account-selection"
 import { OpenClankManagedProtocol } from "./openclank-protocol"
 import {
@@ -23,6 +24,7 @@ export function enabled(): boolean {
 
 export const RouteContext = Schema.Struct({
   rootOperationID: Schema.String,
+  operationID: Schema.optional(Schema.String),
   connectionID: Schema.String,
   providerID: Schema.String,
   billingLane: Auth.BillingLane,
@@ -194,10 +196,10 @@ export async function readManagedSessionBinding(
     throw new ManagedProviderError("Managed provider host returned an invalid managed session binding")
   }
   const result = decoded as Record<string, unknown>
-  const requiredStrings = ["engineSessionID", "stableChatID", "owner", "canonicalCwd", "memoryWorkspaceID", "authorityWorkspaceID", "copalWorkspace"]
+  const requiredStrings = ["engineSessionID", "stableChatID", "owner", "canonicalCwd", "memoryWorkspaceID", "copalWorkspace"]
   const revisions = ["workspaceRevision", "mapRevision", "mappingRevision"]
   const aliases = result.engineAliases
-  if (!exactKeys(result, ["engineSessionID", "stableChatID", "owner", "canonicalCwd", "workspaceRevision", "authorityWorkspaceID", "memoryWorkspaceID", "copalWorkspace", "memoryEnabled", "engineAliases", "mapRevision", "mappingRevision"]) || result.engineSessionID !== sessionID || requiredStrings.some((key) => typeof result[key] !== "string" || !(result[key] as string).trim() || (result[key] as string) !== (result[key] as string).trim()) || !path.isAbsolute(result.canonicalCwd as string) || path.normalize(result.canonicalCwd as string) !== result.canonicalCwd || revisions.some((key) => typeof result[key] !== "number" || !Number.isSafeInteger(result[key]) || (result[key] as number) < 0) || typeof result.memoryEnabled !== "boolean" || !Array.isArray(aliases) || aliases.length > 16 || aliases.some((item) => typeof item !== "string" || !item.trim() || item !== item.trim()) || new Set(aliases).size !== aliases.length || aliases.includes(result.engineSessionID)) {
+  if (!exactKeys(result, ["engineSessionID", "stableChatID", "owner", "canonicalCwd", "workspaceRevision", "authorityWorkspaceID", "memoryWorkspaceID", "copalWorkspace", "memoryEnabled", "engineAliases", "mapRevision", "mappingRevision"]) || result.engineSessionID !== sessionID || requiredStrings.some((key) => typeof result[key] !== "string" || !(result[key] as string).trim() || (result[key] as string) !== (result[key] as string).trim()) || typeof result.authorityWorkspaceID !== "string" || result.authorityWorkspaceID !== result.authorityWorkspaceID.trim() || !path.isAbsolute(result.canonicalCwd as string) || path.normalize(result.canonicalCwd as string) !== result.canonicalCwd || revisions.some((key) => typeof result[key] !== "number" || !Number.isSafeInteger(result[key]) || (result[key] as number) < 0) || typeof result.memoryEnabled !== "boolean" || !Array.isArray(aliases) || aliases.length > 16 || aliases.some((item) => typeof item !== "string" || !item.trim() || item !== item.trim()) || new Set(aliases).size !== aliases.length || aliases.includes(result.engineSessionID)) {
     throw new ManagedProviderError("Managed provider host returned an invalid managed session binding")
   }
   return result as unknown as OpenClankManagedProtocol.SessionBindingReadResult
@@ -379,6 +381,24 @@ export async function beginBoundOperation(
   return leaseBinding(route, binding)
 }
 
+async function captureAdmission(route: RouteContext, binding: AccountSelection.Binding) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      OpenClankManagedProtocol.callHost(connection(), "_openclank/logging/v1/admit", {
+        bindingID: binding.bindingID, rootOperationID: binding.rootOperationID,
+        ...(route.operationID ? { operationID: route.operationID } : {}),
+      }),
+      new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 250) }),
+    ])
+  } catch {
+    // Registration failure is a logging gap, never a provider retry.
+    return null
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export async function leaseBinding(
   routeValue: unknown,
   binding: AccountSelection.Binding,
@@ -403,11 +423,11 @@ export async function leaseBinding(
     }
     return {
       binding,
-      scope: {
+      scope: installCaptureScope({
         connectionID: binding.connectionID,
         billingLane: binding.billingLane,
         credentialRequired: false,
-      },
+      }, binding, connection(), await captureAdmission(route, binding)),
     }
   }
   if (!binding.accountID || binding.credentialRevision === undefined) {
@@ -437,14 +457,14 @@ export async function leaseBinding(
   }
   return {
     binding,
-    scope: {
+    scope: installCaptureScope({
       connectionID: lease.connectionID,
       accountID: lease.accountID,
       billingLane: binding.billingLane,
       credentialRequired: true,
       credentialRevision: lease.credentialRevision,
       credential: lease.credential,
-    },
+    }, binding, connection(), await captureAdmission(route, binding)),
   }
 }
 
@@ -525,6 +545,7 @@ export async function withOperation<A>(
   try {
     return await run()
   } finally {
+    await flushCaptures()
     if (operations.get(sessionID) === operation) operations.delete(sessionID)
   }
 }
@@ -634,6 +655,7 @@ async function recordSessionOutcome(
 ): Promise<AttemptDecision> {
   const operation = requireOperation(sessionID)
   const previous = operation.binding
+  const previousScope = operation.scope
   const next = await recordAttempt(previous, classification.outcome, classification)
   const rotated =
     previous.accountID !== next.accountID || previous.credentialRevision !== next.credentialRevision
@@ -652,6 +674,7 @@ async function recordSessionOutcome(
     !next.committed &&
     ((rotated && ["auth", "quota", "entitlement"].includes(classification.outcome)) ||
       (classification.outcome === "transient" && operation.transientRetries <= 2))
+  if (retry) markCaptureRetry(operation.scope, previousScope)
   return {
     outcome: classification.outcome,
     retry,
@@ -840,6 +863,44 @@ export function resetForTest(): void {
   hostContexts.clear()
   bindingReads.clear()
   resetManagedSessionScopesForTest()
+}
+
+/** Canonical history is host-owned in managed mode; no SQLite fallback. */
+export async function historyCall(sessionID: string, operation: string, input: Record<string, unknown>) {
+  if (!enabled()) throw new ManagedProviderError("managed history is unavailable outside managed mode")
+  if (!sessionID) throw new ManagedProviderError("managed history requires a bound session")
+  await ensureManagedSessionBinding(sessionID)
+  const raw = await OpenClankManagedProtocol.callHost(connection(), "_openclank/history/v1/query", {
+    sessionID,
+    operation,
+    ...input,
+  } as OpenClankManagedProtocol.HistoryQueryRequest)
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ManagedProviderError("managed history host returned invalid result")
+  const value = raw as OpenClankManagedProtocol.HistoryQueryResult
+  if (value.operation !== operation || typeof value.ok !== "boolean" || !value.result || typeof value.result !== "object" || Array.isArray(value.result)) {
+    throw new ManagedProviderError("managed history host returned invalid result")
+  }
+  return value.result
+}
+
+/** Forward a bounded canonical event to the host archive; no local history authority exists in managed mode. */
+export async function historyMutate(
+  sessionID: string,
+  operation: "upsert" | "replay" | "tombstone",
+  events: OpenClankManagedProtocol.HistoryMutationEvent[] | OpenClankManagedProtocol.HistoryTombstoneEvent[],
+) {
+  if (!enabled()) throw new ManagedProviderError("managed history is unavailable outside managed mode")
+  if (!sessionID) throw new ManagedProviderError("managed history requires a bound session")
+  await ensureManagedSessionBinding(sessionID)
+  const raw = await OpenClankManagedProtocol.callHost(connection(), "_openclank/history/v1/mutate", {
+    sessionID,
+    operation,
+    events,
+  } as OpenClankManagedProtocol.HistoryMutationRequest)
+  if (raw.operation !== operation || raw.ok !== true || !Number.isSafeInteger(raw.accepted) || !Number.isSafeInteger(raw.duplicate) || !Number.isSafeInteger(raw.enqueued)) {
+    throw new ManagedProviderError("managed history host returned invalid mutation result")
+  }
+  return raw
 }
 
 export * as ManagedProvider from "./managed-provider"

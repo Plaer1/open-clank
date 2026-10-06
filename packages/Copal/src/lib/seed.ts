@@ -1,6 +1,5 @@
-// Seed data — mirrors /public/data/move-data.json so the app is self-contained
-// on first paint, then fetches the JSON file on mount so AI calendar managers
-// can edit it without touching the source.
+// Public synthetic default data; no personal planning payload is bundled.
+// A local mutable /data/move-data.json can override it at runtime and stays private.
 
 import type { MoveData } from './types';
 

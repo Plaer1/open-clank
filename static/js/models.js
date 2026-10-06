@@ -647,7 +647,7 @@ export async function refreshModels(force = false, opts = {}) {
       const welcomeSub = document.getElementById('welcome-sub');
       if (welcomeSub) welcomeSub.innerHTML = 'Type <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">/setup</span> to get started.';
       const welcomeTip = document.getElementById('welcome-tip');
-      if (welcomeTip) welcomeTip.textContent = 'Type /setup, then choose Local models or API.';
+      if (welcomeTip) welcomeTip.textContent = 'Type /setup to add a subscription account, API provider, or local model.';
     } else {
       // Configured installs should feel ready, not stuck in onboarding.
       const welcomeSub = document.getElementById('welcome-sub');

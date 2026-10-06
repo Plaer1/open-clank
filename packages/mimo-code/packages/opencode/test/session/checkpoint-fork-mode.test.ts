@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import { jsonSchema, tool } from "ai"
 import { Deferred, Effect, Layer } from "effect"
 import { eq } from "drizzle-orm"
 import { Bus } from "../../src/bus"
@@ -75,7 +76,7 @@ const recordingActor = Layer.effect(
 // Used to assert what tryStartCheckpointWriter passes to the prefix-capture
 // helper for each (forkMode, lastCheckpointMessageID) combination. Returns
 // non-empty system/tools so the resulting forkCtx is non-undefined.
-function installRecordingCapture() {
+function installRecordingCapture(tools = {}) {
   const fn: PrefixCaptureFn = (input) =>
     Effect.sync(() => {
       const first = (input.msgs[0] as { info?: { role?: string; id?: string } } | undefined)?.info
@@ -88,7 +89,7 @@ function installRecordingCapture() {
       })
       return {
         system: ["sys-canned"],
-        tools: {},
+        tools,
         inheritedMessages: [{ role: "user" as const, content: "canned" } as never],
         parentPermission: [],
       }
@@ -280,6 +281,39 @@ describe("checkpoint writer forkContext shape per mode", () => {
           expect(fc).toBeDefined()
           expect(fc?.system).toEqual(["sys-canned"])
           expect(fc?.watermarkMsgID).toBe(u2.id)
+        }),
+      { config: { checkpoint: { fork: true } } },
+    ),
+  )
+
+  it.live(
+    "T6b: checkpoint fork receives the frozen advertised tool schemas without executors",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          yield* reset
+          installRecordingCapture({
+            rotated_tool: tool({
+              description: "rotated durable schema",
+              inputSchema: jsonSchema({ type: "object", properties: { path: { type: "string" } } }),
+            }),
+          })
+
+          const svc = yield* SessionCheckpoint.Service
+          const { info } = yield* seedFourMessages()
+          expect(
+            yield* svc.tryStartCheckpointWriter({
+              sessionID: info.id,
+              model: { providerID: "test", modelID: "test-model" },
+              promptOps: {} as never,
+            }),
+          ).toBe("started")
+
+          const fork = spawnLog.lastInput?.forkContext as
+            | { tools: Record<string, { description?: string; execute?: unknown }> }
+            | undefined
+          expect(fork?.tools.rotated_tool?.description).toBe("rotated durable schema")
+          expect(fork?.tools.rotated_tool?.execute).toBeUndefined()
         }),
       { config: { checkpoint: { fork: true } } },
     ),

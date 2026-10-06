@@ -417,6 +417,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 owner,
                 event_description,
                 event_location,
+                db=db,
             )
             if missing_id:
                 return {
@@ -486,6 +487,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 owner,
                 args.get("description"),
                 args.get("location"),
+                db=db,
             )
             if missing_id:
                 return {

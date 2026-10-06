@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from src.openclank.copal_bridge import CopalBridge
+from src.openclank.copal_storage import configured_bridge
 from src.openclank.copal_urls import canonical_open_url
 from src.openclank.copal_planning import (
     EVENT_KIND,
@@ -207,7 +207,7 @@ async def read_copal(arguments: Any, *, owner: str | None = None, account_id: st
     if action == "maintenance.operations" and not admin:
         raise CopalReadError("maintenance.operations requires an admin execution", code="forbidden")
     supplied_bridge = bridge is not None
-    bridge = bridge or CopalBridge()
+    bridge = bridge or configured_bridge()
     docs = await _docs(bridge, owner or "local", workspace)
     by_id = {str(doc.get("id")): doc for doc in docs if doc.get("id")}
     if action in {"notes.list", "wiki.list", "trash.list"}:

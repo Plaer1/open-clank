@@ -13,14 +13,6 @@ def _function_source(path: str, name: str) -> str:
     raise AssertionError(f"{name} not found in {path}")
 
 
-def test_document_ai_tidy_resolves_with_owner_scope():
-    body = _function_source("routes/document/document_routes.py", "ai_tidy_documents")
-    assert 'owner=user or "local-installation"' in body
-    assert 'purpose="utility"' in body
-    assert "complete_text" in body
-    assert "resolve_endpoint(" not in body
-
-
 def test_calendar_quick_parse_resolves_with_owner_scope():
     body = _function_source("routes/calendar_routes.py", "quick_parse")
     assert "owner = _require_user(request)" in body

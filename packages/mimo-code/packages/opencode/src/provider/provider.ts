@@ -39,6 +39,7 @@ import * as ProviderTransform from "./transform"
 import { ModelID, ProviderID } from "./schema"
 import { AccountSelection } from "./account-selection"
 import { ManagedProvider } from "@/acp/managed-provider"
+import { captureFetch } from "./logging-transport"
 
 const log = Log.create({ service: "provider" })
 const DEFAULT_CONTEXT_WINDOW = 1_000_000
@@ -47,6 +48,8 @@ const DEFAULT_CONTEXT_WINDOW = 1_000_000
 const BUILTIN_TIERS = new Set(["ultra", "standard", "lite"])
 // F41: warn once per (providerID, modelID) when limit.context falls back to default
 const warnedContextDefaults = new Set<string>()
+// A stale configured default must not prevent selection of a known provider model.
+const warnedStaleDefaultModels = new Set<string>()
 
 export const DEFAULT_OPENAI_HEADER_TIMEOUT = 300_000
 export const MAX_INHERITED_PROVIDER_AUTH_BYTES = 4 * 1024 * 1024
@@ -2172,7 +2175,7 @@ const layer: Layer.Layer<
         delete options["headerTimeout"]
 
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
-          const fetchFn = customFetch ?? fetch
+          const fetchFn = managedProviderMode ? captureFetch(customFetch ?? fetch, account) : customFetch ?? fetch
           const opts = init ?? {}
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
@@ -2441,9 +2444,16 @@ const layer: Layer.Layer<
 
     const defaultModel = Effect.fn("Provider.defaultModel")(function* () {
       const cfg = yield* config.get()
-      if (cfg.model) return parseModel(cfg.model)
-
       const s = yield* InstanceState.get(state)
+      if (cfg.model) {
+        const parsed = parseModel(cfg.model)
+        if (s.providers[parsed.providerID]?.models[parsed.modelID]) return parsed
+        if (!warnedStaleDefaultModels.has(cfg.model)) {
+          warnedStaleDefaultModels.add(cfg.model)
+          log.warn("configured default model missing from registry, falling through", { model: cfg.model })
+        }
+      }
+
       const recent = yield* fs.readJson(path.join(Global.Path.state, "model.json")).pipe(
         Effect.map((x): { providerID: ProviderID; modelID: ModelID }[] => {
           if (!isRecord(x) || !Array.isArray(x.recent)) return []

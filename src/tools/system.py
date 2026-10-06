@@ -45,7 +45,12 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     except ValueError:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
-    action = (args.get("action") or "").lower()
+    action = (args.get("action") or "").strip().lower()
+    if not action:
+        return {
+            "error": "action is required (list|view|view_ref|add|edit|patch|publish|delete|search)",
+            "exit_code": 1,
+        }
     from services.memory.skills import SkillsManager
     from services.memory.skill_format import Skill, slugify
     from src.constants import DATA_DIR
@@ -54,7 +59,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     # Accept legacy `skill_id` as an alias for `name`.
     name = (args.get("name") or args.get("skill_id") or "").strip()
 
-    if action in ("list", "index", ""):
+    if action in ("list", "index"):
         published = sm.load_published(owner=owner)
         if not published:
             return {"results": "No skills yet. Create one with action='add'."}
@@ -750,6 +755,7 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
                 "error": f"{method} {path} -> HTTP {resp.status_code}",
                 "status_code": resp.status_code,
                 "body": preview,
+                "untrusted_content": True,
                 "exit_code": 1,
             }
         return {

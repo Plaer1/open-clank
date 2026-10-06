@@ -1,3 +1,4 @@
+import { captureScopeEvidence, captureSdkEvidence, flushCaptures } from "@/provider/logging-transport"
 import {
   RequestError,
   type Agent as ACPAgent,
@@ -157,6 +158,7 @@ export class Agent implements ACPAgent {
   private sessionManager: ACPSessionManager
   private eventAbort = new AbortController()
   private eventStarted = false
+  private terminalDeliveries = new Map<string, { busy: boolean; finish: () => void; fail: (error: Error) => void }>()
   private bashSnapshots = new Map<string, string>()
   private toolStarts = new Set<string>()
   private permissionQueues = new Map<string, Promise<void>>()
@@ -255,35 +257,113 @@ export class Agent implements ACPAgent {
     if (this.eventStarted) return
     this.eventStarted = true
     this.runEventSubscription().catch((error) => {
+      this.failTerminalDeliveries(new Error("ACP event subscription failed before terminal delivery"))
       if (this.eventAbort.signal.aborted) return
       log.error("event subscription failed", { error })
     })
   }
 
+  private readonly goalDeliveries = new Map<string, Promise<void>>()
+
+  private deliverGoalCompletions(sessionID: string): Promise<void> {
+    const prior = this.goalDeliveries.get(sessionID) ?? Promise.resolve()
+    // Each actual event queues a fresh read, so a completion racing an older
+    // verification-started read cannot be hidden by in-flight coalescing.
+    const delivery = prior.catch(() => undefined).then(() => this.projectGoalCompletions(sessionID)).finally(() => {
+      if (this.goalDeliveries.get(sessionID) === delivery) this.goalDeliveries.delete(sessionID)
+    })
+    this.goalDeliveries.set(sessionID, delivery)
+    return delivery
+  }
+
+  private async projectGoalCompletions(sessionID: string) {
+    const session = this.sessionManager.tryGet(sessionID)
+    if (!session) return
+    const journal = await this.sdk.session.goal.journal({ sessionID, directory: session.cwd }, { throwOnError: true })
+    for (const entry of journal.data ?? []) {
+      if (entry.type !== "completed" || entry.actor !== "verifier" || entry.reasonCode !== "met") continue
+      const completed = entry.snapshot?.history.find((goal) => goal.id === entry.goalID && goal.revision === entry.revision)
+      if (!completed || completed.status !== "completed" || completed.lastOutcome?.code !== "met") continue
+      const evidenceRefs = (entry.evidenceRefs ?? []).filter((id) => completed.evidence.some((evidence) =>
+        evidence.id === id && (evidence.kind === "file" || evidence.kind === "command") && !!evidence.verifier,
+      )).slice(0, 128)
+      if (!evidenceRefs.length) continue
+      await OpenClankManagedProtocol.callHost(this.connection, "_openclank/session/v1/goal/completed", {
+        sessionID, journalID: entry.id, goalID: entry.goalID, goalRevision: entry.revision,
+        evidenceRefs, verifiedAt: entry.createdAt,
+      })
+    }
+  }
+
   private async runEventSubscription() {
     while (true) {
-      if (this.eventAbort.signal.aborted) return
+      if (this.eventAbort.signal.aborted) {
+        this.failTerminalDeliveries(new Error("ACP event subscription stopped before terminal delivery"))
+        return
+      }
       const events = await this.sdk.global.event({
         signal: this.eventAbort.signal,
       })
       for await (const event of events.stream) {
-        if (this.eventAbort.signal.aborted) return
+        if (this.eventAbort.signal.aborted) {
+          this.failTerminalDeliveries(new Error("ACP event subscription stopped before terminal delivery"))
+          return
+        }
         const payload = event?.payload
         if (!payload) continue
         await this.handleEvent(payload as Event).catch((error) => {
           log.error("failed to handle event", { error, type: payload.type })
         })
       }
+      this.failTerminalDeliveries(new Error("ACP event subscription ended before terminal delivery"))
+    }
+  }
+
+  private failTerminalDeliveries(error: Error) {
+    for (const delivery of this.terminalDeliveries.values()) delivery.fail(error)
+    this.terminalDeliveries.clear()
+  }
+
+  private async withPromptDelivery<A extends { data?: { info?: unknown } }>(sessionID: string, run: () => Promise<A>): Promise<A> {
+    if (this.terminalDeliveries.has(sessionID)) throw new Error("ACP prompt delivery is already active")
+    let finish!: () => void
+    let fail!: (error: Error) => void
+    const terminal = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject })
+    // A stream error may arrive while the SDK request is still settling.
+    terminal.catch(() => undefined)
+    this.terminalDeliveries.set(sessionID, { busy: false, finish, fail })
+    try {
+      const response = await run()
+      // Early SDK admission errors have no turn or terminal event. A returned
+      // message (including cancellation/error) has an ordered busy→idle turn.
+      if (response.data?.info) await terminal
+      return response
+    } finally {
+      this.terminalDeliveries.delete(sessionID)
     }
   }
 
   private async handleEvent(event: Event) {
+    if (event.type === "session.status") {
+      const delivery = this.terminalDeliveries.get(event.properties.sessionID)
+      if (delivery) {
+        if (event.properties.status.type === "busy") delivery.busy = true
+        if (event.properties.status.type === "idle" && delivery.busy) delivery.finish()
+      }
+      return
+    }
+
     // SessionCwd.Event.Changed is an engine bus event carrying the one-chat
     // physical cwd. It is bridged as a private ACP update so the host can
     // atomically refresh its per-chat workspace projection. Cast here because
     // the upstream SDK's generated Event union does not know Open Clank's
     // private event yet.
     const eventType = (event as unknown as { type?: string }).type
+    if (eventType === "session.goal") {
+      const sessionID = String((event as unknown as { properties?: { sessionID?: string } }).properties?.sessionID ?? "")
+      if (sessionID) await this.deliverGoalCompletions(sessionID)
+      return
+    }
     if (eventType === "session.cwd") {
       const props = (event as unknown as { properties?: Record<string, unknown> }).properties ?? {}
       const sessionID = String(props.sessionID ?? "")
@@ -881,6 +961,8 @@ export class Agent implements ACPAgent {
         mcpServers: params.mcpServers,
         sessionId,
       })
+
+      await this.deliverGoalCompletions(sessionId).catch(() => undefined)
 
       // Replay session history
       const messages = await this.sdk.session
@@ -1595,6 +1677,7 @@ export class Agent implements ACPAgent {
     const hostSystem = odysseus?.system_prompt?.trim() || undefined
     const sessionID = params.sessionId
     const session = this.sessionManager.get(sessionID)
+    await this.deliverGoalCompletions(sessionID).catch(() => undefined)
     const directory = session.cwd
 
     const current = session.model
@@ -1715,6 +1798,7 @@ export class Agent implements ACPAgent {
       return { name, args: rest.join(" ").trim() }
     })()
 
+    let mainSdkUsage: ReturnType<typeof captureSdkEvidence>
     const buildUsage = (msg: AssistantMessage): Usage => ({
       totalTokens:
         msg.tokens.input +
@@ -1722,11 +1806,11 @@ export class Agent implements ACPAgent {
         msg.tokens.reasoning +
         (msg.tokens.cache?.read ?? 0) +
         (msg.tokens.cache?.write ?? 0),
-      inputTokens: msg.tokens.input,
+      inputTokens: mainSdkUsage?.usage.inputTokens ?? msg.tokens.input,
       outputTokens: msg.tokens.output,
-      thoughtTokens: msg.tokens.reasoning || undefined,
-      cachedReadTokens: msg.tokens.cache?.read || undefined,
-      cachedWriteTokens: msg.tokens.cache?.write || undefined,
+      thoughtTokens: msg.tokens.reasoning,
+      cachedReadTokens: msg.tokens.cache?.read,
+      cachedWriteTokens: mainSdkUsage?.usage.cacheWriteTokens,
     })
 
     const managedRoute =
@@ -1761,12 +1845,58 @@ export class Agent implements ACPAgent {
       }
     }
 
+    let usageMeta: Record<string, unknown> = {
+      normalizationProfile: "acp-separated-v1",
+      identityCoverage: "partial",
+      coveredDispatchIDs: [],
+      metricCoverage: {},
+    }
     const runManaged = <A>(run: () => Promise<A>) =>
       ManagedProvider.withOperation(
         sessionID,
         managedProvider,
         { providerID: model.providerID, modelID: model.modelID },
-        () => ManagedProvider.withHostContext(sessionID, hostContextForOperation(), run),
+        () =>
+          ManagedProvider.withHostContext(sessionID, hostContextForOperation(), async () => {
+            try {
+              return await run()
+            } finally {
+              await flushCaptures()
+              const scope = ManagedProvider.currentScope(sessionID)
+              const last = captureSdkEvidence(scope)
+              mainSdkUsage = last
+              const coverage = Object.fromEntries(
+                ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens"].map(
+                  (key) => [
+                    key,
+                    last?.metricCoverage[key] ?? {
+                      state: "unavailable",
+                      coverage: "unknown",
+                      source: "acp",
+                      reason: "sdk_category_absent",
+                    },
+                  ],
+                ),
+              )
+              for (const [base, subsets] of [
+                ["output_tokens", ["reasoning_tokens"]],
+              ] as const) {
+                if (subsets.some((key) => !last?.metricCoverage[key]))
+                  coverage[base] = {
+                    state: "unavailable",
+                    coverage: "unknown",
+                    source: "acp",
+                    reason: "missing_normalization_subset",
+                  }
+              }
+              usageMeta = {
+                ...captureScopeEvidence(scope),
+                normalizationProfile: "acp-inclusive-input-separated-output-v1",
+                metricCoverage: coverage,
+                coveredDispatchIDs: last?.coveredDispatchIDs ?? [],
+              }
+            }
+          }),
       )
 
     // The server resolves session.prompt 200 even when the turn died on a
@@ -1798,7 +1928,7 @@ export class Agent implements ACPAgent {
     }
 
     if (!cmd) {
-      const response = await runManaged(() =>
+      const response = await runManaged(() => this.withPromptDelivery(sessionID, () =>
         this.sdk.session.prompt({
           sessionID,
           model: {
@@ -1812,7 +1942,7 @@ export class Agent implements ACPAgent {
           tools: odysseus?.tools,
           system: hostSystem,
         } as any),
-      )
+      ))
       const msg = response.data?.info
 
       await sendUsageUpdate(this.connection, this.sdk, sessionID, directory)
@@ -1822,7 +1952,7 @@ export class Agent implements ACPAgent {
         return {
           stopReason: "cancelled" as const,
           usage: msg ? buildUsage(msg) : undefined,
-          _meta: {},
+          _meta: usageMeta,
         }
       }
       if (failure) {
@@ -1832,7 +1962,7 @@ export class Agent implements ACPAgent {
       return {
         stopReason: "end_turn" as const,
         usage: msg ? buildUsage(msg) : undefined,
-        _meta: {},
+        _meta: usageMeta,
       }
     }
 
@@ -1861,7 +1991,7 @@ export class Agent implements ACPAgent {
         return {
           stopReason: "cancelled" as const,
           usage: msg ? buildUsage(msg) : undefined,
-          _meta: {},
+          _meta: usageMeta,
         }
       }
       if (failure) {
@@ -1871,7 +2001,7 @@ export class Agent implements ACPAgent {
       return {
         stopReason: "end_turn" as const,
         usage: msg ? buildUsage(msg) : undefined,
-        _meta: {},
+        _meta: usageMeta,
       }
     }
 

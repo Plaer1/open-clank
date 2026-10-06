@@ -82,7 +82,7 @@ _DATA_DIR = str(
 server = ToolServer("lifetools")
 
 
-def _render_search_identity(result: Any, *, owner: str, workspace_id: str) -> None:
+async def _render_search_identity(result: Any, *, owner: str, workspace_id: str) -> None:
     """Render reserved identity tokens in a search projection, never storage.
 
     MiMo consumes the private broker's ``search`` wire directly.  Keep a raw
@@ -92,16 +92,9 @@ def _render_search_identity(result: Any, *, owner: str, workspace_id: str) -> No
     if not isinstance(result, dict) or not isinstance(result.get("results"), list):
         return
     try:
-        from services.memory.principal_context import (
-            render_identity_template,
-            resolve_handler_display_label,
-        )
-
-        label_kwargs: dict[str, Any] = {"workspace_id": workspace_id or None}
-        configured_db = os.environ.get("FM_DB_PATH", "").strip()
-        if configured_db:
-            label_kwargs["db_path"] = configured_db
-        label = resolve_handler_display_label(owner, **label_kwargs)
+        from services.memory.principal_context import render_identity_template
+        provider = await _ensure_memory_provider()
+        label = await provider.handler_display_label(owner=owner)
     except Exception:
         logger.debug("lifetools search identity rendering unavailable", exc_info=True)
         return
@@ -574,7 +567,7 @@ async def call_tool(
             else:
                 result = await provider.invoke_tool(name, scoped)
                 if name == "search":
-                    _render_search_identity(
+                    await _render_search_identity(
                         result,
                         owner=_OWNER,
                         workspace_id=expected_workspace,

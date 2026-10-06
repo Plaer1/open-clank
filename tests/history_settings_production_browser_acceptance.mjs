@@ -20,8 +20,6 @@ const repo = process.cwd();
 const python = path.join(repo, 'venv', 'bin', 'python');
 const worker = process.env.OPENCLANK_HISTORY_TEST_BIN
   || path.join(repo, 'packages', 'openclank-history', 'target', 'debug', 'openclank-history-service');
-const copalBridge = process.env.COPAL_BRIDGE_COMMAND
-  || path.join(repo, 'packages', 'Copal', 'rust', 'copal-db', 'target', 'release', 'copal-bridge');
 const chrome = [
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/usr/bin/chromium',
@@ -85,9 +83,7 @@ function startApp({ data, history, socket, registry, files, port }) {
     OPENCLANK_HISTORY_RECEIPT_ROOT: path.join(history, 'restore-receipts'),
     OPENCLANK_HISTORY_RESOURCE_MAP: path.join(history, 'resource-map.json'),
     ODYSSEUS_FILES_REGISTRY: registry,
-    COPAL_STORAGE: 'redb',
-    COPAL_DATA_DIR: path.join(data, 'copal'),
-    COPAL_BRIDGE_COMMAND: copalBridge,
+    COPAL_LOOSE_ROOT: path.join(data, 'copal'),
     PYTHONUNBUFFERED: '1',
   };
   let output = '';
@@ -472,8 +468,8 @@ repo.create_workspace(
   progress('budget pause shown');
   assert.equal(await evaluate('document.querySelector("#doc-editor-textarea").value'), draft);
 
-  // Continue the same paused-history session through Copal's actual Redb
-  // bridge and unified CodeMirror editor. The Files resource handoff below
+  // Continue the same paused-history session through Copal's actual Files vault
+  // repository and unified CodeMirror editor. The Files resource handoff below
   // uses only its opaque ResourceRef, as a user-facing Files action does.
   const copalDocument = await evaluate(`(async () => {
     const response = await fetch('/api/copal/documents?workspace=default', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name:'Acceptance/History Dogfood.md', kind:'markdown', content:'# History dogfood\\n\\nInitial body.\\n' }) });

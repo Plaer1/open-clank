@@ -1,0 +1,36 @@
+/* Editor-only comment presentation. Theme variables follow the surrounding editor. */
+.cm-editor .cm-rich-comment-widget {
+  display:inline-block;
+  box-sizing:border-box;
+  max-width:100%;
+  margin:0 .2em;
+  padding:.4em .7em;
+  color:var(--fg);
+  background:color-mix(in srgb,var(--accent,#22d3ee) 7%,var(--bg,#12151b));
+  border:1px solid color-mix(in srgb,var(--accent,#22d3ee) 24%,transparent);
+  border-radius:8px;
+  vertical-align:top;
+  white-space:normal;
+  font-family:var(--font-family,system-ui,sans-serif);
+  font-style:normal;
+}
+.cm-editor .cm-rich-comment-block { display:block;margin:.45em 0;padding:.8em 1em; }
+.cm-rich-comment-widget:focus-visible { outline:2px solid var(--accent,#22d3ee);outline-offset:2px; }
+.cm-rich-comment-prose { line-height:1.55;overflow-wrap:anywhere; }
+.cm-rich-comment-prose > :first-child { margin-top:0; }
+.cm-rich-comment-prose > :last-child { margin-bottom:0; }
+.cm-rich-comment-prose p { margin:.35em 0; }
+.cm-rich-comment-prose pre { overflow:auto;white-space:pre;padding:.7em;border-radius:6px;background:color-mix(in srgb,var(--fg) 7%,transparent); }
+.cm-rich-comment-prose code { font-family:var(--font-mono,ui-monospace,monospace); }
+.cm-rich-comment-prose img,.cm-rich-comment-prose video { max-width:100%;height:auto;max-height:70vh;object-fit:contain; }
+.cm-rich-comment-widget:not(.cm-rich-comment-block) .cm-rich-comment-prose { display:inline; }
+.cm-rich-comment-widget:not(.cm-rich-comment-block) .cm-rich-comment-prose > p { display:inline;margin:0; }
+.cm-rich-comment-body-edit { width:100%;margin:0; }
+.cm-rich-comment-body-edit > .cm-editor { max-height:28em;min-height:1.6em;border:0;background:transparent; }
+.cm-rich-comment-body-edit .cm-content { padding:0; }
+.cm-rich-comment-body-edit .cm-scroller { font-size:inherit; }
+.cm-rich-comment-notice { margin:.5em 0;color:var(--danger,#dc5757);font-size:.9em; }
+.cm-rich-comment-pending { opacity:.7;font-size:.9em; }
+
+.cm-rich-comment-widget .cm-rich-comment-prose[hidden],.cm-rich-comment-widget .cm-rich-comment-body-edit[hidden] { display:none; }
+.cm-rich-comment-widget.cm-rich-comment-editing { cursor:text; }

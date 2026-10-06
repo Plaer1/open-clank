@@ -205,30 +205,15 @@ fn provider_engine_capture_matrix_covers_file_lifecycle_and_multitarget_failures
     let engine = FileEngine::new(EngineConfig::default(), RootRegistry::default())
         .with_capture_hook(Arc::new(hook));
 
-    assert!(matches!(
-        engine.create_file_app(&source, b"created"),
-        Err(odysseus_files::EngineError::HistoryCapture(_))
-    ));
+    assert!(engine.create_file_app(&source, b"created").is_ok());
     assert_eq!(std::fs::read(&source).unwrap(), b"created");
     let expected = engine.stat_app(&source, true).unwrap().fingerprint;
-    assert!(matches!(
-        engine.replace_if_fingerprint_app(&source, expected.as_ref(), b"replaced"),
-        Err(odysseus_files::EngineError::HistoryCapture(_))
-    ));
+    assert!(engine.replace_if_fingerprint_app(&source, expected.as_ref(), b"replaced").is_ok());
     assert_eq!(std::fs::read(&source).unwrap(), b"replaced");
-    assert!(matches!(
-        engine.copy_file_app(&source, &copy),
-        Err(odysseus_files::EngineError::HistoryCapture(_))
-    ));
-    assert!(matches!(
-        engine.move_file_app(&copy, &moved),
-        Err(odysseus_files::EngineError::HistoryCapture(_))
-    ));
+    assert!(engine.copy_file_app(&source, &copy).is_ok());
+    assert!(engine.move_file_app(&copy, &moved).is_ok());
     assert!(moved.exists());
-    assert!(matches!(
-        engine.trash_file_app(&moved),
-        Err(odysseus_files::EngineError::HistoryCapture(_))
-    ));
+    assert!(engine.trash_file_app(&moved).is_ok());
     let trashed_path = std::fs::read_dir(root.path().join(".odysseus-trash"))
         .unwrap()
         .next()
@@ -242,10 +227,7 @@ fn provider_engine_capture_matrix_covers_file_lifecycle_and_multitarget_failures
         trashed_path,
         fingerprint: None,
     };
-    assert!(matches!(
-        engine.restore_file_app(&trash),
-        Err(odysseus_files::EngineError::HistoryCapture(_))
-    ));
+    assert!(engine.restore_file_app(&trash).is_ok());
     assert_eq!(std::fs::read(&moved).unwrap(), b"replaced");
 
     let events = events.lock().unwrap().clone();
@@ -351,4 +333,16 @@ fn registry_for(root: &Path) -> RootRegistry {
         })
         .unwrap();
     registry
+}
+
+#[test]
+fn configured_missing_capture_hook_preserves_original_and_allows_reads() {
+    let root = tempdir().unwrap();
+    let file = root.path().join("original.txt");
+    std::fs::write(&file, b"original").unwrap();
+    let engine = FileEngine::new(EngineConfig::default(), RootRegistry::default()).require_capture(true);
+    let stat = engine.stat_app(&file, true).unwrap();
+    assert!(matches!(engine.replace_if_fingerprint_app(&file, stat.fingerprint.as_ref(), b"replacement"), Err(odysseus_files::EngineError::HistoryCapture(_))));
+    assert_eq!(std::fs::read(&file).unwrap(), b"original");
+    assert!(engine.stat_app(&file, true).is_ok());
 }

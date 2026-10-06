@@ -14,6 +14,7 @@ native store.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Mapping, Optional, Sequence
 
 from src.openclank.conversation_archive import (
@@ -84,7 +85,7 @@ class HistoryBrokerAdapter:
                     owner=owner,
                     query=query,
                     scope="global",
-                    chat_id=target_chat or None,
+                    chat_id=chat_id or None,
                     actor_id=actor_id,
                     part_types=part_types,
                     tool_name=tool_name,
@@ -218,11 +219,15 @@ class HistoryBrokerAdapter:
             normalized = []
             for part in parts:
                 if isinstance(part, SourcePart):
-                    normalized.append(part)
+                    if ((part.owner and part.owner != owner) or (part.chat_id and part.chat_id != chat_id)):
+                        raise ArchiveUnavailableError(message="history_scope_mismatch", retry_after_ms=0)
+                    normalized.append(replace(part, owner=owner, chat_id=chat_id))
                     continue
                 data = dict(part)
-                data.setdefault("owner", owner)
-                data.setdefault("chat_id", chat_id)
+                if data.get("owner") not in (None, "", owner) or data.get("chat_id") not in (None, "", chat_id):
+                    raise ArchiveUnavailableError(message="history_scope_mismatch", retry_after_ms=0)
+                data["owner"] = owner
+                data["chat_id"] = chat_id
                 normalized.append(data)
             return self.archive.append_parts(normalized)
         except ArchiveUnavailableError as exc:

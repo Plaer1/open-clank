@@ -7,9 +7,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 mod engine;
+#[cfg(windows)]
+pub mod windows_fs;
 pub mod history_capture;
 pub use history_capture::HistoryServiceHook;
-#[cfg(all(feature = "tonic-transport", target_os = "macos"))]
+#[cfg(all(feature = "tonic-transport", any(target_os = "macos", windows)))]
 pub mod grpc_transport;
 #[cfg(unix)]
 mod local_ipc;
@@ -976,7 +978,7 @@ impl RootRegistry {
             let root_path = lexical_normalize(Path::new(&root.canonical_path));
             let target = lexical_normalize(target_path);
             let inside = match root.kind {
-                RootKind::ExactFile => target == root_path,
+                RootKind::ExactFile => platform_path_equal(&target, &root_path),
                 RootKind::RecursiveDirectory => component_contains(&root_path, &target),
             };
             if !inside {
@@ -1029,7 +1031,7 @@ impl RootRegistry {
             }
             let root_path = lexical_normalize(Path::new(&root.canonical_path));
             let inside = match root.kind {
-                RootKind::ExactFile => target == root_path,
+                RootKind::ExactFile => platform_path_equal(&target, &root_path),
                 RootKind::RecursiveDirectory => component_contains(&root_path, &target),
             };
             if inside {
@@ -1120,8 +1122,18 @@ pub fn lexical_normalize(path: &Path) -> PathBuf {
     output
 }
 
+pub(crate) fn platform_path_equal(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    { return windows_fs::authority_path(&lexical_normalize(left)) == windows_fs::authority_path(&lexical_normalize(right)); }
+    #[cfg(not(windows))]
+    { left == right }
+}
+
 pub fn component_contains(root: &Path, target: &Path) -> bool {
-    lexical_normalize(target).starts_with(lexical_normalize(root))
+    #[cfg(windows)]
+    { return windows_fs::authority_path(&lexical_normalize(target)).starts_with(windows_fs::authority_path(&lexical_normalize(root))); }
+    #[cfg(not(windows))]
+    { lexical_normalize(target).starts_with(lexical_normalize(root)) }
 }
 
 /// Component containment fixture logic for paths whose syntax differs from the

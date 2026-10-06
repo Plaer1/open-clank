@@ -28,7 +28,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import hashlib
+import io
 import os
 import re
 import threading
@@ -299,6 +299,112 @@ def _load_state(raw: Any) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def portable_manifest(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """Decode every required pixel payload and bind its editable relationships."""
+    from PIL import Image
+
+    state = bundle.get("state")
+    if not isinstance(state, Mapping) or not isinstance(state.get("layers"), list) :
+        raise ImageProjectError("export has no editable layers", code="invalid_export")
+    entries = []
+    identities = set()
+    relationships = []
+
+    def pixels(node, path, parent=None):
+        if not isinstance(node, Mapping):
+            raise ImageProjectError("invalid editable layer or mask", code="invalid_export")
+        identity = str(node.get("id") or "")
+        if not identity or identity in identities:
+            raise ImageProjectError("export has missing or duplicate layer/mask identities", code="invalid_export")
+        identities.add(identity)
+        encoded = node.get("dataUrl")
+        if not isinstance(encoded, str) or not encoded.startswith("data:image/png;base64,"):
+            raise ImageProjectError("editable pixels must be embedded PNG bytes", code="invalid_export")
+        try:
+            data = base64.b64decode(encoded.split(",", 1)[1], validate=True)
+            with Image.open(io.BytesIO(data)) as image:
+                if image.format != "PNG":
+                    raise ValueError("not PNG")
+                image.load()
+                width, height = image.size
+            if width != node.get("canvasW", width) or height != node.get("canvasH", height):
+                raise ValueError("pixel dimensions disagree")
+        except Exception as exc:
+            raise ImageProjectError("editable PNG could not be decoded or dimensions disagree", code="invalid_export") from exc
+        entries.append({"path": path + "/dataUrl", "id": identity, "parentId": parent,
+                        "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "width": width, "height": height})
+        masks = node.get("masks") or []
+        if not isinstance(masks, list):
+            raise ImageProjectError("invalid mask relationships", code="invalid_export")
+        for index, mask in enumerate(masks):
+            pixels(mask, f"{path}/masks/{index}", identity)
+        mask_ids = [str(mask.get("id") or "") for mask in masks]
+        if node.get("activeMaskId") is not None and str(node["activeMaskId"]) not in mask_ids:
+            raise ImageProjectError("active mask is not owned by its layer", code="invalid_export")
+        relationships.append({"id": identity, "parentId": parent, "maskIds": mask_ids,
+                              "activeMaskId": node.get("activeMaskId"), "type": node.get("type")})
+
+    for index, layer in enumerate(state["layers"]):
+        pixels(layer, f"/state/layers/{index}")
+    layer_ids = [str(layer["id"]) for layer in state["layers"]]
+    if state.get("activeLayerId") is not None and str(state["activeLayerId"]) not in layer_ids:
+        raise ImageProjectError("active layer is unavailable", code="invalid_export")
+    assets = bundle.get("assets") or []
+    if not isinstance(assets, list):
+        raise ImageProjectError("invalid export assets", code="invalid_export")
+    asset_ids = set()
+    for index, asset in enumerate(assets):
+        if not isinstance(asset, Mapping):
+            raise ImageProjectError("invalid export asset", code="invalid_export")
+        identity = str(asset.get("id") or "")
+        if not identity or identity in asset_ids:
+            raise ImageProjectError("export asset identities are missing or duplicated", code="invalid_export")
+        asset_ids.add(identity)
+        try:
+            data = base64.b64decode(asset["data_base64"], validate=True)
+        except Exception as exc:
+            raise ImageProjectError("required export asset bytes are unavailable", code="invalid_export") from exc
+        digest = hashlib.sha256(data).hexdigest()
+        if asset.get("sha256") and asset["sha256"] != digest:
+            raise ImageProjectError("export asset hash disagrees", code="invalid_export")
+        entries.append({"path": f"/assets/{index}/data_base64", "id": identity, "sha256": digest, "size": len(data)})
+    # Explicit external asset references must resolve inside the portable bundle.
+    def references(value):
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if key in {"assetId", "asset_id"} and item is not None and str(item) not in asset_ids:
+                    raise ImageProjectError("editable asset reference is unresolved", code="invalid_export")
+                references(item)
+        elif isinstance(value, list):
+            for item in value:
+                references(item)
+    references(state)
+    return {"format": "imps-editable-manifest-v1", "stateSha256": _state_digest(state),
+            "layerIds": layer_ids, "activeLayerId": state.get("activeLayerId"),
+            "payloads": entries, "relationships": relationships}
+
+
+def complete_portable_export(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the exact serialized artifact, then attach its decoded manifest."""
+    result = json.loads(json.dumps(dict(bundle), ensure_ascii=False))
+    if result.get("kind") != EXPORT_KIND:
+        raise ImageProjectError("bundle is not an Imps project export", code="invalid_export")
+    result["manifest"] = portable_manifest(result)
+    reopened = json.loads(json.dumps(result, ensure_ascii=False))
+    if reopened["manifest"] != portable_manifest(reopened):
+        raise ImageProjectError("export manifest disagrees with completed artifact", code="invalid_export")
+    return reopened
+
+
+def validate_portable_import(bundle: Mapping[str, Any]) -> None:
+    if bundle.get("kind") != EXPORT_KIND:
+        raise ImageProjectError("bundle is not an Imps project export", code="invalid_export")
+    actual = portable_manifest(bundle)
+    # Supported old bundles contain embedded pixels but no additive manifest.
+    if "manifest" in bundle and bundle["manifest"] != actual:
+        raise ImageProjectError("export manifest disagrees with its payload", code="invalid_export")
 
 
 def _normalize_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -740,7 +846,7 @@ class ImageProjectRepository:
         self,
         *,
         owner: str,
-        project_id: str,
+        project_id: str | None,
         image_identity: ImageResourceIdentity,
         expected_image_revision: str,
         image_writer: Callable[[], Any],
@@ -755,13 +861,20 @@ class ImageProjectRepository:
         The source project and its image are left untouched. The new project is
         bound to the freshly allocated ``image_identity``.
         """
-        source = self.get_project(project_id=project_id, owner=owner)
+        source = self.get_project(project_id=project_id, owner=owner) if project_id else None
+        if source is None:
+            if state is None:
+                raise ImageProjectError("unbound copy requires editable state", code="invalid_export")
+            portable_manifest({"state": state, "assets": []})
         body = _normalize_state(state if state is not None else source.state)
+        source_id = source.id if source else None
+        copy_name = name or (f"{source.name} copy" if source else "Untitled copy")
+        copy_width = width if width is not None else (source.width if source else state.get("imgWidth"))
+        copy_height = height if height is not None else (source.height if source else state.get("imgHeight"))
         replay_key = operation_key or hashlib.sha256(json.dumps({
-            "owner": owner, "source": source.id, "provider": image_identity.provider,
+            "owner": owner, "source": source_id, "provider": image_identity.provider,
             "resource": image_identity.resource_id, "state": body,
-            "name": name or f"{source.name} copy", "width": width if width is not None else source.width,
-            "height": height if height is not None else source.height,
+            "name": copy_name, "width": copy_width, "height": copy_height,
         }, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
         db = self.session_factory()
         try:
@@ -770,13 +883,28 @@ class ImageProjectRepository:
                 ManagedImageProject.operation_key == replay_key,
                 ManagedImageProject.is_active == True,  # noqa: E712
             ).first()
+            if source is None and existing is None:
+                already_bound = db.query(ManagedImageProject).filter(
+                    ManagedImageProject.owner == owner,
+                    ManagedImageProject.image_provider == image_identity.provider,
+                    ManagedImageProject.image_resource_id == image_identity.resource_id,
+                    ManagedImageProject.is_active == True,  # noqa: E712
+                ).first()
+                if already_bound is not None:
+                    raise ImageProjectError("image already has a managed source; open that project before copying", code="copy_conflict")
             if existing is not None:
+                if source is None and (
+                    existing.image_provider != image_identity.provider or existing.image_resource_id != image_identity.resource_id
+                    or existing.expected_image_revision != expected_image_revision or _load_state(existing.state) != body
+                    or existing.name != copy_name or existing.width != copy_width or existing.height != copy_height
+                ):
+                    raise ImageProjectError("copy operation was already bound to a different snapshot", code="copy_conflict")
                 return SaveOutcome(
                     project_id=existing.id, project_revision=existing.project_revision,
                     image_identity=ImageResourceIdentity(existing.image_provider, existing.image_resource_id),
                     action_id=f"imps-copy-replay-{replay_key[:16]}", allocated=False,
                     refresh_receipt={"operation": "save_copy", "replayed": True,
-                                     "source_project_id": source.id, "image": f"{existing.image_provider}:{existing.image_resource_id}",
+                                     "source_project_id": source_id, "image": f"{existing.image_provider}:{existing.image_resource_id}",
                                      "image_revision": existing.expected_image_revision, "project_revision": existing.project_revision},
                 )
         finally:
@@ -790,9 +918,9 @@ class ImageProjectRepository:
         created = self.create_project(
             owner=owner,
             image_identity=image_identity,
-            name=name or f"{source.name} copy",
-            width=width if width is not None else source.width,
-            height=height if height is not None else source.height,
+            name=copy_name,
+            width=copy_width,
+            height=copy_height,
             state=body,
             expected_image_revision=committed_image_revision,
             operation_key=replay_key,
@@ -805,7 +933,7 @@ class ImageProjectRepository:
             allocated=True,
             refresh_receipt={
                 "operation": "save_copy",
-                "source_project_id": source.id,
+                "source_project_id": source_id,
                 "image": created.image_identity.as_key(),
                 "image_revision": created.expected_image_revision,
                 "project_revision": created.project_revision,
@@ -1034,7 +1162,7 @@ class ImageProjectRepository:
         beside the image — callers decide where the bytes go.
         """
         record = self.get_project(project_id=project_id, owner=owner)
-        return {
+        return complete_portable_export({
             "kind": EXPORT_KIND,
             "schema_version": EXPORT_SCHEMA_VERSION,
             "name": record.name,
@@ -1047,7 +1175,7 @@ class ImageProjectRepository:
             "project_revision": record.project_revision,
             "state": dict(record.state),
             "assets": [dict(asset) for asset in assets],
-        }
+        })
 
     def import_project(
         self,
@@ -1066,6 +1194,7 @@ class ImageProjectRepository:
             raise ImageProjectError(
                 "bundle is not an Imps project export", code="invalid_export"
             )
+        validate_portable_import(bundle)
         state = _load_state(bundle.get("state"))
         # Preserve unknown top-level state keys verbatim.
         if isinstance(bundle.get("state"), Mapping):

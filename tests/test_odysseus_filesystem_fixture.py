@@ -32,7 +32,7 @@ def test_generator_creates_only_synthetic_disposable_data(tmp_path):
             str(output),
             "--tree-count",
             "0",
-            "--skip-copal-redb",
+            "--skip-copal",
         ],
         check=True,
         capture_output=True,

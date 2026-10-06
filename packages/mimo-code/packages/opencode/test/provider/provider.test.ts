@@ -743,6 +743,43 @@ test("defaultModel respects config model setting", async () => {
   })
 })
 
+test("defaultModel falls through when config model is missing from the registry", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "mimocode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          model: "custom/does-not-exist",
+          provider: {
+            custom: {
+              name: "Custom",
+              npm: "@ai-sdk/openai-compatible",
+              env: [],
+              models: {
+                "aaa-plain": {
+                  name: "AAA",
+                  tool_call: true,
+                  limit: { context: 128000, output: 4096 },
+                },
+              },
+              options: { apiKey: "test-key", baseURL: "https://custom.example/v1" },
+            },
+          },
+        }),
+      )
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const model = await defaultModel()
+      expect(String(model.providerID)).toBe("custom")
+      expect(String(model.modelID)).toBe("aaa-plain")
+    },
+  })
+})
+
 test("provider with baseURL from config", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

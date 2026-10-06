@@ -7,6 +7,7 @@ import {
   PROVIDER_CONTROL_METHODS,
   PROVIDER_STORE_METHODS,
   SESSION_METHODS,
+  LOGGING_METHODS,
   OPERATION_ROUTER_VERSION,
   PROTOCOL_VERSION,
   PROVIDER_STORE_VERSION,
@@ -40,7 +41,7 @@ export const capabilities: CapabilityDeclaration = Object.freeze({
   schemaID: SCHEMA_ID,
   schemaVersion: SCHEMA_VERSION,
   schemaHash: SCHEMA_HASH,
-  methods: [...PROVIDER_STORE_METHODS, ...PROVIDER_CONTROL_METHODS, ...OPERATION_METHODS, ...SESSION_METHODS],
+  methods: [...PROVIDER_STORE_METHODS, ...PROVIDER_CONTROL_METHODS, ...OPERATION_METHODS, ...SESSION_METHODS, ...LOGGING_METHODS],
   operations: OPERATIONS,
   artifactTransfer: true,
   localExecutor: true,
@@ -266,6 +267,7 @@ export interface OAuthStartResult {
   readonly url: string
   readonly method: "auto" | "code"
   readonly instructions: string
+  readonly userCode?: string
   readonly expiresAt: number
 }
 
@@ -432,7 +434,12 @@ export interface OperationExecuteResult {
   readonly selectedAccountID?: string
   readonly output: Record<string, unknown>
   readonly artifacts: readonly ArtifactDescriptor[]
-  readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number; readonly totalTokens?: number }
+  readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number; readonly totalTokens?: number; readonly cacheReadTokens?: number; readonly cacheWriteTokens?: number; readonly reasoningTokens?: number; readonly audioInputTokens?: number; readonly audioOutputTokens?: number; readonly imageInputTokens?: number; readonly imageOutputTokens?: number; readonly searchRequests?: number }
+  readonly metricCoverage?: LoggingMetricCoverage
+  readonly coveredDispatchIDs?: string[]
+  readonly lossReasons?: LoggingLossReason[]
+  readonly identityCoverage?: "complete" | "partial"
+  readonly normalizationProfile?: string
   /** Bounded passive API capacity; never raw headers or provider bodies. */
       readonly quota?: {
         readonly transport?: "documented"
@@ -512,7 +519,121 @@ export interface SessionSettingsEffectiveResult {
   readonly checkpoint: { readonly thresholds: readonly number[]; readonly reserved: number; readonly maxWriterFailures: number; readonly fork: boolean; readonly pushCaps: Record<string, number> }
 }
 
+export type HistoryQueryRequest =
+  | { sessionID: string; operation: "search"; query: string; scope?: "chat" | "global"; kind?: Array<"user_text" | "assistant_text" | "tool_input" | "tool_error" | "reasoning" | "tool_output">; toolName?: string; timeAfter?: number; timeBefore?: number; limit?: number; chatID?: string }
+  | { sessionID: string; operation: "around"; messageID: string; before?: number; after?: number; chatID?: string }
+  | { sessionID: string; operation: "get"; messageID: string; partID: string; offset?: number; length?: number; chatID?: string }
+  | { sessionID: string; operation: "media"; assetID: string; messageID?: string; partID?: string; chatID?: string }
+
+export type HistoryMutationEvent = {
+  messageID: string
+  partID: string
+  revision?: number
+  actorID?: string
+  role: string
+  partType: string
+  content: unknown
+  timeCreated?: number
+  timeUpdated?: number
+  eventSequence?: number
+}
+
+export type HistoryTombstoneEvent = {
+  messageID: string
+  partID: string
+  revision?: number
+  actorID?: string
+  tombstoneReason?: string
+}
+
+export type HistoryMutationRequest =
+  | { sessionID: string; operation: "upsert" | "replay"; events: HistoryMutationEvent[] }
+  | { sessionID: string; operation: "tombstone"; events: HistoryTombstoneEvent[] }
+
+export type HistoryAttachment = { asset_id: string; mime_type: string | null; filename: string | null; byte_size: number | null }
+export type HistoryQueryResult =
+  | { ok: boolean; operation: "search"; result: { ok: boolean; hits: Array<{ part_id: string; session_id: string; message_id: string; project_id: string; kind: string; tool_name: string | null; snippet: string; score: number; time_created: number }>; limit: number; more: boolean; error?: string } }
+  | { ok: boolean; operation: "around"; result: { ok: boolean; session_id: string; messages: Array<{ message_id: string; matched: boolean; time_created: number; parts: Array<{ part_id: string; type: string; role: "user" | "assistant"; tool_name: string | null; text: string }> }>; error?: string } }
+  | { ok: boolean; operation: "get"; result: { ok: boolean; part?: { part_id: string; message_id: string; session_id: string; type: string; role: "user" | "assistant"; tool_name: string | null; text: string; has_more: boolean; next_offset: number | null; attachments: HistoryAttachment[]; time_created: number }; error?: string } }
+  | { ok: boolean; operation: "media"; result: { ok: boolean; attachments: HistoryAttachment[]; error?: string } }
+
+export type HistoryMutationResult = { ok: true; operation: "upsert" | "tombstone" | "replay"; accepted: number; duplicate: number; enqueued: number }
+
+export type LoggingMetricCoverage = Record<string, {
+  state: "reported" | "estimated" | "unavailable" | "not_applicable"
+  coverage: "complete" | "partial" | "unknown"
+  source: string
+  reason?: string
+}>
+export type LoggingLossReason = "dropped" | "truncated" | "parse_degraded" | "write_failed" | "interrupted" | "admission_unavailable" | "queue_full" | "delivery_timeout"
+export interface LoggingAdmissionRequest {
+  bindingID: string
+  rootOperationID: string
+  operationID?: string
+}
+export interface LoggingAdmissionResult {
+  admissionID: string
+  policy: { advanced_enabled: boolean; request_body_enabled: boolean; response_body_enabled: boolean; binary_body_enabled: boolean; revision: number }
+  context: {
+    providerID: string; operationID: string | null; rootOperationID: string; instanceID: string
+    bindingID: string; bindingRevision: number; identityCoverage: "complete" | "partial"
+    persistence: { numeric: boolean; content: boolean; reason: "normal" | "incognito" | "temporary" | "auxiliary" }
+    transportMode: "direct" | "advanced_proxy"
+  }
+}
+export interface LoggingHeader {
+  name: string
+  values: string[]
+  state: "reported" | "redacted" | "omitted" | "truncated"
+}
+export interface LoggingHttp {
+  method?: string
+  endpoint?: { origin: string; path: string }
+  status?: number
+  requestHeaders?: LoggingHeader[]
+  responseHeaders?: LoggingHeader[]
+  coverage?: Record<string, string>
+}
+export interface LoggingEventRequest {
+  admissionID: string
+  dispatchID: string
+  source: "wire" | "sdk" | "acp" | "executor"
+  sequence: number
+  terminal?: boolean
+  outcome?: "completed" | "upstream_error" | "cancelled" | "disconnected" | "interrupted" | "unknown"
+  observationKind?: "delta" | "cumulative_snapshot" | "final_snapshot"
+  metrics?: Record<string, number>
+  metricCoverage?: LoggingMetricCoverage
+  normalizationProfile?: string | null
+  actualModel?: string
+  timing?: Record<string, number | string | null>
+  billable?: boolean | null
+  dispatchIndex?: number
+  retryOfDispatchID?: string
+  coveredDispatchIDs?: string[]
+  identityCoverage?: "complete" | "partial"
+  quota?: OperationExecuteResult["quota"]
+  http?: LoggingHttp
+  requestBody?: unknown
+  responseBody?: unknown
+  events?: unknown[]
+  lossReasons?: LoggingLossReason[]
+}
+export interface GoalCompletionRequest {
+  sessionID: string
+  journalID: string
+  goalID: string
+  goalRevision: number
+  evidenceRefs: string[]
+  verifiedAt: number
+}
+
 export interface MethodRequestMap {
+  "_openclank/session/v1/goal/completed": GoalCompletionRequest
+  "_openclank/logging/v1/admit": LoggingAdmissionRequest
+  "_openclank/logging/v1/events": LoggingEventRequest
+  "_openclank/history/v1/query": HistoryQueryRequest
+  "_openclank/history/v1/mutate": HistoryMutationRequest
   "_openclank/provider-store/v1/account/bind": AccountSelection.SelectionRequest
   "_openclank/provider-store/v1/account/commit": AccountCommitRequest
   "_openclank/provider-store/v1/account/attempt": AccountAttemptRequest
@@ -532,6 +653,11 @@ export interface MethodRequestMap {
 }
 
 export interface MethodResultMap {
+  "_openclank/session/v1/goal/completed": { accepted: true; replayed: boolean }
+  "_openclank/logging/v1/admit": LoggingAdmissionResult
+  "_openclank/logging/v1/events": { accepted: boolean; replayed: boolean; captureState?: string }
+  "_openclank/history/v1/query": HistoryQueryResult
+  "_openclank/history/v1/mutate": HistoryMutationResult
   "_openclank/provider-store/v1/account/bind": AccountSelection.Binding
   "_openclank/provider-store/v1/account/commit": AccountSelection.Binding
   "_openclank/provider-store/v1/account/attempt": AccountSelection.Binding

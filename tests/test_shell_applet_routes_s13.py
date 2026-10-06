@@ -204,6 +204,12 @@ def test_resolve_accepts_direct_and_legacy_aliases():
     assert _node_eval(
         "resolveAppletLocation('/files', '')"
     )["canonicalPath"] == "/files"
+    gallery = _node_eval("resolveAppletLocation('/gallery', '')")
+    assert gallery["target"] == "files"
+    assert gallery["canonicalPath"] == "/files"
+    wiki = _node_eval("resolveAppletLocation('/wiki', '')")
+    assert wiki["target"] == "editor"
+    assert wiki["canonicalPath"] == "/editor"
     resolved = _node_eval("resolveAppletLocation('/mind', '')")
     assert resolved["target"] == "editor"
     assert resolved["mode"] == "mind"
@@ -319,8 +325,10 @@ def test_app_py_registers_files_and_direct_applets():
     ).group(1)
     paths = set(re.findall(r'"(/[^"]*)"', block))
     assert "/files" in paths
-    for required in ("/editor", "/wiki", "/graph", "/treehouse", "/timeline", "/todo", "/calendar"):
+    for required in ("/editor", "/graph", "/treehouse", "/timeline", "/todo", "/calendar"):
         assert required in paths
+    assert 'async def serve_wiki_alias' in source
+    assert 'async def serve_gallery_alias' in source
     assert "/settings" in source
     assert "_COPAL_VIEW_TO_PATH" in source
 
@@ -452,3 +460,6 @@ def test_mcp_pin_records_plan_work_7_slice():
     """Cheap dependency slice of plan work 7: MCP stays under `<2`."""
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert re.search(r"^mcp<2\s*$", requirements, re.M)
+    # PostgreSQL is an advertised DATABASE_URL option. A native setup must
+    # install its dialect rather than failing only when create_engine() runs.
+    assert re.search(r"^psycopg2-binary\s*$", requirements, re.M)

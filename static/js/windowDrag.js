@@ -1,6 +1,6 @@
 // Shared window-drag helper. Replaces the duplicated mousedown / mousemove
 // / mouseup + snap-to-top fullscreen + left/right edge dock patterns that
-// were copy-pasted across calendar.js, tasks.js, gallery.js, emailLibrary.js,
+// were copy-pasted across calendar.js, tasks.js, emailLibrary.js,
 // documentLibrary.js, theme.js. Behavior stays identical to the old per-file
 // copies — each callsite provides its own enter/exit-fullscreen callbacks
 // since the CSS class + inline styles differ per modal.
@@ -37,7 +37,7 @@
 //                        Default true when onEnterFullscreen is supplied.
 
 import { makeEdgeDockController } from './modalSnap.js';
-import { makeWindowResizable } from './windowResize.js';
+import { makeWindowResizable, clampFloatingWindow, markAppletFrame } from './windowResize.js';
 
 const SNAP_PX = 6;        // cursor distance from top edge for fullscreen snap
 const UNSNAP_PX = 24;     // cursor distance from top before fullscreen exits
@@ -58,6 +58,7 @@ export function makeWindowDraggable(modal, options = {}) {
   const content = options.content;
   const header = options.header;
   if (!content || !header) return;
+  markAppletFrame(modal, content);
   const fsClass = options.fsClass || null;
   const onEnterFullscreen = options.onEnterFullscreen || null;
   const onExitFullscreen = options.onExitFullscreen || null;
@@ -84,7 +85,7 @@ export function makeWindowDraggable(modal, options = {}) {
       mobileSkip,
       minWidth: options.minWidth,
       minHeight: options.minHeight,
-      isLocked: () => (fsClass && modal && modal.classList.contains(fsClass))
+      isLocked: () => !!content.dataset._tileZone || (fsClass && modal && modal.classList.contains(fsClass))
         || (modal && _dockClasses.some((c) => modal.classList.contains(c))),
       storageKey: options.resizeStorageKey
         || (modal && modal.id ? 'winsize-' + modal.id
@@ -104,6 +105,7 @@ export function makeWindowDraggable(modal, options = {}) {
   let startX = 0, startY = 0;
   let startLeft = 0, startTop = 0;
   let snapHint = null;
+  let startedTiled = false;
   // Whether the pointer actually moved beyond a small threshold this drag.
   // Used to suppress the synthetic click the browser fires on mouseup —
   // header click handlers (e.g. "collapse expanded card / back to list")
@@ -137,6 +139,7 @@ export function makeWindowDraggable(modal, options = {}) {
     if (!onExitFullscreen) return;
     if (fsClass && modal && !modal.classList.contains(fsClass)) return;
     onExitFullscreen(cx, cy);
+    clampFloatingWindow(content, options);
     // After exit, re-anchor the drag offsets to the new windowed rect so
     // the drag continues smoothly from the cursor's position.
     const r = content.getBoundingClientRect();
@@ -148,6 +151,7 @@ export function makeWindowDraggable(modal, options = {}) {
 
   const _startDrag = (cx, cy) => {
     dragging = true;
+    startedTiled = !!content.dataset._tileZone;
     if (modal) modal.classList.add('modal-dragging');
     // Cancel any in-flight open animation so we don't pin a mid-animation
     // rect and then jump once the animation settles.
@@ -156,6 +160,9 @@ export function makeWindowDraggable(modal, options = {}) {
         .filter(a => a.playState !== 'finished')
         .forEach(a => a.cancel());
     } catch (_) {}
+    if (!_isFullscreen() && !modal?.classList.contains('modal-right-docked') && !modal?.classList.contains('modal-left-docked')) {
+      clampFloatingWindow(content, options);
+    }
     const rect = content.getBoundingClientRect();
     if (onDragStart) {
       try { onDragStart({ rect, cx, cy }); } catch (_) {}
@@ -174,6 +181,11 @@ export function makeWindowDraggable(modal, options = {}) {
 
   const _onMove = (cx, cy) => {
     if (!dragging) return;
+    if (startedTiled && !content.dataset._tileZone) {
+      const restored = content.getBoundingClientRect();
+      startX = cx; startY = cy; startLeft = restored.left; startTop = restored.top;
+      startedTiled = false;
+    }
     // Fullscreen state: unsnap on drag-down or drag toward either horizontal
     // edge. Update dock hover immediately after exit so a fast release
     // commits the dock instead of dropping the modal mid-air.
@@ -233,6 +245,7 @@ export function makeWindowDraggable(modal, options = {}) {
     }
     content.style.left = (startLeft + cx - startX) + 'px';
     content.style.top = (startTop + cy - startY) + 'px';
+    clampFloatingWindow(content, options);
     // Corner guard: in the top fullscreen band the side docks stay OFF, so a
     // top corner only ever snaps to fullscreen — never the corner hybrid.
     const inTopBand = cy <= SNAP_PX;
@@ -251,6 +264,12 @@ export function makeWindowDraggable(modal, options = {}) {
     dragging = false;
     if (modal) modal.classList.remove('modal-dragging');
     _showSnapHint(false);
+    // Pointer tiling commits before the compatibility mouseup. Let that owner
+    // keep its geometry instead of committing a second edge dock afterward.
+    if (content.dataset._tileZone) {
+      rightDock?.release(); leftDock?.release();
+      return;
+    }
     // Top edge wins over side edges — fullscreen is the more common gesture.
     if (enableFullscreen && typeof cy === 'number' && cy <= SNAP_PX) {
       if (rightDock) rightDock.release();
@@ -272,6 +291,7 @@ export function makeWindowDraggable(modal, options = {}) {
     }
     if (rightDock) rightDock.release();
     if (leftDock) leftDock.release();
+    if (!_isFullscreen()) clampFloatingWindow(content, options);
     if (onDragEnd) {
       const r = content.getBoundingClientRect();
       try { onDragEnd({ rect: r }); } catch (_) {}

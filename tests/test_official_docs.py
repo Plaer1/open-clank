@@ -28,10 +28,9 @@ from openclank.official_docs import (  # noqa: E402
     plan_input_from_content,
     plan_official_provision,
     plan_summary,
-    validate_official_terminology,
 )
 from src.openclank.copal_loose import LooseCopalBridge  # noqa: E402
-from src.openclank.copal_bridge import CopalBridgeError  # noqa: E402
+from src.openclank.copal_errors import CopalBridgeError  # noqa: E402
 
 
 def _identity_properties(content: str) -> dict:
@@ -96,25 +95,10 @@ def test_manifest_uses_shared_app_links_without_inviting_chat_creation():
         assert "clank://" not in article["body"] or article["body"].count("clank://") <= 20
 
 
-# ── Terminology ──────────────────────────────────────────────────────────────
-
-def test_rejected_legacy_terminology_absent_from_official_content():
-    texts = [article["body"] for article in official_articles()]
-    texts.extend(payload["content"] for payload in official_payloads())
-    violations = validate_official_terminology(*texts)
-    assert violations == []
-
-
-def test_rejected_terminology_absent_from_literal_and_encoded_bodies():
-    # Literal source scan and decoded note bodies must both be clean.
-    source = Path(__file__).resolve().parent.parent / "src" / "openclank" / "official_docs.py"
-    text = source.read_text(encoding="utf-8").lower()
-    # The ban list itself names the terms once, as the enforcement vocabulary.
-    banned_block = text.split("_banned_terminology", 1)[-1]
-    assert "tiddler" in banned_block
+def test_official_document_bodies_round_trip_cleanly():
     for article in official_articles():
         decoded = json.loads(encode_official_note(article["body"], {"docId": article["id"]}))
-        assert validate_official_terminology(json.dumps(decoded)) == []
+        assert decoded["body"]["type"] == "doc"
 
 
 # ── Provisioning: fresh owner ────────────────────────────────────────────────

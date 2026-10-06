@@ -1,5 +1,6 @@
 import asyncio
 import codecs
+import hashlib
 import os
 import re
 import sys
@@ -28,6 +29,7 @@ DEFAULT_PYTHON_TIMEOUT = 60 * 60
 PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
 TMUX_CAPTURE_LINES = 2000
+TOOL_RESULT_PREVIEW_BYTES = 50 * 1024
 
 
 def _declared_root_receipt(workspace: str) -> dict:
@@ -233,11 +235,12 @@ async def _run_subprocess_streaming(
     proc: asyncio.subprocess.Process,
     *,
     timeout: float,
+    max_output_bytes: int = MAX_OUTPUT_CHARS * 2,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
-) -> Tuple[str, str, Optional[int], bool]:
+) -> Tuple[str, str, Optional[int], bool, Dict, Dict]:
     started = time.time()
-    stdout_full = _BoundedCapture(MAX_OUTPUT_CHARS * 2)
-    stderr_full = _BoundedCapture(MAX_OUTPUT_CHARS * 2)
+    stdout_full = _BoundedCapture(max_output_bytes)
+    stderr_full = _BoundedCapture(max_output_bytes)
     tail = collections.deque(maxlen=PROGRESS_TAIL_LINES)
 
     async def _reader(stream, full_buf, label: str):
@@ -329,39 +332,74 @@ async def _run_subprocess_streaming(
         stderr_full.text(),
         proc.returncode,
         timed_out,
+        stdout_full.metadata(),
+        stderr_full.metadata(),
     )
 
 
 class _BoundedCapture:
-    def __init__(self, max_chars: int):
-        self._max_chars = max(1024, max_chars)
+    def __init__(self, max_bytes: int):
+        self._max_bytes = max(1024, max_bytes)
         self._head = ""
         self._tail = ""
-        self._seen_chars = 0
+        self._seen_bytes = 0
+        self._seen_lines = 0
+        self._ends_newline = True
+        self._digest = hashlib.sha256()
+
+    @staticmethod
+    def _prefix(value: str, budget: int) -> str:
+        return value.encode("utf-8", errors="replace")[:budget].decode("utf-8", errors="ignore")
+
+    @staticmethod
+    def _suffix(value: str, budget: int) -> str:
+        return value.encode("utf-8", errors="replace")[-budget:].decode("utf-8", errors="ignore")
 
     def append(self, line: str) -> None:
         self.append_chunk(line + "\n")
 
     def append_chunk(self, chunk: str) -> None:
-        self._seen_chars += len(chunk)
-        half = self._max_chars // 2
-        head_room = max(0, half - len(self._head))
-        self._head += chunk[:head_room]
-        self._tail = (self._tail + chunk[head_room:])[-half:]
+        encoded = chunk.encode("utf-8", errors="replace")
+        self._seen_bytes += len(encoded)
+        self._seen_lines += chunk.count("\n")
+        self._ends_newline = chunk.endswith("\n")
+        self._digest.update(encoded)
+        half = self._max_bytes // 2
+        head_room = max(0, half - len(self._head.encode("utf-8", errors="replace")))
+        head_chunk = self._prefix(chunk, head_room)
+        self._head += head_chunk
+        remainder = chunk[len(head_chunk):]
+        self._tail = self._suffix(self._tail + remainder, half)
 
     def text(self) -> str:
-        if self._seen_chars <= self._max_chars:
+        if self._seen_bytes <= self._max_bytes:
             return (self._head + self._tail).rstrip("\n")
-        omitted = self._seen_chars - len(self._head) - len(self._tail)
+        marker = "\n...[bytes omitted; see output_capture digest]...\n"
+        available = max(0, self._max_bytes - len(marker.encode("utf-8")))
+        head = self._prefix(self._head, available // 2).rstrip()
+        tail_budget = max(0, available - len(head.encode("utf-8", errors="replace")))
+        tail = self._suffix(self._tail, tail_budget).lstrip()
         return (
-            f"{self._head.rstrip()}\n"
-            f"...[{omitted} chars omitted]...\n"
-            f"{self._tail.lstrip()}"
+            f"{head}\n"
+            "...[bytes omitted; see output_capture digest]...\n"
+            f"{tail}"
         ).rstrip()
 
+    def metadata(self, *, source_complete: bool = True) -> Dict:
+        """Describe the complete observed stream independently of inline retention."""
+        return {
+            "algorithm": "sha256",
+            "value": self._digest.hexdigest(),
+            "source_bytes": self._seen_bytes,
+            "source_lines": self._seen_lines + int(self._seen_bytes > 0 and not self._ends_newline),
+            "inline_max_bytes": self._max_bytes,
+            "inline_truncated": self._seen_bytes > self._max_bytes,
+            "source_complete": source_complete,
+        }
 
-def _bounded_text(value: str, max_chars: int = MAX_OUTPUT_CHARS) -> str:
-    capture = _BoundedCapture(max_chars)
+
+def _bounded_text(value: str, max_bytes: int = MAX_OUTPUT_CHARS) -> str:
+    capture = _BoundedCapture(max_bytes)
     capture.append_chunk(value)
     return capture.text()
 
@@ -423,6 +461,9 @@ class BashTool:
                 approval_binding=approval_binding,
                 extra_env=_sudo_askpass_env(sudo_secret) if sudo_secret else None,
                 history_context=bg_jobs.history_context_mapping(ctx.get("history_context")),
+                run_id=str(ctx.get("run_id") or ""),
+                task_id=str(ctx.get("task_id") or ""),
+                tool_id="bash",
             )
         except ShellApprovalError as exc:
             return {"error": f"bash: {exc}", "exit_code": 126}
@@ -438,7 +479,7 @@ class BashTool:
             foreground_wait_s = 30.0
         deadline = time.monotonic() + foreground_wait_s
         cursor = 0
-        capture = _BoundedCapture(MAX_OUTPUT_CHARS)
+        capture = _BoundedCapture(TOOL_RESULT_PREVIEW_BYTES)
         current = rec
         while True:
             current = bg_jobs.get_scoped(
@@ -479,9 +520,9 @@ class BashTool:
                         )
                     except Exception:
                         pass
-            if current.get("status") != "running" and frame["eof"]:
+            if not bg_jobs.is_active(current) and frame["eof"]:
                 break
-            if current.get("status") == "running" and time.monotonic() >= deadline:
+            if bg_jobs.is_active(current) and time.monotonic() >= deadline:
                 partial = capture.text()
                 return {
                     "output": (
@@ -498,6 +539,10 @@ class BashTool:
                     "containment": containment,
                     "network": network_mode,
                     "destructive_actions": actions,
+                    "output_capture": {
+                        **capture.metadata(source_complete=False),
+                        "artifact": {"kind": "durable_shell_session", "job_id": rec["id"]},
+                    },
                     "coverage": {
                         "kind": "DeclaredRootsBaseline",
                         "before": baseline_before,
@@ -518,6 +563,10 @@ class BashTool:
                 "containment": containment,
                 "network": network_mode,
                 "job_id": rec["id"],
+                "output_capture": {
+                    **capture.metadata(),
+                    "artifact": {"kind": "durable_shell_session", "job_id": rec["id"]},
+                },
                 "coverage": {
                     "kind": "DeclaredRootsBaseline",
                     "before": baseline_before,
@@ -534,6 +583,10 @@ class BashTool:
             "containment": containment,
             "network": network_mode,
             "destructive_actions": actions,
+            "output_capture": {
+                **capture.metadata(),
+                "artifact": {"kind": "durable_shell_session", "job_id": rec["id"]},
+            },
             "coverage": {
                 "kind": "DeclaredRootsBaseline",
                 "before": baseline_before,
@@ -579,9 +632,10 @@ class PythonTool:
             cwd=cwd,
             start_new_session=os.name != "nt",
         )
-        stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
+        stdout, stderr, rc, timed_out, stdout_capture, stderr_capture = await _run_subprocess_streaming(
             proc,
             timeout=DEFAULT_PYTHON_TIMEOUT,
+            max_output_bytes=TOOL_RESULT_PREVIEW_BYTES,
             progress_cb=progress_cb,
         )
         if timed_out:
@@ -592,6 +646,7 @@ class PythonTool:
                 "stderr": _bounded_text(stderr),
                 "containment": containment,
                 "network": network_mode,
+                "output_capture": {"stdout": stdout_capture, "stderr": stderr_capture},
                 "coverage": {
                     "kind": "DeclaredRootsBaseline",
                     "before": baseline_before,
@@ -604,12 +659,13 @@ class PythonTool:
         err = stderr.rstrip()
         if err:
             output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
-        output = _bounded_text(output)
+        output = _bounded_text(output, TOOL_RESULT_PREVIEW_BYTES)
         return {
             "output": output or "(no output)",
             "exit_code": rc or 0,
             "containment": containment,
             "network": network_mode,
+            "output_capture": {"stdout": stdout_capture, "stderr": stderr_capture},
             "coverage": {
                 "kind": "DeclaredRootsBaseline",
                 "before": baseline_before,

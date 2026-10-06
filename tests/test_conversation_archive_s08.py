@@ -24,12 +24,14 @@ import pytest
 
 import core.database as cdb
 import core.session_manager as session_manager_module
+import src.openclank.conversation_archive as conversation_archive_module
 from core.models import ChatMessage
 from src.context_compactor import maybe_compact
 from src.memory_gate import capture_allowed
 from src.openclank.conversation_archive import (
     AROUND_AFTER_MAX,
     GET_LENGTH_MAX_UTF16,
+    GET_TEXT_PAGE_BYTES,
     SEARCH_LIMIT_MAX,
     ConversationArchive,
     SourcePart,
@@ -214,6 +216,151 @@ def test_archive_captures_tool_parts_not_just_text_pairs(archive):
     )
     assert body["ok"] is True
     assert body["part"]["assets"][0]["asset_id"] == "asset-1"
+
+
+def test_search_preview_omits_inline_media_and_bounds_large_fields(archive):
+    archive.append_parts([
+        {"owner": "alice", "chat_id": "chat-preview", "actor_id": "main", "message_id": "m", "part_id": "media", "role": "assistant", "part_type": "text", "content": "before data:image/png;base64,YWJj after", "event_sequence": 1},
+        {"owner": "alice", "chat_id": "chat-preview", "actor_id": "main", "message_id": "m", "part_id": "unpadded", "role": "assistant", "part_type": "text", "content": "DATA:image/png;base64,YWI", "event_sequence": 2},
+        {"owner": "alice", "chat_id": "chat-preview", "actor_id": "main", "message_id": "m", "part_id": "large", "role": "assistant", "part_type": "text", "content": "x" * 5000, "event_sequence": 3},
+        {"owner": "alice", "chat_id": "chat-preview", "actor_id": "main", "message_id": "m", "part_id": "ordinary", "role": "assistant", "part_type": "text", "content": "metadata: base64, is ordinary prose", "event_sequence": 4},
+    ])
+    hits = archive.search(owner="alice", chat_id="chat-preview", query="", limit=4)["hits"]
+    by_part = {hit["part_id"]: hit for hit in hits}
+    assert "base64" not in by_part["media"]["snippet"]
+    assert by_part["media"]["snippet"] == "before [media image/png] after"
+    assert by_part["media"]["index_preview_omitted"] is True
+    assert by_part["unpadded"]["snippet"] == "[media image/png]"
+    assert by_part["large"]["index_preview_omitted"] is True
+    assert by_part["ordinary"]["snippet"] == "metadata: base64, is ordinary prose"
+    assert by_part["ordinary"]["index_preview_omitted"] is False
+    assert archive.get_part(owner="alice", chat_id="chat-preview", message_id="m", part_id="media")["part"]["text"] == "before data:image/png;base64,YWJj after"
+
+
+def test_search_projection_is_sql_bounded_and_preserves_non_data_url_prose(archive, monkeypatch):
+    """Search must never fetch canonical megabytes merely to make a hit card."""
+    wrapped = "data:image/png;base64,YWJj\nZGVm"
+    invalid = "data:image/png;base64,not@base64"
+    bad_tail_bits = "data:image/png;base64,YR==; data:image/png;base64,YWJ="
+    ordinary = "metadata: base64, stays; form-data: stays; xdata:image/png;base64,YWJj"
+    archive.append_parts([
+        {
+            "owner": "alice", "chat_id": "projection", "actor_id": "main",
+            "message_id": "m", "part_id": "huge", "role": "assistant",
+            "part_type": "text",
+            "content": "start data:image/png;base64," + ("QUJD" * 1_500_000) + " end",
+            "event_sequence": 1,
+        },
+        {
+            "owner": "alice", "chat_id": "projection", "actor_id": "main",
+            "message_id": "m", "part_id": "preserve", "role": "assistant",
+            "part_type": "text", "content": f"{wrapped}; {invalid}; {bad_tail_bits}; {ordinary}",
+            "event_sequence": 2,
+        },
+        {
+            "owner": "alice", "chat_id": "projection", "actor_id": "main",
+            "message_id": "m", "part_id": "tool", "role": "assistant",
+            "part_type": "tool_result", "content": {"tool_name": "bash", "output": "needle"},
+            "event_sequence": 3,
+        },
+    ])
+
+    statements = []
+    original_connect = archive._connect
+
+    def traced_connect():
+        conn = original_connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(archive, "_connect", traced_connect)
+    preview_sizes = []
+    original_preview = conversation_archive_module._index_preview
+
+    def bounded_preview(value):
+        text = value if isinstance(value, str) else json.dumps(value)
+        preview_sizes.append(len(text.encode("utf-8")))
+        assert preview_sizes[-1] <= 4000
+        return original_preview(value)
+
+    monkeypatch.setattr(conversation_archive_module, "_index_preview", bounded_preview)
+    hits = archive.search(owner="alice", chat_id="projection", query="", limit=10)
+    by_part = {hit["part_id"]: hit for hit in hits["hits"]}
+    assert by_part["huge"]["snippet"] == "[large field omitted; use history get part_id]"
+    assert by_part["huge"]["index_preview_omitted"] is True
+    assert wrapped in by_part["preserve"]["snippet"]
+    assert invalid in by_part["preserve"]["snippet"]
+    assert bad_tail_bits in by_part["preserve"]["snippet"]
+    assert ordinary in by_part["preserve"]["snippet"]
+    assert all(len(hit.get("snippet", "").encode("utf-8")) <= 240 for hit in hits["hits"])
+    assert preview_sizes
+
+    search_sql = next(statement for statement in statements if "FROM conversation_parts" in statement)
+    assert "CASE WHEN length(CAST(source_text AS BLOB)) > 4000" in search_sql
+    assert "json_valid(content)" in search_sql
+    assert "SELECT *" not in search_sql.upper()
+    assert " content AS " not in search_sql.lower()
+    assert "openclank_index_preview" not in search_sql
+    assert "openclank_tool_name" not in search_sql
+
+    tool_hits = archive.search(
+        owner="alice", chat_id="projection", query="", tool_name="bash", limit=10
+    )
+    assert [hit["part_id"] for hit in tool_hits["hits"]] == ["tool"]
+    tool_sql = [s for s in statements if "json_type(content, '$.tool_name')" in s][-1]
+    assert "json_extract(content, '$.tool_name')" in tool_sql
+    assert "='bash'" in tool_sql
+
+
+def test_get_part_honors_utf16_length_and_reconstructs_unicode_pages(archive):
+    text = ("漢😀é" * 3_000) + "fin"
+    archive.append_parts([{
+        "owner": "alice", "chat_id": "unicode-pages", "actor_id": "main",
+        "message_id": "m", "part_id": "body", "role": "assistant", "part_type": "text",
+        "content": text, "event_sequence": 1,
+    }])
+    pages = []
+    offset = 0
+    while True:
+        page = archive.get_part(
+            owner="alice", chat_id="unicode-pages", message_id="m", part_id="body",
+            length=7, offset=offset,
+        )
+        assert page["ok"] is True
+        visible = page["part"]["text"]
+        assert len(visible.encode("utf-16-le")) // 2 <= 7
+        assert len(visible.encode("utf-8")) <= GET_TEXT_PAGE_BYTES
+        pages.append(visible)
+        if not page["has_more"]:
+            break
+        assert page["next_offset"] > offset
+        offset = page["next_offset"]
+    assert "".join(pages) == text
+
+    # Clamp hostile caller lengths into the documented 1..8000 interval.
+    one = archive.get_part(
+        owner="alice", chat_id="unicode-pages", message_id="m", part_id="body", length=0
+    )
+    assert len(one["part"]["text"].encode("utf-16-le")) // 2 <= 1
+    maximum = archive.get_part(
+        owner="alice", chat_id="unicode-pages", message_id="m", part_id="body", length=999_999
+    )
+    assert len(maximum["part"]["text"].encode("utf-16-le")) // 2 <= GET_LENGTH_MAX_UTF16
+
+    # Match the target pager's explicit surrogate-boundary exception: a
+    # one-unit page that starts on an astral character expands to that whole
+    # two-unit character so it can advance without returning broken/empty text.
+    archive.append_parts([{
+        "owner": "alice", "chat_id": "unicode-pages", "actor_id": "main",
+        "message_id": "m2", "part_id": "astral", "role": "assistant",
+        "part_type": "text", "content": "😀x", "event_sequence": 2,
+    }])
+    astral = archive.get_part(
+        owner="alice", chat_id="unicode-pages", message_id="m2", part_id="astral", length=1
+    )
+    assert astral["part"]["text"] == "😀"
+    assert astral["next_offset"] == 2
+    assert astral["has_more"] is True
 
 
 def test_manager_add_message_archives_full_parts(manager_db):

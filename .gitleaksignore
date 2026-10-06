@@ -1,22 +1,95 @@
-# Synthetic redaction fixtures.
-2b294974a7c3ab984222e2347eeee118376a0ecc:packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:83
-2b294974a7c3ab984222e2347eeee118376a0ecc:packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:116
-
-# Public Stripe browser key and keyboard-shortcut literals.
-6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/console/app/package.json:generic-api-key:9
+# Immutable historical findings: synthetic fixtures, public client/shortcut literals,
+# and reviewed UI translation labels. No directory-mode line-number bypasses.
+e479f69d1afee6a6949cd8c84e6b1f2e165827c8:static/i18n/hr.json:generic-api-key:443
+e479f69d1afee6a6949cd8c84e6b1f2e165827c8:static/i18n/hr.json:generic-api-key:448
+4f90ef5e96f94ce17b0c788145c5f3fe17dabeb6:packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:116
+4f90ef5e96f94ce17b0c788145c5f3fe17dabeb6:packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:83
+2a4100205f4abd21f5cfa867d9e75a3766d4b969:static/i18n/bs.json:generic-api-key:4042
+2a4100205f4abd21f5cfa867d9e75a3766d4b969:static/i18n/bs.json:generic-api-key:443
+2a4100205f4abd21f5cfa867d9e75a3766d4b969:static/i18n/bs.json:generic-api-key:448
 6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1082
 6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1089
+6c8b2319a933c83c3aac14a0b67b0d98babe4df7:packages/mimo-code/packages/console/app/package.json:generic-api-key:9
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/ar.json:generic-api-key:359
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/en.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/en.json:generic-api-key:359
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/es.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/es.json:generic-api-key:359
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/fa.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/fa.json:generic-api-key:359
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/id.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/id.json:generic-api-key:359
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/id.json:generic-api-key:3654
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/id.json:generic-api-key:5814
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/id.json:generic-api-key:6359
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/ja.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/ko.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/pa-Guru.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/pt.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/pt.json:generic-api-key:359
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/ru.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/ru.json:generic-api-key:359
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/sw.json:generic-api-key:354
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/sw.json:generic-api-key:359
+d0bff43811b78418203a5fd62c5b3c58e5f44d07:static/i18n/ur.json:generic-api-key:354
+086632d80513358b5c6f172caa6699035766d657:static/i18n/bg.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/bg.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/cs.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/cs.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/cs.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/da.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/da.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/de.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/de.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/el.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/el.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/el.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/es-419.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/es-419.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/es-419.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/fi.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/fi.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/fi.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/fr.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/fr.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/fr.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/hu.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/hu.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/hu.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/it.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/it.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/it.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/ms.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/ms.json:generic-api-key:4316
+086632d80513358b5c6f172caa6699035766d657:static/i18n/ms.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/ms.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/nl.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/nl.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/no.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/no.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/pl.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/pl.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/pl.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/pl.json:generic-api-key:6983
+086632d80513358b5c6f172caa6699035766d657:static/i18n/pl.json:generic-api-key:6984
+086632d80513358b5c6f172caa6699035766d657:static/i18n/pt-BR.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/pt-BR.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/pt-BR.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/ro.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/ro.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/ro.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/sv.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/sv.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/th.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/th.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/tr.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/tr.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/uk.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/uk.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/vi.json:generic-api-key:4042
+086632d80513358b5c6f172caa6699035766d657:static/i18n/vi.json:generic-api-key:443
+086632d80513358b5c6f172caa6699035766d657:static/i18n/vi.json:generic-api-key:448
+086632d80513358b5c6f172caa6699035766d657:static/i18n/zh-Hant.json:generic-api-key:4042
 
-# The same exact fixtures under directory scans, whose fingerprints do not
-# carry a Git commit prefix.
-packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:83
-packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:116
-# The same synthetic assignments after the current working-tree test expansion.
-packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:118
-packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts:generic-api-key:151
-packages/mimo-code/packages/console/app/package.json:generic-api-key:9
-packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1082
-packages/mimo-code/packages/app/src/pages/layout.tsx:generic-api-key:1089
-
-# Header-only privacy classifier fixture; it contains no private-key body.
-mcp_servers/frankenmemory/crates/fm-core/src/privacy.rs:private-key:266
+# Immutable header-only no-store classifier fixture; no private key body.
+086632d80513358b5c6f172caa6699035766d657:mcp_servers/frankenmemory/crates/fm-core/src/privacy.rs:private-key:266

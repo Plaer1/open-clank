@@ -17,6 +17,7 @@ import {
 import { AppRuntime } from "@/effect/app-runtime"
 import { Provider } from "@/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
+import { flushCaptures, passiveQuota, sdkUsageEvidence, captureScopeEvidence, markCaptureRetry } from "@/provider/logging-transport"
 import { ManagedProvider } from "./managed-provider"
 import { OpenClankManagedProtocol } from "./openclank-protocol"
 
@@ -30,65 +31,16 @@ type ExecutionOutput = {
   output: Record<string, unknown>
   artifacts: Artifact[]
   usage?: ExecuteResult["usage"]
+  metricCoverage?: ExecuteResult["metricCoverage"]
+  coveredDispatchIDs?: string[]
+  lossReasons?: ExecuteResult["lossReasons"]
+  identityCoverage?: ExecuteResult["identityCoverage"]
+  normalizationProfile?: string
   quota?: ExecuteResult["quota"]
   modelFingerprint?: string
   dimension?: number
 }
 
-function passiveQuota(response: unknown, providerID: string): ExecuteResult["quota"] | undefined {
-  if (providerID !== "openai" && providerID !== "anthropic") return undefined
-  const headers = (response as { response?: { headers?: Headers | Record<string, string> } })?.response?.headers
-  if (!headers) return undefined
-  const get = (name: string) => (headers instanceof Headers ? headers.get(name) : headers[name] ?? headers[name.toLowerCase()]) ?? undefined
-  const integer = (name: string) => {
-    const raw = get(name)
-    if (raw === undefined || !/^\d+$/.test(raw)) return undefined
-    const value = Number(raw)
-    return Number.isSafeInteger(value) ? value : undefined
-  }
-  const resetAt = (name: string, format: "duration" | "rfc3339") => {
-    const raw = get(name)
-    if (!raw || raw.length > 64) return undefined
-    if (format === "rfc3339") {
-      const parsed = Date.parse(raw)
-      return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined
-    }
-    let total = 0
-    const matches = [...raw.matchAll(/(\d+)(ms|s|m|h)/g)]
-    if (!matches.length || matches.map(match => match[0]).join("") !== raw) return undefined
-    for (const match of matches) {
-      const amount = Number(match[1])
-      const multiplier = match[2] === "ms" ? 1 : match[2] === "s" ? 1000 : match[2] === "m" ? 60_000 : 3_600_000
-      total += amount * multiplier
-      if (!Number.isSafeInteger(total) || total > 86_400_000 * 30) return undefined
-    }
-    return new Date(Date.now() + total).toISOString()
-  }
-  const metric = (kind: "requests" | "tokens" | "inputTokens" | "outputTokens") => {
-    const anthroName = kind === "inputTokens" ? "input-tokens" : kind === "outputTokens" ? "output-tokens" : kind
-    const prefix = providerID === "anthropic" ? `anthropic-ratelimit-${anthroName}` : `x-ratelimit-${kind === "inputTokens" || kind === "outputTokens" ? "limit-tokens" : kind}`
-    const resetName = providerID === "anthropic" ? `${prefix}-reset` : `x-ratelimit-reset-${kind === "inputTokens" || kind === "outputTokens" ? "tokens" : kind}`
-    const limitName = providerID === "anthropic" ? `${prefix}-limit` : `x-ratelimit-limit-${kind === "inputTokens" || kind === "outputTokens" ? "tokens" : kind}`
-    const remainingName = providerID === "anthropic" ? `${prefix}-remaining` : `x-ratelimit-remaining-${kind === "inputTokens" || kind === "outputTokens" ? "tokens" : kind}`
-    const reset = resetAt(resetName, providerID === "anthropic" ? "rfc3339" : "duration")
-    return {
-    ...(integer(limitName) === undefined ? {} : { limit: integer(limitName) }),
-    ...(integer(remainingName) === undefined ? {} : { remaining: integer(remainingName) }),
-    ...(reset === undefined ? {} : { resetAt: reset }),
-    }
-  }
-  const requests = metric("requests")
-  const tokens = metric("tokens")
-  const inputTokens = providerID === "anthropic" ? metric("inputTokens") : {}
-  const outputTokens = providerID === "anthropic" ? metric("outputTokens") : {}
-  const hasMetric = (value: { limit?: number; remaining?: number; resetAt?: string }) => value.limit !== undefined || value.remaining !== undefined || value.resetAt !== undefined
-  const result: { transport: "documented"; adapterRevision: string; requests?: { limit?: number; remaining?: number; resetAt?: string }; tokens?: { limit?: number; remaining?: number; resetAt?: string }; inputTokens?: { limit?: number; remaining?: number; resetAt?: string }; outputTokens?: { limit?: number; remaining?: number; resetAt?: string } } = { transport: "documented", adapterRevision: `${providerID}-capacity-v1` }
-  if (hasMetric(requests)) result.requests = requests
-  if (hasMetric(tokens)) result.tokens = tokens
-  if (hasMetric(inputTokens)) result.inputTokens = inputTokens
-  if (hasMetric(outputTokens)) result.outputTokens = outputTokens
-  return result.requests || result.tokens || result.inputTokens || result.outputTokens ? result : undefined
-}
 
 /**
  * Provider resolution is injectable so the managed router can be exercised
@@ -635,6 +587,7 @@ async function executeRemote(
   runtime: Runtime,
   callerAbortSignal?: AbortSignal,
 ): Promise<ExecutionOutput> {
+  const dispatchOffset = captureScopeEvidence(scope).coveredDispatchIDs.length
   const model = await runtime.modelForRoute(route)
   const inputArtifacts = new Map<string, { data: Uint8Array; mediaType: string }>()
   for (const descriptor of request.artifactInputs) {
@@ -673,11 +626,7 @@ async function executeRemote(
       return {
         output: webSearchOutput(response, route.providerID, answer),
         artifacts: [],
-        usage: response.usage ? {
-          ...(Number.isFinite((response.usage as any).inputTokens) ? { inputTokens: Number((response.usage as any).inputTokens) } : {}),
-          ...(Number.isFinite((response.usage as any).outputTokens) ? { outputTokens: Number((response.usage as any).outputTokens) } : {}),
-          ...(Number.isFinite((response.usage as any).totalTokens) ? { totalTokens: Number((response.usage as any).totalTokens) } : {}),
-        } : undefined,
+        ...sdkUsageEvidence(response.usage, scope, "managed-sdk-inclusive-v1", dispatchOffset),
       }
     } catch (error) {
       if (callerAbortSignal?.aborted) {
@@ -728,11 +677,7 @@ async function executeRemote(
     return {
       output: { text: response.text },
       artifacts: [],
-      usage: {
-        ...(Number.isFinite(usage?.inputTokens) ? { inputTokens: Number(usage.inputTokens) } : {}),
-        ...(Number.isFinite(usage?.outputTokens) ? { outputTokens: Number(usage.outputTokens) } : {}),
-        ...(Number.isFinite(usage?.totalTokens) ? { totalTokens: Number(usage.totalTokens) } : {}),
-      },
+      ...sdkUsageEvidence(usage, scope, "managed-sdk-inclusive-v1", dispatchOffset),
       ...(quota ? { quota } : {}),
     }
   }
@@ -770,11 +715,7 @@ async function executeRemote(
     return {
       output: {},
       artifacts,
-      usage: {
-        ...(Number.isFinite(usage?.inputTokens) ? { inputTokens: Number(usage.inputTokens) } : {}),
-        ...(Number.isFinite(usage?.outputTokens) ? { outputTokens: Number(usage.outputTokens) } : {}),
-        ...(Number.isFinite(usage?.totalTokens) ? { totalTokens: Number(usage.totalTokens) } : {}),
-      },
+      ...sdkUsageEvidence(usage, scope, "sdk-category-unknown-v1", dispatchOffset),
       ...(quota ? { quota } : {}),
     }
   }
@@ -798,6 +739,7 @@ async function executeRemote(
       output: { embeddings: response.embeddings },
       artifacts: [],
       dimension,
+      ...sdkUsageEvidence(response.usage, scope, "sdk-embedding-input-v1", dispatchOffset),
       modelFingerprint: `${route.connectionID}:${route.modelID}:${dimension}`,
     }
   }
@@ -816,6 +758,7 @@ async function executeRemote(
     return {
       output: {},
       artifacts: [await writeArtifact(connection, bytes(response.audio.uint8Array), response.audio.mediaType)],
+      ...sdkUsageEvidence((response as unknown as {usage?:unknown}).usage, scope, "sdk-category-unknown-v1", dispatchOffset),
     }
   }
 
@@ -828,7 +771,7 @@ async function executeRemote(
       audio: audio.data,
       maxRetries: 0,
     })
-    return { output: { text: response.text }, artifacts: [] }
+    return { output: { text: response.text }, artifacts: [], ...sdkUsageEvidence((response as unknown as {usage?:unknown}).usage, scope, "sdk-category-unknown-v1", dispatchOffset) }
   }
 
   throw new ManagedOperationError("unsupported_operation", "managed operation adapter is unavailable", "entitlement")
@@ -948,6 +891,7 @@ export class Router {
     let lastRoute = request.routes[0]
     let committed = false
     let lastBinding: ManagedProvider.BoundOperation["binding"] | undefined
+    const captureScopes: object[] = []
 
     for (const route of request.routes) {
       lastRoute = route
@@ -955,7 +899,7 @@ export class Router {
       let bound: ManagedProvider.BoundOperation
       try {
         bound = await ManagedProvider.beginBoundOperation(
-          { ...route, rootOperationID: request.rootOperationID },
+          { ...route, rootOperationID: request.rootOperationID, operationID: journal.operationID },
           modelIdentity,
         )
       } catch (error) {
@@ -963,6 +907,7 @@ export class Router {
         continue
       }
       lastBinding = bound.binding
+      captureScopes.push(bound.scope)
       const attemptedAccounts = new Set<string>()
       let transientRetries = 0
 
@@ -1058,6 +1003,7 @@ export class Router {
             bound = { ...bound, binding: next }
             lastBinding = next
             transientRetries += 1
+            markCaptureRetry(bound.scope)
             await new Promise((resolve) =>
               setTimeout(resolve, 100 * 2 ** (transientRetries - 1) + Math.floor(Math.random() * 50)),
             )
@@ -1097,10 +1043,13 @@ export class Router {
             }
             lastBinding = next
             if ((next.accountID ?? "keyless") !== accountKey && !attemptedAccounts.has(next.accountID ?? "keyless")) {
+              const previousScope = bound.scope
               bound = await ManagedProvider.leaseBinding(
-                { ...route, rootOperationID: request.rootOperationID },
+                { ...route, rootOperationID: request.rootOperationID, operationID: journal.operationID },
                 next,
               )
+              markCaptureRetry(bound.scope, previousScope)
+              captureScopes.push(bound.scope)
               transientRetries = 0
               continue
             }
@@ -1150,6 +1099,7 @@ export class Router {
             },
           )
         }
+        await flushCaptures()
         const result: ExecuteResult = {
           operationID: journal.operationID,
           rootOperationID: request.rootOperationID,
@@ -1165,6 +1115,11 @@ export class Router {
           output: executed.output,
           artifacts: executed.artifacts,
           ...(executed.usage ? { usage: executed.usage } : {}),
+          ...(executed.metricCoverage ? {metricCoverage:executed.metricCoverage} : {}),
+          ...(executed.normalizationProfile ? {normalizationProfile:executed.normalizationProfile} : {}),
+          ...captureScopeEvidence(bound.scope),
+          ...(executed.coveredDispatchIDs ? {coveredDispatchIDs:executed.coveredDispatchIDs} : {}),
+          lossReasons:[...new Set(captureScopes.flatMap(scope => captureScopeEvidence(scope).lossReasons))],
           ...(executed.quota ? { quota: executed.quota } : {}),
           ...(executed.modelFingerprint ? { modelFingerprint: executed.modelFingerprint } : {}),
           ...(executed.dimension !== undefined ? { dimension: executed.dimension } : {}),
@@ -1195,7 +1150,11 @@ export class Router {
     }
 
     const cancelled = lastError.code === "cancelled"
+    await flushCaptures()
     const result: ExecuteResult = {
+      coveredDispatchIDs:captureScopes.flatMap(scope => captureScopeEvidence(scope).coveredDispatchIDs),
+      lossReasons:[...new Set(captureScopes.flatMap(scope => captureScopeEvidence(scope).lossReasons))],
+      identityCoverage:captureScopes.some(scope => captureScopeEvidence(scope).identityCoverage !== "complete") || !captureScopes.length ? "partial" : "complete",
       operationID: journal.operationID,
       rootOperationID: request.rootOperationID,
       operation: request.operation,
@@ -1259,6 +1218,7 @@ export class Router {
     this.rememberTerminal(operationKey, result)
     return result
   } finally {
+    await flushCaptures()
     const active = this.inFlight.get(operationKey)
     if (active?.controller === callerController) this.inFlight.delete(operationKey)
   }

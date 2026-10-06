@@ -5,7 +5,7 @@
  *   #ge-import-topbar    topbar "+ Import" button
  *   #ge-import-file      File button in the Import section
  *   #ge-import-paste     Clipboard button (uses async clipboard API)
- *   #ge-import-gallery   Gallery picker — fetches /api/gallery/library
+ *   #ge-import-gallery   Files picker — browses the Gallery folder
  *                        and shows a thumbnail grid overlay
  *
  * Plus the shared `handleImportedImage(img)` sink — scales to canvas,
@@ -26,6 +26,8 @@
  * @returns {{ handleImportedImage: (img: HTMLImageElement) => void }}
  */
 import { state } from './state.js';
+import { filesFacadeClient } from '../filesFacadeClient.js';
+import { openFilesImageBrowser } from '../filesImageBrowser.js';
 
 export function wireImport({ container, saveState, createLayer, composite, renderLayerPanel, uiModule }) {
   // Hidden <input type="file"> the topbar + File buttons both click.
@@ -101,46 +103,20 @@ export function wireImport({ container, saveState, createLayer, composite, rende
     }
   });
 
-  // Import from Gallery — fetch /api/gallery/library and show a
-  // thumbnail-grid picker overlay.
+  // Import from Files while preserving Gallery's ordinary folders and pages.
   document.getElementById('ge-import-gallery')?.addEventListener('click', async () => {
     try {
-      const res = await fetch('/api/gallery/library?limit=50', { credentials: 'same-origin' });
-      const data = await res.json();
-      const items = data.items || [];
-      if (!items.length) { if (uiModule) uiModule.showToast('No images in gallery'); return; }
-
-      // Picker overlay.
-      const overlay = document.createElement('div');
-      overlay.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;';
-      const panel = document.createElement('div');
-      panel.style.cssText = 'background:var(--panel,#1e1e1e);border-radius:12px;padding:16px;max-width:500px;max-height:70vh;overflow-y:auto;width:90%;';
-      panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><span style="font-size:13px;font-weight:600;">Pick from Gallery</span><button id="ge-gallery-close" style="background:none;border:none;color:var(--fg);cursor:pointer;font-size:18px;">✕</button></div>';
-      const grid = document.createElement('div');
-      grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:6px;';
-      for (const item of items) {
-        const thumb = document.createElement('img');
-        thumb.src = item.url;
-        thumb.style.cssText = 'width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;cursor:pointer;border:2px solid transparent;transition:border-color 0.15s;';
-        thumb.addEventListener('mouseenter', () => { thumb.style.borderColor = 'var(--accent,#61afef)'; });
-        thumb.addEventListener('mouseleave', () => { thumb.style.borderColor = 'transparent'; });
-        thumb.addEventListener('click', () => {
-          overlay.remove();
+      await openFilesImageBrowser({
+        onPick(item) {
           const img = new Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => handleImportedImage(img);
-          img.onerror = () => { if (uiModule) uiModule.showToast('Failed to load gallery image'); };
-          img.src = item.url;
-        });
-        grid.appendChild(thumb);
-      }
-      panel.appendChild(grid);
-      overlay.appendChild(panel);
-      document.body.appendChild(overlay);
-      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-      panel.querySelector('#ge-gallery-close').addEventListener('click', () => overlay.remove());
-    } catch (e) {
-      if (uiModule) uiModule.showToast('Failed to load gallery: ' + e.message);
+          img.onerror = () => { if (uiModule) uiModule.showToast('Failed to load Files image'); };
+          img.src = filesFacadeClient.contentUrl(item.ref, { purpose: 'preview' });
+        },
+      });
+    } catch (error) {
+      if (uiModule) uiModule.showToast('Failed to load Files: ' + error.message);
     }
   });
 

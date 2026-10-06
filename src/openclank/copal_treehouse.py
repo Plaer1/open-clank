@@ -750,6 +750,7 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
     if kind in {"course.update", "course.publish", "course.archive", "course.author.add", "course.reorder_modules"}:
         course_id = _id(payload.get("courseId"), "courseId")
         course = _course_author(state, actor_id, course_id)
+        event_data = {}
         if kind == "course.update":
             if "title" in payload: course["title"] = _text(payload["title"], "title", maximum=256)
             if "description" in payload: course["description"] = _text(payload["description"], "description", maximum=16_384, required=False)
@@ -763,6 +764,12 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
                 ) for module in modules
             ):
                 raise TreeHouseError("A published course needs at least one populated module", code="publish_incomplete", status=409)
+            if course.get("status") == "draft" and course.get("ownerId") == actor_id:
+                lessons = [activity for module in modules for activity_id in module.get("activityIds", [])
+                           if (activity := state["activities"].get(activity_id)) and not activity.get("deletedAt")
+                           and activity.get("status") == "published" and str(activity.get("content") or "").strip()]
+                event_data["publicationReceipt"] = {"classId": course_id, "catalogueRevision": state["revision"],
+                    "authoredByOwner": True, "seededOfficial": bool(course.get("fieldGuideKey")), "lessonCount": len(lessons)}
             course["status"] = "published"; event_type = "course.published"
         elif kind == "course.archive":
             course["status"] = "archived"; event_type = "course.archived"
@@ -777,7 +784,7 @@ def _command_result(state: dict[str, Any], command: dict[str, Any], actor_id: st
             for index, module_id in enumerate(ordered): state["modules"][module_id]["order"] = index
             event_type = "course.modules_reordered"
         course["updatedAt"] = at
-        emit(event_type, actor_id, "course", course_id, {})
+        emit(event_type, actor_id, "course", course_id, event_data)
         sync_course_enrollments(course_id)
         return {"courseId": course_id, "status": course["status"]}
 
@@ -1372,106 +1379,8 @@ def public_treehouse_snapshot(state: dict[str, Any], actor_id: str) -> dict[str,
     }
 
 
-def plan_legacy_migration(documents: Iterable[dict[str, Any]], state: dict[str, Any]) -> dict[str, Any]:
-    validate_treehouse_state(state)
-    known = state.get("migrations", {}).get("legacyFrontmatter", {}).get("sources", {})
-    candidates = []
-    for doc in documents:
-        if doc.get("kind") in {"treehouse-state", "calendar-projection", "planning", "asset", "base"}:
-            continue
-        treehouse = doc.get("treehouse") or {}
-        frontmatter = doc.get("frontmatter") or {}
-        if not (treehouse or doc.get("kind", "").startswith("treehouse-") or frontmatter.get("course") or frontmatter.get("skill")):
-            continue
-        source_key = f"{doc.get('id')}:{doc.get('head')}"
-        if source_key in known:
-            continue
-        candidates.append({
-            "sourceKey": source_key,
-            "documentId": doc.get("id"),
-            "head": doc.get("head"),
-            "name": doc.get("name"),
-            "course": treehouse.get("course") or frontmatter.get("course"),
-            "skill": treehouse.get("skill") or frontmatter.get("skill"),
-            "prerequisite": treehouse.get("prerequisite") or frontmatter.get("depends_on"),
-            "text": doc.get("text") or "",
-            "tasks": doc.get("tasks") or [],
-        })
-    return {"schemaVersion": 1, "candidates": candidates, "counts": {"documents": len(candidates), "courses": len({item["course"] for item in candidates if item["course"]}), "skills": len({item["skill"] for item in candidates if item["skill"]}), "tasks": sum(len(item["tasks"]) for item in candidates)}}
 
 
-def apply_legacy_migration(
-    state: dict[str, Any],
-    plan: dict[str, Any],
-    *,
-    actor_id: str,
-    command_id: str,
-    expected_revision: int | None = None,
-    now: datetime | None = None,
-) -> tuple[dict[str, Any], dict[str, Any], bool]:
-    validate_treehouse_state(state)
-    _require_role(state, actor_id, "admin", "instructor")
-    if command_id in state["processedCommands"]:
-        replay = state["processedCommands"][command_id]["result"]
-        return state, {**copy.deepcopy(replay), "replayed": True}, False
-    if expected_revision is not None and expected_revision != state["revision"]:
-        raise TreeHouseError("TreeHouse state changed in another tab", code="stale", status=409, details={"revision": state["revision"]})
-    next_state = copy.deepcopy(state); timestamp = _now(now)
-    sources = next_state["migrations"]["legacyFrontmatter"]["sources"]
-    course_ids: dict[str, str] = {}
-    skill_ids: dict[str, str] = {}
-    imported = {"courses": 0, "modules": 0, "activities": 0, "assignments": 0, "skills": 0, "documents": 0}
-
-    for item in plan.get("candidates", []):
-        if item["sourceKey"] in sources: continue
-        course_name = str(item.get("course") or "").strip()
-        if course_name:
-            course_id = course_ids.setdefault(course_name, str(uuid.uuid5(LEGACY_NAMESPACE, f"course\n{course_name}")))
-            if course_id not in next_state["courses"]:
-                next_state["courses"][course_id] = {"id": course_id, "title": course_name, "description": "Imported from legacy TreeHouse frontmatter", "tags": ["legacy-import"], "status": "draft", "authorIds": [actor_id], "moduleIds": [], "createdAt": timestamp, "updatedAt": timestamp}
-                imported["courses"] += 1
-            module_id = str(uuid.uuid5(LEGACY_NAMESPACE, f"module\n{course_name}"))
-            if module_id not in next_state["modules"]:
-                next_state["modules"][module_id] = {"id": module_id, "courseId": course_id, "title": "Imported lessons", "description": "", "activityIds": [], "assignmentIds": [], "order": 0, "createdAt": timestamp, "updatedAt": timestamp}
-                next_state["courses"][course_id]["moduleIds"].append(module_id); imported["modules"] += 1
-            activity_id = str(uuid.uuid5(LEGACY_NAMESPACE, f"activity\n{item['documentId']}"))
-            if activity_id not in next_state["activities"]:
-                next_state["activities"][activity_id] = {"id": activity_id, "courseId": course_id, "moduleId": module_id, "title": str(item.get("name") or "Imported lesson"), "content": item.get("text") or "", "activityType": "markdown", "status": "published", "points": 10, "skillIds": [], "order": len(next_state["modules"][module_id]["activityIds"]), "sourceDocumentId": item["documentId"], "sourceHead": item["head"], "createdAt": timestamp, "updatedAt": timestamp}
-                next_state["modules"][module_id]["activityIds"].append(activity_id); imported["activities"] += 1
-            for task in item.get("tasks", []):
-                assignment_id = str(uuid.uuid5(LEGACY_NAMESPACE, f"assignment\n{item['documentId']}\n{task.get('id')}"))
-                if assignment_id not in next_state["assignments"]:
-                    next_state["assignments"][assignment_id] = {"id": assignment_id, "courseId": course_id, "moduleId": module_id, "title": str(task.get("text") or "Imported evidence task"), "prompt": f"Imported from {item.get('name')}", "status": "draft", "dueAt": "", "maxPoints": 100, "skillIds": [], "allowRetries": True, "maxAttempts": 0, "sourceDocumentId": item["documentId"], "sourceTaskId": task.get("id"), "createdAt": timestamp, "updatedAt": timestamp}
-                    next_state["modules"][module_id]["assignmentIds"].append(assignment_id); imported["assignments"] += 1
-        skill_name = str(item.get("skill") or "").strip()
-        if skill_name:
-            skill_id = skill_ids.setdefault(skill_name, str(uuid.uuid5(LEGACY_NAMESPACE, f"skill\n{skill_name}")))
-            if skill_id not in next_state["skills"]:
-                next_state["skills"][skill_id] = {"id": skill_id, "title": skill_name, "description": f"Imported from {item.get('name')}", "prerequisiteIds": [], "thresholds": [0, 25, 60, 100], "masteryThreshold": 60, "evidencePoints": 25, "sourceDocumentId": item["documentId"], "sourceHead": item["head"], "createdAt": timestamp, "updatedAt": timestamp}
-                imported["skills"] += 1
-        sources[item["sourceKey"]] = {"documentId": item["documentId"], "head": item["head"], "importedAt": timestamp}
-        imported["documents"] += 1
-
-    # Resolve prerequisite names after all skills exist. Unknown names remain a
-    # migration diagnostic instead of inventing a node.
-    title_to_id = {skill["title"].casefold(): skill_id for skill_id, skill in next_state["skills"].items()}
-    unresolved = []
-    for item in plan.get("candidates", []):
-        skill_name = str(item.get("skill") or "").strip(); dependency = str(item.get("prerequisite") or "").strip()
-        if not skill_name or not dependency: continue
-        skill_id = title_to_id.get(skill_name.casefold()); dependency_id = title_to_id.get(dependency.casefold())
-        if skill_id and dependency_id and dependency_id != skill_id:
-            next_state["skills"][skill_id]["prerequisiteIds"] = list(dict.fromkeys([*next_state["skills"][skill_id]["prerequisiteIds"], dependency_id]))
-        elif not dependency_id:
-            unresolved.append({"skill": skill_name, "prerequisite": dependency})
-    cycle = _skill_cycle(next_state["skills"])
-    if cycle: raise TreeHouseError("Legacy migration would create a prerequisite cycle", code="prerequisite_cycle", status=409, details={"cycle": cycle})
-
-    next_state["events"].append({"id": str(uuid.uuid5(EVENT_NAMESPACE, f"{command_id}\nmigration")), "commandId": command_id, "type": "migration.legacy_applied", "actorId": actor_id, "subjectId": actor_id, "entityType": "migration", "entityId": "legacy-frontmatter", "at": timestamp, "data": {"imported": imported, "unresolved": unresolved}})
-    next_state["revision"] += 1; next_state["updatedAt"] = timestamp
-    result = {"imported": imported, "unresolvedPrerequisites": unresolved, "revision": next_state["revision"], "replayed": False}
-    next_state["processedCommands"][command_id] = {"result": copy.deepcopy(result), "revision": next_state["revision"], "at": timestamp}
-    return next_state, result, True
 
 
 def state_fingerprint(state: dict[str, Any]) -> str:

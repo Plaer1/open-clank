@@ -92,6 +92,7 @@ class AccountOwnerLifecycle:
         operation_journal: OperationJournalStore,
         artifact_store: ArtifactStore,
         preset_manager: Any,
+        conversation_archive: Any | None = None,
         operation_path: Path | None = None,
         clock=time.time,
     ) -> None:
@@ -99,12 +100,20 @@ class AccountOwnerLifecycle:
         self.operation_journal = operation_journal
         self.artifact_store = artifact_store
         self.preset_manager = preset_manager
+        self._conversation_archive = conversation_archive
         self.operation_path = Path(
             operation_path or (Path(DATA_DIR) / ".account-lifecycle" / "operations.json")
         )
         self.clock = clock
         self.coordinator_id = uuid.uuid4().hex
         self._session_factory = operation_journal._session_factory
+
+    @property
+    def conversation_archive(self):
+        if self._conversation_archive is None:
+            from src.openclank.conversation_archive import get_conversation_archive
+            self._conversation_archive = get_conversation_archive()
+        return self._conversation_archive
 
     @staticmethod
     def _operation_dict(row: AccountLifecycleOperation) -> dict[str, Any]:
@@ -796,6 +805,7 @@ class AccountOwnerLifecycle:
         personas = self.preset_manager.presets.get("default_personas") or {}
         persona_present = isinstance(personas, dict) and owner in personas
         stores = {
+            "conversation_archive": self.conversation_archive.owner_inventory(owner),
             "provider": self.provider_store.owner_inventory(owner),
             "operation_journal": self.operation_journal.owner_inventory(owner),
             "artifacts": self.artifact_store.owner_inventory(owner),
@@ -818,6 +828,9 @@ class AccountOwnerLifecycle:
         source_owner = _owner(source_owner)
         target_owner = _owner(target_owner)
         stores: dict[str, Any] = {}
+        # Immutable archive rows are visible under both the renamed aliases;
+        # source/target row counts must not be mistaken for a collision.
+        stores["conversation_archive"] = self.conversation_archive.rename_owner(source_owner, target_owner)
         definitions = (
             (
                 "operation_journal",
@@ -874,8 +887,12 @@ class AccountOwnerLifecycle:
 
         completed: list[tuple[str, Any, Any]] = []
         stores: dict[str, Any] = {}
-        current_store = "operation_journal"
+        current_store = "conversation_archive"
         try:
+            result = self.conversation_archive.rename_owner(old_owner, new_owner)
+            stores[current_store] = result
+            completed.append((current_store, result, lambda: self.conversation_archive.rename_owner(new_owner, old_owner)))
+            current_store = "operation_journal"
             result = self.operation_journal.rename_owner(old_owner, new_owner)
             stores[current_store] = result
             completed.append(
@@ -958,6 +975,7 @@ class AccountOwnerLifecycle:
         owner = _owner(owner)
         stores: dict[str, Any] = {}
         steps = (
+            ("conversation_archive", lambda: self.conversation_archive.purge_owner(owner)),
             ("provider", lambda: self.provider_store.purge_owner(owner)),
             ("operation_journal", lambda: self.operation_journal.purge_owner(owner)),
             ("artifacts", lambda: self.artifact_store.purge_owner(owner)),

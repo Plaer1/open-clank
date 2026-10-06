@@ -9,7 +9,7 @@ Each draft carries:
   - id           — opaque uuid (the client never sees gallery-image ids
                     as draft ids, so blank-canvas drafts work too)
   - source_image_id (nullable) — back-pointer for "this draft started as
-                    an edit of GalleryImage X"
+                    an edit of Files image X"
   - payload      — full JSON snapshot (layers as base64 PNG dataURLs,
                     offsets, opacities, etc.) the editor knows how to
                     rehydrate
