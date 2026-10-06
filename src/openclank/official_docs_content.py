@@ -492,18 +492,23 @@ Use the native installation for the current bare-metal app, particularly on Appl
 
 ## Native source setup
 
-From the checked-out project, with Python 3.11 or later:
+Use Python 3.11 or later, Rust/Cargo and the platform C/C++ build tools. macOS needs Xcode Command Line Tools; Windows needs Visual Studio C++ Build Tools and the Windows SDK. Before first launch, obtain the matching offline emoji parts and manifest following the repository Setup Guide. Those assets are prepared locally but have not been publicly published yet; a source clone alone is incomplete.
+
+From the checked-out project, with the matching part files already supplied:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+python scripts/emoji_asset_bundle.py assemble --parts /path/to/emoji-parts
 python setup.py
 openclank server start
 openclank server status
 ```
 
-On macOS the repository also provides `./start-macos.sh`. The default browser address is `http://127.0.0.1:7777`. Use the configured port if it differs. `openclank` opens the terminal interface and starts the local service only after a genuine loopback connection refusal; explicit server lifecycle commands make the service state easier to inspect.
+Setup builds/verifies the managed engine and builds the native memory and History workers from the locked source. macOS and Windows also build Files and the platform thumbnail helper. Python requirements alone do not provide these workers. Keep Cargo and the platform compiler available for setup; the first build may take several minutes. Linux remains unqualified and its native Files worker is not built.
+
+On macOS the repository also provides `./start-macos.sh`, after the same prerequisites and artwork assembly. The default browser address is `http://127.0.0.1:7777`. Use the configured port if it differs. `openclank` opens the terminal interface and starts the local service only after a genuine loopback connection refusal; explicit server lifecycle commands make the service state easier to inspect.
 
 This recipe is for a **fresh installation**. On an existing installation, read the repository setup/upgrade guide before running setup. The first-run script is not a universal migration or repair command. Windows source installation is tested; native ARM64 and x64 frozen packages still need qualification, and Linux remains unqualified. See [[Limits and Platform Support]].
 

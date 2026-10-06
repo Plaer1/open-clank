@@ -42,7 +42,8 @@ from typing import Any
 # v18 — final verified read-only Help, Editor/Wiki and current media bindings.
 # v19 — current hosted Files-only authority; older-store recovery preserved.
 # v20 — Docker unsupported; retained legacy references carry no release gate.
-OFFICIAL_DOCS_SEED_VERSION = 20
+# v21 — complete fresh source setup: offline assets and native workspace workers.
+OFFICIAL_DOCS_SEED_VERSION = 21
 
 # Top-level folder that holds every provisioned official page. Derived identity
 # (product/builtin markers) is the real recognition mechanism; this name is the

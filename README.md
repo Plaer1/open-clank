@@ -51,7 +51,8 @@ thin frames and maximize beside the retained navigation.
 
 ## Start on macOS
 
-For a fresh source installation, install Homebrew and Python 3.11 or later,
+For a fresh source installation, install Homebrew, Python 3.11 or later,
+[Rust/Cargo](https://rustup.rs/) and Xcode Command Line Tools (`xcode-select --install`),
 then clone the source:
 
 ```bash
@@ -68,9 +69,10 @@ Once the verified pack is installed:
 ./start-macos.sh
 ```
 
-The launcher prepares the environment, verifies the managed engine and starts
-the app through its bootstrap. First setup can download tools and build native
-components. Apple Silicon local-model serving can use Metal through the
+The launcher prepares the environment, builds and verifies the managed engine,
+builds the native memory, Files, thumbnail and History workers from source, and
+starts the app through its bootstrap. First setup can download dependencies and
+take several minutes to compile. Apple Silicon local-model serving can use Metal through the
 appropriate backend; model compatibility depends on that backend.
 
 Open the address printed by the launcher, normally `http://127.0.0.1:7777`.

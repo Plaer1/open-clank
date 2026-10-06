@@ -285,6 +285,38 @@ def ensure_managed_engine():
     print(f"  [ok] Managed engine verified: {result.binary}")
 
 
+def ensure_native_workers():
+    """Build the source workers selected by the host platform before first run."""
+    cargo = shutil.which("cargo")
+    if not cargo:
+        raise RuntimeError(
+            "Source setup requires Rust Cargo and platform C/C++ build tools; "
+            "install the prerequisites in docs/setup.md and rerun setup"
+        )
+    root = Path(BASE_DIR)
+    builds = [
+        (root / "mcp_servers/frankenmemory", ("fm-mcp",)),
+        (root / "packages/openclank-history", ("openclank-history-service",)),
+    ]
+    if sys.platform in {"darwin", "win32"}:
+        thumbnail = "odysseus-quicklook-helper" if sys.platform == "darwin" else "odysseus-shell-thumbnail-helper"
+        builds.append((root / "packages/odysseus-files", ("odysseus-files-service", thumbnail)))
+    else:
+        print("  [warn] Linux source support remains unqualified; native Files is not built")
+    suffix = ".exe" if os.name == "nt" else ""
+    for crate, binaries in builds:
+        command = [cargo, "build", "--locked", "--release", "--manifest-path", str(crate / "Cargo.toml"),
+                   "--target-dir", str(crate / "target")]
+        for binary in binaries:
+            command.extend(("--bin", binary))
+        subprocess.run(command, cwd=root, check=True)
+        for binary in binaries:
+            artifact = crate / "target/release" / (binary + suffix)
+            if not artifact.is_file() or (os.name != "nt" and not os.access(artifact, os.X_OK)):
+                raise RuntimeError(f"Native worker build did not produce {binary}")
+            print(f"  [ok] Native worker built: {binary}")
+
+
 def validate_existing_provider_store():
     """Validate existing provider state; setup never upgrades an installation."""
     from src.openclank.provider_startup import PROVIDER_ENV_AUTHORITIES, validate_provider_store
@@ -312,6 +344,9 @@ def main():
 
     print("1. Verifying managed engine...")
     ensure_managed_engine()
+
+    print("\n1b. Building native workspace workers...")
+    ensure_native_workers()
 
     print("\n2. Creating directories...")
     create_dirs()

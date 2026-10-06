@@ -37,7 +37,8 @@ actions.
 
 ### macOS
 
-Install Homebrew and Python 3.11 or later, then clone the source:
+Install Homebrew, Python 3.11 or later, [Rust/Cargo](https://rustup.rs/) and
+Xcode Command Line Tools (`xcode-select --install`), then clone the source:
 
 ```bash
 git clone https://github.com/Plaer1/open-clank.git
@@ -53,10 +54,12 @@ before first launch. Once the verified pack is installed:
 
 The launcher prepares the venv, runs setup and starts the validated bootstrap.
 On Apple Silicon, use ARM-native Python rather than a Rosetta interpreter.
-Setup verifies the managed engine and may download pinned Bun/build dependencies
-when rebuilding. Native Files, History, memory and Editor also need their
-admitted worker artifacts; Python packages alone do not establish readiness for
-every native feature.
+Setup builds/verifies the managed engine and may download pinned Bun/build
+dependencies. It also runs locked Cargo release builds for the native memory,
+History, Files and QuickLook workers; these artifacts are required for the
+workspace features. Keep Cargo and the platform compiler available when rerunning
+setup. The first build may take several minutes and needs additional disk space
+for dependency and compiler outputs. Python requirements alone are insufficient.
 
 The default address is `http://127.0.0.1:7777`. The launcher loads missing values
 from `.env`; exported shell values win. Legacy `ODYSSEUS_PORT` / `ODYSSEUS_HOST`
@@ -85,7 +88,9 @@ openclank server start
 openclank server status
 ```
 
-Python 3.11 or later is required. Setup verifies the managed engine and may
+Python 3.11 or later, Rust/Cargo and a C/C++ compiler are required. Setup builds
+the memory and History workers; Linux native Files remains unsupported and
+unqualified. Setup verifies the managed engine and may
 fetch the pinned Bun toolchain if that engine needs rebuilding. Local model
 serving is optional; GPU, runtime, model and memory requirements depend on the
 selected model. Cookbook background downloads and serves use `tmux`.
@@ -491,9 +496,11 @@ The foreground bootstrap takes the same address as `--host 0.0.0.0`. Bind
 outside loopback only for a trusted LAN/VPN such as Tailscale; authenticate
 with a real account and do not expose the port directly to the public internet.
 
-**Requirements:** Python 3.11+ and the toolchains/native artifacts required by
-the features you use. Setup may fetch pinned Bun/build dependencies for the
-managed engine. For Cookbook background commands and the agent shell tool,
+**Requirements:** Python 3.11+, [Rust/Cargo](https://rustup.rs/) and the Visual
+Studio C++ Build Tools/Windows SDK for your Python/host architecture. Setup
+builds the native memory, History, Files and Windows thumbnail workers from
+source and may fetch pinned Bun/build dependencies for the managed engine.
+This source build wiring does not qualify frozen ARM64 or x64 packages. For Cookbook background commands and the agent shell tool,
 also install
 [Git for Windows](https://git-scm.com/download/win) (provides `bash.exe`).
 Local GPU *serving* of vLLM/SGLang needs Linux/WSL2; for a local model on Windows,

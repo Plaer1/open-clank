@@ -45,6 +45,12 @@ from dotenv import load_dotenv
 # The same encoding also reads ordinary UTF-8 without changing its meaning.
 load_dotenv(encoding="utf-8-sig")
 
+# Resolve the built source/bundled worker before imports bind the FM command.
+# Explicit environment and .env choices retain precedence.
+if not os.environ.get("FM_MCP_COMMAND", "").strip():
+    from src.runtime_paths import resolve_fm_mcp
+    os.environ["FM_MCP_COMMAND"] = resolve_fm_mcp().path
+
 import asyncio
 import logging
 import secrets
