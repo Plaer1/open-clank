@@ -1752,6 +1752,15 @@ import {
       // Reserve the visible help attachment before the final Copal flush. The
       // complete pre-acceptance sequence is inside one release boundary, so a
       // flush, FormData, DOM, or transport failure cannot strand a claim.
+      // These values also serve HTTP-error cleanup and the SSE loop after the
+      // pre-acceptance boundary, so keep them in the complete send scope.
+      const modelName = _bestKnownStreamModel(selectedRouteForSend) || null;
+      const researchBtn = el('research-toggle-btn');
+      const enableResearchBtn = () => {
+        if (!researchBtn) return;
+        researchBtn.disabled = false;
+        researchBtn.classList.toggle('active', el('research-toggle').checked);
+      };
       helpClaim = claimAssistantContext();
       helpContext = helpClaim?.context || null;
       try {
@@ -1763,7 +1772,17 @@ import {
           if (typeof flushCopal === 'function') await flushCopal();
           const getCopal = window.__odysseusGetActiveCopalContext;
           const copalContext = typeof getCopal === 'function' ? getCopal() : null;
-          if (copalContext && typeof copalContext === 'object') fd.append('active_copal_context', JSON.stringify(copalContext));
+          if (copalContext && typeof copalContext === 'object') {
+            // The shared getter also carries account scope for contextual Help.
+            // Chat accepts only the four resource identifiers; owner scope is
+            // derived from the authenticated session on the server.
+            fd.append('active_copal_context', JSON.stringify({
+              workspace: copalContext.workspace,
+              view: copalContext.view ?? null,
+              resourceKind: copalContext.resourceKind ?? null,
+              resourceId: copalContext.resourceId ?? null,
+            }));
+          }
         } catch (error) {
           console.warn('Copal active-resource flush failed', error);
           throw error;
@@ -1823,7 +1842,6 @@ import {
         _syncForegroundStreamGlobals();
         holder._researchQuery = msg; // Store query for notification text
       
-        const modelName = _bestKnownStreamModel(selectedRouteForSend) || null;
 
         let loadingText = 'Initializing...';
 
@@ -1868,7 +1886,6 @@ import {
         scheduleFirstTokenWaitMessages();
         }
       
-        const researchBtn = el('research-toggle-btn');
         if (el('research-toggle').checked && researchBtn) {
         researchBtn.disabled = true;
         researchBtn.classList.remove('active');
@@ -1876,11 +1893,6 @@ import {
         box.appendChild(holder);
         uiModule.scrollHistory();
 
-        const enableResearchBtn = () => {
-        if (!researchBtn) return;
-        researchBtn.disabled = false;
-        researchBtn.classList.toggle('active', el('research-toggle').checked);
-        };
 
         if (el('research-toggle').checked && researchBtn) {
         researchBtn.style.display = 'none';

@@ -310,6 +310,9 @@ def _model_config(
     }
     # Copy only fields understood by the engine's provider config schema.  The
     # complete normalized capability object remains host-owned.
+    # Lifecycle status stays advisory in that object. Connection-scoped config
+    # entries default to active in the engine after host route admission; the
+    # config schema does not accept an explicit "active" status.
     for name in (
         "family",
         "release_date",
@@ -322,7 +325,6 @@ def _model_config(
         "limit",
         "modalities",
         "experimental",
-        "status",
         "cachePromptTTL",
     ):
         if name in capabilities:

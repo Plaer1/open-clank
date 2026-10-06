@@ -819,7 +819,7 @@ class CopalFilesProvider:
             f"workspace:{self.workspace_id}",
             "Copal",
             "provider_root",
-            ("children", "stat", "search", "write"),
+            ("children", "stat", "search"),
             workspace_id=self.workspace_id,
             provenance={"domain": "copal", "workspace": self.workspace_id},
             open_target={"app": "copal_notes"},
@@ -835,7 +835,7 @@ class CopalFilesProvider:
             ("children", "stat", "search"),
             parent_origin_id=f"workspace:{workspace_id}",
             workspace_id=workspace_id,
-            provenance={"domain": "copal", "view": origin_id.split(":", 1)[0]},
+            provenance={"domain": "copal", "view": origin_id.split(":", 1)[0], "corpus": origin_id.rsplit(":", 1)[-1]},
             child_sort_keys=CopalFilesProvider._DOCUMENT_SORTS,
         )
 

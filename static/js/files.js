@@ -1430,9 +1430,16 @@ function creationDestinationForEntry(target, index = state.activeColumnIndex) {
   const ref = destinationResourceRef(target);
   if (!ref || !target || !isDirectory(target)) return null;
   const capabilities = new Set(Array.isArray(target.capabilities) ? target.capabilities.map(String) : []);
-  if (!capabilities.has('children') || !capabilities.has('write')) return null;
+  const copalCorpus = target.provider === 'copal' && (
+    (target.kind === 'provider_root' || (target.provenance?.domain === 'copal' && !target.provenance?.view)) ? 'notes'
+      : target.provenance?.view === 'active' && ['all', 'notes', 'wiki'].includes(target.provenance?.corpus)
+        ? (target.provenance.corpus === 'wiki' ? 'wiki' : 'notes') : null
+  );
+  if (!capabilities.has('children') || (!capabilities.has('write') && !copalCorpus)) return null;
   const revision = target.revision && typeof target.revision === 'object' ? { ...target.revision } : null;
   return Object.freeze({
+    creationCopalCorpus: copalCorpus || null,
+    creationSupportsFolders: !copalCorpus,
     creationDestinationRef: ref,
     creationDestinationId: String(target.resource_id || target.resourceId || ''),
     creationDestinationRevision: revision ? Object.freeze(revision) : null,
@@ -1470,6 +1477,10 @@ async function createFilesResource(kind, captured) {
     setStatus('Choose an authorized writable folder before creating an item.', true);
     return false;
   }
+  if (kind === 'folder' && captured.creationSupportsFolders === false) {
+    setStatus('This Copal collection supports new notes; folders appear when notes use folder names.', true);
+    return false;
+  }
   const generation = Number(captured.creationGeneration);
   const lifecycle = Number(captured.creationLifecycle);
   const content = Number(captured.creationContent);
@@ -1498,6 +1509,20 @@ async function createFilesResource(kind, captured) {
     }
     const operation = commandId;
     try {
+      if (kind === 'file' && captured.creationCopalCorpus) {
+        const copal = await import('./copal.js');
+        const result = await copal.createFilesNote({ name: proposed, workspace: captured.creationWorkspace,
+          corpus: captured.creationCopalCorpus, actionId: operation });
+        if (!result?.doc?.id) throw new Error('Copal creation outcome was not confirmed; do not submit it again.');
+        if (state.owner !== owner || state.lifecycleGeneration !== lifecycle
+            || String(state.currentWorkspaceId || copalWorkspace()) !== captured.creationWorkspace) {
+          setStatus('Files access changed after creation; reopen the collection to confirm the new note.', true);
+          return true;
+        }
+        await reloadManagedColumn(Number(captured.creationDestinationIndex));
+        setStatus(`Created file: ${proposed}. Open it from Documents in Editor.`);
+        return true;
+      }
       let response;
       const create = () => kind === 'folder'
         ? filesFacadeClient.createDirectory(captured.creationDestinationRef, {
@@ -1714,7 +1739,7 @@ function canvasMenuAdapter() {
     commands: request => {
       const entry = contextEntryForNode(request?.objectTarget || request?.target);
       const commands = [];
-      commands.push({ id: 'files-new-folder', label: 'New Folder…' });
+      commands.push({ id: 'files-new-folder', label: 'New Folder…', disabled: request?.adapterContext?.creationSupportsFolders === false });
       commands.push({ id: 'files-new-file', label: 'New File…' });
       if (filesClipboard) {
         const destination = currentFilesPasteDestination(request?.adapterContext?.pasteDestination);
@@ -5112,6 +5137,7 @@ function showFilesNewMenu({ anchor = null } = {}) {
   for (const [kind, label, glyph] of [['folder', 'New Folder…', 'folder'], ['file', 'New File…', 'file']]) {
     const item = el('button', { type: 'button', class: 'files-action-menu-item', role: 'menuitem' });
     item.append(namedGlyph(glyph, { size: 14 }), el('span', { text: label }));
+    item.disabled = kind === 'folder' && captured?.creationSupportsFolders === false;
     item.addEventListener('click', () => { closeManagedActionMenu(); void createFilesResource(kind, captured); });
     menu.append(item);
   }
@@ -6638,7 +6664,7 @@ function commandDescriptors(snapshot) {
   const single = entries.length === 1 ? entries[0] : null;
   const requiredSingle = single ? '' : 'Select one item.';
   add('new-file', 'New file…', 'File', () => createFilesResource('file', snapshot.creation), snapshot.creation ? '' : 'This folder does not support creating files.');
-  add('new-folder', 'New folder…', 'File', () => createFilesResource('folder', snapshot.creation), snapshot.creation ? '' : 'This folder does not support creating folders.');
+  add('new-folder', 'New folder…', 'File', () => createFilesResource('folder', snapshot.creation), snapshot.creation && snapshot.creation.creationSupportsFolders !== false ? '' : 'This folder does not support creating folders.');
   add('open', 'Open', 'File', () => isDirectory(single) ? openManagedDirectory(single) : options.pickerMode ? confirmPickerEntry(single) : openManagedEntry(single), requiredSingle || (!single?.capabilities?.includes('open') && !isDirectory(single) ? 'This provider cannot open this item.' : ''));
   add('download', 'Download', 'File', async () => { for (const entry of entries) await downloadEntry(entry); }, entries.length && entries.every(entry => entry.capabilities?.includes('download')) ? '' : 'Select downloadable files.');
   add('information', 'Resource information', 'File', () => uiModule.styledConfirm([single.name, 'Type: ' + (single.kind || single.media_type || 'File'), 'Provider: ' + (single.provider || state.provider), ...(single.size != null ? ['Size: ' + formatBytes(single.size)] : []), ...(single.modified_unix_ms ? ['Modified: ' + formatModified(single.modified_unix_ms)] : [])].join('\n'), { title:'Resource information',confirmText:'Done',cancelText:'Close' }), requiredSingle);

@@ -3634,6 +3634,22 @@ export function getActiveAgentContext() {
   return { accountId: state.accountId || null, workspace: state.workspace || 'default', view, resourceKind, resourceId: resourceId || null };
 }
 
+// Files' New file creates a canonical empty note, rather than pretending the
+// read-only Copal navigation projection implements arbitrary staged imports.
+export async function createFilesNote({ name, workspace, corpus = 'notes', actionId }) {
+  if (!actionId || !['notes', 'wiki'].includes(corpus)) throw new Error('Invalid Copal creation request.');
+  const options = { method: 'POST', body: JSON.stringify({ name, kind: corpus === 'wiki' ? 'wiki' : 'note', corpus, content: '', actionId }) };
+  let result;
+  try { result = await api('/documents', options, workspace); }
+  catch (error) {
+    // Canonical actionId replay reconciles a lost transport response without
+    // creating a second note. Validation and provider errors are not retried.
+    if (!(error instanceof TypeError)) throw error;
+    result = await api('/documents', options, workspace);
+  }
+  return result;
+}
+
 export async function flushActiveAgentResource() {
   // Notes owns the only currently shared draft queue. Other views either save
   // through their existing explicit controls or are projections; the method is
