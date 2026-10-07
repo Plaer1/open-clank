@@ -369,11 +369,13 @@ def build(output: Path, use_existing_engine: bool):
     libraries = macho_inventory(contents)
     # Sign leaves before hashing; outer signing must not re-sign inner bytes.
     for path in macho_files(contents):
-        signed = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(path)],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-        if not signed:
+        signature = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(path)],
+                                   capture_output=True, text=True, timeout=60, check=False)
+        if signature.returncode != 0:
             if path.is_relative_to(bundled_engine):
-                raise RuntimeError("Engine must carry a valid native signature before provenance is sealed")
+                detail = (signature.stderr or signature.stdout or "no codesign diagnostic").strip()
+                detail = detail.replace(str(path), path.name)[:1000]
+                raise RuntimeError("Canonical Engine signature is invalid before packaging: " + detail)
             run("/usr/bin/codesign", "--force", "--sign", "-", path)
     packages = json.loads(subprocess.check_output([str(python), "-I", "-m", "pip", "list", "--format=json"], text=True))
     write_json(resources / "build-provenance.json", {

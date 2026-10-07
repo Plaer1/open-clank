@@ -966,6 +966,27 @@ def _read_app_version(repo_root: Path) -> str:
     return match.group(1)
 
 
+def _sign_darwin_build_binary(binary: Path, target: str) -> None:
+    """Finish the native compiled artifact before its provenance is sealed."""
+    if not target.startswith("darwin-"):
+        return
+    if sys.platform != "darwin":
+        raise EngineBuildError("Darwin engine signing requires a native macOS build host")
+    commands = (
+        ("signing", ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", str(binary)]),
+        ("signature verification", ["/usr/bin/codesign", "--verify", "--strict", str(binary)]),
+    )
+    for stage, command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise EngineBuildError(f"Darwin engine {stage} failed: {type(exc).__name__}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "no codesign diagnostic").strip()
+            detail = detail.replace(str(binary), binary.name)[:1000]
+            raise EngineBuildError(f"Darwin engine {stage} failed (code {result.returncode}): {detail}")
+
+
 def _provenance_payload(
     *,
     manifest: Mapping[str, Any],
@@ -1189,6 +1210,7 @@ def build_current(
         if not built_binary.is_file():
             raise EngineBuildError(f"engine build did not produce {built_binary}")
         _verify_pe_target(built_binary, target)
+        _sign_darwin_build_binary(built_binary, target)
         if source_fingerprint(vendor_root) != source_sha256:
             raise EngineBuildError("vendored engine source changed during the build")
 
