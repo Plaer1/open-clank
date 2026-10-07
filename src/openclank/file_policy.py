@@ -366,6 +366,16 @@ ON file_operations(owner_subject_id, created_unix_ms DESC);
 """
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Retain SQLite transaction context semantics and close on every exit."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class FilePolicyRepository(CanonicalCompatibility):
     """SQLite repository and monotonic resolver for canonical file authority."""
 
@@ -376,7 +386,7 @@ class FilePolicyRepository(CanonicalCompatibility):
         # Admission is read-only: even switching SQLite journal mode is a
         # mutation and must wait until the store passes the current contract.
         if path.is_file() and path.stat().st_size:
-            with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as admission:
+            with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, factory=_ClosingConnection) as admission:
                 existing = bool(admission.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_policy_meta'").fetchone())
                 if not existing and admission.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='permission_grants'").fetchone():
                     raise FilePolicyError("Files permission store does not match this release. Stop writers and keep a complete backup; restore the matching release or prepare an offline conversion.", code="policy_store_unavailable")
@@ -404,11 +414,15 @@ class FilePolicyRepository(CanonicalCompatibility):
                 raise FilePolicyError("unsupported file-policy schema", code="policy_store_unavailable")
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=10000")
-        connection.execute("PRAGMA journal_mode=WAL")
+        connection = sqlite3.connect(self.db_path, timeout=10.0, isolation_level=None, factory=_ClosingConnection)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=10000")
+            connection.execute("PRAGMA journal_mode=WAL")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     @staticmethod
