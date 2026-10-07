@@ -289,6 +289,38 @@ def verify_portable_payload() -> dict | None:
     return manifest
 
 
+def packaged_engine_expectations() -> dict[str, str]:
+    """Read Engine pins only after admitting the complete sealed payload.
+
+    Frozen distributions carry the compiled artifact and its bound provenance,
+    rather than a second copy of the vendored build source tree.
+    """
+    manifest = verify_portable_payload()
+    if not isinstance(manifest, dict):
+        raise EngineBuildError("sealed Engine expectations require a frozen payload")
+    if sys.platform == "darwin":
+        from src.openclank.engine_build import default_install_root
+        root = Path(default_install_root()).resolve()
+        try:
+            current = json.loads((root / "current.json").read_text(encoding="utf-8"))
+            artifact = _portable_child(root, current["artifact"], "engine artifact")
+            provenance = json.loads((artifact / "provenance.json").read_text(encoding="utf-8"))
+            engine = provenance["inputs"]
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+            raise EngineBuildError("sealed Engine input metadata is invalid") from exc
+    else:
+        engine = manifest.get("engine")
+    if not isinstance(engine, dict):
+        raise EngineBuildError("sealed Engine input metadata is missing")
+    result = {"expected_target": manifest["target"]}
+    for field in ("source_sha256", "vendor_manifest_sha256"):
+        value = engine.get(field)
+        if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+            raise EngineBuildError("sealed Engine input pin is invalid")
+        result["expected_" + field] = value
+    return result
+
+
 def _data_dir(value: Path | None) -> Path:
     configured = value or Path(
         os.environ.get("OPEN_CLANK_DATA_DIR")
