@@ -2,12 +2,52 @@
 from __future__ import annotations
 
 import multiprocessing
+import json
 import os
+import re
 import signal
 import sys
 import threading
 import webbrowser
 from pathlib import Path
+
+
+STARTUP_DIAGNOSTIC_PREFIX = "OPENCLANK_MAC_STARTUP "
+STARTUP_PHASES = frozenset({"imports", "payload", "profile", "state-directory",
+                          "start-lock", "server-start", "browser", "running",
+                          "bootstrap", "uvicorn-import", "application-import", "serving"})
+_OWNER_PHASE = "imports"
+
+
+def safe_startup_record(record: dict) -> dict:
+    """Admit diagnostic identifiers only, never exception messages or paths."""
+    phase = record.get("phase")
+    if record.get("schema_version") != 1 or not isinstance(phase, str) or phase not in STARTUP_PHASES:
+        return {}
+    kind = record.get("exception_type")
+    if not isinstance(kind, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", kind):
+        return {}
+    safe = {"schema_version": 1, "phase": record["phase"], "exception_type": kind}
+    for field in ("errno", "child_exit_code"):
+        value = record.get(field)
+        if type(value) is int and -4096 <= value <= 4096:
+            safe[field] = value
+    missing = record.get("missing_module")
+    if isinstance(missing, str) and len(missing) <= 160 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", missing):
+        safe["missing_module"] = missing
+    return safe
+
+
+def startup_failure_record(exc: Exception, phase: str) -> dict:
+    record = {"schema_version": 1, "phase": phase, "exception_type": type(exc).__name__}
+    if isinstance(exc, OSError):
+        record["errno"] = exc.errno
+    if isinstance(exc, ModuleNotFoundError):
+        record["missing_module"] = exc.name
+    exited = re.match(r"Open Clank exited during startup \(code (-?\d+)\)", str(exc))
+    if exited:
+        record["child_exit_code"] = int(exited.group(1))
+    return safe_startup_record(record)
 
 
 def local_app_port() -> int:
@@ -22,12 +62,16 @@ def local_app_port() -> int:
 
 
 def app_owner() -> int:
+    global _OWNER_PHASE
+    _OWNER_PHASE = "imports"
     from scripts.openclank_bootstrap import verify_portable_payload
     from src.openclank.client_profiles import ClientProfile
     from src.openclank.server_manager import LocalServerManager
     from src.runtime_paths import get_app_root
 
+    _OWNER_PHASE = "payload"
     verify_portable_payload()
+    _OWNER_PHASE = "profile"
     profile = ClientProfile.create("macos-app", f"http://127.0.0.1:{local_app_port()}", auto_start=True)
     manager = LocalServerManager(repo_root=Path(get_app_root()))
     stopping = threading.Event()
@@ -36,9 +80,13 @@ def app_owner() -> int:
     import time
     # Use the same canonical start lock for the ownership decision and start;
     # another CLI cannot win a startup race and have its server stopped by Quit.
+    _OWNER_PHASE = "state-directory"
+    manager.state_dir.mkdir(parents=True, exist_ok=True)
+    _OWNER_PHASE = "start-lock"
     with manager._start_lock(time.monotonic() + 120):
         before = manager.status(profile)
         host, port = manager._address(profile)
+        _OWNER_PHASE = "server-start"
         status = manager._start_locked(profile, host=host, port=port,
                                        wait_seconds=120, allow_auth_setup=True)
         owned = status.pid != before.pid or not before.running
@@ -55,9 +103,11 @@ def app_owner() -> int:
         threading.Thread(target=reap, daemon=True, name="macos-server-reap").start()
     try:
         if not stopping.is_set():
+            _OWNER_PHASE = "browser"
             if not webbrowser.open(status.url):
                 raise RuntimeError("Open the browser at " + status.url)
             print("Open Clank browser opened", flush=True)
+        _OWNER_PHASE = "running"
         while not stopping.wait(0.5):
             if not status.pid or not manager._alive(status.pid):
                 raise RuntimeError("Open Clank server stopped; see its per-user server log")
@@ -75,7 +125,7 @@ def main() -> int:
         try:
             return app_owner()
         except Exception as exc:
-            print("Open Clank app: " + str(exc), file=sys.stderr)
+            print(STARTUP_DIAGNOSTIC_PREFIX + json.dumps(startup_failure_record(exc, _OWNER_PHASE), sort_keys=True), file=sys.stderr, flush=True)
             return 1
     from src.openclank.cli import main as cli_main
     return int(cli_main())

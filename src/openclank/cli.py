@@ -303,16 +303,24 @@ def _run_managed_server(values: list[str]) -> int:
     if str(args.host).lower().rstrip(".") not in {"localhost", "127.0.0.1", "::1"}:
         print("openclank: packaged server startup is restricted to loopback", file=sys.stderr)
         return 2
+    phase = "bootstrap"
     try:
         from scripts.openclank_bootstrap import prepare_service
 
         prepare_service()
+        phase = "uvicorn-import"
         import uvicorn
+        phase = "application-import"
         from app import app
 
+        phase = "serving"
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
         return 0
     except Exception as exc:
+        if sys.platform == "darwin":
+            from scripts.macos_entry import STARTUP_DIAGNOSTIC_PREFIX, startup_failure_record
+
+            print(STARTUP_DIAGNOSTIC_PREFIX + json.dumps(startup_failure_record(exc, phase), sort_keys=True), file=sys.stderr, flush=True)
         # Bootstrap exceptions contain invariant names and paths, never
         # provider credential values.  Do not expose tracebacks in the normal
         # packaged startup path.

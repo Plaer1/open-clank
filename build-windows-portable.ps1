@@ -150,9 +150,10 @@ foreach ($crate in $helperCrates) {
     }
 }
 }
-& $pyExe -m PyInstaller --noconfirm --clean --onefile --console --noupx --name openclank-windows-host-apps --paths . --distpath $stageBin --workpath (Join-Path $stageRoot 'host-apps-work') --specpath $stageRoot src/openclank/windows_host_apps.py
+# Absolute checkout inputs keep PyInstaller spec generation valid when temp and source use different drives.
+& $pyExe -m PyInstaller --noconfirm --clean --onefile --console --noupx --name openclank-windows-host-apps --paths $PSScriptRoot --distpath $stageBin --workpath (Join-Path $stageRoot 'host-apps-work') --specpath $stageRoot (Join-Path $PSScriptRoot 'src/openclank/windows_host_apps.py')
 if ($LASTEXITCODE -ne 0) { Fail 'Host application helper build failed.' }
-& $pyExe -m PyInstaller --noconfirm --clean --onefile --console --noupx --name openclank-windows-desktop-capture --paths . --collect-submodules winrt --collect-submodules PIL --distpath $stageBin --workpath (Join-Path $stageRoot 'desktop-work') --specpath $stageRoot src/windows_desktop_capture.py
+& $pyExe -m PyInstaller --noconfirm --clean --onefile --console --noupx --name openclank-windows-desktop-capture --paths $PSScriptRoot --collect-submodules winrt --collect-submodules PIL --distpath $stageBin --workpath (Join-Path $stageRoot 'desktop-work') --specpath $stageRoot (Join-Path $PSScriptRoot 'src/windows_desktop_capture.py')
 if ($LASTEXITCODE -ne 0) { Fail 'Desktop capture/OCR helper build failed.' }
 $adoptionArgs=@()
 if ($VerifiedRustArtifacts) { $adoptionArgs=@('--adoption-provenance-sha256',$VerifiedRustArtifactsSha256) }
@@ -171,7 +172,7 @@ $dataArgs = @(
 
 $pyInstallerExit = 1
 try {
-    & $pyExe -m PyInstaller --noconfirm --clean --onedir --console --noupx --distpath $targetDist --workpath (Join-Path $stageRoot 'app-work') --specpath $stageRoot --contents-directory _internal --icon=static/icon.ico --name openclank --hidden-import=app --hidden-import=scripts.openclank_bootstrap --hidden-import=scripts.openclank_engine --hidden-import=scripts.emoji_asset_bundle --collect-submodules=src --collect-submodules=core --collect-submodules=routes --collect-submodules=services --collect-submodules=keyring.backends --copy-metadata=keyring @dataArgs openclank_entry.py
+    & $pyExe -m PyInstaller --noconfirm --clean --onedir --console --noupx --distpath $targetDist --workpath (Join-Path $stageRoot 'app-work') --specpath $stageRoot --contents-directory _internal --paths $PSScriptRoot --icon (Join-Path $PSScriptRoot 'static/icon.ico') --name openclank --hidden-import=app --hidden-import=scripts.openclank_bootstrap --hidden-import=scripts.openclank_engine --hidden-import=scripts.emoji_asset_bundle --collect-submodules=src --collect-submodules=core --collect-submodules=routes --collect-submodules=services --collect-submodules=keyring.backends --copy-metadata=keyring @dataArgs (Join-Path $PSScriptRoot 'openclank_entry.py')
     $pyInstallerExit = $LASTEXITCODE
 } finally {
     Remove-Item -Recurse -Force $stageRoot -ErrorAction SilentlyContinue

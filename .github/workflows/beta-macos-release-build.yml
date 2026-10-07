@@ -65,6 +65,35 @@ jobs:
           cp dist/macos-arm64/OpenClank.app/Contents/Resources/package-manifest.json dist/macos-provenance/
           # Successful DMG and sealed app retain all package evidence. These are only this job's disposable build intermediates.
           rm -rf dist/macos-arm64/work dist/macos-arm64/engine
+      - name: Record sealed unqualified build identity
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PYTHON'
+          import hashlib, json, os
+          from pathlib import Path
+          paths = ["dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg", "dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg.sha256", "dist/macos-provenance/build-provenance.json", "dist/macos-provenance/package-manifest.json"]
+          entries = []
+          for name in paths:
+              path = Path(name)
+              with path.open("rb") as stream:
+                  digest = hashlib.file_digest(stream, "sha256").hexdigest()
+              entries.append({"path": name, "bytes": path.stat().st_size, "sha256": digest})
+          record = {"source_sha": os.environ["GITHUB_SHA"], "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"], "qualification": "unqualified-build-only", "files": entries}
+          Path("dist/macos-provenance/build-identity.json").write_text(json.dumps(record, indent=2) + "\n")
+          PYTHON
+      - name: Retain sealed build evidence before private runtime qualification
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Open-Clank-macos-arm64-build-unqualified
+          path: |
+            dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg
+            dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg.sha256
+            dist/macos-provenance/build-provenance.json
+            dist/macos-provenance/package-manifest.json
+            dist/macos-provenance/build-identity.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
       - name: Verify external artwork for disposable qualification
         env:
           GH_TOKEN: ${{ github.token }}

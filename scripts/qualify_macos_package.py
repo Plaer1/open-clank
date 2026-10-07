@@ -43,6 +43,37 @@ def fixture_png():
             + chunk(b'IDAT', zlib.compress(pixels)) + chunk(b'IEND', b''))
 
 
+def preauth_startup_diagnostics(work, home, owner_exit_code):
+    """Read bounded private tails; export only fixed-schema startup records."""
+    from scripts.macos_entry import STARTUP_DIAGNOSTIC_PREFIX, safe_startup_record
+
+    runtime = home / 'Library/Application Support/OpenClank/runtime'
+    result = {'owner_exit_code': owner_exit_code, 'runtime_directory_exists': runtime.is_dir(), 'records': []}
+    for label, path in [('owner', work / 'server.log'), ('managed', runtime / 'server.log')]:
+        result[label + '_log_exists'] = path.is_file()
+        try:
+            with path.open('rb') as source:
+                source.seek(0, os.SEEK_END)
+                source.seek(max(0, source.tell() - 8192))
+                lines = source.read(8192).decode('utf-8', errors='replace').splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.startswith(STARTUP_DIAGNOSTIC_PREFIX):
+                continue
+            try:
+                record = json.loads(line[len(STARTUP_DIAGNOSTIC_PREFIX):])
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            safe = safe_startup_record(record)
+            if safe:
+                result['records'].append({'source': label, **safe})
+    result['records'] = result['records'][-8:]
+    return result
+
+
 def qualify(bundle, target, output, parts=None, emoji_pack=None):
     if sys.platform != 'darwin':
         raise RuntimeError('Mac qualification requires actual native macOS execution')
@@ -127,12 +158,16 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
         deadline = time.monotonic() + 180
         while True:
             if process.poll() is not None:
-                raise RuntimeError('Packaged server exited before readiness; inspect server.log')
+                receipt['startup_diagnostics'] = preauth_startup_diagnostics(work, home, process.returncode)
+                print('Mac pre-auth startup diagnostics: ' + json.dumps(receipt['startup_diagnostics'], sort_keys=True), flush=True)
+                raise RuntimeError('Packaged server exited before readiness; inspect safe startup diagnostics')
             try:
                 if request('/api/health')['status'] == 'healthy':
                     break
             except (OSError, ValueError):
                 if time.monotonic() >= deadline:
+                    receipt['startup_diagnostics'] = preauth_startup_diagnostics(work, home, process.poll())
+                    print('Mac pre-auth startup diagnostics: ' + json.dumps(receipt['startup_diagnostics'], sort_keys=True), flush=True)
                     raise RuntimeError('Packaged server readiness timed out')
                 time.sleep(1)
         checks.append('fresh-data-packaged-server-startup')
