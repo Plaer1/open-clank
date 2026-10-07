@@ -6,6 +6,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -17,6 +18,13 @@ STARTUP_PHASES = frozenset({"imports", "payload", "profile", "state-directory",
                           "start-lock", "server-start", "browser", "running",
                           "bootstrap", "uvicorn-import", "application-import", "serving"})
 _OWNER_PHASE = "imports"
+_CODESIGN_REASONS = {
+    "a sealed resource is missing or invalid": "sealed-resource-changed",
+    "code object is not signed at all": "unsigned-code",
+    "invalid signature": "invalid-signature",
+    "bundle format unrecognized": "invalid-bundle-format",
+    "resource envelope is obsolete": "obsolete-resource-envelope",
+}
 
 
 def safe_startup_record(record: dict) -> dict:
@@ -28,13 +36,24 @@ def safe_startup_record(record: dict) -> dict:
     if not isinstance(kind, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", kind):
         return {}
     safe = {"schema_version": 1, "phase": record["phase"], "exception_type": kind}
-    for field in ("errno", "child_exit_code"):
+    for field in ("errno", "child_exit_code", "codesign_returncode"):
         value = record.get(field)
         if type(value) is int and -4096 <= value <= 4096:
             safe[field] = value
     missing = record.get("missing_module")
     if isinstance(missing, str) and len(missing) <= 160 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", missing):
         safe["missing_module"] = missing
+    reason = record.get("codesign_reason")
+    if isinstance(reason, str) and reason in {*_CODESIGN_REASONS.values(), "unclassified-signature-failure"}:
+        safe["codesign_reason"] = reason
+    changes = record.get("codesign_resource_changes")
+    if isinstance(changes, dict):
+        safe_counts = {key: value for key, value in changes.items()
+                       if key in {"added", "modified", "missing"} and type(value) is int and 0 <= value <= 1024}
+        if safe_counts:
+            safe["codesign_resource_changes"] = safe_counts
+    if type(record.get("sitecustomize_cache_added")) is bool:
+        safe["sitecustomize_cache_added"] = record["sitecustomize_cache_added"]
     return safe
 
 
@@ -47,6 +66,14 @@ def startup_failure_record(exc: Exception, phase: str) -> dict:
     exited = re.match(r"Open Clank exited during startup \(code (-?\d+)\)", str(exc))
     if exited:
         record["child_exit_code"] = int(exited.group(1))
+    if isinstance(exc, subprocess.CalledProcessError) and isinstance(exc.cmd, (list, tuple)) and exc.cmd and str(exc.cmd[0]) == "/usr/bin/codesign":
+        record["codesign_returncode"] = exc.returncode
+        stderr = exc.stderr or b""
+        detail = stderr[:8192].decode("utf-8", errors="replace") if isinstance(stderr, bytes) else str(stderr)[:8192]
+        record["codesign_reason"] = next((value for text, value in _CODESIGN_REASONS.items() if text in detail), "unclassified-signature-failure")
+        lines = detail.splitlines()
+        record["codesign_resource_changes"] = {kind: sum(line.startswith("file " + kind + ":") for line in lines) for kind in ("added", "modified", "missing")}
+        record["sitecustomize_cache_added"] = any(line.startswith("file added:") and "/__pycache__/sitecustomize." in line for line in lines)
     return safe_startup_record(record)
 
 

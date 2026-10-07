@@ -134,12 +134,14 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
                            cwd=work, check=True, timeout=180, stdout=verification)
         checks.append('sealed-Mac-payload-and-seven-native-helper-verification')
         runtime = bundle / 'Contents/Resources/runtime/_internal/python/bin/python3'
-        subprocess.run([str(runtime), '-I', '-c',
+        subprocess.run([str(runtime), '-I', '-B', '-c',
                         'import mcp,fastapi,sqlalchemy,grpc,cryptography,psycopg2;from src.openclank import lifetools_server; print("native child imports passed")'],
                        env=environment, cwd=work, check=True, timeout=60)
-        subprocess.run([str(runtime), '-I', '-m', 'json.tool', '--help'], env=environment,
+        subprocess.run([str(runtime), '-I', '-B', '-m', 'json.tool', '--help'], env=environment,
                        cwd=work, check=True, timeout=30, stdout=subprocess.DEVNULL)
         checks.append('standalone-private-python-I-c-and-m-without-PATH-python')
+        verify_bundle(bundle / 'Contents')
+        checks.append('private-python-probes-preserve-sealed-bundle')
         if parts is not None:
             subprocess.run([str(executable), 'assets', 'assemble', '--parts', str(parts)],
                            env=environment, cwd=work, check=True, timeout=600)

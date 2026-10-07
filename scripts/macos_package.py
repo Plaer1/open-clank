@@ -73,6 +73,20 @@ def entries(contents: Path):
     return result
 
 
+def install_python_startup(site: Path):
+    """Disable caches before sitecustomize or any other packaged .pth import."""
+    bootstrap = site / "000_openclank_no_bytecode.pth"
+    startup = site / "sitecustomize.py"
+    if bootstrap.exists() or startup.exists():
+        raise RuntimeError("Private Python already has an Open Clank startup hook")
+    if any(path.name <= bootstrap.name for path in site.glob("*.pth")):
+        raise RuntimeError("Private Python has a .pth hook before immutable runtime setup")
+    # .pth statements run before sitecustomize is compiled. Import only built-in
+    # sys here: setting the flag inside sitecustomize is too late for its cache.
+    bootstrap.write_text("import sys; sys.dont_write_bytecode = True\n", encoding="utf-8")
+    startup.write_text("import sys\nsys.dont_write_bytecode = True\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).resolve().parents[4]))\n", encoding="utf-8")
+
+
 def verify_bundle(contents: Path) -> dict:
     contents = contents.resolve()
     receipt = json.loads((contents / "Resources/package-manifest.json").read_text())
@@ -314,10 +328,7 @@ def build(output: Path, use_existing_engine: bool):
         if any(line.strip() and not line.startswith(("#", "import ")) and Path(line.strip()).is_absolute()
                for line in pth.read_text().splitlines()):
             raise RuntimeError("Private Python absolute site injection refused")
-    startup = site / "sitecustomize.py"
-    if startup.exists():
-        raise RuntimeError("Private Python already has a sitecustomize")
-    startup.write_text("import sys\nfrom pathlib import Path\nsys.dont_write_bytecode = True\nsys.path.insert(0, str(Path(__file__).resolve().parents[4]))\n")
+    install_python_startup(site)
     current = json.loads((engine_root / "current.json").read_text())
     artifact = child(engine_root, current["artifact"])
     bundled_engine = internal / "libexec/openclank/engine"
@@ -400,7 +411,10 @@ def build(output: Path, use_existing_engine: bool):
     run("/usr/bin/codesign", "--verify", "--deep", "--strict", app)
     verify_bundle(contents)
     private = internal / "python/bin/python3"
-    run(private, "-I", "-B", "-c", "import mcp,fastapi,sqlalchemy,grpc,cryptography,psycopg2;from src.runtime_paths import get_app_root;print('private-runtime-imports-passed')")
+    # Prove ordinary interpreter startup is immutable without a caller's -B.
+    run(private, "-c", "import sys;assert sys.dont_write_bytecode;print('private-runtime-default-startup-passed')")
+    run(private, "-I", "-c", "import sys;assert sys.dont_write_bytecode;import mcp,fastapi,sqlalchemy,grpc,cryptography,psycopg2;from src.runtime_paths import get_app_root;print('private-runtime-imports-passed')")
+    verify_bundle(contents)
     cli = resources / "runtime/openclank"
     run(cli, "--version")
     run(cli, "engine", "verify", "--json")
