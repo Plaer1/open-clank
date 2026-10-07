@@ -62,6 +62,27 @@ class LocalServerManager:
     def _alive(pid: int) -> bool:
         if pid <= 1:
             return False
+        if os.name == "nt":
+            # Windows os.kill(pid, 0) is CTRL_C_EVENT, not a read-only liveness
+            # probe. Query the process without sending any signal.
+            import ctypes
+            from ctypes import wintypes
+
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+            kernel.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+            kernel.CloseHandle.restype = wintypes.BOOL
+            handle = kernel.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return ctypes.get_last_error() == 5
+            try:
+                code = wintypes.DWORD()
+                return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+            finally:
+                kernel.CloseHandle(handle)
         try:
             os.kill(pid, 0)
         except OSError:
@@ -155,7 +176,7 @@ class LocalServerManager:
         return True, "ready"
 
     @staticmethod
-    def _presence_probe(url: str, *, timeout: float = 1.5) -> tuple[bool, str]:
+    def _presence_probe(url: str, *, timeout: float = 1.5, require_identity: bool = False) -> tuple[bool, str]:
         """Distinguish a reachable authenticated app from an empty port.
 
         `/api/ready` intentionally sits behind the normal auth middleware, so
@@ -175,6 +196,8 @@ class LocalServerManager:
         except httpx.HTTPError as exc:
             return False, str(exc)
         if response.status_code in {401, 403}:
+            if require_identity:
+                return False, "public application identity unavailable"
             return True, f"authentication endpoint returned HTTP {response.status_code}"
         if response.status_code != 200:
             return False, f"authentication endpoint returned HTTP {response.status_code}"
@@ -268,13 +291,13 @@ class LocalServerManager:
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
 
-    def start(self, profile: ClientProfile, *, wait_seconds: float = 60.0) -> ServerStatus:
+    def start(self, profile: ClientProfile, *, wait_seconds: float = 60.0, allow_auth_setup: bool = False) -> ServerStatus:
         host, port = self._address(profile)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + max(1.0, wait_seconds)
         with self._start_lock(deadline):
             remaining = max(1.0, deadline - time.monotonic())
-            return self._start_locked(profile, host=host, port=port, wait_seconds=remaining)
+            return self._start_locked(profile, host=host, port=port, wait_seconds=remaining, allow_auth_setup=allow_auth_setup)
 
     def _start_locked(
         self,
@@ -283,10 +306,17 @@ class LocalServerManager:
         host: str,
         port: int,
         wait_seconds: float,
+        allow_auth_setup: bool = False,
     ) -> ServerStatus:
         existing = self.status(profile)
         if existing.ready:
+            if allow_auth_setup and not (existing.pid and self._looks_like_server(existing.pid)):
+                raise ServerManagerError("browser launch refuses an application without a verified owned server process")
             return existing
+        if allow_auth_setup and existing.pid and self._looks_like_server(existing.pid):
+            present, detail = self._presence_probe(profile.url, require_identity=True)
+            if present:
+                return ServerStatus(True, existing.pid, profile.url, False, detail)
         if existing.running:
             raise ServerManagerError(f"Open Clank process {existing.pid} is running but not ready: {existing.detail}")
 
@@ -370,6 +400,10 @@ class LocalServerManager:
                 ready, detail = self._probe(profile.url, "/api/ready")
                 if ready:
                     return ServerStatus(True, process.pid, profile.url, True, "ready")
+                if allow_auth_setup:
+                    present, presence_detail = self._presence_probe(profile.url, require_identity=True)
+                    if present:
+                        return ServerStatus(True, process.pid, profile.url, False, presence_detail)
                 time.sleep(0.25)
             raise ServerManagerError(f"Open Clank did not become ready: {detail}; see {self.log_path}")
         except Exception:
@@ -401,8 +435,18 @@ class LocalServerManager:
         if not pid or not self._looks_like_server(pid):
             raise ServerManagerError("no verified Open Clank server process is recorded")
         try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError as exc:
+            if os.name == "nt":
+                # Detached Windows servers have no shared console for a
+                # CTRL_BREAK shutdown. Preserve termination semantics while
+                # also terminating helpers in this verified owned PID tree.
+                subprocess.run(
+                    [str(Path(os.environ["SystemRoot"]) / "System32/taskkill.exe"),
+                     "/PID", str(pid), "/T", "/F"],
+                    check=True, capture_output=True, timeout=30,
+                )
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except (OSError, subprocess.SubprocessError) as exc:
             raise ServerManagerError(f"could not stop Open Clank process {pid}: {exc}") from exc
         deadline = time.monotonic() + max(1.0, wait_seconds)
         while time.monotonic() < deadline and self._alive(pid):

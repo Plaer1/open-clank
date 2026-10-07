@@ -136,11 +136,24 @@ jobs:
           python -B scripts/qualify_windows_portable.py --bundle "dist/$env:RELEASE_TARGET/openclank" --target $env:RELEASE_TARGET --output "dist/qualification-$env:RELEASE_TARGET"
           if ($LASTEXITCODE -ne 0) { throw 'Actual packaged startup/auth/Files/helper qualification failed.' }
           Copy-Item (Join-Path $env:RUNNER_TEMP 'wdeps/receipt.json') "dist/qualification-$env:RELEASE_TARGET/native-dependencies.json"
+      - name: Build per-user installer from the qualified bundle
+        run: |
+          python -B scripts/build_windows_installer.py --bundle "dist/$env:RELEASE_TARGET/openclank" --target $env:RELEASE_TARGET --output-root dist/installers --tool-root (Join-Path $env:RUNNER_TEMP 'winstaller-tools') --qualification-receipt "dist/qualification-$env:RELEASE_TARGET/receipt.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Per-user installer build failed.' }
+      - name: Qualify actual installed startup and data-preserving uninstall
+        run: |
+          $installers = @(Get-ChildItem dist/installers -Filter "Open-Clank-*-$env:RELEASE_TARGET-Setup.exe")
+          if ($installers.Count -ne 1) { throw 'Require exactly one target-specific installer.' }
+          python -B scripts/qualify_windows_installer.py --installer $installers[0].FullName --target $env:RELEASE_TARGET --emoji-pack $env:QUALIFICATION_EMOJI_PACK --output "dist/installer-qualification-$env:RELEASE_TARGET"
+          if ($LASTEXITCODE -ne 0) { throw 'Actual per-user install/startup/auth/Files/thumbnail/uninstall qualification failed.' }
       - name: Require bounded release assets
         run: |
           $zips = @(Get-ChildItem dist -Filter "Open-Clank-*-$env:RELEASE_TARGET.zip")
           if ($zips.Count -ne 1 -or $zips[0].Length -ge 2GB) { throw 'Require exactly one reviewed ZIP under the GitHub 2 GiB per-file limit.' }
           if (-not (Test-Path ($zips[0].FullName + '.sha256'))) { throw 'Release ZIP checksum file is missing.' }
+          $installers = @(Get-ChildItem dist/installers -Filter "Open-Clank-*-$env:RELEASE_TARGET-Setup.exe")
+          if ($installers.Count -ne 1 -or $installers[0].Length -ge 2GB) { throw 'Require exactly one installer under the GitHub 2 GiB per-file limit.' }
+          if (-not (Test-Path ($installers[0].FullName + '.sha256'))) { throw 'Installer checksum file is missing.' }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Open-Clank-${{ matrix.target }}
@@ -148,6 +161,10 @@ jobs:
             dist/Open-Clank-*-${{ matrix.target }}.zip
             dist/Open-Clank-*-${{ matrix.target }}.zip.sha256
             dist/qualification-${{ matrix.target }}/
+            dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.exe
+            dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.exe.sha256
+            dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.provenance.json
+            dist/installer-qualification-${{ matrix.target }}/
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

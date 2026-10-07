@@ -70,6 +70,7 @@ def _parser() -> argparse.ArgumentParser:
     server = sub.add_parser("server", help="manage the complete local Open Clank service")
     server.add_argument("action", choices=("start", "stop", "status"))
     server.add_argument("--profile")
+    server.add_argument("--open-browser", action="store_true", help="start the local app and open its authenticated browser interface")
 
     engine = sub.add_parser("engine", help="build and verify the private managed engine")
     engine.add_argument("engine_args", nargs=argparse.REMAINDER)
@@ -230,8 +231,13 @@ def _run_logout(args, store: ProfileStore, vault: ClientCredentialVault) -> int:
 def _run_server(args, store: ProfileStore) -> int:
     profile = _profile_for(args, store)
     manager = LocalServerManager(repo_root=REPO_ROOT)
+    if args.open_browser and args.action != "start":
+        raise ProfileError("--open-browser is available only with server start")
     if args.action == "start":
-        status = manager.start(profile)
+        status = manager.start(profile, allow_auth_setup=args.open_browser)
+        if args.open_browser:
+            if not webbrowser.open(status.url):
+                raise ServerManagerError("Windows could not open the browser; open " + status.url)
     elif args.action == "stop":
         status = manager.stop(profile)
     else:
@@ -243,7 +249,7 @@ def _run_server(args, store: ProfileStore) -> int:
         return 0
     if args.action == "status" and status.running:
         return 0
-    return 0 if status.ready else 1
+    return 0 if status.ready or (args.open_browser and status.running) else 1
 
 
 def _run_engine(args) -> int:

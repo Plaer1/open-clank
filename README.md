@@ -86,11 +86,18 @@ as a data migration.
 
 ## Other installation paths
 
-[The Windows launcher](docs/setup.md#native-windows) supports the tested Windows
-source installation, including Files, Editor and native image/video thumbnails.
-The release also prepares `Open-Clank-1.0.2-windows-x64.zip` and an ARM64
-counterpart. Use only the architectures actually offered after qualification;
-see [Windows package installation](docs/setup.md#windows-release-package).
+For Windows, the easiest planned path is the per-user installer:
+`Open-Clank-1.0.2-windows-x64-Setup.exe` or the ARM64 counterpart. It includes
+private Python and native app dependencies, creates Start menu shortcuts, and
+can download and verify the complete offline artwork or use existing parts.
+No global Python/PATH changes are needed. ZIP packages remain an alternative.
+Installers and native packages are still awaiting qualification; use only
+architectures offered by the published release. See
+[Windows installation](docs/setup.md#windows-release-package), including
+unsigned Beta and data-preserving uninstall details.
+
+[The Windows source launcher](docs/setup.md#native-windows) also supports the
+tested source installation, including Files, Editor and native thumbnails.
 [Linux source setup](docs/setup.md#linux) is available, but Linux support remains
 unqualified.
 

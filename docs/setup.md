@@ -108,12 +108,38 @@ selected model. Cookbook background downloads and serves use `tmux`.
 
 ### Windows release package
 
-The release prepares `Open-Clank-1.0.2-windows-x64.zip` and
-`Open-Clank-1.0.2-windows-arm64.zip`. Native package qualification is still
-pending; download only an architecture actually offered by the published
-release. These packages carry a private Python runtime, managed engine and
-native workers, so they do not require system Python, Cargo or Bun.
+The easiest planned installation is the per-user Setup executable:
+`Open-Clank-1.0.2-windows-x64-Setup.exe` or
+`Open-Clank-1.0.2-windows-arm64-Setup.exe`. Installer and native package
+qualification is still pending; downloads become available after publication,
+and only architectures actually offered by the release should be installed.
+This Beta is unsigned. Windows may show an unsigned-app warning; check the
+release source and checksum before deciding to run it.
 
+Setup installs beneath your account's
+`%LOCALAPPDATA%\Programs\Open Clank Beta\windows-x64` (or `windows-arm64`)
+without administrator installation or global Python/PATH changes. Its private
+Python runtime, managed engine and native workers require no system Python,
+Cargo or Bun. The ARM64 package contains a native ARM64 application payload;
+the Inno Setup launcher itself is x64 and uses Windows ARM x64 emulation.
+
+The complete offline-artwork task is selected by default. It downloads about
+2.2 GB of pinned release parts with progress and retry, or accepts a folder
+containing all five parts and `emoji-assets.parts.json`. Setup verifies every
+file and assembles the pinned pack into writable personal application data.
+You may skip artwork and later run the assembly command below without
+uninstalling; missing artwork does not enable any runtime CDN fallback.
+
+Start menu **Open Clank** runs `openclank.exe server start --open-browser`;
+**Stop Open Clank** runs `openclank.exe server stop`. The desktop shortcut is
+optional and off by default. Setup does not automatically launch the app when
+installation finishes. Launch Open Clank and follow mandatory browser setup to
+create the first administrator, then sign in normally. The server remains on
+loopback by default. Uninstall removes the installed program and shortcuts,
+while preserving personal data and installed artwork; it is not a data reset.
+
+For a portable alternative, download `Open-Clank-1.0.2-windows-x64.zip` or
+`Open-Clank-1.0.2-windows-arm64.zip` from the same qualified release.
 Extract the ZIP and keep its entire `openclank` directory together, including
 `_internal` and checksum files. Download the shared five artwork parts and
 `emoji-assets.parts.json` into a separate directory. From the extracted app
@@ -122,15 +148,15 @@ directory, run in PowerShell:
 ```powershell
 .\openclank.exe assets assemble --parts C:\path\to\emoji-parts
 .\openclank.exe assets verify
-.\openclank.exe server start
+.\openclank.exe server start --open-browser
 ```
 
 Assembly installs the pinned pack in normal writable application data, outside
 `_internal`. `OPEN_CLANK_DATA_DIR` can select an explicit data directory; use the
 same value for assembly, verification and server startup. Open
 `http://127.0.0.1:7777` and follow first-run setup to create the administrator.
-Running `.\openclank.exe` without arguments opens the TUI/device authorization
-flow. Missing artwork leaves artwork endpoints unavailable with an install
+Run `.\openclank.exe server stop` to stop the owned server. Running
+`.\openclank.exe` without arguments opens the TUI/device authorization flow. Missing artwork leaves artwork endpoints unavailable with an install
 hint; it does not silently fetch from a CDN.
 
 ### Windows
