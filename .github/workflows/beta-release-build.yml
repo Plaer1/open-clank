@@ -50,6 +50,10 @@ jobs:
       NATIVE_ARCH: ${{ matrix.architecture }}
       EMOJI_RELEASE_TAG: ${{ inputs.emoji_release_tag || 'v1.0.2-beta.1-artwork' }}
     steps:
+      - name: Preserve real vendored symlinks before checkout
+        run: |
+          git config --global core.symlinks true
+          if ($LASTEXITCODE -ne 0) { throw 'Runner cannot enable the source symlink checkout contract.' }
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
@@ -63,6 +67,26 @@ jobs:
         with:
           python-version: '3.13.16'
           architecture: ${{ matrix.architecture }}
+      - name: Validate exact Engine checkout before expensive builds
+        run: |
+          @'
+          import subprocess
+          from pathlib import Path
+          from src.openclank.engine_build import source_fingerprint
+          raw = subprocess.check_output(['git', 'ls-files', '-s', '-z', '--', 'packages/mimo-code'])
+          links = []
+          for record in raw.split(b'\0'):
+              if record and record.startswith(b'120000 '):
+                  links.append(Path(record.split(b'\t', 1)[1].decode('utf-8')))
+          actual = sum(path.is_symlink() for path in links)
+          print(f'Engine checkout symlinks: tracked={len(links)}, actual={actual}, plain_or_missing={len(links)-actual}')
+          print('Engine checkout SHA256: ' + source_fingerprint(Path('packages/mimo-code')))
+          if actual != len(links):
+              raise SystemExit('Engine checkout must retain actual Git symlinks; no text-file substitution')
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'Native checkout source-type diagnostic failed.' }
+          python -B scripts/openclank_engine.py contract --json
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Engine source contract failed before dependency/native builds; do not repin or bypass.' }
       - name: Initialize native MSVC and LLVM
         run: |
           $ErrorActionPreference = 'Stop'
