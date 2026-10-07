@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "cryptography": {
+      "name": "cryptography",
+      "version": "50.0.2",
+      "filename": "cryptography-50.0.2.tar.gz",
+      "url": "https://files.pythonhosted.org/packages/9d/af/182eb91b0df3fe75c4d9f26fe70684569566745f6ba7e5c9c73a862c5252/cryptography-50.0.2.tar.gz",
+      "sha256": "7b46165bb56eb4704e2eaaf86f3c940d19154535d9b0ca7d6d590b04060e00d5",
+      "size": 880623,
+      "authority": "https://pypi.org/pypi/cryptography/50.0.2/json",
+      "role": "source-build-input"
+    },
+    "psycopg2-binary": {
+      "name": "psycopg2-binary",
+      "version": "2.9.13",
+      "filename": "psycopg2_binary-2.9.13.tar.gz",
+      "url": "https://files.pythonhosted.org/packages/ed/76/7b4383014be0fcc6c1c0e24292845a14e1672cf17fca62ca0a2bd5f4563d/psycopg2_binary-2.9.13.tar.gz",
+      "sha256": "e324ecf60f952d21dd11413b8bbed0951bbd99579a06fd06f28bfc37737cd373",
+      "size": 378112,
+      "authority": "https://pypi.org/pypi/psycopg2-binary/2.9.13/json",
+      "role": "source-build-input"
+    },
+    "meson": {
+      "name": "meson",
+      "version": "1.12.1",
+      "filename": "meson-1.12.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/57/99/36cd25f9598eef70db97577440a70a360af505f6f01c2338a18d1556079c/meson-1.12.1-py3-none-any.whl",
+      "sha256": "930bc7542cbd9f57009e182fd014eba48cf1a0180a7b9006d2d32d8f168d8b02",
+      "size": 1108668,
+      "authority": "https://pypi.org/pypi/meson/1.12.1/json",
+      "role": "native-build-tool-wheel"
+    },
+    "ninja": {
+      "name": "ninja",
+      "version": "1.13.2",
+      "filename": "ninja-1.13.2-py3-none-win_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/b7/8d/59a31fa508070d042571d9d226b541a21000756817313f397da22287ad34/ninja-1.13.2-py3-none-win_arm64.whl",
+      "sha256": "1db9852e528efa7702f5123969f86678663e46d57ff28ab13f5fd84d64a85fb1",
+      "size": 290620,
+      "authority": "https://pypi.org/pypi/ninja/1.13.2/json",
+      "role": "native-build-tool-wheel"
+    },
+    "OpenSSL": {
+      "name": "OpenSSL",
+      "version": "3.5.9",
+      "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
+      "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+      "authority": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz.sha256",
+      "role": "native-static-SSL-source"
+    },
+    "PostgreSQL": {
+      "name": "PostgreSQL",
+      "version": "18.6",
+      "url": "https://ftp.postgresql.org/pub/source/v18.6/postgresql-18.6.tar.bz2",
+      "sha256": "555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f",
+      "size": 22632314,
+      "authority": "https://ftp.postgresql.org/pub/source/v18.6/postgresql-18.6.tar.bz2.sha256",
+      "role": "client-only-libpq-source"
+    },
+    "Strawberry-Perl-portable": {
+      "name": "Strawberry-Perl-portable",
+      "version": "5.42.3.1",
+      "url": "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54231_64bit/strawberry-perl-5.42.3.1-64bit-portable.zip",
+      "sha256": "6a081a811781c30aca51dbc036afd93092af91e3297901f02c17043795a10690",
+      "size": 304765269,
+      "authority": "https://strawberryperl.com/releases.json",
+      "role": "emulated-x64-Perl-driver-only-no-bundled-compiler-or-libraries"
+    },
+    "grpcio": {
+      "name": "grpcio",
+      "version": "1.83.0",
+      "filename": "grpcio-1.83.0.tar.gz",
+      "url": "https://files.pythonhosted.org/packages/0c/98/304898ac4e04e2d5e4e4c2eadc178b1f2a16d5f4bc2f91306c87d64680b9/grpcio-1.83.0.tar.gz",
+      "sha256": "7674587248fbbb2ac6e4eecf83a8a0f3d91a928f941de571acfd3a2f007fbc24"
+    }
+  },
+  "tools": [
+    {
+      "name": "maturin",
+      "version": "1.15.0",
+      "filename": "maturin-1.15.0-py3-none-win_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/8b/10/15d4314edf130955edf2dc237aa393a8a7c10f2b9b57b89fa2f61f915659/maturin-1.15.0-py3-none-win_arm64.whl",
+      "sha256": "c7dc0c66c78d3debdd9c5aa807e861fbcbf07f3505d34b125df74c03986b0f48",
+      "authority": "https://pypi.org/pypi/maturin/1.15.0/json"
+    },
+    {
+      "name": "cffi",
+      "version": "2.1.1",
+      "filename": "cffi-2.1.1-cp313-cp313-win_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/01/9a/11f687cb39d6a3504060d5242f04f48c735afb4d3d533958a20594890cb2/cffi-2.1.1-cp313-cp313-win_arm64.whl",
+      "sha256": "63bbfd5ded17c4840ac07cd8f1c21ba9d9708141f840b324f422f41b207e3973",
+      "authority": "https://pypi.org/pypi/cffi/2.1.1/json"
+    },
+    {
+      "name": "pycparser",
+      "version": "3.0",
+      "filename": "pycparser-3.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+      "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+      "authority": "https://pypi.org/pypi/pycparser/3.0/json"
+    },
+    {
+      "name": "delvewheel",
+      "version": "1.13.1",
+      "filename": "delvewheel-1.13.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ea/d0/fc48bf4c00b80c1ced5ce3740ea0c5d040758dafce385275e5de559375a4/delvewheel-1.13.1-py3-none-any.whl",
+      "sha256": "1b3bc696193a57e322b8bfd644de240be6e003066aae44cc3d5aef8cbee22ca3",
+      "authority": "https://pypi.org/pypi/delvewheel/1.13.1/json"
+    },
+    {
+      "name": "pefile",
+      "version": "2024.8.26",
+      "filename": "pefile-2024.8.26-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/54/16/12b82f791c7f50ddec566873d5bdd245baa1491bac11d15ffb98aecc8f8b/pefile-2024.8.26-py3-none-any.whl",
+      "sha256": "76f8b485dcd3b1bb8166f1128d395fa3d87af26360c2358fb75b80019b957c6f",
+      "authority": "https://pypi.org/pypi/pefile/2024.8.26/json"
+    },
+    {
+      "name": "setuptools",
+      "version": "84.0.0",
+      "filename": "setuptools-84.0.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl",
+      "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
+    },
+    {
+      "name": "wheel",
+      "version": "0.48.0",
+      "filename": "wheel-0.48.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl",
+      "sha256": "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab"
+    },
+    {
+      "name": "Cython",
+      "version": "3.1.1",
+      "filename": "cython-3.1.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a7/97/8e8637e67afc09f1b51a617b15a0d1caf0b5159b0f79d47ab101e620e491/cython-3.1.1-py3-none-any.whl",
+      "sha256": "07621e044f332d18139df2ccfcc930151fd323c2f61a58c82f304cffc9eb5280"
+    },
+    {
+      "name": "packaging",
+      "version": "26.3",
+      "filename": "packaging-26.3-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+      "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+    },
+    {
+      "name": "typing_extensions",
+      "version": "4.16.0",
+      "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+    }
+  ]
+}

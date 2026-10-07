@@ -1,0 +1,153 @@
+name: Beta release Windows builds
+
+on:
+  push:
+    branches: [codex/beta1-release-build-20261006]
+  workflow_dispatch:
+    inputs:
+      emoji_release_tag:
+        description: Same-repository release containing the pinned shared offline artwork parts
+        required: true
+        default: v1.0.2-beta.1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-release-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    if: github.ref == 'refs/heads/codex/beta1-release-build-20261006'
+    name: Native ${{ matrix.target }} portable qualification
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-latest
+            architecture: x64
+            rust_host: x86_64-pc-windows-msvc
+            bun_archive: bun-windows-x64
+            bun_sha256: e6f093d39da486b20262ca8cdd5ed6a9e8bc9c2f275b78e6d3a0c5b28cc95901
+          - target: windows-arm64
+            runner: windows-11-arm
+            architecture: arm64
+            rust_host: aarch64-pc-windows-msvc
+            bun_archive: bun-windows-aarch64
+            bun_sha256: f473bfe2df73ee770548c93dd5d380aea7120c218ec2aa1afdd0bbba7bf18c47
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUSTUP_TOOLCHAIN: 1.99.0-${{ matrix.rust_host }}
+      RELEASE_TARGET: ${{ matrix.target }}
+      NATIVE_ARCH: ${{ matrix.architecture }}
+      EMOJI_RELEASE_TAG: ${{ inputs.emoji_release_tag || 'v1.0.2-beta.1' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Check shared release access before building
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:EMOJI_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Shared release assets are unavailable to the read-only repository token. Do not substitute a personal token or broader job permissions.' }
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13.16'
+          architecture: ${{ matrix.architecture }}
+      - name: Initialize native MSVC and LLVM
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = (& $vswhere -latest -products '*' -property installationPath | Select-Object -First 1)
+          if (-not $vs) { throw 'Native Visual Studio installation is missing.' }
+          $devcmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
+          $command = '"' + $devcmd + '" -no_logo -arch=' + $env:NATIVE_ARCH + ' -host_arch=' + $env:NATIVE_ARCH + ' && set'
+          $priorEnvironment = @{}
+          Get-ChildItem Env: | ForEach-Object { $priorEnvironment[$_.Name] = $_.Value }
+          $lines = & cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw 'Native MSVC environment initialization failed.' }
+          foreach ($line in $lines) {
+            $index = $line.IndexOf('=')
+            if ($index -gt 0) {
+              $name = $line.Substring(0, $index); $value = $line.Substring($index + 1)
+              [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+              if ($priorEnvironment[$name] -cne $value -and $name -notmatch '^(GITHUB_|RUNNER_|ACTIONS_)') { Add-Content -Path $env:GITHUB_ENV -Value "$name=$value" }
+            }
+          }
+          if ($env:VSCMD_ARG_TGT_ARCH -ne $env:NATIVE_ARCH -or $env:VSCMD_ARG_HOST_ARCH -ne $env:NATIVE_ARCH) { throw 'MSVC host/target architecture mismatch.' }
+          $llvm = Join-Path $env:ProgramFiles 'LLVM/bin'
+          if (-not (Test-Path (Join-Path $llvm 'libclang.dll'))) { throw 'Native LLVM/libclang is missing.' }
+          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvm"
+          Add-Content -Path $env:GITHUB_PATH -Value $llvm
+      - name: Install exact native Rust and Bun
+        env:
+          BUN_ARCHIVE: ${{ matrix.bun_archive }}
+          BUN_SHA256: ${{ matrix.bun_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain installation failed.' }
+          $rust = (& rustc -vV | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $rust -notmatch 'release: 1[.]99[.]0' -or $rust -notmatch [regex]::Escape('host: ${{ matrix.rust_host }}')) { throw 'Rust version/native host mismatch.' }
+          $zip = Join-Path $env:RUNNER_TEMP 'bun.zip'
+          Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/$env:BUN_ARCHIVE.zip" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:BUN_SHA256) { throw 'Pinned Bun archive hash mismatch.' }
+          $root = Join-Path $env:RUNNER_TEMP 'bun-native'
+          Expand-Archive $zip -DestinationPath $root
+          Remove-Item $zip
+          $bin = Join-Path $root $env:BUN_ARCHIVE
+          $bun = Join-Path $bin 'bun.exe'
+          if ((& $bun --version | Out-String).Trim() -ne '1.4.0') { throw 'Pinned Bun version mismatch.' }
+          if ((& $bun -e 'console.log(process.arch)' | Out-String).Trim() -ne $env:NATIVE_ARCH) { throw 'Bun native architecture mismatch.' }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+      - name: Install complete native Python dependencies
+        run: |
+          $python = (Get-Command python).Source
+          & $python -B scripts/windows_native_dependencies.py --target $env:RELEASE_TARGET --work-root (Join-Path $env:RUNNER_TEMP 'wdeps')
+          if ($LASTEXITCODE -ne 0) { throw 'Complete native dependency preparation failed; no reduced-feature or emulated fallback is allowed.' }
+      - name: Build portable bundle without shared artwork
+        run: |
+          $python = (Get-Command python).Source
+          ./build-windows-portable.ps1 -Target $env:RELEASE_TARGET -PythonExecutable $python -BunExecutable (Get-Command bun).Source -ReuseInstalledDependencies
+          if ($LASTEXITCODE -ne 0) { throw 'Native portable build failed.' }
+      - name: Acquire and verify shared artwork for disposable qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $parts = Join-Path $env:RUNNER_TEMP 'emoji-parts'
+          gh release download $env:EMOJI_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*' --dir $parts
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned shared release asset download failed.' }
+          $pack = Join-Path $env:RUNNER_TEMP 'emoji-assets.pack'
+          python -B scripts/emoji_asset_bundle.py assemble --parts $parts --pack $pack
+          if ($LASTEXITCODE -ne 0) { throw 'Shared artwork SHA/size/SQLite/catalog verification failed.' }
+          Remove-Item $parts -Recurse -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "QUALIFICATION_EMOJI_PACK=$pack"
+      - name: Qualify actual native packaged first run
+        run: |
+          python -B scripts/qualify_windows_portable.py --bundle "dist/$env:RELEASE_TARGET/openclank" --target $env:RELEASE_TARGET --output "dist/qualification-$env:RELEASE_TARGET"
+          if ($LASTEXITCODE -ne 0) { throw 'Actual packaged startup/auth/Files/helper qualification failed.' }
+          Copy-Item (Join-Path $env:RUNNER_TEMP 'wdeps/receipt.json') "dist/qualification-$env:RELEASE_TARGET/native-dependencies.json"
+      - name: Require bounded release assets
+        run: |
+          $zips = @(Get-ChildItem dist -Filter "Open-Clank-*-$env:RELEASE_TARGET.zip")
+          if ($zips.Count -ne 1 -or $zips[0].Length -ge 2GB) { throw 'Require exactly one reviewed ZIP under the GitHub 2 GiB per-file limit.' }
+          if (-not (Test-Path ($zips[0].FullName + '.sha256'))) { throw 'Release ZIP checksum file is missing.' }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Open-Clank-${{ matrix.target }}
+          path: |
+            dist/Open-Clank-*-${{ matrix.target }}.zip
+            dist/Open-Clank-*-${{ matrix.target }}.zip.sha256
+            dist/qualification-${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

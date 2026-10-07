@@ -83,6 +83,11 @@ def _unique_paths(values: Iterable[Path | str]) -> list[Path]:
 
 def _python_candidate_paths(repo_root: Path | None = None) -> list[Path]:
     root = (repo_root or Path(get_app_root())).resolve()
+    if getattr(sys, "frozen", False) and os.name == "nt":
+        # The public executable is a frozen CLI, never a general interpreter.
+        # Child protocols must use the checksummed, target-matching runtime;
+        # developer PATH/venv installations cannot mask an incomplete release.
+        return [Path(get_app_root()).resolve() / "python" / "python.exe"]
     names = ("python.exe", "python") if os.name == "nt" else ("bin/python",)
     project = [root / ".venv" / names[0], root / "venv" / names[0]]
     if os.name == "nt":

@@ -1,21 +1,41 @@
-"""Immutable packaged Google/Kitchen artwork; no network or user-cache writes."""
+"""Verified local Google/Kitchen artwork; no runtime network or cache writes."""
 from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from functools import lru_cache
 from contextlib import contextmanager
 from pathlib import Path
-from src.runtime_paths import get_app_root
+from scripts.emoji_asset_bundle import BundleError, expected_manifest, runtime_asset_paths, verify
 
-_PACK = Path(get_app_root()) / "static/vendor/google-emoji/emoji-assets.pack"
+_PACK, _MANIFEST = runtime_asset_paths()
 _ID = re.compile(r"^[gk]:[0-9a-f]+(?:-[0-9a-f]+)*(?:_[0-9a-f]+(?:-[0-9a-f]+)*)?$")
+
+
+def artwork_install_hint() -> str:
+    command = "openclank assets assemble" if getattr(sys, "frozen", False) else "python3 scripts/emoji_asset_bundle.py assemble"
+    return f"Install the matching offline release parts with {command} --parts <directory>."
+
+
+@lru_cache(maxsize=1)
+def _verify_frozen_pack(path: str, identity: tuple[int, ...]) -> None:
+    # An install command verifies before atomic publication. Verify the exact
+    # bundled pin once per local file identity as well, so an arbitrary file in
+    # writable application data cannot masquerade as shipped artwork.
+    try:
+        verify(Path(path), expected_manifest(_MANIFEST))
+    except (BundleError, KeyError, TypeError) as exc:
+        raise RuntimeError("Offline emoji artwork failed pinned verification") from exc
 
 
 @contextmanager
 def _connect():
     if not _PACK.is_file():
-        raise RuntimeError("Packaged emoji artwork is missing")
+        raise RuntimeError("Offline emoji artwork is missing. " + artwork_install_hint())
+    if getattr(sys, "frozen", False):
+        stat = _PACK.stat()
+        _verify_frozen_pack(str(_PACK), (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
     db = sqlite3.connect(_PACK.as_uri() + "?mode=ro&immutable=1", uri=True)
     db.execute("PRAGMA query_only=ON")
     try:

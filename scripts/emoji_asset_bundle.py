@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,36 @@ BUFFER_BYTES = 4 * 1024 * 1024
 
 class BundleError(RuntimeError):
     pass
+
+
+def runtime_asset_paths(
+    *, app_root: Path | None = None, data_dir: Path | None = None,
+    frozen: bool | None = None,
+) -> tuple[Path, Path]:
+    """Resolve the install destination and immutable bundled pin.
+
+    Source setup stays inside its writable checkout. Frozen executables keep
+    the large install-time payload in normal application data, outside their
+    checksummed bundle. No runtime download or caller-supplied manifest is used.
+    """
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    if app_root is None:
+        if is_frozen:
+            from src.runtime_paths import get_app_root
+            app_root = Path(get_app_root())
+        else:
+            app_root = ROOT
+    assets = Path(app_root).expanduser().absolute() / "static/vendor/google-emoji"
+    if is_frozen:
+        if data_dir is None:
+            from src.runtime_paths import get_default_data_dir
+            data_dir = Path(os.environ.get("OPEN_CLANK_DATA_DIR")
+                            or os.environ.get("ODYSSEUS_DATA_DIR")
+                            or get_default_data_dir())
+        pack = Path(data_dir).expanduser().absolute() / "assets/google-emoji/emoji-assets.pack"
+    else:
+        pack = assets / "emoji-assets.pack"
+    return pack, assets / "bundle-manifest.json"
 
 
 def file_digest(path: Path) -> tuple[int, str]:
@@ -143,8 +174,9 @@ def assemble(parts_root: Path, destination: Path, expected: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("verify", "split", "assemble"))
-    parser.add_argument("--pack", type=Path, default=ASSETS / "emoji-assets.pack")
-    parser.add_argument("--manifest", type=Path, default=ASSETS / "bundle-manifest.json")
+    default_pack, default_manifest = runtime_asset_paths()
+    parser.add_argument("--pack", type=Path, default=default_pack)
+    parser.add_argument("--manifest", type=Path, default=default_manifest)
     parser.add_argument("--parts", type=Path, help="local part output/input directory")
     parser.add_argument("--part-bytes", type=int, default=MAX_PART_BYTES)
     args = parser.parse_args()

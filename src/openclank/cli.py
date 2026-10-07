@@ -32,6 +32,7 @@ RESERVED_COMMANDS = {
     "server",
     "engine",
     "hex",
+    "assets",
     "help",
 }
 
@@ -80,7 +81,29 @@ def _parser() -> argparse.ArgumentParser:
     )
     hexes.add_argument("hex_args", nargs=argparse.REMAINDER)
 
+    assets = sub.add_parser("assets", help="assemble or verify the complete offline artwork")
+    assets.add_argument("action", choices=("assemble", "verify"))
+    assets.add_argument("--parts", type=Path, help="directory containing the five release parts and their manifest")
+
     return parser
+
+
+def _run_assets(args) -> int:
+    from scripts.emoji_asset_bundle import BundleError, assemble, expected_manifest, runtime_asset_paths, verify
+
+    try:
+        pack, manifest = runtime_asset_paths()
+        expected = expected_manifest(manifest)
+        if args.action == "assemble":
+            if args.parts is None:
+                raise ProfileError("assets assemble requires --parts")
+            assemble(args.parts, pack, expected)
+        else:
+            verify(pack, expected)
+    except (BundleError, OSError, ValueError, KeyError) as exc:
+        raise ProfileError("Offline artwork verification or assembly failed; existing installed artwork was preserved") from exc
+    print("Complete offline artwork verified.")
+    return 0
 
 
 def _version() -> str:
@@ -318,6 +341,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         print(f"Open Clank {_version()}")
         return 0
+    if args.command == "assets":
+        try:
+            return _run_assets(args)
+        except ProfileError as exc:
+            print(f"openclank: {exc}", file=sys.stderr)
+            return 1
     store = ProfileStore()
     vault = ClientCredentialVault()
     try:

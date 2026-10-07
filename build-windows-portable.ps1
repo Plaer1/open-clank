@@ -7,6 +7,7 @@ param(
     [string]$EngineInstallRoot,
     [string]$VerifiedRustArtifacts,
     [string]$VerifiedRustArtifactsSha256,
+    [switch]$ReuseInstalledDependencies,
     [switch]$IncludeCopalRedb
 )
 
@@ -70,11 +71,14 @@ if ($LASTEXITCODE -ne 0 -or $hostTarget -notin $expectedPython) {
     Fail "Portable $Target requires matching target Python and complete requirements (found $hostTarget)."
 }
 $rustTarget = if ($Target -eq 'windows-arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+$targetDist = Join-Path $PSScriptRoot ('dist\' + $Target)
+if (Test-Path (Join-Path $targetDist 'openclank')) { Fail 'Target bundle already exists; preserve it and choose a fresh build location before rebuilding.' }
 
-Write-Step "Installing build dependencies"
-& $pyExe -m pip install --upgrade pip --quiet
-& $pyExe -m pip install -r requirements.txt pyinstaller==6.16.0
-if ($LASTEXITCODE -ne 0) { Fail "Dependency install failed." }
+if (-not $ReuseInstalledDependencies) {
+    Write-Step "Installing build dependencies"
+    & $pyExe -m pip install -r requirements.txt pyinstaller==6.16.0
+    if ($LASTEXITCODE -ne 0) { Fail "Dependency install failed." }
+}
 
 # Separate target engine pointer/output without copying the full source tree.
 $sourceEngineRoot = Join-Path $PSScriptRoot "libexec\openclank\engine"
@@ -106,6 +110,15 @@ if (-not $sourceArtifactRelative -or [System.IO.Path]::IsPathRooted($sourceArtif
 $sourceArtifact = Join-Path $sourceEngineRoot $sourceArtifactRelative.Replace("/", "\")
 if (-not (Test-Path $sourceArtifact -PathType Container)) { Fail "Verified engine artifact is missing." }
 $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("openclank-windows-portable-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $stageRoot | Out-Null
+& $pyExe -B scripts/windows_portable_build.py dependencies --output (Join-Path $stageRoot 'build-dependencies.json')
+if ($LASTEXITCODE -ne 0) { Fail 'Complete matching-target installed dependency verification failed.' }
+$stageData = Join-Path $stageRoot 'data'
+& $pyExe -B scripts/windows_portable_build.py stage-data --output $stageData
+if ($LASTEXITCODE -ne 0) { Fail 'Release resource staging failed.' }
+Copy-Item (Join-Path $stageRoot 'build-dependencies.json') (Join-Path $stageData 'build-dependencies.json')
+& $pyExe -B scripts/windows_portable_build.py stage-python --target $Target --output (Join-Path $stageData 'python')
+if ($LASTEXITCODE -ne 0) { Fail 'Standalone matching-target child Python staging failed.' }
 $stageEngineRoot = Join-Path $stageRoot "libexec\openclank\engine"
 $stageArtifact = Join-Path $stageEngineRoot $sourceArtifactRelative.Replace("/", "\")
 New-Item -ItemType Directory -Path (Split-Path $stageArtifact -Parent) -Force | Out-Null
@@ -151,19 +164,14 @@ $targetDist = Join-Path $PSScriptRoot ('dist\' + $Target)
 if (Test-Path (Join-Path $targetDist 'openclank')) { Fail 'Target bundle already exists; preserve it and choose a fresh build location before rebuilding.' }
 
 $dataArgs = @(
-    "--add-data", "static;static",
-    "--add-data", "scripts;scripts",
-    "--add-data", "mcp_servers;mcp_servers",
-    "--add-data", "services/hwfit/data;services/hwfit/data",
-    "--add-data", "config;config",
-    "--add-data", "contracts;contracts",
+    "--add-data", ($stageData + ";."),
     "--add-data", ((Join-Path $stageRoot "libexec") + ";libexec")
     "--add-data", ($stageBin + ";bin")
 )
 
 $pyInstallerExit = 1
 try {
-    & $pyExe -m PyInstaller --noconfirm --clean --onedir --console --noupx --distpath $targetDist --workpath (Join-Path $stageRoot 'app-work') --specpath $stageRoot --contents-directory _internal --icon=static/icon.ico --name openclank --hidden-import=app --collect-submodules=keyring.backends @dataArgs openclank_entry.py
+    & $pyExe -m PyInstaller --noconfirm --clean --onedir --console --noupx --distpath $targetDist --workpath (Join-Path $stageRoot 'app-work') --specpath $stageRoot --contents-directory _internal --icon=static/icon.ico --name openclank --hidden-import=app --hidden-import=scripts.openclank_bootstrap --hidden-import=scripts.openclank_engine --hidden-import=scripts.emoji_asset_bundle --collect-submodules=src --collect-submodules=core --collect-submodules=routes --collect-submodules=services --collect-submodules=keyring.backends --copy-metadata=keyring @dataArgs openclank_entry.py
     $pyInstallerExit = $LASTEXITCODE
 } finally {
     Remove-Item -Recurse -Force $stageRoot -ErrorAction SilentlyContinue
@@ -171,6 +179,7 @@ try {
 if ($pyInstallerExit -ne 0) { Fail "PyInstaller build failed." }
 
 $bundleRoot = Join-Path $targetDist 'openclank'
+Copy-Item LICENSE (Join-Path $bundleRoot 'LICENSE')
 $publicExe = Join-Path $bundleRoot "openclank.exe"
 if (-not (Test-Path $publicExe)) { Fail "Portable public command is missing." }
 
@@ -236,6 +245,10 @@ if ($LASTEXITCODE -ne 0 -or $versionOutput -ne "Open Clank $appVersion") {
 }
 & $publicExe engine verify --json
 if ($LASTEXITCODE -ne 0) { Fail "Packaged managed engine or portable payload failed verification." }
+
+$archivePath = Join-Path $PSScriptRoot ('dist\Open-Clank-' + $appVersion + '-' + $Target + '.zip')
+& $pyExe -B scripts/windows_portable_build.py archive --bundle $bundleRoot --target $Target --output $archivePath
+if ($LASTEXITCODE -ne 0) { Fail 'Portable archive preparation failed.' }
 
 Write-Host ""
 Write-Host "Build complete." -ForegroundColor Green
