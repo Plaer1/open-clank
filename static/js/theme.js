@@ -1097,8 +1097,13 @@ function _prepareThemeEmojiCatalog() {
     _themeEmojiCatalogPromise = getThemeEmojiCatalog()
       .catch(error => {
         _themeEmojiCatalogPromise = null;
-        console.error('Packaged emoji catalogue integrity failure', error);
-        uiModule.showToast?.('The installed emoji artwork is unavailable. Check the application package.');
+        console.error('Local emoji catalogue request failed', error);
+        const message = error.authenticationRequired ? 'Sign in to load emoji artwork.'
+          : error.transient ? (error.connectionInterrupted
+            ? 'Emoji connection interrupted. Reload to try again.'
+            : 'Emoji loading timed out. Reload to try again.')
+          : 'The installed emoji artwork is unavailable. Check the offline artwork installation.';
+        uiModule.showToast?.(message);
         return [];
       });
   }

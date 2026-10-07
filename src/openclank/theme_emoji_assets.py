@@ -4,10 +4,11 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 from functools import lru_cache
 from contextlib import contextmanager
 from pathlib import Path
-from scripts.emoji_asset_bundle import BundleError, expected_manifest, runtime_asset_paths, verify
+from scripts.emoji_asset_bundle import BundleError, expected_manifest, runtime_asset_paths, file_digest
 
 _PACK, _MANIFEST = runtime_asset_paths()
 _ID = re.compile(r"^[gk]:[0-9a-f]+(?:-[0-9a-f]+)*(?:_[0-9a-f]+(?:-[0-9a-f]+)*)?$")
@@ -18,34 +19,60 @@ def artwork_install_hint() -> str:
     return f"Install the matching offline release parts with {command} --parts <directory>."
 
 
+_verification_lock = threading.Lock()
+
+
+def _pack_identity() -> tuple[int, ...]:
+    stat = _PACK.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 @lru_cache(maxsize=1)
+def _verify_frozen_pin(path: str, identity: tuple[int, ...]) -> bool:
+    # Exact sealed bytes already bind the database whose full SQLite integrity
+    # is checked by assets verify/assemble. Do not repeat that scan on requests.
+    expected = expected_manifest(_MANIFEST)
+    return (file_digest(Path(path)) == (expected["pack_bytes"], expected["pack_sha256"])
+            and _pack_identity() == identity)
+
+
 def _verify_frozen_pack(path: str, identity: tuple[int, ...]) -> None:
-    # An install command verifies before atomic publication. Verify the exact
-    # bundled pin once per local file identity as well, so an arbitrary file in
-    # writable application data cannot masquerade as shipped artwork.
-    try:
-        verify(Path(path), expected_manifest(_MANIFEST))
-    except (BundleError, KeyError, TypeError) as exc:
-        raise RuntimeError("Offline emoji artwork failed pinned verification") from exc
+    # Lock outside the memoized function: concurrent first misses must share
+    # one full hash. Cache failures too until the writable file identity changes.
+    with _verification_lock:
+        try:
+            if _pack_identity() != identity or not _verify_frozen_pin(path, identity):
+                raise BundleError("artwork pack does not match its sealed pin")
+        except (BundleError, KeyError, TypeError) as exc:
+            raise RuntimeError("Offline emoji artwork failed pinned verification") from exc
+
+
+def _verified_identity() -> tuple[int, ...]:
+    if not _PACK.is_file():
+        raise RuntimeError("Offline emoji artwork is missing. " + artwork_install_hint())
+    identity = _pack_identity()
+    if getattr(sys, "frozen", False):
+        _verify_frozen_pack(str(_PACK), identity)
+    return identity
 
 
 @contextmanager
 def _connect():
-    if not _PACK.is_file():
-        raise RuntimeError("Offline emoji artwork is missing. " + artwork_install_hint())
-    if getattr(sys, "frozen", False):
-        stat = _PACK.stat()
-        _verify_frozen_pack(str(_PACK), (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+    identity = _verified_identity()
     db = sqlite3.connect(_PACK.as_uri() + "?mode=ro&immutable=1", uri=True)
-    db.execute("PRAGMA query_only=ON")
     try:
+        db.execute("PRAGMA query_only=ON")
+        if _pack_identity() != identity:
+            raise RuntimeError("Offline emoji artwork changed during verification")
         yield db
+        if _pack_identity() != identity:
+            raise RuntimeError("Offline emoji artwork changed while reading")
     finally:
         db.close()
 
 
 @lru_cache(maxsize=1)
-def get_emoji_catalogs() -> dict:
+def _catalogs_for_identity(identity: tuple[int, ...]) -> dict:
     with _connect() as db:
         row = db.execute("SELECT value FROM metadata WHERE key='runtime_catalogs'").fetchone()
         exceptions = db.execute("SELECT value FROM metadata WHERE key='upstream_exceptions'").fetchone()
@@ -60,9 +87,17 @@ def get_emoji_catalogs() -> dict:
     return catalogs
 
 
+def get_emoji_catalogs() -> dict:
+    return _catalogs_for_identity(_verified_identity())
+
+
 @lru_cache(maxsize=1)
+def _kitchen_text_for_identity(identity: tuple[int, ...]) -> str:
+    return "\n".join(_catalogs_for_identity(identity)["kitchen"]) + "\n"
+
+
 def get_kitchen_catalog_text() -> str:
-    return "\n".join(get_emoji_catalogs()["kitchen"]) + "\n"
+    return _kitchen_text_for_identity(_verified_identity())
 
 
 def get_google_catalog() -> dict:

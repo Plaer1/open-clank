@@ -7,16 +7,30 @@ const pending = new Map();
 let decodedPixels = 0;
 let activeLoads = 0;
 const loadWaiters = [];
-let catalogReady = false;
+let catalogState = 'loading';
 
 async function fetchLocal(url, json = false) {
-  const response = await fetch(url, { credentials: 'same-origin' });
-  if (!response.ok) throw new Error(`Packaged emoji integrity failure (${response.status})`);
+  let response;
+  try {
+    response = await fetch(url, { credentials: 'same-origin' });
+  } catch (cause) {
+    const error = new Error('Local emoji catalogue request was interrupted', { cause });
+    error.transient = true;
+    error.connectionInterrupted = true;
+    throw error;
+  }
+  if (!response.ok) {
+    const error = new Error(`Local emoji catalogue request failed (${response.status})`);
+    error.transient = response.status === 502 || response.status === 504;
+    error.authenticationRequired = response.status === 401 || response.status === 403;
+    throw error;
+  }
   return json ? response.json() : response.text();
 }
 
 export function getThemeEmojiCatalog() {
   if (!catalogPromise) {
+    catalogState = 'loading';
     catalogPromise = Promise.all([
       fetchLocal('/api/theme-emoji/google/catalog', true),
       fetchLocal('/api/theme-emoji/kitchen/catalog'),
@@ -26,15 +40,20 @@ export function getThemeEmojiCatalog() {
       const entries = google.entries.map(entry => ({ id: entry.id, kind: 'google',
         src: `/api/theme-emoji/google/${encodeURIComponent(entry.id)}` }));
       for (const id of kitchen) entries.push({ id, kind: 'kitchen', src: `/api/theme-emoji/kitchen/${encodeURIComponent(id)}` });
-      catalogReady = true;
+      catalogState = 'ready';
       return entries;
-    }).catch(error => { catalogPromise = null; throw error; });
+    }).catch(error => {
+      catalogPromise = null;
+      catalogState = error.authenticationRequired ? 'authentication-required'
+        : error.transient ? 'interrupted' : 'unavailable';
+      throw error;
+    });
   }
   return catalogPromise;
 }
 
 export function getThemeEmojiCatalogStatus() {
-  return { kitchen: catalogReady ? 'ready' : 'loading', local: true };
+  return { kitchen: catalogState, local: true };
 }
 
 function acquireLoadSlot(signal) {
