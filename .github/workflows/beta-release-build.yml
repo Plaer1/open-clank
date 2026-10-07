@@ -67,24 +67,44 @@ jobs:
         with:
           python-version: '3.13.16'
           architecture: ${{ matrix.architecture }}
-      - name: Validate exact Engine checkout before expensive builds
+      - name: Inspect actual vendored links with standard library only
         run: |
           @'
+          import os
           import subprocess
           from pathlib import Path
-          from src.openclank.engine_build import source_fingerprint
           raw = subprocess.check_output(['git', 'ls-files', '-s', '-z', '--', 'packages/mimo-code'])
           links = []
+          mismatches = []
           for record in raw.split(b'\0'):
               if record and record.startswith(b'120000 '):
-                  links.append(Path(record.split(b'\t', 1)[1].decode('utf-8')))
-          actual = sum(path.is_symlink() for path in links)
-          print(f'Engine checkout symlinks: tracked={len(links)}, actual={actual}, plain_or_missing={len(links)-actual}')
-          print('Engine checkout SHA256: ' + source_fingerprint(Path('packages/mimo-code')))
-          if actual != len(links):
+                  metadata, name = record.split(b'\t', 1)
+                  path = Path(name.decode('utf-8'))
+                  links.append(path)
+                  if path.is_symlink():
+                      expected = subprocess.check_output(['git', 'cat-file', 'blob', metadata.split()[1].decode('ascii')]).decode('utf-8')
+                      actual = os.readlink(path)
+                      if actual != expected:
+                          mismatches.append((path.as_posix(), expected, actual))
+          actual_count = sum(path.is_symlink() for path in links)
+          print(f'Engine checkout symlinks: tracked={len(links)}, actual={actual_count}, plain_or_missing={len(links)-actual_count}, literal_target_mismatches={len(mismatches)}')
+          for path, expected, actual in mismatches[:3]:
+              print(f'Git link {path[:160]!r}: blob_target={expected[:200]!r}, actual_readlink={actual[:200]!r}')
+          if actual_count != len(links):
               raise SystemExit('Engine checkout must retain actual Git symlinks; no text-file substitution')
           '@ | python -B -
           if ($LASTEXITCODE -ne 0) { throw 'Native checkout source-type diagnostic failed.' }
+      - name: Bootstrap only native Engine contract imports
+        run: |
+          $specs = @(Get-Content requirements.txt | Where-Object { $_ -match '^pydantic(?=[<>=!~;\s]|$)' })
+          if ($specs.Count -ne 1) { throw 'Require exactly one canonical Pydantic requirement for the contract bootstrap.' }
+          $contractSpec = $specs[0].Trim()
+          python -m pip install --disable-pip-version-check --only-binary=:all: $contractSpec
+          if ($LASTEXITCODE -ne 0) { throw 'Minimal native binary-wheel Engine contract bootstrap failed; no source or emulated fallback.' }
+      - name: Validate exact Engine contract before expensive builds
+        run: |
+          python -B -c "from pathlib import Path; from src.openclank.engine_build import source_fingerprint; print('Engine checkout SHA256: ' + source_fingerprint(Path('packages/mimo-code')))"
+          if ($LASTEXITCODE -ne 0) { throw 'Canonical Engine fingerprint diagnostic import failed after the minimal bootstrap.' }
           python -B scripts/openclank_engine.py contract --json
           if ($LASTEXITCODE -ne 0) { throw 'Pinned Engine source contract failed before dependency/native builds; do not repin or bypass.' }
       - name: Initialize native MSVC and LLVM
