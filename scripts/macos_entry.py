@@ -10,6 +10,17 @@ import webbrowser
 from pathlib import Path
 
 
+def local_app_port() -> int:
+    """Use the established port setting without admitting a remote listener."""
+    raw = os.environ.get("APP_PORT", "7777")
+    if not raw or len(raw) > 5 or not raw.isascii() or not raw.isdecimal():
+        raise ValueError("APP_PORT must be an ASCII decimal integer from 1 to 65535")
+    port = int(raw)
+    if not 1 <= port <= 65535:
+        raise ValueError("APP_PORT must be an ASCII decimal integer from 1 to 65535")
+    return port
+
+
 def app_owner() -> int:
     from scripts.openclank_bootstrap import verify_portable_payload
     from src.openclank.client_profiles import ClientProfile
@@ -17,7 +28,7 @@ def app_owner() -> int:
     from src.runtime_paths import get_app_root
 
     verify_portable_payload()
-    profile = ClientProfile.create("macos-app", "http://127.0.0.1:7777", auto_start=True)
+    profile = ClientProfile.create("macos-app", f"http://127.0.0.1:{local_app_port()}", auto_start=True)
     manager = LocalServerManager(repo_root=Path(get_app_root()))
     stopping = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):

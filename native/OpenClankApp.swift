@@ -5,8 +5,18 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var owner: Process?
     var quitting = false
+    var browserURL: URL?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let configuredPort = ProcessInfo.processInfo.environment["APP_PORT"] ?? "7777"
+        guard !configuredPort.isEmpty, configuredPort.utf8.count <= 5,
+              configuredPort.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+              let port = Int(configuredPort), (1...65535).contains(port),
+              let localURL = URL(string: "http://127.0.0.1:\(port)") else {
+            fail("APP_PORT must be an ASCII decimal integer from 1 to 65535.")
+            return
+        }
+        browserURL = localURL
         let menu = NSMenu()
         let item = NSMenuItem()
         let appMenu = NSMenu()
@@ -53,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openBrowser() {
-        NSWorkspace.shared.open(URL(string: "http://127.0.0.1:7777")!)
+        if let url = browserURL { NSWorkspace.shared.open(url) }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

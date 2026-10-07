@@ -51,14 +51,25 @@ thin frames and maximize beside the retained navigation.
 
 ## Start on macOS
 
-The Apple Silicon source installation has passed fresh-install qualification.
+The planned packaged installation for Apple Silicon is
+`Open-Clank-1.0.2-macos-arm64.dmg` from the
+[`v1.0.2-beta.1` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1)
+when published. Native app qualification on macOS 15 is still pending. The app
+is ad-hoc signed, not notarized; Intel/universal packages are not claimed.
+Drag **OpenClank.app** to Applications. It includes private Python, Engine and
+native helpers, so you do not need a checkout, Homebrew or system Python.
+[Install the verified offline artwork with its packaged CLI](docs/setup.md#macos-app-package),
+then open the app and create the first administrator in the browser.
+
+For the source-build alternative, the Apple Silicon installation has passed
+fresh-install qualification.
 Install Homebrew, ARM-native Python 3.11 or later,
 [Rust/Cargo](https://rustup.rs/) and Xcode Command Line Tools (`xcode-select --install`).
 The release label is `v1.0.2-beta.1`; its downloads become available when the
-[release is published](https://github.com/Plaer1/open-clank/releases).
+[application release is published](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1).
 Download `open-clank-1.0.2-beta.1-source.tar.gz` from the application release.
 Obtain the five matching artwork parts and `emoji-assets.parts.json` from the
-separate `v1.0.2-beta.1-artwork` supporting release when published, then extract
+separate [`v1.0.2-beta.1-artwork` supporting release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork) when published, then extract
 the source archive:
 
 ```bash
@@ -71,8 +82,8 @@ python3 scripts/emoji_asset_bundle.py verify
 
 Follow [the complete artwork instructions](docs/setup.md#offline-emoji-artwork)
 for downloading and verifying the parts. A source archive or Git clone alone
-omits the artwork. This is a source build, not a native macOS installer; Intel
-Macs have not been qualified.
+omits the artwork. The source alternative compiles locally; Intel Macs have not
+been qualified.
 
 The launcher prepares the environment, builds and verifies the managed engine,
 builds the native memory, Files, thumbnail and History workers from source, and

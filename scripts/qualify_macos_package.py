@@ -75,8 +75,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
               'OPEN_CLANK_RUNTIME_PYTHON', 'OPEN_CLANK_PYTHON', 'VIRTUAL_ENV', 'PYTHONHOME', 'PYTHONPATH'}:
             environment.pop(key, None)
     with socket.socket() as listener:
-        listener.bind(('127.0.0.1', 7777))
-    port = 7777
+        listener.bind(('127.0.0.1', 0))
+        port = listener.getsockname()[1]
     environment['APP_PORT'] = str(port)
     environment['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin'
     environment['PYTHONDONTWRITEBYTECODE'] = '1'

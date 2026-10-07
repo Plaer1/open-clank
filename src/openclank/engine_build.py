@@ -1145,14 +1145,19 @@ def build_current(
                 return existing
 
         bun = _ensure_bun(root, manifest, bun_executable, allow_download=allow_bun_download)
+        # Dependency lifecycle wrappers invoke Bun by name even when the
+        # parent build uses its absolute admitted executable. Keep those
+        # children on the same pinned toolchain without changing caller PATH.
+        environment = os.environ.copy()
+        inherited_path = environment.get("PATH", "")
+        environment["PATH"] = str(bun.resolve().parent) + (os.pathsep + inherited_path if inherited_path else "")
         lockfile = _safe_child(vendor_root, manifest["inputs"]["lockfile"]["path"], "lockfile")
         lock_hash = _sha256_file(lockfile)
         if install_dependencies:
-            subprocess.run([str(bun), "ci"], cwd=vendor_root, check=True)
+            subprocess.run([str(bun), "ci"], cwd=vendor_root, env=environment, check=True)
             if _sha256_file(lockfile) != lock_hash:
                 raise EngineBuildError("bun ci modified the pinned lockfile")
 
-        environment = os.environ.copy()
         environment.update({
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
