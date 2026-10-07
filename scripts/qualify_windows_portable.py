@@ -96,6 +96,10 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
         subprocess.run([str(runtime), '-I', '-m', 'json.tool', '--help'], env=environment,
                        cwd=work, check=True, timeout=30, stdout=subprocess.DEVNULL)
         checks.append('standalone-private-python-I-c-and-m-without-PATH-python')
+        with (work / 'payload-verify-after-python.json').open('wb') as verification:
+            subprocess.run([str(executable), 'engine', 'verify', '--json'], env=environment,
+                           cwd=work, check=True, timeout=180, stdout=verification)
+        checks.append('sealed-payload-unchanged-after-private-python-probes')
         if parts is not None:
             subprocess.run([str(executable), 'assets', 'assemble', '--parts', str(parts)],
                            env=environment, cwd=work, check=True, timeout=600)
@@ -174,6 +178,15 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
             raise RuntimeError('Editor reopen differs from saved fixture')
         checks.append('editor-save-disk-bytes-and-reopen')
         receipt['fixture_sha256'] = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        # Stop the owned server before the final seal check, so worker shutdown
+        # cannot introduce an unchecked payload mutation after acceptance.
+        subprocess.run([str(system_root / 'System32/taskkill.exe'), '/PID', str(process.pid), '/T', '/F'],
+                       capture_output=True, timeout=30)
+        process.wait(timeout=30)
+        with (work / 'payload-verify-after-journey.json').open('wb') as verification:
+            subprocess.run([str(executable), 'engine', 'verify', '--json'], env=environment,
+                           cwd=work, check=True, timeout=180, stdout=verification)
+        checks.append('sealed-payload-unchanged-after-journey-and-owned-server-stop')
         receipt['qualification'] = 'packaged-startup-auth-files-editor-passed'
     finally:
         if process is not None and process.poll() is None:
