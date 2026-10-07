@@ -79,14 +79,14 @@ jobs:
       - name: Qualify actual mounted and relocated package
         run: |
           set -euo pipefail
-          python3 -B scripts/qualify_macos_package.py --dmg dist/macos-arm64/Open-Clank-1.0.2-beta.1-macos-arm64.dmg --output dist/macos-qualification --emoji-pack "$QUALIFICATION_EMOJI_PACK"
+          python3 -B scripts/qualify_macos_package.py --dmg dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg --output dist/macos-qualification --emoji-pack "$QUALIFICATION_EMOJI_PACK"
           # AppKit GUI Quit and Screen Recording permission journeys require separate native manual evidence.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Open-Clank-macos-arm64
           path: |
-            dist/macos-arm64/Open-Clank-1.0.2-beta.1-macos-arm64.dmg
-            dist/macos-arm64/Open-Clank-1.0.2-beta.1-macos-arm64.dmg.sha256
+            dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg
+            dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg.sha256
             dist/macos-provenance/*.json
             dist/macos-qualification/receipt.json
           if-no-files-found: error
