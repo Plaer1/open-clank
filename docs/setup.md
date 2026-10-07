@@ -46,10 +46,11 @@ unqualified.
 
 Downloads become available when `v1.0.2-beta.1` is published on the
 [releases page](https://github.com/Plaer1/open-clank/releases). Obtain
-`open-clank-1.0.2-beta.1-source.tar.gz`, `emoji-assets.parts.json`, and
-`emoji-assets.pack.part-001` through `emoji-assets.pack.part-005` from that
-same release. Check the source archive against the release checksum file.
-Keep all six artwork files together in a separate directory.
+`open-clank-1.0.2-beta.1-source.tar.gz` from the application release. Obtain
+`emoji-assets.parts.json` and `emoji-assets.pack.part-001` through
+`emoji-assets.pack.part-005` from the separate `v1.0.2-beta.1-artwork` supporting
+release when published. Check the source archive against the release checksum
+file. Keep all six artwork files together in a separate directory.
 
 ```bash
 tar -xzf open-clank-1.0.2-beta.1-source.tar.gz
@@ -800,12 +801,12 @@ Obtain these six assets from the release matching your source or package on the
 
 Save them together in one directory. With GitHub CLI installed, the equivalent
 commands below download assets only; they do not create or publish a release.
-Replace `PUBLISHED_TAG` with an actual published tag containing all six files.
-For Beta 1, the proposed release label is `v1.0.2-beta.1`; use it only after
-publication and confirm all six assets are present.
+Beta 1 uses the separate `v1.0.2-beta.1-artwork` supporting release. Use the
+command only after its publication and confirm all six assets are present.
+The application binaries and source use the separate `v1.0.2-beta.1` release.
 
 ```bash
-gh release download PUBLISHED_TAG --repo Plaer1/open-clank --dir emoji-parts --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*'
+gh release download v1.0.2-beta.1-artwork --repo Plaer1/open-clank --dir emoji-parts --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*'
 python3 scripts/emoji_asset_bundle.py assemble --parts emoji-parts
 python3 scripts/emoji_asset_bundle.py verify
 ```

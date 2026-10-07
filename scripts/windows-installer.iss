@@ -65,7 +65,7 @@ Name: "{userdesktop}\Open Clank Beta ({#Target})"; Filename: "{app}\payload\open
 
 [Code]
 const
-  ArtworkBaseURL = 'https://github.com/Plaer1/open-clank/releases/download/v1.0.2-beta.1/';
+  ArtworkBaseURL = 'https://github.com/Plaer1/open-clank/releases/download/v1.0.2-beta.1-artwork/';
   ArtworkBytes = 2211209216;
 var
   ArtworkPage: TInputDirWizardPage;

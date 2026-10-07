@@ -56,8 +56,10 @@ Install Homebrew, ARM-native Python 3.11 or later,
 [Rust/Cargo](https://rustup.rs/) and Xcode Command Line Tools (`xcode-select --install`).
 The release label is `v1.0.2-beta.1`; its downloads become available when the
 [release is published](https://github.com/Plaer1/open-clank/releases).
-Download `open-clank-1.0.2-beta.1-source.tar.gz` and the five matching artwork
-parts plus `emoji-assets.parts.json`, then extract the source archive:
+Download `open-clank-1.0.2-beta.1-source.tar.gz` from the application release.
+Obtain the five matching artwork parts and `emoji-assets.parts.json` from the
+separate `v1.0.2-beta.1-artwork` supporting release when published, then extract
+the source archive:
 
 ```bash
 tar -xzf open-clank-1.0.2-beta.1-source.tar.gz

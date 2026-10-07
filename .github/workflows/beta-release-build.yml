@@ -8,7 +8,7 @@ on:
       emoji_release_tag:
         description: Same-repository release containing the pinned shared offline artwork parts
         required: true
-        default: v1.0.2-beta.1
+        default: v1.0.2-beta.1-artwork
         type: string
 
 permissions:
@@ -48,7 +48,7 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.99.0-${{ matrix.rust_host }}
       RELEASE_TARGET: ${{ matrix.target }}
       NATIVE_ARCH: ${{ matrix.architecture }}
-      EMOJI_RELEASE_TAG: ${{ inputs.emoji_release_tag || 'v1.0.2-beta.1' }}
+      EMOJI_RELEASE_TAG: ${{ inputs.emoji_release_tag || 'v1.0.2-beta.1-artwork' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
