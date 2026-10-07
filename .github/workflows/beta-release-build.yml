@@ -163,6 +163,63 @@ jobs:
           $python = (Get-Command python).Source
           ./build-windows-portable.ps1 -Target $env:RELEASE_TARGET -PythonExecutable $python -BunExecutable (Get-Command bun).Source -ReuseInstalledDependencies
           if ($LASTEXITCODE -ne 0) { throw 'Native portable build failed.' }
+      - name: Admit and relocate the exact emitted portable ZIP
+        run: |
+          @'
+          import hashlib, json, os, re, shutil, stat, zipfile
+          from pathlib import Path, PurePosixPath
+          target = os.environ["RELEASE_TARGET"]
+          archives = list(Path("dist").glob(f"Open-Clank-*-{target}.zip"))
+          if len(archives) != 1:
+              raise RuntimeError("Require one target-specific emitted ZIP")
+          archive = archives[0]
+          if not 0 < archive.stat().st_size < 2 * 1024 ** 3:
+              raise RuntimeError("Portable ZIP asset size is outside the release bound")
+          with archive.open("rb") as stream:
+              archive_sha = hashlib.file_digest(stream, "sha256").hexdigest()
+          checksum = Path(str(archive) + ".sha256").read_text().split()
+          if len(checksum) != 2 or checksum[0] != archive_sha or checksum[1].lstrip("*") != archive.name:
+              raise RuntimeError("Emitted ZIP checksum/name mismatch")
+          destination = Path(os.environ["RUNNER_TEMP"]) / ("Qualified Portable " + target)
+          original = Path("dist") / target / "openclank"
+          if destination.exists() or not original.is_dir():
+              raise RuntimeError("Require fresh relocation and current-job staged bundle")
+          with zipfile.ZipFile(archive) as zipped:
+              members = zipped.infolist()
+              names = [item.filename for item in members]
+              if len(names) != len(set(name.casefold() for name in names)):
+                  raise RuntimeError("Portable ZIP duplicate/case-colliding members refused")
+              for item in members:
+                  path = PurePosixPath(item.filename)
+                  mode = item.external_attr >> 16
+                  if path.as_posix() != item.filename.rstrip("/") or path.is_absolute() or not path.parts or path.parts[0] != "openclank" or any(part in {"", ".", ".."} or part.endswith((".", " ")) or re.search(r'[\\:*?"<>|]', part) or re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:[.].*)?", part) for part in path.parts) or (mode and stat.S_IFMT(mode) not in {0, stat.S_IFREG, stat.S_IFDIR}):
+                      raise RuntimeError("Portable ZIP path/type refused")
+              total = sum(item.file_size for item in members)
+              if total > 8 * 1024 ** 3 or shutil.disk_usage(destination.parent).free < total + 512 * 1024 ** 2:
+                  raise RuntimeError("Insufficient bounded relocation disk space")
+              destination.mkdir()
+              zipped.extractall(destination)
+          relocated = destination / "openclank"
+          def inventory(root):
+              result = {}
+              for path in root.rglob("*"):
+                  if path.is_symlink():
+                      raise RuntimeError("Portable bundle symlink refused")
+                  if path.is_file():
+                      with path.open("rb") as stream:
+                          result[path.relative_to(root).as_posix()] = hashlib.file_digest(stream, "sha256").hexdigest()
+              return result
+          original_inventory = inventory(original)
+          relocated_inventory = inventory(relocated)
+          if original_inventory != relocated_inventory:
+              raise RuntimeError("Exact emitted/extracted bundle bytes disagree")
+          Path("dist/portable-zip-" + target + ".json").write_text(json.dumps({"target": target, "zip_sha256": archive_sha, "files": len(relocated_inventory), "qualification": "exact-emitted-zip-relocation-admitted"}, indent=2) + "\n")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write("QUALIFIED_PORTABLE_BUNDLE=" + str(relocated) + "\n")
+          # Exact byte inventory proves this current job's original staging is redundant.
+          shutil.rmtree(original)
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'Exact emitted ZIP relocation failed closed.' }
       - name: Acquire and verify shared artwork for disposable qualification
         env:
           GH_TOKEN: ${{ github.token }}
@@ -177,12 +234,12 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "QUALIFICATION_EMOJI_PACK=$pack"
       - name: Qualify actual native packaged first run
         run: |
-          python -B scripts/qualify_windows_portable.py --bundle "dist/$env:RELEASE_TARGET/openclank" --target $env:RELEASE_TARGET --output "dist/qualification-$env:RELEASE_TARGET"
+          python -B scripts/qualify_windows_portable.py --bundle $env:QUALIFIED_PORTABLE_BUNDLE --target $env:RELEASE_TARGET --output "dist/qualification-$env:RELEASE_TARGET"
           if ($LASTEXITCODE -ne 0) { throw 'Actual packaged startup/auth/Files/helper qualification failed.' }
           Copy-Item (Join-Path $env:RUNNER_TEMP 'wdeps/receipt.json') "dist/qualification-$env:RELEASE_TARGET/native-dependencies.json"
       - name: Build per-user installer from the qualified bundle
         run: |
-          python -B scripts/build_windows_installer.py --bundle "dist/$env:RELEASE_TARGET/openclank" --target $env:RELEASE_TARGET --output-root dist/installers --tool-root (Join-Path $env:RUNNER_TEMP 'winstaller-tools') --qualification-receipt "dist/qualification-$env:RELEASE_TARGET/receipt.json"
+          python -B scripts/build_windows_installer.py --bundle $env:QUALIFIED_PORTABLE_BUNDLE --target $env:RELEASE_TARGET --output-root dist/installers --tool-root (Join-Path $env:RUNNER_TEMP 'winstaller-tools') --qualification-receipt "dist/qualification-$env:RELEASE_TARGET/receipt.json"
           if ($LASTEXITCODE -ne 0) { throw 'Per-user installer build failed.' }
       - name: Qualify actual installed startup and data-preserving uninstall
         run: |
@@ -205,6 +262,7 @@ jobs:
             dist/Open-Clank-*-${{ matrix.target }}.zip
             dist/Open-Clank-*-${{ matrix.target }}.zip.sha256
             dist/qualification-${{ matrix.target }}/
+            dist/portable-zip-${{ matrix.target }}.json
             dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.exe
             dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.exe.sha256
             dist/installers/Open-Clank-*-${{ matrix.target }}-Setup.provenance.json

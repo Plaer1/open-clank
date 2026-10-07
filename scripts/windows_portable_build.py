@@ -143,7 +143,8 @@ def stage_python(destination, target):
     startup.write_text('import sys\nsys.dont_write_bytecode = True\n', encoding='ascii')
     # Precompile before checksumming so first child startup cannot introduce
     # an unlisted .pyc in the sealed payload (including startup .pth imports).
-    subprocess.run([str(destination / 'python.exe'), '-I', '-B', '-m', 'compileall', '-q', str(destination)],
+    subprocess.run([str(destination / 'python.exe'), '-I', '-B', '-m', 'compileall',
+                    '--invalidation-mode', 'checked-hash', '-q', str(destination)],
                    check=True, timeout=300)
     files = []
     for path in sorted(destination.rglob('*')):

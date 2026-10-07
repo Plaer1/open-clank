@@ -24,7 +24,7 @@ import zipfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-INPUTS_SHA256 = 'ebf4e317a282c5211e90dde4b9b9ed5b74eac490de0b7b1cfe2cd6c01b79c281'
+INPUTS_SHA256 = 'f166825531360a7298a86f2c86d6c0e52d085d40c6504c9758b23dd9c2b747a5'
 ADAPTER_SHA256 = '07f723d003b7b85b22cf9712399b0c52aa51a1dec92c42b97347b6e46dcf4aa0'
 
 
@@ -98,6 +98,7 @@ class Builder:
         (self.root / 'tmp').mkdir()
         self.python = None
         self.built = []
+        self.build_tools = []
 
     def run(self, argv, name, cwd=None, allow_failure=False):
         with (self.logs / (name + '.txt')).open('xb') as log:
@@ -151,6 +152,44 @@ class Builder:
         paths = [self.fetch(item) for item in tools]
         self.run([self.python, '-I', '-m', 'pip', 'install', '--no-index', '--no-deps', *paths], 'pinned-builder-tools')
         self.env['PATH'] = str(builder / 'Scripts') + os.pathsep + self.env['PATH']
+
+    def postgres_generators(self):
+        item = self.config['sources']['WinFlexBison']
+        archive = self.fetch(item)
+        if archive.stat().st_size != item['size']:
+            raise RuntimeError('Pinned PostgreSQL generator archive size differs')
+        tools = self.extract(archive, 'postgres-generators')
+        self.env['BISON_PKGDATADIR'] = str(tools / 'data')
+        self.env.pop('M4', None)  # WinBison's packaged M4 implementation, not ambient tools.
+        binaries = []
+        for name in ('win_flex.exe', 'win_bison.exe'):
+            executable = tools / name
+            expected = item['executables'][name]
+            if sha(executable) != expected['sha256']:
+                raise RuntimeError('Pinned PostgreSQL generator executable differs')
+            # These are emulated build generators only; shipped libraries stay native.
+            pe_bytes(executable.read_bytes(), 0x14c)
+            step = name.removesuffix('.exe') + '-version'
+            self.run([executable, '--version'], step)
+            version = (self.logs / (step + '.txt')).read_text(errors='replace')
+            if not re.search(r'\b' + re.escape(expected['version']) + r'\b', version):
+                raise RuntimeError('PostgreSQL generator version differs from pin')
+            binaries.append({'name': name, 'version': expected['version'],
+                             'architecture': 'x86-emulated-build-only', 'sha256': expected['sha256']})
+        # Exercise bundled skeleton/M4 data before the expensive client build.
+        smoke = self.root / 'postgres-generator-preflight'; smoke.mkdir()
+        (smoke / 'parser.y').write_text('%token NUMBER\n%%\nstart: NUMBER;\n%%\n')
+        (smoke / 'scanner.l').write_text('%option noyywrap\n%%\n[0-9]+ return 1;\n. ;\n%%\n')
+        flex, bison = tools / 'win_flex.exe', tools / 'win_bison.exe'
+        self.run([bison, '--output=parser.c', '--defines=parser.h', 'parser.y'], 'bison-generator-preflight', cwd=smoke)
+        self.run([flex, '--outfile=scanner.c', 'scanner.l'], 'flex-generator-preflight', cwd=smoke)
+        if any(not (smoke / name).is_file() or (smoke / name).stat().st_size == 0
+               for name in ('parser.c', 'parser.h', 'scanner.c')):
+            raise RuntimeError('Pinned PostgreSQL generator outputs missing')
+        self.build_tools.append({'name': item['name'], 'version': item['version'],
+                                 'role': item['role'], 'archive_sha256': item['sha256'],
+                                 'binaries': binaries, 'generator_preflight': 'passed'})
+        return flex, bison
 
     def openssl(self):
         prefix = self.root / 'openssl'
@@ -214,9 +253,14 @@ class Builder:
             self.env.update(OPENSSL_DIR=str(prefix), OPENSSL_STATIC='1', OPENSSL_NO_VENDOR='1')
             self.run([self.python, '-I', '-m', 'pip', 'wheel', '--no-deps', '--no-build-isolation',
                       '--no-cache-dir', '--config-settings=build-args=--locked', '--wheel-dir', self.wheels, source], 'cryptography-wheel')
+        elif package == 'py-rust-stemmers':
+            self.run([self.python, '-I', '-m', 'pip', 'wheel', '--no-deps', '--no-build-isolation',
+                      '--no-cache-dir', '--config-settings=build-args=--locked', '--wheel-dir', self.wheels, source],
+                     'stemmer-wheel')
         else:
             prefix = self.openssl()
             pg = self.extract(self.fetch(self.config['sources']['PostgreSQL']), 'postgresql-source')
+            flex, bison = self.postgres_generators()
             self.env['PATH'] = str(self.perl.parent) + os.pathsep + self.env['PATH']
             self.env['INCLUDE'] = str(prefix / 'include') + os.pathsep + self.env.get('INCLUDE', '')
             self.env['LIB'] = str(prefix / 'lib') + os.pathsep + self.env.get('LIB', '')
@@ -225,7 +269,9 @@ class Builder:
             native.write_text("[built-in options]\nc_link_args = ['ws2_32.lib', 'crypt32.lib', 'advapi32.lib', 'user32.lib', 'gdi32.lib', 'bcrypt.lib']\n")
             meson = [self.python, '-I', '-m', 'mesonbuild.mesonmain']
             self.run([*meson, 'setup', build, pg, '--backend=ninja', '--buildtype=release', '--prefix=' + str(client),
-                      '--native-file', native, '-Dssl=openssl', '-Db_lto=false'], 'libpq-setup')
+                      '--native-file', native, '-Dssl=openssl', '-Db_lto=false',
+                      '-DFLEX=' + json.dumps([flex.as_posix()]), '-DBISON=' + json.dumps([bison.as_posix()]),
+                      '-DPERL=' + self.perl.as_posix(), '-DPYTHON=' + json.dumps([self.python.as_posix()])], 'libpq-setup')
             self.run([*meson, 'compile', '-C', build, '-j', '1', 'libpq:shared_library', 'pg_config'], 'libpq-build')
             mapping = json.loads(subprocess.check_output([str(x) for x in [*meson, 'introspect', '--installed', build]], env=self.env))
             for original, target in mapping.items():
@@ -254,12 +300,13 @@ class Builder:
                       '-w', self.wheels, raw_wheel], 'psycopg-private-dll-repair')
         pattern = package.replace('-', '_') + '-' + item['version'] + '-*.whl'
         wheel, = self.wheels.glob(pattern)
-        self.wheel_check(wheel, package, item['version'])
+        self.wheel_check(wheel, item['name'], item['version'])
         self.run([self.python, '-I', '-m', 'pip', 'install', '--no-index', '--no-deps', wheel], package + '-builder-import-install')
         probes = {
             'grpcio': 'import grpc; assert grpc.__version__=="1.83.0"; c=grpc.insecure_channel("127.0.0.1:1"); c.close()',
             'cryptography': 'from cryptography.fernet import Fernet; f=Fernet(Fernet.generate_key()); assert f.decrypt(f.encrypt(b"fixture"))==b"fixture"',
             'psycopg2-binary': 'import psycopg2; from psycopg2.extensions import libpq_version,parse_dsn; assert libpq_version()==180006; assert parse_dsn("sslmode=require")["sslmode"]=="require"',
+            'py-rust-stemmers': 'from py_rust_stemmers import SnowballStemmer; s=SnowballStemmer("english"); words=["running","jumps","easily"]; expected=["run","jump","easili"]; assert s.stem_word("running")=="run"; assert s.stem_words(words)==expected; assert s.stem_words_parallel(words)==expected',
         }
         self.run([self.python, '-I', '-c', probes[package]], package + '-native-feature-probe')
         self.built.append(package)
@@ -267,7 +314,7 @@ class Builder:
     def close(self):
         # Each successful source wheel advances the unchanged complete native
         # wheel resolver. Only an actually observed reviewed gap selects a recipe.
-        for number in range(4):
+        for number in range(5):
             name = 'full-native-resolution-' + str(number)
             code = self.run([sys.executable, '-I', '-m', 'pip', 'download', '--only-binary=:all:', '--no-cache-dir',
                              '--find-links', self.wheels, '--dest', self.wheels, '-r', ROOT / 'requirements.txt',
@@ -275,10 +322,14 @@ class Builder:
             if code == 0:
                 break
             evidence = (self.logs / (name + '.txt')).read_text(encoding='utf-8', errors='strict')
-            found = re.search(r'(?:No matching distribution found for|Could not find a version that satisfies the requirement)\s+(grpcio|psycopg2-binary|cryptography)(?:[<=>\[\s]|$)', evidence)
-            if not found:
+            found = re.search(r'(?:No matching distribution found for|Could not find a version that satisfies the requirement)\s+(grpcio|psycopg2-binary|cryptography|py-rust-stemmers)(?:[<=>\[\s]|$)', evidence)
+            package = found[1] if found else None
+            if package is None and 'ResolutionImpossible' in evidence and re.search(
+                    r'fastembed 0\.8\.[01] depends on py-rust-stemmers<0\.2\.0 and >=0\.1\.0', evidence):
+                package = 'py-rust-stemmers'
+            if package is None:
                 raise RuntimeError('Full native dependency resolution failed outside reviewed source recipes')
-            self.build(found[1])
+            self.build(package)
         else:
             raise RuntimeError('Full unchanged native closure still failed')
         wheels = sorted(self.wheels.glob('*.whl'))
@@ -290,7 +341,7 @@ class Builder:
         self.run([sys.executable, '-I', '-m', 'pip', 'install', '--no-index', '--only-binary=:all:',
                   '--find-links', self.wheels, '-r', ROOT / 'requirements.txt', 'pyinstaller==6.16.0'], 'full-offline-install')
         self.run([sys.executable, '-I', '-m', 'pip', 'check'], 'full-pip-check')
-        self.run([sys.executable, '-I', '-c', 'import grpc,psycopg2,cryptography,mcp,fastapi,sqlalchemy,PIL,winrt; print("full native imports passed")'], 'full-native-imports')
+        self.run([sys.executable, '-I', '-c', 'import grpc,psycopg2,cryptography,mcp,fastapi,sqlalchemy,PIL,winrt,py_rust_stemmers,fastembed; print("full native imports passed")'], 'full-native-imports')
         self.run([sys.executable, '-I', '-m', 'pip', 'freeze', '--all'], 'full-native-freeze')
         if self.built:
             notices = Path(sysconfig.get_path('purelib')) / 'openclank_native_dependency_licenses'
@@ -312,11 +363,11 @@ class Builder:
                         with archive.extractfile(member) as source, target.open('xb') as destination:
                             shutil.copyfileobj(source, destination)
             (notices / 'source-inputs.json').write_text(json.dumps(
-                {'inputs_manifest_sha256': INPUTS_SHA256, 'source_recipes': self.built,
+                {'inputs_manifest_sha256': INPUTS_SHA256, 'source_recipes': self.built, 'build_tools': self.build_tools,
                  'inputs': [{'name': path.name, 'sha256': sha(path)} for path in sorted(self.inputs.iterdir())]},
                 indent=2) + '\n', encoding='utf-8')
         return {'target': self.target, 'python': sys.version, 'requirements_sha256': sha(ROOT / 'requirements.txt'),
-                'inputs_manifest_sha256': INPUTS_SHA256, 'source_recipes': self.built,
+                'inputs_manifest_sha256': INPUTS_SHA256, 'source_recipes': self.built, 'build_tools': self.build_tools,
                 'wheels': [{'name': path.name, 'sha256': sha(path)} for path in wheels],
                 'status': 'full-native-offline-install-imports-pip-check-passed'}
 

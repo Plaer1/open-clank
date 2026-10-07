@@ -1194,6 +1194,21 @@ def build_current(
             "TZ": "UTC",
         })
         environment.pop("MIMOCODE_RELEASE", None)
+        if os.name == "nt":
+            # Start compilation with generated catalog files already present.
+            # Resolving models-schema during in-process generation can leave
+            # Windows Bun's compiler unaware of the newly created sibling.
+            subprocess.run(
+                [str(bun), "run", "--cwd", "packages/opencode", "script/generate.ts"],
+                cwd=vendor_root,
+                env=environment,
+                check=True,
+            )
+            provider_root = vendor_root / "packages" / "opencode" / "src" / "provider"
+            for name in ("models-snapshot.js", "models-snapshot.d.ts"):
+                generated = provider_root / name
+                if generated.is_symlink() or not generated.is_file() or generated.stat().st_size == 0:
+                    raise EngineBuildError(f"model catalog generation did not produce a regular nonempty {name}")
         subprocess.run(
             [
                 str(bun),
