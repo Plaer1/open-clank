@@ -190,7 +190,10 @@ def stage_python(destination, target):
     # A real CPython installation supplies its stdlib, extension DLLs and
     # redistributable runtime. Never copy ambient base site-packages/tools.
     for path in sorted(base.iterdir()):
-        if path.is_file() and path.suffix.lower() in {'.exe', '.dll', '.txt'}:
+        # setup-python may retain its foreign-architecture installer bootstrap
+        # beside the runtime. Only CPython entrypoints belong in this payload.
+        if path.is_file() and (path.suffix.lower() in {'.dll', '.txt'}
+                               or path.name.lower() in {'python.exe', 'pythonw.exe'}):
             shutil.copyfile(path, destination / path.name)
     for folder in ('Lib', 'DLLs', 'tcl'):
         source = base / folder
