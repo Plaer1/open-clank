@@ -23,6 +23,18 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def windows_powershell_environment(environment=None):
+    # Python inherits pwsh7 module paths; Windows PowerShell 5.1 cannot load
+    # those same-named modules. Isolate only this child's builtin modules.
+    child = dict(os.environ if environment is None else environment)
+    for key in tuple(child):
+        if key.casefold() == 'psmodulepath':
+            del child[key]
+    child['PSModulePath'] = str(Path(os.environ['SystemRoot']) / 'System32' /
+                               'WindowsPowerShell' / 'v1.0' / 'Modules')
+    return child
+
+
 def build(bundle, target, output, tools, qualification):
     if os.name != 'nt':
         raise RuntimeError('Installer compilation requires actual Windows')
@@ -49,7 +61,8 @@ def build(bundle, target, output, tools, qualification):
     script = "$s=Get-AuthenticodeSignature -LiteralPath $args[0]; if($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch '(^|, )CN=Pyrsys B\\.V\\.(,|$)'){exit 1}"
     command = "$args=@('" + str(vendor).replace("'", "''") + "');\n" + script
     encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
-    subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], check=True, timeout=60)
+    subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+                   env=windows_powershell_environment(), check=True, timeout=60)
     compiler_root = tools / 'inno'
     subprocess.run([str(vendor), '/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART',
                     '/NOICONS', '/DIR=' + str(compiler_root), '/LOG=' + str(tools / 'compiler-install-private.log')],

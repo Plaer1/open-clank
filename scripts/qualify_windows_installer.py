@@ -17,14 +17,15 @@ import time
 import urllib.request
 
 from qualify_windows_portable import qualify as qualify_payload
-from build_windows_installer import digest
+from build_windows_installer import digest, windows_powershell_environment
 
 
 def powershell(script, *arguments, environment=None):
     command = '$args=@(' + ','.join("'" + str(a).replace("'", "''") + "'" for a in arguments) + ');\n' + script
     encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
     result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
-                            env=environment, capture_output=True, text=True, check=True, timeout=90)
+                            env=windows_powershell_environment(environment), capture_output=True,
+                            text=True, check=True, timeout=90)
     return result.stdout.strip()
 
 
