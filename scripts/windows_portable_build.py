@@ -131,6 +131,14 @@ def omit_unused_arm_auxiliary(destination, target):
     auxiliary = destination / 'vcruntime140_1.dll'
     if target != 'windows-arm64' or not auxiliary.exists():
         return []
+    from src.openclank.engine_build import _verify_pe_target, EngineBuildError
+    try:
+        _verify_pe_target(auxiliary, target)
+    except EngineBuildError:
+        pass
+    else:
+        # A genuinely native auxiliary remains under ordinary admission.
+        return []
     known_sha = '60c70e34e2e156f8bd214b92c2125c252e17d86ac8a25799ea1a4ecabde1d97c'
     # An exact official foreign auxiliary is not a native runtime exception.
     verify_staged_pe(auxiliary, 'windows-x64', destination)
