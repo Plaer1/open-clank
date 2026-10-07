@@ -144,8 +144,8 @@ def omit_unused_arm_auxiliary(destination, target):
     verify_staged_pe(auxiliary, 'windows-x64', destination)
     if auxiliary.stat().st_size != 53600 or digest(auxiliary) != known_sha:
         raise RuntimeError('Unknown ARM private-Python auxiliary refuses omission')
-    if metadata.version('pefile') != '2024.8.26':
-        raise RuntimeError('ARM import admission requires pinned pefile2024.8.26')
+    if metadata.version('pefile') not in {'2023.2.7', '2024.8.26'}:
+        raise RuntimeError('ARM import admission requires reviewed pefile 2023.2.7 or 2024.8.26')
     import pefile
     native_files = [path for path in sorted(destination.rglob('*')) if path.is_file()
                     and (path.suffix.lower() in {'.dll', '.pyd'}
