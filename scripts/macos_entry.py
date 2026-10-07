@@ -16,7 +16,7 @@ from pathlib import Path
 STARTUP_DIAGNOSTIC_PREFIX = "OPENCLANK_MAC_STARTUP "
 STARTUP_PHASES = frozenset({"imports", "payload", "profile", "state-directory",
                           "start-lock", "server-start", "browser", "running",
-                          "bootstrap", "uvicorn-import", "application-import", "serving"})
+                          "bootstrap", "uvicorn-import", "application-import", "serving", "configuration"})
 _OWNER_PHASE = "imports"
 _CODESIGN_REASONS = {
     "a sealed resource is missing or invalid": "sealed-resource-changed",
@@ -78,14 +78,8 @@ def startup_failure_record(exc: Exception, phase: str) -> dict:
 
 
 def local_app_port() -> int:
-    """Use the established port setting without admitting a remote listener."""
-    raw = os.environ.get("APP_PORT", "7777")
-    if not raw or len(raw) > 5 or not raw.isascii() or not raw.isdecimal():
-        raise ValueError("APP_PORT must be an ASCII decimal integer from 1 to 65535")
-    port = int(raw)
-    if not 1 <= port <= 65535:
-        raise ValueError("APP_PORT must be an ASCII decimal integer from 1 to 65535")
-    return port
+    from scripts.macos_launch_profile import local_app_port as resolved_port
+    return resolved_port()
 
 
 def app_owner() -> int:
@@ -146,6 +140,17 @@ def app_owner() -> int:
 
 
 def main() -> int:
+    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+        # Resolve before importing anything that binds data roots/settings.
+        from scripts.macos_launch_profile import apply_launch_profile
+        try:
+            port = apply_launch_profile()
+        except Exception as exc:
+            print(STARTUP_DIAGNOSTIC_PREFIX + json.dumps(startup_failure_record(exc, "configuration"), sort_keys=True), file=sys.stderr, flush=True)
+            return 1
+        if sys.argv[1:] == ["__mac-launch-configuration"]:
+            print(port, flush=True)
+            return 0
     if sys.argv[1:] == ["__mac-app-owner"]:
         if not getattr(sys, "frozen", False) or sys.platform != "darwin":
             return 2

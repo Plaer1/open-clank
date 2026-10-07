@@ -43,7 +43,10 @@ if os.name == "nt":
 from dotenv import load_dotenv
 # Windows editors may prepend a UTF-8 BOM to configuration files.
 # The same encoding also reads ordinary UTF-8 without changing its meaning.
-load_dotenv(encoding="utf-8-sig")
+if not getattr(sys, "frozen", False):
+    # Frozen installs admit explicit launch configuration only. Searching cwd
+    # ancestors could select an unrelated account/data/native helper profile.
+    load_dotenv(encoding="utf-8-sig")
 
 # Resolve the built source/bundled worker before imports bind the FM command.
 # Explicit environment and .env choices retain precedence.
@@ -1369,10 +1372,15 @@ async def _startup_event():
         from core.constants import APP_VERSION
         from src.openclank.engine_build import source_fingerprint, verify_install
 
-        _engine_source = source_fingerprint(Path(__file__).resolve().parent / "packages" / "mimo-code")
+        if getattr(sys, "frozen", False):
+            from scripts.openclank_bootstrap import packaged_engine_expectations
+            _engine_expectations = packaged_engine_expectations()
+        else:
+            _engine_expectations = {"expected_source_sha256": source_fingerprint(
+                Path(__file__).resolve().parent / "packages" / "mimo-code")}
         app.state.engine_verification = verify_install(
             expected_version=APP_VERSION,
-            expected_source_sha256=_engine_source,
+            **_engine_expectations,
             run_smoke=True,
             acp_smoke=True,
         ).require()

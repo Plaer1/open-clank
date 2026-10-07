@@ -96,7 +96,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
     fixture.write_bytes(before.encode('utf-8'))
     image_fixture = home / 'macOS native content fixture.png'
     image_fixture.write_bytes(fixture_png())
-    environment = os.environ.copy()
+    # No inherited operator selectors, credentials or ambient dotenv authority.
+    environment = {key: os.environ[key] for key in ('LANG', 'LC_ALL', 'LC_CTYPE') if key in os.environ}
     # Independent virgin data/home. Never select a developer's accounts/store.
     environment.update(OPEN_CLANK_DATA_DIR=str(work / 'data'), USERPROFILE=str(home),
                        HOME=str(home), APP_BIND='127.0.0.1')
@@ -108,6 +109,26 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         port = listener.getsockname()[1]
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        profile_port = listener.getsockname()[1]
+    if profile_port == port or port in {7777, 7796} or profile_port in {7777, 7796}:
+        raise RuntimeError('Disposable qualification ports must differ from live ports')
+    from scripts.macos_launch_profile import PROFILE_RELATIVE
+    config = home / 'existing-private-config.env'
+    config.write_text('APP_PORT=1\nFM_MCP_COMMAND=/unselected/source/helper\n', encoding='utf-8')
+    profile_path = home / PROFILE_RELATIVE
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text(json.dumps({'schema_version': 1, 'config_file': str(config), 'environment': {
+        'OPEN_CLANK_DATA_DIR': str(work / 'data'), 'APP_PORT': str(profile_port),
+        'OPENCLANK_CONVERSATION_ARCHIVE_DB': str(work / 'data/conversation_archive.sqlite3'),
+        'FM_DB_PATH': str(work / 'data/frankenmemory.db'),
+        'OPENCLANK_HISTORY_ROOT': str(work / 'data/history'),
+        'ODYSSEUS_FILES_REGISTRY': str(work / 'data/file-roots.json'),
+        'COPAL_LOOSE_ROOT': str(work / 'data/notes'),
+    }}), encoding='utf-8')
+    profile_path.chmod(0o600)
+    environment.pop('OPEN_CLANK_DATA_DIR')
     environment['APP_PORT'] = str(port)
     environment['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin'
     environment['PYTHONDONTWRITEBYTECODE'] = '1'
@@ -129,14 +150,29 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
     process = None
     receipt = {'target': target, 'checks': checks, 'qualification': 'failed'}
     try:
+        profile_environment = dict(environment)
+        profile_environment.pop('APP_PORT')
+        for selected, expected in ((profile_environment, profile_port), (environment, port)):
+            resolved = subprocess.check_output([str(executable), '__mac-launch-configuration'],
+                                              env=selected, cwd=work, timeout=45, text=True)
+            if resolved != str(expected) + '\n':
+                raise RuntimeError('Packaged launch profile/explicit port precedence disagrees')
+        checks.append('effective-HOME-private-profile-dotenv-map-and-explicit-port-precedence')
+        # The explicit Mac profile is the sole dotenv authority for frozen app
+        # startup. An arbitrary working-directory file must never be admitted.
+        canary = work / 'ancestor-config-must-not-write.sqlite3'
+        (work / '.env').write_text('OPENCLANK_CONVERSATION_ARCHIVE_DB=' + str(canary) + '\n', encoding='utf-8')
         with (work / 'payload-verify.json').open('wb') as verification:
             subprocess.run([str(executable), 'engine', 'verify', '--json'], env=environment,
                            cwd=work, check=True, timeout=180, stdout=verification)
         checks.append('sealed-Mac-payload-and-seven-native-helper-verification')
         runtime = bundle / 'Contents/Resources/runtime/_internal/python/bin/python3'
+        # Standalone Python is an implementation runtime rather than the
+        # frozen public command; pass the selected fixture data explicitly.
+        private_environment = dict(environment, OPEN_CLANK_DATA_DIR=str(work / 'data'))
         subprocess.run([str(runtime), '-I', '-B', '-c',
                         'import mcp,fastapi,sqlalchemy,grpc,cryptography,psycopg2;from src.openclank import lifetools_server; print("native child imports passed")'],
-                       env=environment, cwd=work, check=True, timeout=60)
+                       env=private_environment, cwd=work, check=True, timeout=60)
         subprocess.run([str(runtime), '-I', '-B', '-m', 'json.tool', '--help'], env=environment,
                        cwd=work, check=True, timeout=30, stdout=subprocess.DEVNULL)
         checks.append('standalone-private-python-I-c-and-m-without-PATH-python')
@@ -173,6 +209,11 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
                     raise RuntimeError('Packaged server readiness timed out')
                 time.sleep(1)
         checks.append('fresh-data-packaged-server-startup')
+        local_status = subprocess.check_output([str(executable), 'server', 'status'],
+                                              env=environment, cwd=work, timeout=45, text=True)
+        if base not in local_status:
+            raise RuntimeError('Packaged initial CLI local profile disagrees with app launch port')
+        checks.append('initial-CLI-local-profile-agrees-with-app-port')
         password = secrets.token_urlsafe(24)
         if request('/api/auth/setup', {'username': 'releasefixture', 'password': password}).get('ok') is not True:
             raise RuntimeError('Canonical first-run setup did not create fixture account')
@@ -258,6 +299,9 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
         if reopened_again['payload']['text'] != after:
             raise RuntimeError('Packaged restart lost the Editor resource')
         checks.append('restart-preserves-account-session-and-exact-editor-bytes')
+        if canary.exists() or not (work / 'data/conversation_archive.sqlite3').is_file():
+            raise RuntimeError('Frozen startup used an ambient dotenv instead of the explicit profile')
+        checks.append('same-profile-data-restart-without-ambient-dotenv-discovery')
         verify_bundle(bundle / 'Contents')
         checks.append('sealed-bundle-unchanged-after-real-journeys')
         receipt['qualification'] = 'mounted-relocated-package-auth-files-editor-owner-restart-passed'

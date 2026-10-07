@@ -395,7 +395,7 @@ def build(output: Path, use_existing_engine: bool):
         "pyinstaller": "6.16.0", "rust": "1.99.0", "bun": "1.4.0", "requirements_sha256": digest(ROOT / "requirements.txt"),
         "packages": packages, "mach_o": libraries, "signing": "ad-hoc", "notarized": False,
         "source_inputs": [{"path": name, "sha256": digest(ROOT / name)} for name in
-                          ("build-macos-app.sh", "scripts/macos_package.py", "scripts/macos_entry.py", "native/OpenClankApp.swift",
+                          ("build-macos-app.sh", "scripts/macos_package.py", "scripts/macos_entry.py", "scripts/macos_launch_profile.py", "native/OpenClankApp.swift",
                            "native/DesktopMetadata.swift", "native/DesktopOCR.swift", "native/macos_host_apps.swift")]})
     from scripts.windows_helper_artifacts import source_inputs
     helper_sources = {name: source_inputs(ROOT, manifest.rsplit("/", 1)[0])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -24,6 +25,11 @@ from src.runtime_paths import get_app_root
 
 REPO_ROOT = Path(get_app_root()).resolve()
 DEFAULT_LOCAL_URL = "http://127.0.0.1:7777"
+if getattr(sys, "frozen", False) and sys.platform == "darwin":
+    # The Mac entrypoint resolves/validates its explicit launch profile before
+    # this import. Only initial local-profile creation follows that port;
+    # existing named/selected client profiles retain their own URLs.
+    DEFAULT_LOCAL_URL = "http://127.0.0.1:" + os.environ.get("APP_PORT", "7777")
 RESERVED_COMMANDS = {
     "tui",
     "profile",
