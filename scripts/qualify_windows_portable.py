@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import sys
 import struct
 import subprocess
 import time
@@ -17,6 +18,11 @@ import urllib.error
 import urllib.request
 import urllib.parse
 import zlib
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def fixture_png():
@@ -145,6 +151,11 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
             raise RuntimeError('Fixture login failed')
         password = None
         checks.append('actual-password-login-with-session-cookie')
+        from scripts.qualify_theme_emoji import CHECK, qualify_theme_emoji
+        receipt['theme_emoji'] = qualify_theme_emoji(
+            base, cookies, bundle / '_internal/static/vendor/google-emoji/bundle-manifest.json',
+            work / 'data/assets/google-emoji/emoji-assets.pack')
+        checks.append(CHECK)
         roots = request('/api/files-v1/roots')
         host = next(item for item in roots['entries'] if item.get('name') == 'Host locations')
         home_resource = next(item for item in children(host) if item.get('name') == 'Home')

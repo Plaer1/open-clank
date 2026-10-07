@@ -232,6 +232,11 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
             raise RuntimeError('Fixture login failed')
         password = None
         checks.append('actual-password-login-with-session-cookie')
+        from scripts.qualify_theme_emoji import CHECK, qualify_theme_emoji
+        receipt['theme_emoji'] = qualify_theme_emoji(
+            base, cookies, bundle / 'Contents/Resources/runtime/_internal/static/vendor/google-emoji/bundle-manifest.json',
+            work / 'data/assets/google-emoji/emoji-assets.pack')
+        checks.append(CHECK)
         roots = request('/api/files-v1/roots')
         host = next(item for item in roots['entries'] if item.get('name') == 'Host locations')
         home_resource = next(item for item in children(host) if item.get('name') == 'Home')
