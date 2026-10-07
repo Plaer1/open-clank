@@ -1,6 +1,39 @@
 import AppKit
 import Darwin
 
+func pyramidEyeTemplate() -> NSImage {
+    // Exact geometry from static/icons/open-clank-mark.svg. A monochrome
+    // alpha template lets AppKit choose light/dark/highlight menu-bar colors.
+    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+        guard let context = NSGraphicsContext.current?.cgContext else { return false }
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.translateBy(x: rect.minX, y: rect.maxY)
+        context.scaleBy(x: rect.width / 32, y: -rect.height / 32)
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setFillColor(NSColor.black.cgColor)
+        context.setLineWidth(2)
+        context.setLineJoin(.round)
+        context.move(to: CGPoint(x: 16, y: 3))
+        context.addLine(to: CGPoint(x: 29, y: 27))
+        context.addLine(to: CGPoint(x: 3, y: 27))
+        context.closePath()
+        context.strokePath()
+        let eye = CGMutablePath()
+        eye.move(to: CGPoint(x: 8.5, y: 17))
+        eye.addQuadCurve(to: CGPoint(x: 23.5, y: 17), control: CGPoint(x: 16, y: 7))
+        eye.addQuadCurve(to: CGPoint(x: 8.5, y: 17), control: CGPoint(x: 16, y: 27))
+        eye.closeSubpath()
+        eye.addEllipse(in: CGRect(x: 12.3, y: 13.3, width: 7.4, height: 7.4))
+        context.addPath(eye)
+        context.drawPath(using: .eoFill)
+        context.fillEllipse(in: CGRect(x: 14.8, y: 15.8, width: 2.4, height: 2.4))
+        return true
+    }
+    image.isTemplate = true
+    return image
+}
+
 // A normal AppKit lifetime owns the canonical local server. Closing the browser
 // leaves the app running; Quit asks its child owner to stop only its generation.
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -8,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var quitting = false
     var browserURL: URL?
     var exitStatus: Int32 = 0
+    var statusItem: NSStatusItem?
 
     func configuredPort(resources: URL, environment: [String: String]) throws -> Int {
         let helper = Process()
@@ -56,14 +90,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         browserURL = URL(string: "http://127.0.0.1:\(port)")
         let menu = NSMenu()
-        let item = NSMenuItem()
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Open Browser", action: #selector(openBrowser), keyEquivalent: "o")
-        appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit Open Clank", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        item.submenu = appMenu
-        menu.addItem(item)
-        NSApp.mainMenu = menu
+        let open = menu.addItem(withTitle: "Open Open Clank", action: #selector(openBrowser), keyEquivalent: "o")
+        open.target = self
+        menu.addItem(NSMenuItem.separator())
+        let quit = menu.addItem(withTitle: "Quit Open Clank", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.image = pyramidEyeTemplate()
+        item.button?.toolTip = "Open Clank"
+        item.button?.setAccessibilityLabel("Open Clank")
+        item.menu = menu
+        statusItem = item
         let process = Process()
         process.executableURL = resources.appendingPathComponent("runtime/openclank")
         process.arguments = ["__mac-app-owner"]
@@ -120,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = "Open Clank"
         alert.informativeText = message
         alert.alertStyle = .critical
+        NSApp.activate()
         alert.runModal()
         NSApp.terminate(nil)
     }
@@ -134,5 +172,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 let application = NSApplication.shared
 let delegate = AppDelegate()
 application.delegate = delegate
-application.setActivationPolicy(.regular)
+application.setActivationPolicy(.accessory)
 application.run()
