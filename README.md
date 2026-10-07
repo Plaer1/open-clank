@@ -16,8 +16,8 @@ keeping files, knowledge and work together.
 > **Beta 1 is the first of several betas.** macOS is where we are building and
 > dogfooding. Windows source support is working and tested, including Files,
 > Editor save/reopen and History restore, and native image/video thumbnails.
-> Native ARM64 and x64 frozen release packages still need qualification. Linux
-> support remains unqualified. Read the [Beta 1 notes](docs/beta1.md) and
+> Native ARM64 and x64 Windows packages are being qualified separately; use only
+> the architectures offered by the published release. Linux support is coming later. Read the [Beta 1 notes](docs/beta1.md) and
 > [known limits](docs/known-limits.md).
 
 ## Everyday work
@@ -51,23 +51,26 @@ thin frames and maximize beside the retained navigation.
 
 ## Start on macOS
 
-For a fresh source installation, install Homebrew, Python 3.11 or later,
-[Rust/Cargo](https://rustup.rs/) and Xcode Command Line Tools (`xcode-select --install`),
-then clone the source:
+The Apple Silicon source installation has passed fresh-install qualification.
+Install Homebrew, ARM-native Python 3.11 or later,
+[Rust/Cargo](https://rustup.rs/) and Xcode Command Line Tools (`xcode-select --install`).
+The release label is `v1.0.2-beta.1`; its downloads become available when the
+[release is published](https://github.com/Plaer1/open-clank/releases).
+Download `open-clank-1.0.2-beta.1-source.tar.gz` and the five matching artwork
+parts plus `emoji-assets.parts.json`, then extract the source archive:
 
 ```bash
-git clone https://github.com/Plaer1/open-clank.git
-cd open-clank
-```
-
-Before launching, [obtain and assemble the matching offline artwork](docs/setup.md#offline-emoji-artwork).
-The five artwork parts and manifest are prepared locally but have not been
-published yet; a source clone alone is not a complete first-run installation.
-Once the verified pack is installed:
-
-```bash
+tar -xzf open-clank-1.0.2-beta.1-source.tar.gz
+cd open-clank-1.0.2-beta.1
+python3 scripts/emoji_asset_bundle.py assemble --parts /path/to/emoji-parts
+python3 scripts/emoji_asset_bundle.py verify
 ./start-macos.sh
 ```
+
+Follow [the complete artwork instructions](docs/setup.md#offline-emoji-artwork)
+for downloading and verifying the parts. A source archive or Git clone alone
+omits the artwork. This is a source build, not a native macOS installer; Intel
+Macs have not been qualified.
 
 The launcher prepares the environment, builds and verifies the managed engine,
 builds the native memory, Files, thumbnail and History workers from source, and
@@ -85,7 +88,9 @@ as a data migration.
 
 [The Windows launcher](docs/setup.md#native-windows) supports the tested Windows
 source installation, including Files, Editor and native image/video thumbnails.
-Native ARM64 and x64 frozen release packages have not yet been qualified.
+The release also prepares `Open-Clank-1.0.2-windows-x64.zip` and an ARM64
+counterpart. Use only the architectures actually offered after qualification;
+see [Windows package installation](docs/setup.md#windows-release-package).
 [Linux source setup](docs/setup.md#linux) is available, but Linux support remains
 unqualified.
 
@@ -97,11 +102,11 @@ retained only as unsupported legacy reference.
 
 The full offline Google/Noto/Emoji Kitchen pack is a release payload, not a Git
 blob. A source checkout needs the matching release part files assembled once;
-a qualified installed application distribution must include the pack. The public assembly tool
+Windows packages install the same pack into normal writable user data. The public assembly tool
 verifies pinned SHA-256, size, SQLite integrity and catalog counts and makes no
 network requests. See [source setup](docs/setup.md#offline-emoji-artwork).
-Release parts have not been published merely because this repository contains
-the assembly tool; obtain only the payload matched to the installed manifest.
+Downloads become available when the release is published; obtain only the
+payload matched to the installed manifest.
 
 ## First login and model access
 

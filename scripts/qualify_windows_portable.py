@@ -10,10 +10,25 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import struct
 import subprocess
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
+import zlib
+
+
+def fixture_png():
+    """Small nonsquare content fixture; a square fallback icon cannot pass."""
+    width, height = 96, 48
+
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+
+    pixels = b''.join(b'\x00' + b'\xe0\x20\x20' * 48 + b'\x20\x20\xe0' * 48 for _ in range(height))
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(pixels)) + chunk(b'IEND', b''))
 
 
 def qualify(bundle, target, output, parts=None, emoji_pack=None):
@@ -35,6 +50,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
     before = 'Open Clank Windows release fixture — original\n'
     after = 'Open Clank Windows release fixture — saved\n'
     fixture.write_bytes(before.encode('utf-8'))
+    image_fixture = home / 'Windows native content fixture.png'
+    image_fixture.write_bytes(fixture_png())
     environment = os.environ.copy()
     # Independent virgin data/home. Never select a developer's accounts/store.
     environment.update(OPEN_CLANK_DATA_DIR=str(work / 'data'), USERPROFILE=str(home),
@@ -51,7 +68,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
     system_root = Path(os.environ['SystemRoot'])
     environment['PATH'] = os.pathsep.join(str(system_root / item) for item in ('System32', ''))
     base = f'http://127.0.0.1:{port}'
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    cookies = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
     checks = []
 
     def request(path, body=None):
@@ -109,6 +127,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
         if request('/api/auth/setup', {'username': 'releasefixture', 'password': password}).get('ok') is not True:
             raise RuntimeError('Canonical first-run setup did not create fixture account')
         checks.append('canonical-first-run-setup')
+        if list(cookies):
+            raise RuntimeError('First-run setup unexpectedly created an authenticated cookie')
         try:
             request('/api/files-v1/roots')
         except urllib.error.HTTPError as error:
@@ -124,7 +144,22 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
         roots = request('/api/files-v1/roots')
         host = next(item for item in roots['entries'] if item.get('name') == 'Host locations')
         home_resource = next(item for item in children(host) if item.get('name') == 'Home')
-        file_resource = next(item for item in children(home_resource) if item.get('name') == fixture.name)
+        home_entries = children(home_resource)
+        image_resource = next(item for item in home_entries if item.get('name') == image_fixture.name)
+        image_url = '/api/files-v1/thumbnail/' + urllib.parse.quote(image_resource['ref'], safe='')
+        with opener.open(urllib.request.Request(base + image_url + '?width=192&height=192&scale=1&icon=false',
+                                              headers={'Origin': base}), timeout=30) as response:
+            if response.headers.get_content_type() != 'image/png':
+                raise RuntimeError('Packaged native thumbnail did not return image/png')
+            png = response.read(4 * 1024 * 1024 + 1)
+        if not 33 <= len(png) <= 4 * 1024 * 1024 or png[:8] != b'\x89PNG\r\n\x1a\n' or png[12:16] != b'IHDR':
+            raise RuntimeError('Packaged native thumbnail PNG content is missing or malformed')
+        width, height = struct.unpack('>II', png[16:24])
+        if not (1 <= height <= 192 and width == height * 2 and width <= 192):
+            raise RuntimeError('Packaged thumbnail dimensions do not preserve the nonsquare content fixture')
+        checks.append('packaged-native-PNG-content-thumbnail-without-icon-fallback')
+        receipt['thumbnail_sha256'] = hashlib.sha256(png).hexdigest()
+        file_resource = next(item for item in home_entries if item.get('name') == fixture.name)
         opened = request('/api/files-v1/open-resource', {'resource_ref': file_resource['ref']})
         if opened['target']['app'] != 'editor' or opened['payload']['text'] != before:
             raise RuntimeError('Files exact-open did not produce the original Editor payload')
