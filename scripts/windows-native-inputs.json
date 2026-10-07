@@ -73,6 +73,26 @@
       "filename": "grpcio-1.83.0.tar.gz",
       "url": "https://files.pythonhosted.org/packages/0c/98/304898ac4e04e2d5e4e4c2eadc178b1f2a16d5f4bc2f91306c87d64680b9/grpcio-1.83.0.tar.gz",
       "sha256": "7674587248fbbb2ac6e4eecf83a8a0f3d91a928f941de571acfd3a2f007fbc24"
+    },
+    "WinFlexBison": {
+      "name": "WinFlexBison",
+      "version": "2.5.25",
+      "filename": "win_flex_bison-2.5.25.zip",
+      "url": "https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip",
+      "sha256": "8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135",
+      "size": 1083989,
+      "authority": "https://github.com/lexxmark/winflexbison/releases/tag/v2.5.25",
+      "role": "emulated-x86-build-generators-only-not-shipped",
+      "executables": {
+        "win_flex.exe": {
+          "version": "2.6.4",
+          "sha256": "14c3741650bf31f1fa24213eabfaf0a84806346e4b6f257d16fb99b7a7966668"
+        },
+        "win_bison.exe": {
+          "version": "3.8.2",
+          "sha256": "db9602d654ac90d8cdaea7e03e82a82ac6cfe13077eb7d1ca13fc788dd97712a"
+        }
+      }
     }
   },
   "tools": [

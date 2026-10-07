@@ -24,7 +24,7 @@ import zipfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-INPUTS_SHA256 = 'ebf4e317a282c5211e90dde4b9b9ed5b74eac490de0b7b1cfe2cd6c01b79c281'
+INPUTS_SHA256 = 'accb9f57e7d1d0d31b38aca2ef1c95727992a6f38ec42dc1933cc053c1970ab4'
 ADAPTER_SHA256 = '07f723d003b7b85b22cf9712399b0c52aa51a1dec92c42b97347b6e46dcf4aa0'
 
 
@@ -98,6 +98,7 @@ class Builder:
         (self.root / 'tmp').mkdir()
         self.python = None
         self.built = []
+        self.build_tools = []
 
     def run(self, argv, name, cwd=None, allow_failure=False):
         with (self.logs / (name + '.txt')).open('xb') as log:
@@ -151,6 +152,44 @@ class Builder:
         paths = [self.fetch(item) for item in tools]
         self.run([self.python, '-I', '-m', 'pip', 'install', '--no-index', '--no-deps', *paths], 'pinned-builder-tools')
         self.env['PATH'] = str(builder / 'Scripts') + os.pathsep + self.env['PATH']
+
+    def postgres_generators(self):
+        item = self.config['sources']['WinFlexBison']
+        archive = self.fetch(item)
+        if archive.stat().st_size != item['size']:
+            raise RuntimeError('Pinned PostgreSQL generator archive size differs')
+        tools = self.extract(archive, 'postgres-generators')
+        self.env['BISON_PKGDATADIR'] = str(tools / 'data')
+        self.env.pop('M4', None)  # WinBison's packaged M4 implementation, not ambient tools.
+        binaries = []
+        for name in ('win_flex.exe', 'win_bison.exe'):
+            executable = tools / name
+            expected = item['executables'][name]
+            if sha(executable) != expected['sha256']:
+                raise RuntimeError('Pinned PostgreSQL generator executable differs')
+            # These are emulated build generators only; shipped libraries stay native.
+            pe_bytes(executable.read_bytes(), 0x14c)
+            step = name.removesuffix('.exe') + '-version'
+            self.run([executable, '--version'], step)
+            version = (self.logs / (step + '.txt')).read_text(errors='replace')
+            if not re.search(r'\b' + re.escape(expected['version']) + r'\b', version):
+                raise RuntimeError('PostgreSQL generator version differs from pin')
+            binaries.append({'name': name, 'version': expected['version'],
+                             'architecture': 'x86-emulated-build-only', 'sha256': expected['sha256']})
+        # Exercise bundled skeleton/M4 data before the expensive client build.
+        smoke = self.root / 'postgres-generator-preflight'; smoke.mkdir()
+        (smoke / 'parser.y').write_text('%token NUMBER\n%%\nstart: NUMBER;\n%%\n')
+        (smoke / 'scanner.l').write_text('%option noyywrap\n%%\n[0-9]+ return 1;\n. ;\n%%\n')
+        flex, bison = tools / 'win_flex.exe', tools / 'win_bison.exe'
+        self.run([bison, '--output=parser.c', '--defines=parser.h', 'parser.y'], 'bison-generator-preflight', cwd=smoke)
+        self.run([flex, '--outfile=scanner.c', 'scanner.l'], 'flex-generator-preflight', cwd=smoke)
+        if any(not (smoke / name).is_file() or (smoke / name).stat().st_size == 0
+               for name in ('parser.c', 'parser.h', 'scanner.c')):
+            raise RuntimeError('Pinned PostgreSQL generator outputs missing')
+        self.build_tools.append({'name': item['name'], 'version': item['version'],
+                                 'role': item['role'], 'archive_sha256': item['sha256'],
+                                 'binaries': binaries, 'generator_preflight': 'passed'})
+        return flex, bison
 
     def openssl(self):
         prefix = self.root / 'openssl'
@@ -217,6 +256,7 @@ class Builder:
         else:
             prefix = self.openssl()
             pg = self.extract(self.fetch(self.config['sources']['PostgreSQL']), 'postgresql-source')
+            flex, bison = self.postgres_generators()
             self.env['PATH'] = str(self.perl.parent) + os.pathsep + self.env['PATH']
             self.env['INCLUDE'] = str(prefix / 'include') + os.pathsep + self.env.get('INCLUDE', '')
             self.env['LIB'] = str(prefix / 'lib') + os.pathsep + self.env.get('LIB', '')
@@ -225,7 +265,9 @@ class Builder:
             native.write_text("[built-in options]\nc_link_args = ['ws2_32.lib', 'crypt32.lib', 'advapi32.lib', 'user32.lib', 'gdi32.lib', 'bcrypt.lib']\n")
             meson = [self.python, '-I', '-m', 'mesonbuild.mesonmain']
             self.run([*meson, 'setup', build, pg, '--backend=ninja', '--buildtype=release', '--prefix=' + str(client),
-                      '--native-file', native, '-Dssl=openssl', '-Db_lto=false'], 'libpq-setup')
+                      '--native-file', native, '-Dssl=openssl', '-Db_lto=false',
+                      '-DFLEX=' + json.dumps([flex.as_posix()]), '-DBISON=' + json.dumps([bison.as_posix()]),
+                      '-DPERL=' + self.perl.as_posix(), '-DPYTHON=' + json.dumps([self.python.as_posix()])], 'libpq-setup')
             self.run([*meson, 'compile', '-C', build, '-j', '1', 'libpq:shared_library', 'pg_config'], 'libpq-build')
             mapping = json.loads(subprocess.check_output([str(x) for x in [*meson, 'introspect', '--installed', build]], env=self.env))
             for original, target in mapping.items():
@@ -312,11 +354,11 @@ class Builder:
                         with archive.extractfile(member) as source, target.open('xb') as destination:
                             shutil.copyfileobj(source, destination)
             (notices / 'source-inputs.json').write_text(json.dumps(
-                {'inputs_manifest_sha256': INPUTS_SHA256, 'source_recipes': self.built,
+                {'inputs_manifest_sha256': INPUTS_SHA256, 'source_recipes': self.built, 'build_tools': self.build_tools,
                  'inputs': [{'name': path.name, 'sha256': sha(path)} for path in sorted(self.inputs.iterdir())]},
                 indent=2) + '\n', encoding='utf-8')
         return {'target': self.target, 'python': sys.version, 'requirements_sha256': sha(ROOT / 'requirements.txt'),
-                'inputs_manifest_sha256': INPUTS_SHA256, 'source_recipes': self.built,
+                'inputs_manifest_sha256': INPUTS_SHA256, 'source_recipes': self.built, 'build_tools': self.build_tools,
                 'wheels': [{'name': path.name, 'sha256': sha(path)} for path in wheels],
                 'status': 'full-native-offline-install-imports-pip-check-passed'}
 
