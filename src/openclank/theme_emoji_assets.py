@@ -9,6 +9,7 @@ from functools import lru_cache
 from contextlib import contextmanager
 from pathlib import Path
 from scripts.emoji_asset_bundle import BundleError, expected_manifest, runtime_asset_paths, file_digest
+from scripts.emoji_runtime_schema import assert_schema, decoded_blob, read_metadata
 
 _PACK, _MANIFEST = runtime_asset_paths()
 _ID = re.compile(r"^[gk]:[0-9a-f]+(?:-[0-9a-f]+)*(?:_[0-9a-f]+(?:-[0-9a-f]+)*)?$")
@@ -62,11 +63,14 @@ def _connect():
     db = sqlite3.connect(_PACK.as_uri() + "?mode=ro&immutable=1", uri=True)
     try:
         db.execute("PRAGMA query_only=ON")
+        assert_schema(db)
         if _pack_identity() != identity:
             raise RuntimeError("Offline emoji artwork changed during verification")
         yield db
         if _pack_identity() != identity:
             raise RuntimeError("Offline emoji artwork changed while reading")
+    except (ValueError, sqlite3.Error) as error:
+        raise RuntimeError("Offline emoji artwork failed runtime verification") from error
     finally:
         db.close()
 
@@ -74,15 +78,14 @@ def _connect():
 @lru_cache(maxsize=1)
 def _catalogs_for_identity(identity: tuple[int, ...]) -> dict:
     with _connect() as db:
-        row = db.execute("SELECT value FROM metadata WHERE key='runtime_catalogs'").fetchone()
-        exceptions = db.execute("SELECT value FROM metadata WHERE key='upstream_exceptions'").fetchone()
-        runtime_count = db.execute("SELECT count(*) FROM runtime_assets WHERE kind='kitchen'").fetchone()[0]
-        complete = db.execute("SELECT value FROM metadata WHERE key='runtime_available'").fetchone()
-    if not row or not complete or complete[0] != "true":
+        metadata = read_metadata(db)
+        runtime_count = db.execute("SELECT count(*) FROM runtime_assets WHERE identity LIKE 'k:%'").fetchone()[0]
+    row, exceptions = metadata.get("runtime_catalogs"), metadata.get("upstream_exceptions")
+    if not row or metadata.get("runtime_available") != "true":
         raise RuntimeError("Packaged emoji artwork is incomplete")
-    catalogs = json.loads(row[0])
+    catalogs = json.loads(row)
     if (not catalogs.get("google") or not exceptions or len(catalogs.get("kitchen", [])) != runtime_count
-            or runtime_count + len(json.loads(exceptions[0])) != 147000):
+            or runtime_count + len(json.loads(exceptions)) != 147000):
         raise RuntimeError("Packaged emoji catalogue integrity failure")
     return catalogs
 
@@ -103,8 +106,9 @@ def get_kitchen_catalog_text() -> str:
 def get_google_catalog() -> dict:
     catalogs = get_emoji_catalogs()
     with _connect() as db:
-        complete = db.execute("SELECT value FROM metadata WHERE key='bundle_complete'").fetchone()[0] == "true"
-        exceptions = json.loads(db.execute("SELECT value FROM metadata WHERE key='upstream_exceptions'").fetchone()[0])
+        metadata = read_metadata(db)
+        complete = metadata.get("bundle_complete") == "true"
+        exceptions = json.loads(metadata["upstream_exceptions"])
     return {"entries": catalogs["google"], "local": True, "complete": complete,
             "availableKitchen": len(catalogs["kitchen"]), "expectedKitchen": 147000,
             "unavailableKitchen": len(exceptions)}
@@ -117,8 +121,10 @@ def get_packaged_asset(asset_id: str, kind: str) -> tuple[bytes, str, str]:
         raise KeyError(asset_id)
     get_emoji_catalogs()
     with _connect() as db:
-        row = db.execute("SELECT b.data,b.sha256,r.format FROM runtime_assets r JOIN blobs b ON b.sha256=r.sha256 WHERE r.identity=? AND r.kind=?", (asset_id, kind)).fetchone()
+        row = db.execute("SELECT b.sha256,b.format,b.codec,b.decoded_bytes,b.data,b.width,b.height FROM runtime_assets r JOIN blobs b ON b.id=r.blob_id WHERE r.identity=?", (asset_id,)).fetchone()
     if row is None:
         raise KeyError(asset_id)
-    data, digest, format_name = row
-    return data, "image/svg+xml" if format_name == "svg" else "image/png", digest
+    try:
+        return decoded_blob(row)
+    except ValueError as error:
+        raise RuntimeError("Offline emoji artwork failed response verification") from error

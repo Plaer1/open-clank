@@ -13,6 +13,12 @@ import sqlite3
 import sys
 import tempfile
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.emoji_runtime_schema import (
+    SCHEMA_VERSION, IDENTITY, MIME, assert_schema, decoded_blob, read_metadata,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "static/vendor/google-emoji"
 MAX_PART_BYTES = 512 * 1024 * 1024
@@ -80,7 +86,11 @@ def expected_manifest(path: Path) -> dict:
     data = json.loads(path.read_text())
     if (type(data.get("pack_bytes")) is not int or data["pack_bytes"] <= 0
             or len(str(data.get("pack_sha256", ""))) != 64
-            or not data.get("runtime_available")):
+            or not data.get("runtime_available")
+            or data.get("runtime_schema") != SCHEMA_VERSION
+            or data.get("kitchen_format") not in MIME
+            or not isinstance(data.get("runtime_identity_sha256"), str)
+            or len(data["runtime_identity_sha256"]) != 64):
         raise BundleError("invalid pinned artwork manifest")
     return data
 
@@ -96,21 +106,41 @@ def verify(pack: Path, expected: dict) -> None:
             stage = "sqlite-integrity"
             if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                 raise BundleError("artwork SQLite integrity failure")
+            assert_schema(db)
+            if db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise BundleError("artwork SQLite foreign key failure")
             stage = "catalog-verification"
-            metadata = dict(db.execute("SELECT key,value FROM metadata"))
+            metadata = read_metadata(db)
             catalogs = json.loads(metadata["runtime_catalogs"])
             exceptions = json.loads(metadata["upstream_exceptions"])
-            counts = dict(db.execute("SELECT kind,count(*) FROM runtime_assets GROUP BY kind"))
-            kitchen_ids = {row[0] for row in db.execute("SELECT identity FROM runtime_assets WHERE kind='kitchen'")}
+            identities = [row[0] for row in db.execute("SELECT identity FROM runtime_assets ORDER BY identity")]
+            if any(not IDENTITY.fullmatch(identity) for identity in identities):
+                raise BundleError("artwork runtime identity is malformed")
+            kitchen_ids = {identity for identity in identities if identity.startswith("k:")}
+            google_ids = {identity for identity in identities if identity.startswith("g:")}
+            identity_digest = hashlib.sha256(("\n".join(identities) + "\n").encode("utf-8")).hexdigest()
             if (metadata.get("runtime_available") != "true"
-                    or counts.get("google") != expected["google_resolvable"]
-                    or counts.get("kitchen") != expected["available_kitchen"]
+                    or len(google_ids) != expected["google_resolvable"]
+                    or len(kitchen_ids) != expected["available_kitchen"]
                     or len(catalogs["google"]) != expected["google_sampler"]
                     or set(catalogs["kitchen"]) != kitchen_ids
-                    or len(exceptions) + counts["kitchen"] != expected["expected_kitchen"]
+                    or len(catalogs["kitchen"]) != len(kitchen_ids)
+                    or len({entry["id"] for entry in catalogs["google"]}) != len(catalogs["google"])
+                    or any(entry["id"] not in google_ids for entry in catalogs["google"])
+                    or len(exceptions) + len(kitchen_ids) != expected["expected_kitchen"]
                     or exceptions != expected["exceptions"]
-                    or db.execute("SELECT count(*) FROM assets").fetchone()[0] != expected["original_records"]):
+                    or identity_digest != expected["runtime_identity_sha256"]):
                 raise BundleError("artwork catalog or exception-count mismatch")
+            if db.execute("SELECT count(*) FROM blobs WHERE id NOT IN (SELECT blob_id FROM runtime_assets)").fetchone()[0]:
+                raise BundleError("artwork contains unreferenced runtime blobs")
+            if db.execute("SELECT count(*) FROM runtime_assets r JOIN blobs b ON b.id=r.blob_id WHERE (substr(r.identity,1,2)='g:' AND b.format!='svg') OR (substr(r.identity,1,2)='k:' AND b.format!=?)", (expected["kitchen_format"],)).fetchone()[0]:
+                raise BundleError("artwork runtime image format differs")
+            stage = "blob-verification"
+            limit = expected.get("optimization", {}).get("profile", {}).get("max_dimension")
+            if expected["kitchen_format"] == "webp" and (type(limit) is not int or not 0 < limit <= 256):
+                raise BundleError("artwork raster dimension pin is missing or invalid")
+            for row in db.execute("SELECT sha256,format,codec,decoded_bytes,data,width,height FROM blobs"):
+                decoded_blob(row, max_dimension=limit)
     except (BundleError, OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
         _report_failure(stage, error)
         raise
