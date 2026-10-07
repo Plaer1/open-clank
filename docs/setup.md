@@ -38,18 +38,63 @@ actions.
 
 ### macOS
 
+#### macOS app package
+
+The Apple Silicon download for macOS 15 or later is `Open-Clank-1.0.2-macos-arm64.dmg` from
+the [`v1.0.2-beta.1` application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1)
+when published. Native package and menu-bar Open/Quit qualification have passed;
+no Intel/universal or older macOS qualification is claimed. This Beta app is
+ad-hoc signed, without Developer ID signing or notarization. Check its release
+checksum and signing information before deciding to open it; these instructions
+do not disable Gatekeeper.
+
+Mount the DMG, drag **OpenClank.app** to Applications, then eject the DMG.
+The app includes private Python, Engine and native helpers and needs no checkout,
+Homebrew, Cargo or system Python. Download all five artwork parts and
+`emoji-assets.parts.json` from the separate
+[`v1.0.2-beta.1-artwork` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork)
+which is available now, keeping them together in one directory. Install them with the
+app's packaged command in Terminal:
+
+```bash
+"/Applications/OpenClank.app/Contents/Resources/runtime/openclank" assets assemble --parts /path/to/emoji-parts
+"/Applications/OpenClank.app/Contents/Resources/runtime/openclank" assets verify
+```
+
+The default pack destination is `~/.open-clank/data/assets/google-emoji/emoji-assets.pack`.
+Assembly verifies the full pinned payload and writes outside the sealed `.app`;
+never add artwork or editable data inside the application bundle. If using
+`OPEN_CLANK_DATA_DIR`, use the same configured directory for assembly and launch.
+
+Open **OpenClank.app**. Its pyramid-and-eye menu-bar icon offers **Open** to
+show the browser UI and **Quit** to stop the server generation owned by that
+app. It has no Dock icon. Open uses the configured loopback address, normally
+`http://127.0.0.1:7777`. Create the first administrator through mandatory browser
+setup, then sign in. Reopening retains user data. Missing artwork returns an
+install hint rather than fetching a CDN. Removing the app does not remove
+personal application data or the installed pack.
+
+For a custom data directory or port, packaged Finder launches use the supported
+per-user launch profile at
+`~/Library/Application Support/OpenClank/macos-launch-profile.json`. The profile
+selects `OPEN_CLANK_DATA_DIR` and optionally `APP_PORT`; use the same profile for
+the packaged artwork command. Setting an environment variable in an unrelated
+Terminal does not change a running Finder-launched app. Source launcher settings
+are described separately below.
+
+#### macOS source alternative
+
 The Apple Silicon source installation has passed fresh-install qualification.
 Install Homebrew, ARM-native Python 3.11 or later, [Rust/Cargo](https://rustup.rs/)
-and Xcode Command Line Tools (`xcode-select --install`). This release supplies
-source files, not a native/notarized macOS installer; Intel Macs remain
-unqualified.
+and Xcode Command Line Tools (`xcode-select --install`). This alternative builds
+locally; Intel Macs remain unqualified.
 
 Downloads become available when `v1.0.2-beta.1` is published on the
-[releases page](https://github.com/Plaer1/open-clank/releases). Obtain
+[application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1). Obtain
 `open-clank-1.0.2-beta.1-source.tar.gz` from the application release. Obtain
 `emoji-assets.parts.json` and `emoji-assets.pack.part-001` through
 `emoji-assets.pack.part-005` from the separate `v1.0.2-beta.1-artwork` supporting
-release when published. Check the source archive against the release checksum
+[release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork), available now. Check the source archive against the release checksum
 file. Keep all six artwork files together in a separate directory.
 
 ```bash
@@ -787,14 +832,15 @@ To back up or restore the configured data paths, see the
 
 ## Offline emoji artwork
 
-**Complete this step before first launch from source or a Windows package.**
-Git checkouts, source archives and Windows ZIPs omit the large pack; the shared
-five parts install the full offline artwork once. Downloads become available
-when the release is published. Until then, use only an explicitly supplied
-maintainer delivery location; source code alone does not complete installation.
+**Complete this step before first launch from source or a packaged app.**
+Git checkouts, source archives, macOS DMGs and Windows ZIPs omit the large pack; the shared
+five parts install the full offline artwork once. The supporting artwork release
+is available now; application downloads remain separate and become available
+when the application release is published. Source code alone does not complete
+installation.
 
 Obtain these six assets from the release matching your source or package on the
-[GitHub releases page](https://github.com/Plaer1/open-clank/releases):
+[artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork), available now:
 
 - `emoji-assets.parts.json`
 - `emoji-assets.pack.part-001` through `emoji-assets.pack.part-005`
@@ -802,7 +848,7 @@ Obtain these six assets from the release matching your source or package on the
 Save them together in one directory. With GitHub CLI installed, the equivalent
 commands below download assets only; they do not create or publish a release.
 Beta 1 uses the separate `v1.0.2-beta.1-artwork` supporting release. Use the
-command only after its publication and confirm all six assets are present.
+command to obtain the published artwork and confirm all six assets are present.
 The application binaries and source use the separate `v1.0.2-beta.1` release.
 
 ```bash
@@ -811,7 +857,9 @@ python3 scripts/emoji_asset_bundle.py assemble --parts emoji-parts
 python3 scripts/emoji_asset_bundle.py verify
 ```
 
-On Windows, the same `gh` command works in PowerShell. A source installation
+For the macOS app, use its [packaged CLI](#macos-app-package) for assembly and
+verification rather than the source Python script. On Windows, the same `gh`
+command works in PowerShell. A source installation
 uses `py -3.11` in place of `python3`; a release package uses
 `.\openclank.exe assets assemble --parts <directory>` and
 `.\openclank.exe assets verify`. GitHub CLI is optional: downloading the six assets in a browser
@@ -823,7 +871,7 @@ Assembly verifies every part, the pinned total hash/size, SQLite integrity and
 runtime catalog counts, then publishes the pack atomically at
 `static/vendor/google-emoji/emoji-assets.pack` for source installations, or
 `assets/google-emoji/emoji-assets.pack` beneath normal application data for
-frozen Windows packages. The pinned pack is 2,211,209,216
+frozen Windows/macOS packages. The pinned pack is 2,211,209,216
 bytes with SHA-256
 `2c9e29cdffb64a173a7f2fc8b62ecb886331f422f71b935caf9298660bef116e`.
 An existing pack is verified and never silently replaced. Wrong, incomplete or

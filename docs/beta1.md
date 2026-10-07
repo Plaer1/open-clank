@@ -1,18 +1,25 @@
 # Open Clank Beta 1
 
 Beta 1 is the first of several beta releases. macOS is where Open Clank is
-currently built and dogfooded. Windows source support is working and tested:
+currently built and dogfooded. The macOS 15+ Apple Silicon package has passed
+native qualification, including menu-bar Open/Quit. Its pyramid-and-eye icon
+owns the app lifecycle; there is no Dock icon. It is ad-hoc signed and not
+notarized, with no Intel/universal claim. Windows source support is working and tested:
 Setup/Check, authenticated startup, Files, Editor save/reopen and History
 restore, native image/video thumbnails and host application dispatch passed
 focused checks. Shared fixes were also tested on macOS. Native ARM64 and x64
-frozen release packages still need qualification; Linux remains unqualified.
+frozen installers and packages still need final qualification; Linux release
+support is coming soon and remains unqualified.
 Docker is not officially supported or tested. Retained Docker material is
 unsupported legacy reference and does not gate the Beta 1 release.
 
 **Beta 1 is a human release label. The machine version remains `1.0.2`.**
 The installed revision identifies the actual source/build. These notes do not
-announce a published GitHub tag, release asset or installer: publishing a release
-is a separate step. CI artifact definitions are not platform acceptance.
+announce a published application release or downloadable installer. Application
+downloads become available when `v1.0.2-beta.1` is published. The verified five
+offline-artwork parts and manifest are available from the separate
+[`v1.0.2-beta.1-artwork` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork).
+CI artifact definitions are not platform acceptance.
 
 ## Current workspace
 
