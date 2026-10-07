@@ -51,15 +51,19 @@ thin frames and maximize beside the retained navigation.
 
 ## Start on macOS
 
-The planned packaged installation for Apple Silicon is
+The packaged installation for Apple Silicon Macs running macOS 15 or later is
 `Open-Clank-1.0.2-macos-arm64.dmg` from the
 [`v1.0.2-beta.1` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1)
-when published. Native app qualification on macOS 15 is still pending. The app
-is ad-hoc signed, not notarized; Intel/universal packages are not claimed.
+when published. The native package and its menu-bar Open/Quit flow have passed
+qualification. The app is ad-hoc signed, not notarized; Intel/universal packages
+are not claimed.
 Drag **OpenClank.app** to Applications. It includes private Python, Engine and
 native helpers, so you do not need a checkout, Homebrew or system Python.
 [Install the verified offline artwork with its packaged CLI](docs/setup.md#macos-app-package),
-then open the app and create the first administrator in the browser.
+then open the app. Its pyramid-and-eye menu-bar icon offers **Open** to show
+the browser UI and **Quit** to stop its owned server. It has no Dock icon.
+Create the first administrator through browser setup, then sign in. Open uses
+the configured loopback address, normally `http://127.0.0.1:7777`.
 
 For the source-build alternative, the Apple Silicon installation has passed
 fresh-install qualification.
@@ -69,7 +73,7 @@ The release label is `v1.0.2-beta.1`; its downloads become available when the
 [application release is published](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1).
 Download `open-clank-1.0.2-beta.1-source.tar.gz` from the application release.
 Obtain the five matching artwork parts and `emoji-assets.parts.json` from the
-separate [`v1.0.2-beta.1-artwork` supporting release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork) when published, then extract
+available [`v1.0.2-beta.1-artwork` supporting release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork), then extract
 the source archive:
 
 ```bash
@@ -112,7 +116,7 @@ unsigned Beta and data-preserving uninstall details.
 [The Windows source launcher](docs/setup.md#native-windows) also supports the
 tested source installation, including Files, Editor and native thumbnails.
 [Linux source setup](docs/setup.md#linux) is available, but Linux support remains
-unqualified.
+unqualified; Linux release support is coming soon.
 
 Docker is not officially supported or tested. Existing Docker files and
 [setup notes](docs/setup.md#docker-compose-unsupported-legacy-reference) are

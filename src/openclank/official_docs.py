@@ -43,7 +43,8 @@ from typing import Any
 # v19 — current hosted Files-only authority; older-store recovery preserved.
 # v20 — Docker unsupported; retained legacy references carry no release gate.
 # v21 — complete fresh source setup: offline assets and native workspace workers.
-OFFICIAL_DOCS_SEED_VERSION = 21
+# v22 — packaged Mac menu-bar lifecycle and current offline release installation.
+OFFICIAL_DOCS_SEED_VERSION = 22
 
 # Top-level folder that holds every provisioned official page. Derived identity
 # (product/builtin markers) is the real recognition mechanism; this name is the

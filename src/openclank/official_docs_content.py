@@ -7,7 +7,7 @@ resources. They are references, not invented URLs or executable page content.
 ARTICLE_CONTENT = {
     "openclank-docs-home": """# Open Clank Handbook
 
-This handbook ships with **Open Clank Beta 1, the first of several betas**. macOS is where we are currently building and dogfooding. Windows source support is working and tested, including Files, Editor save/reopen and History restore, and native image/video thumbnails. Native ARM64 and x64 frozen release packages still need qualification. Linux remains unqualified.
+This handbook ships with **Open Clank Beta 1, the first of several betas**. The macOS15+ Apple Silicon package has passed native and menu-bar Open/Quit qualification, with no Dock icon. It is ad-hoc signed, not notarized. Windows source support is working and tested, including Files, Editor save/reopen and History restore, and native image/video thumbnails. Native ARM64 and x64 Windows installers/packages still need final qualification. Application downloads are not yet announced; the verified offline artwork is available in v1.0.2-beta.1-artwork. Linux release support is coming soon and remains unqualified.
 
 Official pages are read-only. Wiki opens a dedicated page-authoring applet; Editor and Wiki share the same document identity, drafts, saves, history and attachments.
 
@@ -459,7 +459,7 @@ This handbook distinguishes shipped implementation from a capability observed on
 
 ## Platforms and deployment
 
-This is **Beta 1, the first of several betas**. macOS is the current build and dogfood focus. Windows source Setup/Check, authenticated startup, Files, Editor save/reopen and History restore, native PNG/JPEG/MP4 thumbnails, and host application dispatch are working and tested. Shared fixes were also tested on macOS. The tested source setup used x64 Python with ARM Engine and native sidecars; native ARM64 and x64 frozen release packages still need qualification. Linux remains unqualified. Host compatibility still depends on the selected Python/runtime versions and optional operating system dependencies. GPU model serving depends on the runtime, drivers, model format and available memory. Docker is not officially supported or tested. Retained Docker files and instructions are unsupported legacy reference, not an official installation path or a Beta 1 release qualification requirement.
+This is **Beta 1, the first of several betas**. The macOS15+ Apple Silicon package has passed native and menu-bar Open/Quit qualification. Its pyramid-and-eye menu owns the app lifecycle, without a Dock icon. It is ad-hoc signed, not notarized; Intel/universal packages are not claimed. Windows source Setup/Check, authenticated startup, Files, Editor save/reopen and History restore, native PNG/JPEG/MP4 thumbnails, and host application dispatch are working and tested. Shared fixes were also tested on macOS. The tested source setup used x64 Python with ARM Engine and native sidecars; native ARM64 and x64 frozen release packages still need qualification. Linux release support is coming soon and remains unqualified. Application downloads become available when the v1.0.2-beta.1 release is published; the verified offline artwork is available separately in v1.0.2-beta.1-artwork. Host compatibility still depends on the selected Python/runtime versions and optional operating system dependencies. GPU model serving depends on the runtime, drivers, model format and available memory. Docker is not officially supported or tested. Retained Docker files and instructions are unsupported legacy reference, not an official installation path or a Beta 1 release qualification requirement.
 
 Desktop capture/OCR and host-opening adapters are macOS-focused. Their implementation does not prove that permission was granted or a particular application launched on your host. Use the availability/error state.
 
@@ -488,11 +488,32 @@ No cross-account sharing is granted by a document link. Reading a recipe does no
 ADDITIONAL_ARTICLES = (
     ("openclank-docs-setup", "Setup and First Run", """# Setup and First Run
 
-Use the native installation for the current bare-metal app, particularly on Apple Silicon when serving local models through Metal.
+Use the packaged app or the source alternative below. Local model serving is optional; configure providers through Settings → Add Models.
+
+## macOS app package
+
+On Apple Silicon Macs running macOS15 or later, install Open-Clank-1.0.2-macos-arm64.dmg from the application release when published. Copy OpenClank.app to Applications. The package has passed native and menu-bar Open/Quit qualification; it includes private Python, Engine and native workers, so no checkout or system Python is required. It is ad-hoc signed and not notarized; no Intel/universal qualification is claimed.
+
+Open the app and use its pyramid-and-eye menu-bar icon: **Open** shows the browser UI; **Quit** stops the server owned by that app. There is no Dock icon. Open uses the configured loopback address, normally http://127.0.0.1:7777. Reopening retains user data. Custom packaged launch settings use the per-user macOS launch profile described in the repository Setup Guide; a source checkout's terminal settings do not configure an unrelated Finder launch.
+
+Download all five pinned artwork parts and emoji-assets.parts.json from the available [supporting artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork). Keep them together and run the packaged command:
+
+```bash
+"/Applications/OpenClank.app/Contents/Resources/runtime/openclank" assets assemble --parts /path/to/emoji-parts
+"/Applications/OpenClank.app/Contents/Resources/runtime/openclank" assets verify
+```
+
+Artwork installs into writable user data outside the sealed app. Missing artwork gives an install hint; no runtime CDN fetch supplies it.
+
+## Windows release package
+
+The planned per-user installers are Open-Clank-1.0.2-windows-x64-Setup.exe and Open-Clank-1.0.2-windows-arm64-Setup.exe. Final native installer and artwork qualification remains pending; use only architectures actually offered when the application release is published. The beta is unsigned. Each package includes private Python and native workers, with no global Python/PATH changes. ARM64 payloads are native ARM64; the x64 installer bootstrap uses Windows ARM emulation.
+
+Setup can download verified artwork or use the five existing parts and manifest. Start menu **Open Clank** opens the local browser app; **Stop Open Clank** stops its owned server. Uninstall preserves user data and artwork. ZIPs remain an alternative; keep the complete extracted folder together and use `openclank.exe assets assemble --parts <directory>` then `assets verify`. See the repository Setup Guide for exact release assets and commands.
 
 ## Native source setup
 
-Use Python 3.11 or later, Rust/Cargo and the platform C/C++ build tools. macOS needs Xcode Command Line Tools; Windows needs Visual Studio C++ Build Tools and the Windows SDK. Before first launch, obtain the matching offline emoji parts and manifest following the repository Setup Guide. Those assets are prepared locally but have not been publicly published yet; a source clone alone is incomplete.
+Use Python 3.11 or later, Rust/Cargo and the platform C/C++ build tools. macOS needs Xcode Command Line Tools; Windows needs Visual Studio C++ Build Tools and the Windows SDK. Before first launch, obtain the matching offline emoji parts and manifest following the repository Setup Guide. The verified artwork is available in the supporting release v1.0.2-beta.1-artwork; a source clone alone is incomplete.
 
 From the checked-out project, with the matching part files already supplied:
 
@@ -514,7 +535,7 @@ This recipe is for a **fresh installation**. On an existing installation, read t
 
 ## First sign-in
 
-First setup creates the configured administrator and prints a temporary password to the local terminal when credentials were generated for a non-interactive setup. Interactive setup asks you to create the initial administrator directly. Sign in to Open Clank and change the password through Account settings. This application account is separate from a provider subscription login or API key; configure model access afterward. Keep credentials out of documents and screenshots.
+Packaged installations use mandatory browser first-run setup to create the initial administrator, then require normal sign-in. Source setup creates the configured administrator and prints a temporary password to the local terminal when credentials were generated for a non-interactive setup. Interactive setup asks you to create the initial administrator directly. Sign in to Open Clank and change the password through Account settings. This application account is separate from a provider subscription login or API key; configure model access afterward. Keep credentials out of documents and screenshots.
 
 Open Settings → Add Models and choose a Local, API, or Subscription setup card, then select a model in Chat. Added Models is the inventory of connected models. The application can run without serving a local model; a connected API or remote runtime supplies model execution.
 

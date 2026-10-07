@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import math
@@ -20,6 +21,19 @@ BUFFER_BYTES = 4 * 1024 * 1024
 
 class BundleError(RuntimeError):
     pass
+
+
+def _report_failure(stage: str, error: BaseException, completed_parts: int = 0) -> None:
+    """Emit bounded diagnostics without exception text, paths or environment."""
+    if getattr(error, "_offline_artwork_reported", False):
+        return
+    record = {"stage": stage, "error_type": type(error).__name__, "completed_parts": completed_parts}
+    for field in ("errno", "winerror"):
+        value = getattr(error, field, None)
+        if type(value) is int:
+            record[field] = value
+    print("offline artwork diagnostic: " + json.dumps(record, sort_keys=True), file=sys.stderr)
+    error._offline_artwork_reported = True
 
 
 def runtime_asset_paths(
@@ -72,26 +86,34 @@ def expected_manifest(path: Path) -> dict:
 
 
 def verify(pack: Path, expected: dict) -> None:
-    if file_digest(pack) != (expected["pack_bytes"], expected["pack_sha256"]):
-        raise BundleError("artwork pack size or SHA-256 mismatch")
-    with sqlite3.connect(pack.resolve().as_uri() + "?mode=ro&immutable=1", uri=True) as db:
-        db.execute("PRAGMA query_only=ON")
-        if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
-            raise BundleError("artwork SQLite integrity failure")
-        metadata = dict(db.execute("SELECT key,value FROM metadata"))
-        catalogs = json.loads(metadata["runtime_catalogs"])
-        exceptions = json.loads(metadata["upstream_exceptions"])
-        counts = dict(db.execute("SELECT kind,count(*) FROM runtime_assets GROUP BY kind"))
-        kitchen_ids = {row[0] for row in db.execute("SELECT identity FROM runtime_assets WHERE kind='kitchen'")}
-        if (metadata.get("runtime_available") != "true"
-                or counts.get("google") != expected["google_resolvable"]
-                or counts.get("kitchen") != expected["available_kitchen"]
-                or len(catalogs["google"]) != expected["google_sampler"]
-                or set(catalogs["kitchen"]) != kitchen_ids
-                or len(exceptions) + counts["kitchen"] != expected["expected_kitchen"]
-                or exceptions != expected["exceptions"]
-                or db.execute("SELECT count(*) FROM assets").fetchone()[0] != expected["original_records"]):
-            raise BundleError("artwork catalog or exception-count mismatch")
+    stage = "pack-hash"
+    try:
+        if file_digest(pack) != (expected["pack_bytes"], expected["pack_sha256"]):
+            raise BundleError("artwork pack size or SHA-256 mismatch")
+        stage = "sqlite-open"
+        with closing(sqlite3.connect(pack.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+            db.execute("PRAGMA query_only=ON")
+            stage = "sqlite-integrity"
+            if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+                raise BundleError("artwork SQLite integrity failure")
+            stage = "catalog-verification"
+            metadata = dict(db.execute("SELECT key,value FROM metadata"))
+            catalogs = json.loads(metadata["runtime_catalogs"])
+            exceptions = json.loads(metadata["upstream_exceptions"])
+            counts = dict(db.execute("SELECT kind,count(*) FROM runtime_assets GROUP BY kind"))
+            kitchen_ids = {row[0] for row in db.execute("SELECT identity FROM runtime_assets WHERE kind='kitchen'")}
+            if (metadata.get("runtime_available") != "true"
+                    or counts.get("google") != expected["google_resolvable"]
+                    or counts.get("kitchen") != expected["available_kitchen"]
+                    or len(catalogs["google"]) != expected["google_sampler"]
+                    or set(catalogs["kitchen"]) != kitchen_ids
+                    or len(exceptions) + counts["kitchen"] != expected["expected_kitchen"]
+                    or exceptions != expected["exceptions"]
+                    or db.execute("SELECT count(*) FROM assets").fetchone()[0] != expected["original_records"]):
+                raise BundleError("artwork catalog or exception-count mismatch")
+    except (BundleError, OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
+        _report_failure(stage, error)
+        raise
 
 
 def split(pack: Path, output: Path, expected: dict, part_bytes: int) -> int:
@@ -148,6 +170,8 @@ def assemble(parts_root: Path, destination: Path, expected: dict) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary_name = tempfile.mkstemp(prefix=".emoji-assets-", dir=destination.parent)
     temporary = Path(temporary_name)
+    stage = "copy-parts"
+    completed_parts = 0
     try:
         with os.fdopen(handle, "wb") as output:
             for part in parts:
@@ -161,14 +185,26 @@ def assemble(parts_root: Path, destination: Path, expected: dict) -> None:
                         count += len(block)
                 if (count, digest.hexdigest()) != (part["bytes"], part["sha256"]):
                     raise BundleError("release part size or SHA-256 mismatch")
+                completed_parts += 1
+            stage = "flush-parts"
             output.flush()
             os.fsync(output.fileno())
+        stage = "verify-assembled-pack"
         verify(temporary, expected)
+        stage = "prepare-publication"
         os.chmod(temporary, 0o644)
         # A hard-link publishes atomically and fails if another writer won.
+        stage = "publish-pack"
         os.link(temporary, destination)
+    except (BundleError, OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
+        _report_failure(stage, error, completed_parts)
+        raise
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as error:
+            _report_failure("cleanup-temporary", error, completed_parts)
+            raise
 
 
 def main() -> int:
@@ -191,7 +227,8 @@ def main() -> int:
             print(f"offline artwork parts prepared: {count}")
         else:
             assemble(args.parts, args.pack, expected)
-    except (BundleError, OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+    except (BundleError, OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
+        _report_failure("manifest-or-command", error)
         print("offline artwork bundle failed verification or assembly; original installed pack was preserved")
         return 1
     print("offline artwork bundle verified")
