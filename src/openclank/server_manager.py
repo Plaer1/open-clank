@@ -131,8 +131,11 @@ class LocalServerManager:
                 return "__managed-server" in process_command
             return "openclank_bootstrap.py" in process_command and "serve" in process_command
         try:
+            ps_command = ["ps", "-p", str(pid), "-o", "command="]
+            if getattr(sys, "frozen", False) and sys.platform == "darwin":
+                ps_command.insert(1, "-ww")
             result = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "command="],
+                ps_command,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -141,6 +144,9 @@ class LocalServerManager:
         except (OSError, subprocess.TimeoutExpired):
             return False
         command = result.stdout
+        if getattr(sys, "frozen", False) and sys.platform == "darwin":
+            expected = str(Path(sys.executable).resolve()) + " __managed-server"
+            return command.strip() == expected or command.startswith(expected + " ")
         return (
             "uvicorn" in command and "app:app" in command
         ) or (

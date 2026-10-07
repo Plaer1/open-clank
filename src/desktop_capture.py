@@ -38,6 +38,13 @@ class _NativeDesktopHelpers:
     def _executable(self, name: str, source: Path) -> Path:
         if sys.platform != "darwin":
             raise DesktopCaptureError("native desktop helper is unavailable", code="ocr_unavailable")
+        if getattr(sys, "frozen", False):
+            from src.runtime_paths import get_app_root
+
+            executable = Path(get_app_root()) / "bin" / name
+            if executable.is_file() and os.access(executable, os.X_OK):
+                return executable
+            raise DesktopCaptureError("bundled native desktop helper is unavailable", code="ocr_unavailable")
         import stat
         source_bytes = source.read_bytes()
         digest = hashlib.sha256(source_bytes).hexdigest()[:24]

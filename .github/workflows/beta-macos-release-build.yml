@@ -1,0 +1,94 @@
+name: Beta release macOS build
+
+on:
+  push:
+    branches: [codex/beta1-macos-release-build-20261006]
+  workflow_dispatch:
+    inputs:
+      emoji_release_tag:
+        description: Same-repository release containing the pinned offline artwork parts
+        required: true
+        default: v1.0.2-beta.1-artwork
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-macos-release-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    if: github.ref == 'refs/heads/codex/beta1-macos-release-build-20261006'
+    runs-on: macos-15
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUSTUP_TOOLCHAIN: 1.99.0-aarch64-apple-darwin
+      EMOJI_RELEASE_TAG: ${{ inputs.emoji_release_tag || 'v1.0.2-beta.1-artwork' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Require native Apple Silicon and shared asset access
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+          gh release view "$EMOJI_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13.16'
+          architecture: arm64
+      - name: Require native build tools and exact Rust
+        run: |
+          set -euo pipefail
+          python3 -I -c 'import platform; assert platform.machine() == "arm64"; assert platform.python_version() == "3.13.16"'
+          xcrun --find clang >/dev/null
+          for tool in swiftc sips iconutil lipo otool codesign hdiutil; do test -x "/usr/bin/$tool"; done
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc -vV | grep -Fx 'release: 1.99.0'
+          rustc -vV | grep -Fx 'host: aarch64-apple-darwin'
+      - name: Build sealed native app and DMG without shared artwork
+        run: |
+          set -euo pipefail
+          python3 -B scripts/macos_package.py build --output dist/macos-arm64
+          mkdir -p dist/macos-provenance
+          cp dist/macos-arm64/OpenClank.app/Contents/Resources/build-provenance.json dist/macos-provenance/
+          cp dist/macos-arm64/OpenClank.app/Contents/Resources/package-manifest.json dist/macos-provenance/
+          # Successful DMG and sealed app retain all package evidence. These are only this job's disposable build intermediates.
+          rm -rf dist/macos-arm64/work dist/macos-arm64/engine
+      - name: Verify external artwork for disposable qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          parts="$RUNNER_TEMP/emoji-parts"
+          pack="$RUNNER_TEMP/emoji-assets.pack"
+          gh release download "$EMOJI_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*' --dir "$parts"
+          python3 -B scripts/emoji_asset_bundle.py assemble --parts "$parts" --pack "$pack"
+          rm -rf "$parts"
+          printf 'QUALIFICATION_EMOJI_PACK=%s\n' "$pack" >> "$GITHUB_ENV"
+      - name: Qualify actual mounted and relocated package
+        run: |
+          set -euo pipefail
+          python3 -B scripts/qualify_macos_package.py --dmg dist/macos-arm64/Open-Clank-1.0.2-beta.1-macos-arm64.dmg --output dist/macos-qualification --emoji-pack "$QUALIFICATION_EMOJI_PACK"
+          # AppKit GUI Quit and Screen Recording permission journeys require separate native manual evidence.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Open-Clank-macos-arm64
+          path: |
+            dist/macos-arm64/Open-Clank-1.0.2-beta.1-macos-arm64.dmg
+            dist/macos-arm64/Open-Clank-1.0.2-beta.1-macos-arm64.dmg.sha256
+            dist/macos-provenance/*.json
+            dist/macos-qualification/receipt.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

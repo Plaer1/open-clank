@@ -83,6 +83,13 @@ class MacOSHostApps:
     def _executable(self) -> str:
         if sys.platform != "darwin":
             raise MacOSHostAppsError("Open on host is supported on macOS only", code="unsupported_platform")
+        if getattr(sys, "frozen", False):
+            from src.runtime_paths import get_app_root
+
+            executable = Path(get_app_root()) / "bin" / "openclank-macos-host-apps"
+            if executable.is_file() and os.access(executable, os.X_OK):
+                return str(executable)
+            raise MacOSHostAppsError("Bundled host app discovery is unavailable", code="provider_unavailable")
         try:
             source = _SOURCE.read_bytes()
             digest = hashlib.sha256(source).hexdigest()[:20]

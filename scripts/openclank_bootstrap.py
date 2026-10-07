@@ -93,6 +93,10 @@ def verify_portable_payload() -> dict | None:
 
     if not getattr(sys, "frozen", False):
         return None
+    if sys.platform == "darwin":
+        from scripts.macos_package import verify_bundle
+
+        return verify_bundle(Path(sys.executable).resolve().parents[2])
     bundle_root = Path(sys.executable).resolve().parent
     manifest_path = bundle_root / "portable-provenance.json"
     checksums_path = bundle_root / "SHA256SUMS"
