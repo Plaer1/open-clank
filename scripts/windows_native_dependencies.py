@@ -44,6 +44,33 @@ def pe_bytes(data, machine):
         raise RuntimeError('Native dependency has the wrong PE architecture')
 
 
+def dependency_failure_tail(log_path, environment):
+    """Bounded, redacted diagnostics for this driver's dependency-only logs."""
+    with log_path.open('rb') as stream:
+        stream.seek(0, os.SEEK_END)
+        offset = max(0, stream.tell() - 65536)
+        stream.seek(offset)
+        text = stream.read(65536).decode('utf-8', errors='replace')
+    if offset:
+        text = text.partition('\n')[2]  # Never print a truncated first line.
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+    values = set()
+    for name, value in environment.items():
+        if value and re.search(r'TOKEN|KEY|PASSWORD|PASSWD|SECRET|CREDENTIAL', name, re.I):
+            values.add(value)
+            values.update(piece for piece in value.splitlines() if piece.strip())
+            values.add(urllib.parse.quote(value, safe=''))
+    for value in sorted(values, key=len, reverse=True):
+        text = text.replace(value, '[REDACTED]')
+    text = re.sub(r'(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@', r'\1[REDACTED]@', text)
+    text = re.sub(r'(?i)(authorization\s*[:=]\s*)(?:(?:bearer|token|basic)\s+)?\S+',
+                  r'\1[REDACTED]', text)
+    text = re.sub(r"(?i)((?:token|password|passwd|api[_-]?key|secret|credential)\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)",
+                  r'\1[REDACTED]', text)
+    lines = text.splitlines()[-40:]
+    return '\n'.join(lines)[-6000:]
+
+
 class Builder:
     def __init__(self, args):
         self.root = args.work_root.resolve()
@@ -76,8 +103,14 @@ class Builder:
         with (self.logs / (name + '.txt')).open('xb') as log:
             code = subprocess.run([str(item) for item in argv], cwd=cwd or self.root, env=self.env,
                                   stdout=log, stderr=subprocess.STDOUT).returncode
+        if code:
+            # Only this dependency driver's logs enter console diagnostics.
+            # Server/auth/installer qualification logs are never read here.
+            tail = dependency_failure_tail(self.logs / (name + '.txt'), self.env)
+            print(f'Dependency step {name} failed ({code}); redacted tail (max40 lines/6000 chars):', file=sys.stderr)
+            print(tail, file=sys.stderr)
         if code and not allow_failure:
-            raise RuntimeError(f'{name} failed ({code}); inspect preserved build logs')
+            raise RuntimeError(f'{name} failed ({code}); see redacted dependency diagnostics')
         return code
 
     def fetch(self, item):
