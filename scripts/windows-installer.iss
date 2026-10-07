@@ -51,7 +51,7 @@ UsePreviousTasks=no
 SetupLogging=yes
 
 [Tasks]
-Name: "downloadart"; Description: "Install complete offline emoji artwork (download about 2.2 GB, or use existing release parts)"; Flags: checkedonce
+Name: "downloadart"; Description: "Install complete offline emoji artwork (download about 449 MB, or use existing release parts)"; Flags: checkedonce
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
@@ -65,8 +65,8 @@ Name: "{userdesktop}\Open Clank Beta ({#Target})"; Filename: "{app}\payload\open
 
 [Code]
 const
-  ArtworkBaseURL = 'https://github.com/Plaer1/open-clank/releases/download/v1.0.2-beta.1-artwork/';
-  ArtworkBytes = 2211209216;
+  ArtworkBaseURL = 'https://github.com/Plaer1/open-clank/releases/download/v1.0.2-beta.1-artwork-compact/';
+  ArtworkBytes = 449189888;
 var
   ArtworkPage: TInputDirWizardPage;
   DownloadPage: TDownloadWizardPage;
@@ -77,13 +77,13 @@ begin
   ArtworkPage := CreateInputDirPage(wpSelectTasks, 'Offline emoji artwork',
     'Download the complete artwork or use existing release files',
     'Leave the folder empty to download the verified release artwork with progress. ' +
-    'If you already have all five parts and emoji-assets.parts.json, select their folder. ' +
+    'If you already have emoji-assets.pack.part-001 and emoji-assets.parts.json, select their folder. ' +
     'Artwork stays in your personal application data and is preserved on uninstall. ' +
     'This beta installer is unsigned.', False, '');
   ArtworkPage.Add('Existing artwork parts folder (optional):');
   ArtworkPage.Values[0] := ExpandConstant('{param:ARTWORKPARTS|}');
   DownloadPage := CreateDownloadPage('Downloading offline emoji artwork',
-    'Downloading about 2.2 GB from the published Open Clank Beta release; verifying every file.', nil);
+    'Downloading about 449 MB from the published Open Clank Beta release; verifying every file.', nil);
   DownloadPage.ShowBaseNameInsteadOfUrl := True;
   WizardForm.FinishedLabel.Caption :=
     'Open Clank and its private Python runtime are installed for your Windows account. ' +
@@ -105,7 +105,7 @@ end;
 procedure CheckArtworkFile(const Name, Hash: String);
 begin
   if not FileExists(AddBackslash(PartsDirectory) + Name) then
-    RaiseException('An artwork release file is missing. Select the folder containing all six files.');
+    RaiseException('An artwork release file is missing. Select the folder containing the part and its manifest.');
   if CompareText(GetSHA256OfFile(AddBackslash(PartsDirectory) + Name), Hash) <> 0 then
     RaiseException('An artwork release file failed verification. Existing installed artwork was preserved.');
 end;
@@ -120,19 +120,15 @@ begin
   if PartsDirectory = '' then begin
     if not GetSpaceOnDisk64(ExpandConstant('{tmp}'), FreeBytes, TotalBytes) or
        (FreeBytes < Int64(ArtworkBytes) * 2 + 536870912) then begin
-      SuppressibleMsgBox('Downloading and assembling artwork needs about 4.7 GB of free working space. ' +
+      SuppressibleMsgBox('Downloading and assembling artwork needs about 1.5 GB of free working space. ' +
         'Free space or select existing parts; you can also return to Tasks and install the app without artwork.', mbError, MB_OK, IDOK);
       Result := False;
       Exit;
     end;
     PartsDirectory := ExpandConstant('{tmp}');
     DownloadPage.Clear;
-    AddArtworkFile('emoji-assets.parts.json', '41edeb112a6c497c39d9c2a0601925347aa3bdbb341d5030656d39cf0505a248');
-    AddArtworkFile('emoji-assets.pack.part-001', 'a8b8760854f0d6c3ab6e4018fb72e3858bafcd32bd3b1ad9bae0697104d321a1');
-    AddArtworkFile('emoji-assets.pack.part-002', '10e27dc1b7688f8881b9e055de0b6a2f01f70a1a96126221ae38688b71ab9b66');
-    AddArtworkFile('emoji-assets.pack.part-003', '03078bfa3addbb7be7fda4dd2d06ef48cf600680a6e602ff4939d7f29bb2071e');
-    AddArtworkFile('emoji-assets.pack.part-004', '08c2ffae5c497ba8352ddb1fe409b94f5723761e78d7f4e0c03d58d21c35418d');
-    AddArtworkFile('emoji-assets.pack.part-005', '051c9dd5785e65249ad30e6fac66044216cfb3af10f09d9c07ca40ad075937a0');
+    AddArtworkFile('emoji-assets.parts.json', 'f58411bc3aee12c7947ef27271f86cde9e4813df230c97d6394c1a715acdb2f9');
+    AddArtworkFile('emoji-assets.pack.part-001', '42adf0a79e4012ae71be7f5b3c348b51cdbfddc254a02829547cb60a58a4074c');
     DownloadPage.Show;
     try
       try
@@ -149,12 +145,8 @@ begin
   end;
   if Result then begin
     try
-      CheckArtworkFile('emoji-assets.parts.json', '41edeb112a6c497c39d9c2a0601925347aa3bdbb341d5030656d39cf0505a248');
-      CheckArtworkFile('emoji-assets.pack.part-001', 'a8b8760854f0d6c3ab6e4018fb72e3858bafcd32bd3b1ad9bae0697104d321a1');
-      CheckArtworkFile('emoji-assets.pack.part-002', '10e27dc1b7688f8881b9e055de0b6a2f01f70a1a96126221ae38688b71ab9b66');
-      CheckArtworkFile('emoji-assets.pack.part-003', '03078bfa3addbb7be7fda4dd2d06ef48cf600680a6e602ff4939d7f29bb2071e');
-      CheckArtworkFile('emoji-assets.pack.part-004', '08c2ffae5c497ba8352ddb1fe409b94f5723761e78d7f4e0c03d58d21c35418d');
-      CheckArtworkFile('emoji-assets.pack.part-005', '051c9dd5785e65249ad30e6fac66044216cfb3af10f09d9c07ca40ad075937a0');
+      CheckArtworkFile('emoji-assets.parts.json', 'f58411bc3aee12c7947ef27271f86cde9e4813df230c97d6394c1a715acdb2f9');
+      CheckArtworkFile('emoji-assets.pack.part-001', '42adf0a79e4012ae71be7f5b3c348b51cdbfddc254a02829547cb60a58a4074c');
     except
       SuppressibleMsgBox(GetExceptionMessage, mbError, MB_OK, IDOK);
       Result := False;

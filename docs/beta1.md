@@ -16,9 +16,9 @@ unsupported legacy reference and does not gate the Beta 1 release.
 **Beta 1 is a human release label. The machine version remains `1.0.2`.**
 The installed revision identifies the actual source/build. These notes do not
 announce a published application release or downloadable installer. Application
-downloads become available when `v1.0.2-beta.1` is published. The verified five
-offline-artwork parts and manifest are available from the separate
-[`v1.0.2-beta.1-artwork` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork).
+downloads become available when `v1.0.2-beta.1` is published. The verified single
+offline-artwork part and manifest become available when the separate
+[`v1.0.2-beta.1-artwork-compact` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact) is published.
 CI artifact definitions are not platform acceptance.
 
 ## Current workspace

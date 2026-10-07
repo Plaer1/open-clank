@@ -6,8 +6,8 @@
   "google_sampler": 1916,
   "google_resolvable": 1924,
   "original_records": 151047,
-  "pack_bytes": 2211209216,
-  "pack_sha256": "2c9e29cdffb64a173a7f2fc8b62ecb886331f422f71b935caf9298660bef116e",
+  "pack_bytes": 449189888,
+  "pack_sha256": "42adf0a79e4012ae71be7f5b3c348b51cdbfddc254a02829547cb60a58a4074c",
   "noto_commit": "e20cbc2bbec1926686be9f9bee7d1d2cfa1fea0e",
   "kitchen_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
   "exceptions": [
@@ -114,5 +114,29 @@
       "error": "HTTP 404"
     }
   ],
-  "policy": "Original pinned Google bytes, tone-free components and sequences; aliases resolve locally without duplicate sampling probability; unavailable originals stay explicit, no upstream runtime fallback."
+  "policy": "Runtime-only integer-ID SQLite, lossless WebP and exact zlib SVG; full acquisition provenance separately preserved",
+  "runtime_schema": 2,
+  "kitchen_format": "webp",
+  "runtime_identity_sha256": "ce034852c9e38bc5a87b83104dcf7ad8c440227a9840728e490bd2e926065517",
+  "optimization": {
+    "profile": {
+      "name": "compact-lossless-webp-v2",
+      "max_dimension": 160,
+      "resampling": "nearest",
+      "webp_lossless": true,
+      "webp_method": 4,
+      "webp_effort": 75,
+      "webp_exact": true,
+      "google_svg": "exact-zlib",
+      "sqlite_page_size": 1024,
+      "runtime_schema": 2
+    },
+    "source_pack_sha256": "2c9e29cdffb64a173a7f2fc8b62ecb886331f422f71b935caf9298660bef116e",
+    "source_manifest_sha256": "5ef680bc040af8a33c22928c9fc616e580311f492aa8e031638bb2eda9ecd0af",
+    "pillow": "12.3.0",
+    "libwebp": "1.6.0",
+    "pipeline_sha256": "dae63934368461ce0bc1c225162997c6e426c5d41e8eac365c0d6697daccd8a2",
+    "runtime_helper_sha256": "9d312c0685e5afa9c73d167a9ab581d4ee0b7359e7435b28c665cc7fd8e31e3e",
+    "source_runtime_identity_sha256": "ce034852c9e38bc5a87b83104dcf7ad8c440227a9840728e490bd2e926065517"
+  }
 }

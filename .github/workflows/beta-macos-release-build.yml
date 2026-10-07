@@ -8,7 +8,7 @@ on:
       emoji_release_tag:
         description: Same-repository release containing the pinned offline artwork parts
         required: true
-        default: v1.0.2-beta.1-artwork
+        default: v1.0.2-beta.1-artwork-compact
         type: string
 
 permissions:
@@ -29,7 +29,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: '2'
       RUSTUP_TOOLCHAIN: 1.99.0-aarch64-apple-darwin
-      EMOJI_RELEASE_TAG: ${{ inputs.emoji_release_tag || 'v1.0.2-beta.1-artwork' }}
+      EMOJI_RELEASE_TAG: ${{ inputs.emoji_release_tag || 'v1.0.2-beta.1-artwork-compact' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -43,6 +43,31 @@ jobs:
           test "$(uname -m)" = arm64
           test "$(sw_vers -productVersion | cut -d. -f1)" = 15
           gh release view "$EMOJI_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null
+          parts="$RUNNER_TEMP/emoji-parts"
+          gh release download "$EMOJI_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'bundle-manifest.json' --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-001' --dir "$parts"
+          python3 -B - <<'PYTHON'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "emoji-parts"
+          sealed = Path("static/vendor/google-emoji/bundle-manifest.json").read_bytes()
+          assert hashlib.sha256(sealed).hexdigest() == "03bfa768ea11381d9859464bd05f848f4709f848085537b10029abe9e64fd385"
+          assert (root / "bundle-manifest.json").read_bytes() == sealed
+          raw = (root / "emoji-assets.parts.json").read_bytes()
+          assert hashlib.sha256(raw).hexdigest() == "f58411bc3aee12c7947ef27271f86cde9e4813df230c97d6394c1a715acdb2f9"
+          parts, pin = json.loads(raw), json.loads(sealed)
+          assert parts["pack_bytes"] == pin["pack_bytes"] and parts["pack_sha256"] == pin["pack_sha256"]
+          assert len(parts["parts"]) == 1
+          part = parts["parts"][0]
+          assert part["filename"] == "emoji-assets.pack.part-001" and part["bytes"] == pin["pack_bytes"] and part["sha256"] == pin["pack_sha256"]
+          payload = root / part["filename"]
+          assert payload.stat().st_size == part["bytes"]
+          digest = hashlib.sha256()
+          with payload.open("rb") as stream:
+              for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                  digest.update(block)
+          assert digest.hexdigest() == part["sha256"]
+          print("Compact artwork: exact three public files admitted against sealed source pins")
+          PYTHON
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13.16'
@@ -101,7 +126,7 @@ jobs:
           set -euo pipefail
           parts="$RUNNER_TEMP/emoji-parts"
           pack="$RUNNER_TEMP/emoji-assets.pack"
-          gh release download "$EMOJI_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*' --dir "$parts"
+          # Reuse the exact files admitted before the native build.
           python3 -B scripts/emoji_asset_bundle.py assemble --parts "$parts" --pack "$pack"
           rm -rf "$parts"
           printf 'QUALIFICATION_EMOJI_PACK=%s\n' "$pack" >> "$GITHUB_ENV"

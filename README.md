@@ -72,8 +72,9 @@ Install Homebrew, ARM-native Python 3.11 or later,
 The release label is `v1.0.2-beta.1`; its downloads become available when the
 [application release is published](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1).
 Download `open-clank-1.0.2-beta.1-source.tar.gz` from the application release.
-Obtain the five matching artwork parts and `emoji-assets.parts.json` from the
-available [`v1.0.2-beta.1-artwork` supporting release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork), then extract
+The complete Google/Kitchen offline collection is preserved in a compact SVG/WebP pack (449 MB); Kitchen images use 160px lossless WebP, while Google SVG bytes remain exact.
+Obtain the matching artwork part and `emoji-assets.parts.json` from the
+[`v1.0.2-beta.1-artwork-compact` supporting release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact) when published, then extract
 the source archive:
 
 ```bash

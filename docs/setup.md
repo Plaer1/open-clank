@@ -50,10 +50,10 @@ do not disable Gatekeeper.
 
 Mount the DMG, drag **OpenClank.app** to Applications, then eject the DMG.
 The app includes private Python, Engine and native helpers and needs no checkout,
-Homebrew, Cargo or system Python. Download all five artwork parts and
+Homebrew, Cargo or system Python. Download the artwork part and
 `emoji-assets.parts.json` from the separate
-[`v1.0.2-beta.1-artwork` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork)
-which is available now, keeping them together in one directory. Install them with the
+[`v1.0.2-beta.1-artwork-compact` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact)
+which becomes available when published, keeping them together in one directory. Install them with the
 app's packaged command in Terminal:
 
 ```bash
@@ -92,10 +92,9 @@ locally; Intel Macs remain unqualified.
 Downloads become available when `v1.0.2-beta.1` is published on the
 [application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1). Obtain
 `open-clank-1.0.2-beta.1-source.tar.gz` from the application release. Obtain
-`emoji-assets.parts.json` and `emoji-assets.pack.part-001` through
-`emoji-assets.pack.part-005` from the separate `v1.0.2-beta.1-artwork` supporting
-[release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork), available now. Check the source archive against the release checksum
-file. Keep all six artwork files together in a separate directory.
+`emoji-assets.parts.json` and `emoji-assets.pack.part-001` from the separate `v1.0.2-beta.1-artwork-compact` supporting
+[release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact), when published. Check the source archive against the release checksum
+file. Keep both artwork files together in a separate directory.
 
 ```bash
 tar -xzf open-clank-1.0.2-beta.1-source.tar.gz
@@ -170,8 +169,8 @@ Cargo or Bun. The ARM64 package contains a native ARM64 application payload;
 the Inno Setup launcher itself is x64 and uses Windows ARM x64 emulation.
 
 The complete offline-artwork task is selected by default. It downloads about
-2.2 GB of pinned release parts with progress and retry, or accepts a folder
-containing all five parts and `emoji-assets.parts.json`. Setup verifies every
+449 MB of pinned release artwork with progress and retry, or accepts a folder
+containing the part and `emoji-assets.parts.json`. Setup verifies every
 file and assembles the pinned pack into writable personal application data.
 You may skip artwork and later run the assembly command below without
 uninstalling; missing artwork does not enable any runtime CDN fallback.
@@ -187,7 +186,7 @@ while preserving personal data and installed artwork; it is not a data reset.
 For a portable alternative, download `Open-Clank-1.0.2-windows-x64.zip` or
 `Open-Clank-1.0.2-windows-arm64.zip` from the same qualified release.
 Extract the ZIP and keep its entire `openclank` directory together, including
-`_internal` and checksum files. Download the shared five artwork parts and
+`_internal` and checksum files. Download the shared artwork part and
 `emoji-assets.parts.json` into a separate directory. From the extracted app
 directory, run in PowerShell:
 
@@ -571,7 +570,7 @@ and [obtain the matching artwork parts](#offline-emoji-artwork):
 ```powershell
 git clone https://github.com/Plaer1/open-clank.git
 cd open-clank
-# Download the matching manifest and five parts before this command.
+# Download the matching manifest and single part before this command.
 py -3.11 scripts/emoji_asset_bundle.py assemble --parts C:\path\to\emoji-parts
 powershell -ExecutionPolicy Bypass -File .\launch-windows.ps1
 ```
@@ -834,25 +833,25 @@ To back up or restore the configured data paths, see the
 
 **Complete this step before first launch from source or a packaged app.**
 Git checkouts, source archives, macOS DMGs and Windows ZIPs omit the large pack; the shared
-five parts install the full offline artwork once. The supporting artwork release
-is available now; application downloads remain separate and become available
+one part installs the full offline artwork once. The supporting artwork release
+becomes available when published; application downloads remain separate and become available
 when the application release is published. Source code alone does not complete
 installation.
 
-Obtain these six assets from the release matching your source or package on the
-[artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork), available now:
+Obtain these two installation files from the release matching your source or package on the
+[artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact), when published:
 
 - `emoji-assets.parts.json`
-- `emoji-assets.pack.part-001` through `emoji-assets.pack.part-005`
+- `emoji-assets.pack.part-001`
 
 Save them together in one directory. With GitHub CLI installed, the equivalent
 commands below download assets only; they do not create or publish a release.
-Beta 1 uses the separate `v1.0.2-beta.1-artwork` supporting release. Use the
-command to obtain the published artwork and confirm all six assets are present.
+Beta 1 uses the separate `v1.0.2-beta.1-artwork-compact` supporting release. Use the
+command after publication to obtain the artwork and confirm both installation files are present.
 The application binaries and source use the separate `v1.0.2-beta.1` release.
 
 ```bash
-gh release download v1.0.2-beta.1-artwork --repo Plaer1/open-clank --dir emoji-parts --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*'
+gh release download v1.0.2-beta.1-artwork-compact --repo Plaer1/open-clank --dir emoji-parts --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*'
 python3 scripts/emoji_asset_bundle.py assemble --parts emoji-parts
 python3 scripts/emoji_asset_bundle.py verify
 ```
@@ -862,27 +861,29 @@ verification rather than the source Python script. On Windows, the same `gh`
 command works in PowerShell. A source installation
 uses `py -3.11` in place of `python3`; a release package uses
 `.\openclank.exe assets assemble --parts <directory>` and
-`.\openclank.exe assets verify`. GitHub CLI is optional: downloading the six assets in a browser
+`.\openclank.exe assets verify`. GitHub CLI is optional: downloading both installation files in a browser
 and running the assembly command with their directory works too. For files
 provided directly by the maintainer, skip the `gh` command and supply that local
 directory with `--parts`.
+
+The compact runtime uses schema2 SQLite: exact Google SVG (compressed only at rest) and 160px lossless Kitchen WebP. All available identities remain offline. Raw local acquisition provenance is retained privately and is not a release asset.
 
 Assembly verifies every part, the pinned total hash/size, SQLite integrity and
 runtime catalog counts, then publishes the pack atomically at
 `static/vendor/google-emoji/emoji-assets.pack` for source installations, or
 `assets/google-emoji/emoji-assets.pack` beneath normal application data for
-frozen Windows/macOS packages. The pinned pack is 2,211,209,216
+frozen Windows/macOS packages. The pinned pack is 449,189,888
 bytes with SHA-256
-`2c9e29cdffb64a173a7f2fc8b62ecb886331f422f71b935caf9298660bef116e`.
+`42adf0a79e4012ae71be7f5b3c348b51cdbfddc254a02829547cb60a58a4074c`.
 An existing pack is verified and never silently replaced. Wrong, incomplete or
 mismatched assets are refused; obtain the matching parts before continuing.
-Allow about 4.2 GiB for the downloaded parts and temporary assembled pack.
-The macOS archive, expanded source, parts and pack require roughly 4.5 GiB
+Allow about 0.84 GiB for the downloaded part and temporary assembled pack.
+The macOS archive, expanded source, parts and pack require roughly 1.1 GiB
 before Python/Bun/Cargo dependencies, native build outputs and application data;
 reserve several additional GiB for setup. An uncached installation disk ceiling
 has not been measured. After successful
 assembly and verification, the downloaded parts can be removed to reclaim
-about 2.1 GiB. Runtime reads the local pack; it never fetches artwork from a CDN.
+about 0.42 GiB. Runtime reads the local pack; it never fetches artwork from a CDN.
 
 Maintainers prepare local parts, each at most 512 MiB, with:
 
