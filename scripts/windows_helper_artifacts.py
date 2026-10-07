@@ -10,7 +10,6 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
-from src.openclank.engine_build import _verify_pe_target
 
 HELPERS = {
     'odysseus-files-service.exe': ('packages/odysseus-files', 'required'),
@@ -52,6 +51,8 @@ def require_hash(path, expected):
         raise ValueError("Reviewed manifest SHA256 mismatch")
 
 def rust_adoption(args):
+    from src.openclank.engine_build import _verify_pe_target
+
     if args.output.exists(): raise ValueError("Adoption manifest exists; preserve it")
     require_hash(args.source_state, args.source_state_sha256)
     state=json.loads(args.source_state.read_text(encoding="utf-8-sig"))
@@ -97,6 +98,8 @@ def rust_adoption(args):
     print(json.dumps({'adoption_manifest_sha256':sha(args.output),'rust_helpers':len(artifacts)}))
 
 def rust_reuse(args):
+    from src.openclank.engine_build import _verify_pe_target
+
     require_hash(args.reuse_rust_manifest,args.reuse_rust_sha256)
     manifest=json.loads(args.reuse_rust_manifest.read_text(encoding='utf-8-sig'))
     if manifest.get('schema_version')!=1 or manifest.get('target')!=args.target or not manifest.get('qualification','').startswith('adopted-current-binary-PE/hash'):
@@ -139,6 +142,8 @@ def main():
         rust_adoption(args);return
     if args.reuse_rust_manifest:
         rust_reuse(args);return
+    from src.openclank.engine_build import _verify_pe_target
+
     for name,(source,requirement) in HELPERS.items():
         binary=args.bin_dir/name
         if not binary.is_file():

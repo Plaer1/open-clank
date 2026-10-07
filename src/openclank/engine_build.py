@@ -483,7 +483,12 @@ def source_fingerprint(vendor_root: Path | str) -> str:
             digest.update(b"\0")
             if path.is_symlink():
                 digest.update(b"symlink\0")
-                digest.update(os.readlink(path).encode("utf-8"))
+                target = os.readlink(path)
+                # Windows reports real link targets with native separators;
+                # preserve the portable target spelling without changing type.
+                if sys.platform == "win32":
+                    target = target.replace("\\", "/")
+                digest.update(target.encode("utf-8"))
             elif path.is_file():
                 digest.update(b"file\0")
                 with path.open("rb") as handle:
