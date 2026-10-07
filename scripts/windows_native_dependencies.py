@@ -24,7 +24,7 @@ import zipfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-INPUTS_SHA256 = 'accb9f57e7d1d0d31b38aca2ef1c95727992a6f38ec42dc1933cc053c1970ab4'
+INPUTS_SHA256 = 'f166825531360a7298a86f2c86d6c0e52d085d40c6504c9758b23dd9c2b747a5'
 ADAPTER_SHA256 = '07f723d003b7b85b22cf9712399b0c52aa51a1dec92c42b97347b6e46dcf4aa0'
 
 
@@ -253,6 +253,10 @@ class Builder:
             self.env.update(OPENSSL_DIR=str(prefix), OPENSSL_STATIC='1', OPENSSL_NO_VENDOR='1')
             self.run([self.python, '-I', '-m', 'pip', 'wheel', '--no-deps', '--no-build-isolation',
                       '--no-cache-dir', '--config-settings=build-args=--locked', '--wheel-dir', self.wheels, source], 'cryptography-wheel')
+        elif package == 'py-rust-stemmers':
+            self.run([self.python, '-I', '-m', 'pip', 'wheel', '--no-deps', '--no-build-isolation',
+                      '--no-cache-dir', '--config-settings=build-args=--locked', '--wheel-dir', self.wheels, source],
+                     'stemmer-wheel')
         else:
             prefix = self.openssl()
             pg = self.extract(self.fetch(self.config['sources']['PostgreSQL']), 'postgresql-source')
@@ -296,12 +300,13 @@ class Builder:
                       '-w', self.wheels, raw_wheel], 'psycopg-private-dll-repair')
         pattern = package.replace('-', '_') + '-' + item['version'] + '-*.whl'
         wheel, = self.wheels.glob(pattern)
-        self.wheel_check(wheel, package, item['version'])
+        self.wheel_check(wheel, item['name'], item['version'])
         self.run([self.python, '-I', '-m', 'pip', 'install', '--no-index', '--no-deps', wheel], package + '-builder-import-install')
         probes = {
             'grpcio': 'import grpc; assert grpc.__version__=="1.83.0"; c=grpc.insecure_channel("127.0.0.1:1"); c.close()',
             'cryptography': 'from cryptography.fernet import Fernet; f=Fernet(Fernet.generate_key()); assert f.decrypt(f.encrypt(b"fixture"))==b"fixture"',
             'psycopg2-binary': 'import psycopg2; from psycopg2.extensions import libpq_version,parse_dsn; assert libpq_version()==180006; assert parse_dsn("sslmode=require")["sslmode"]=="require"',
+            'py-rust-stemmers': 'from py_rust_stemmers import SnowballStemmer; s=SnowballStemmer("english"); words=["running","jumps","easily"]; expected=["run","jump","easili"]; assert s.stem_word("running")=="run"; assert s.stem_words(words)==expected; assert s.stem_words_parallel(words)==expected',
         }
         self.run([self.python, '-I', '-c', probes[package]], package + '-native-feature-probe')
         self.built.append(package)
@@ -309,7 +314,7 @@ class Builder:
     def close(self):
         # Each successful source wheel advances the unchanged complete native
         # wheel resolver. Only an actually observed reviewed gap selects a recipe.
-        for number in range(4):
+        for number in range(5):
             name = 'full-native-resolution-' + str(number)
             code = self.run([sys.executable, '-I', '-m', 'pip', 'download', '--only-binary=:all:', '--no-cache-dir',
                              '--find-links', self.wheels, '--dest', self.wheels, '-r', ROOT / 'requirements.txt',
@@ -317,10 +322,14 @@ class Builder:
             if code == 0:
                 break
             evidence = (self.logs / (name + '.txt')).read_text(encoding='utf-8', errors='strict')
-            found = re.search(r'(?:No matching distribution found for|Could not find a version that satisfies the requirement)\s+(grpcio|psycopg2-binary|cryptography)(?:[<=>\[\s]|$)', evidence)
-            if not found:
+            found = re.search(r'(?:No matching distribution found for|Could not find a version that satisfies the requirement)\s+(grpcio|psycopg2-binary|cryptography|py-rust-stemmers)(?:[<=>\[\s]|$)', evidence)
+            package = found[1] if found else None
+            if package is None and 'ResolutionImpossible' in evidence and re.search(
+                    r'fastembed 0\.8\.[01] depends on py-rust-stemmers<0\.2\.0 and >=0\.1\.0', evidence):
+                package = 'py-rust-stemmers'
+            if package is None:
                 raise RuntimeError('Full native dependency resolution failed outside reviewed source recipes')
-            self.build(found[1])
+            self.build(package)
         else:
             raise RuntimeError('Full unchanged native closure still failed')
         wheels = sorted(self.wheels.glob('*.whl'))
@@ -332,7 +341,7 @@ class Builder:
         self.run([sys.executable, '-I', '-m', 'pip', 'install', '--no-index', '--only-binary=:all:',
                   '--find-links', self.wheels, '-r', ROOT / 'requirements.txt', 'pyinstaller==6.16.0'], 'full-offline-install')
         self.run([sys.executable, '-I', '-m', 'pip', 'check'], 'full-pip-check')
-        self.run([sys.executable, '-I', '-c', 'import grpc,psycopg2,cryptography,mcp,fastapi,sqlalchemy,PIL,winrt; print("full native imports passed")'], 'full-native-imports')
+        self.run([sys.executable, '-I', '-c', 'import grpc,psycopg2,cryptography,mcp,fastapi,sqlalchemy,PIL,winrt,py_rust_stemmers,fastembed; print("full native imports passed")'], 'full-native-imports')
         self.run([sys.executable, '-I', '-m', 'pip', 'freeze', '--all'], 'full-native-freeze')
         if self.built:
             notices = Path(sysconfig.get_path('purelib')) / 'openclank_native_dependency_licenses'

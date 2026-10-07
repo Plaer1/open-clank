@@ -93,6 +93,16 @@
           "sha256": "db9602d654ac90d8cdaea7e03e82a82ac6cfe13077eb7d1ca13fc788dd97712a"
         }
       }
+    },
+    "py-rust-stemmers": {
+      "name": "py_rust_stemmers",
+      "version": "0.1.8",
+      "filename": "py_rust_stemmers-0.1.8.tar.gz",
+      "url": "https://files.pythonhosted.org/packages/6b/c1/9763f9fb1cd73f9c317a83feeed6e0d4af320c6bbddab47b4a94f3a47d0c/py_rust_stemmers-0.1.8.tar.gz",
+      "sha256": "6b0f6f48bc54d607aed802de872fcd5a71bae969a6760976dc78ce55e8eaf3da",
+      "size": 9732,
+      "authority": "https://pypi.org/pypi/py-rust-stemmers/0.1.8/json",
+      "role": "native-ARM64-locked-Rust-source-build-input"
     }
   },
   "tools": [
