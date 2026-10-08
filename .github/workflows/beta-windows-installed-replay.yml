@@ -1,0 +1,58 @@
+name: Retained ARM Windows installer diagnostic replay
+
+on:
+  push:
+    branches: [codex/beta1-windows-installed-replay-20261008]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: retained-arm-installer-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    if: github.ref == 'refs/heads/codex/beta1-windows-installed-replay-20261008'
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.13.16'
+          architecture: arm64
+      - name: Acquire pinned compact artwork without rebuilding runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $parts = Join-Path $env:RUNNER_TEMP 'replay-artwork-parts'
+          gh release download v1.0.2-beta.1-artwork-compact --repo $env:GITHUB_REPOSITORY --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-001' --dir $parts
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned replay artwork download failed.' }
+          $pack = Join-Path $env:RUNNER_TEMP 'replay-emoji-assets.pack'
+          python -B scripts/emoji_asset_bundle.py assemble --parts $parts --pack $pack
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned replay artwork admission failed.' }
+          Remove-Item $parts -Recurse -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "REPLAY_EMOJI_PACK=$pack"
+      - name: Replay sealed retained ARM portable and actual second shortcut
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP 'retained-arm-installer-replay'
+          $privateLog = Join-Path $env:RUNNER_TEMP 'retained-arm-installer-replay-private.log'
+          python -B scripts/replay_windows_installer.py --work $work --emoji-pack $env:REPLAY_EMOJI_PACK --output dist/installed-replay-windows-arm64 *> $privateLog
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic replay failed; only bounded safe receipt may be retained.' }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: Installed-replay-windows-arm64
+          path: dist/installed-replay-windows-arm64/receipt.json
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
