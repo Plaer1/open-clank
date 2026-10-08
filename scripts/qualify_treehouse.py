@@ -81,11 +81,25 @@ class Journey:
         # aggregate_visible_state builds these two read timestamps afresh on
         # every GET. Exact native same-read/restart diagnosis binds this
         # exception; all nested timestamps and business records stay strict.
+        created, updated = state['createdAt'], state['updatedAt']
         for field in ('createdAt', 'updatedAt'):
             value = state.pop(field)
             if not isinstance(value, str) or not value:
                 raise RuntimeError('Treehouse aggregate read timestamp is malformed')
-        return state
+        profile = state['profiles'].get(snapshot['accountId'])
+        # An author with no persisted progress has an ensure_account_profile
+        # timestamp derived from this fresh aggregate. Persisted timestamps
+        # never match this condition and remain part of the exact comparison.
+        synthesized_profile = bool(isinstance(profile, dict)
+                                   and profile.get('createdAt') == created == updated)
+        if synthesized_profile:
+            state['profiles'] = dict(state['profiles'])
+            current = dict(profile)
+            current.pop('createdAt')
+            state['profiles'][snapshot['accountId']] = current
+        # Include the classification: synthesized -> persisted is a change,
+        # even if removing the read-only timestamp made other values equal.
+        return state, synthesized_profile
 
     def capture(self):
         owner, learner = self.snapshot(), self.snapshot(self.learner)
@@ -106,7 +120,15 @@ class Journey:
                 'owner.state.createdAt', 'owner.state.updatedAt',
                 'learner.state.createdAt', 'learner.state.updatedAt',
             ],
-            'nested_state_and_full_stats': 'exact',
+            'conditional_synthesized_profile_fields': [
+                label + '.state.profiles.<current-account>.createdAt'
+                for label, captured in zip(('owner', 'learner'), self.persisted[:2])
+                if captured[1]
+            ],
+            'profile_condition': 'createdAt-equals-both-fresh-aggregate-timestamps',
+            'synthesized_or_persisted_classification': 'exact-across-restart',
+            'nested_state': 'exact-except-listed-synthesized-fields',
+            'full_stats': 'exact',
         }
 
     def verify_file_proof(self):
