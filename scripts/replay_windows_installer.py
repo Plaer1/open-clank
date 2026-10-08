@@ -24,6 +24,8 @@ ARTIFACT = 11541795873
 ARTIFACT_SHA = '67ba14adb77040b8e6233a07be387bcf77dd06fc081b4a4c85ff8e8c65adf4d5'
 TARGET = 'windows-arm64'
 SECOND_CLICK = '$p=Start-Process -FilePath $args[0] -Wait -PassThru;exit $p.ExitCode'
+ORIGINAL_SNAPSHOT = '$all=@(Get-CimInstance Win32_Process);$ids=@([int]$args[0]);$found=@();do{$next=@($all|Where-Object {$_.ParentProcessId -in $ids -and $_.ProcessId -notin $found.ProcessId});$found+=@($next);$ids=@($next.ProcessId)}while($ids.Count -gt 0);ConvertTo-Json -InputObject @($found|Select-Object ProcessId,CreationDate) -Compress'
+REPAIRED_SNAPSHOT = '$all=@(Get-CimInstance Win32_Process);$ids=@([int]$args[0]);$found=@();do{$next=@($all|Where-Object {$_.ParentProcessId -in $ids -and $_.ProcessId -notin $found.ProcessId});$found+=@($next);if($next.Count -eq 0){break};$ids=@($next|ForEach-Object {$_.ProcessId})}while($ids.Count -gt 0);ConvertTo-Json -InputObject @($found|Select-Object ProcessId,CreationDate) -Compress'
 ERROR_MARKERS = (
     'browser launch refuses an application without a verified owned server process',
     'recorded process identity is not verifiable',
@@ -187,6 +189,16 @@ def replay(args, receipt):
     original = installed.powershell
 
     def observe(script, *arguments, environment=None):
+        if script == ORIGINAL_SNAPSHOT:
+            receipt['actual_second_shortcut_and_same_pid_gate_passed'] = True
+            receipt['snapshot_only_tool_repair_applied'] = True
+            try:
+                result = original(REPAIRED_SNAPSHOT, *arguments, environment=environment)
+            except subprocess.TimeoutExpired:
+                receipt['actual_repaired_snapshot_timed_out'] = True
+                raise
+            receipt['actual_repaired_snapshot_completed'] = True
+            return result
         second_click = script == SECOND_CLICK and len(arguments) == 1 and Path(arguments[0]).name == 'Open Clank.lnk'
         lock = Path(environment['APPDATA']) / 'OpenClank/runtime/server.start.lock' if second_click else None
         if second_click:
