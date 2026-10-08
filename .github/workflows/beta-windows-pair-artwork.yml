@@ -76,6 +76,8 @@ jobs:
           prefix = 'SAFE_WINDOWS_PAIR_DIAGNOSTIC '
           stages = {'execution-source', 'producer-source', 'original-provenance', 'official-artifact', 'proof-and-members', 'native-receipts', 'export', 'artwork'}
           scripts = {'verify_windows_release_pair.py', 'verify_retained_windows_release.py', 'qualify_retained_windows_release.py', 'qualify_treehouse.py', 'qualify_theme_emoji.py', 'qualify_windows_installer_artwork.py', 'qualify_windows_installer.py'}
+          marker_names = {'download-or-verification-error', 'artwork-working-space-error', 'release-part-missing', 'release-part-hash-error', 'payload-verification-error', 'artwork-assembly-error', 'existing-payload-collision'}
+          booleans = ('log_present', 'log_tail_readable', 'payload_executable_present', 'uninstaller_present', 'installed_pack_present')
           try:
               with Path(sys.argv[1]).open('rb') as stream:
                   stream.seek(0, 2)
@@ -85,7 +87,7 @@ jobs:
                   if not line.startswith(prefix) or len(line) > 4096:
                       continue
                   record = json.loads(line[len(prefix):])
-                  if set(record) != {'stage', 'exception_class', 'frames'} or record['stage'] not in stages:
+                  if set(record) != {'stage', 'exception_class', 'frames', 'subprocess_returncode', 'subprocess_kind', 'artwork_fixture'} or record['stage'] not in stages:
                       continue
                   if not isinstance(record['exception_class'], str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', record['exception_class']):
                       continue
@@ -94,7 +96,21 @@ jobs:
                       continue
                   if not all(isinstance(frame, dict) and set(frame) == {'script', 'line'} and frame['script'] in scripts and type(frame['line']) is int and frame['line'] > 0 for frame in frames):
                       continue
-                  print(json.dumps({'stage': record['stage'], 'exception_class': record['exception_class'], 'frames': [{'script': frame['script'], 'line': frame['line']} for frame in frames]}, separators=(',', ':')))
+                  returncode = record['subprocess_returncode']
+                  if returncode is not None and (type(returncode) is not int or not -(2**31) <= returncode < 2**32):
+                      continue
+                  if record['subprocess_kind'] not in {'none', 'other', 'setup', 'private-cli', 'uninstall'}:
+                      continue
+                  fixture = record['artwork_fixture']
+                  if not isinstance(fixture, dict) or set(fixture) != {'mode', 'markers', *booleans}:
+                      continue
+                  if fixture['mode'] not in {'unavailable', 'default-download', 'existing-parts'} or not all(type(fixture[key]) is bool for key in booleans):
+                      continue
+                  markers = fixture['markers']
+                  if not isinstance(markers, list) or len(markers) > len(marker_names) or not all(isinstance(marker, str) and marker in marker_names for marker in markers) or markers != sorted(set(markers)):
+                      continue
+                  safe_fixture = {'mode': fixture['mode'], 'markers': list(markers), **{key: fixture[key] for key in booleans}}
+                  print(json.dumps({'stage': record['stage'], 'exception_class': record['exception_class'], 'frames': [{'script': frame['script'], 'line': frame['line']} for frame in frames], 'subprocess_returncode': returncode, 'subprocess_kind': record['subprocess_kind'], 'artwork_fixture': safe_fixture}, separators=(',', ':')))
                   break
           except Exception:
               pass

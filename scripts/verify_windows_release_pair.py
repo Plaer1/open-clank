@@ -11,6 +11,7 @@ import shutil
 import sys
 import traceback
 import tempfile
+import subprocess
 from types import SimpleNamespace
 import zipfile
 from verify_retained_windows_release import source_bytes, require_checks
@@ -360,6 +361,73 @@ def admit_pair(args):
                 args.parts.resolve(), args.artwork_output.resolve())
 
 
+
+# These are fixed strings from the unchanged, source-bound installer issuer.
+# Only their enum labels leave the private Inno log; never publish log lines.
+INNO_MARKERS = {
+    'download-or-verification-error': 'Artwork download or verification failed.',
+    'artwork-working-space-error': 'Downloading and assembling artwork needs about',
+    'release-part-missing': 'An artwork release file is missing.',
+    'release-part-hash-error': 'An artwork release file failed verification.',
+    'payload-verification-error': 'The installed application files failed verification.',
+    'artwork-assembly-error': 'Complete offline artwork assembly failed.',
+    'existing-payload-collision': 'A payload already exists at this location.',
+}
+
+
+def safe_installer_evidence(args, error, stage):
+    returncode = None
+    kind = 'none'
+    if isinstance(error, subprocess.CalledProcessError):
+        if type(error.returncode) is int and -(2**31) <= error.returncode < 2**32:
+            returncode = error.returncode
+        kind = 'other'
+        if isinstance(error.cmd, (list, tuple)) and error.cmd:
+            executable = Path(error.cmd[0]).name.lower()
+            if executable == ('Open-Clank-1.0.2-' + args.target + '-Setup.exe').lower():
+                kind = 'setup'
+            elif executable == 'openclank.exe':
+                kind = 'private-cli'
+            elif executable == 'unins000.exe':
+                kind = 'uninstall'
+    fixture = {'mode': 'unavailable', 'log_present': False, 'log_tail_readable': False,
+               'markers': [], 'payload_executable_present': False,
+               'uninstaller_present': False, 'installed_pack_present': False}
+    if stage != 'artwork' or args.artwork_output is None:
+        return returncode, kind, fixture
+    work = args.artwork_output.resolve().with_name(args.artwork_output.name + '-private-fixture')
+    # Read only this invocation's fixed fresh fixture. There is no profile-wide
+    # discovery, arbitrary log path, recursive scan, or caller-supplied marker.
+    if not work.is_dir() or work.is_symlink():
+        return returncode, kind, fixture
+    for mode in ('existing-parts', 'default-download'):
+        case = work / mode
+        if not case.is_dir() or case.is_symlink():
+            continue
+        fixture['mode'] = mode
+        fixture['payload_executable_present'] = (case / 'installation/payload/openclank.exe').is_file()
+        fixture['uninstaller_present'] = (case / 'installation/unins000.exe').is_file()
+        fixture['installed_pack_present'] = (case / 'data/assets/google-emoji/emoji-assets.pack').is_file()
+        log = case / 'install-private.log'
+        fixture['log_present'] = log.is_file() and not log.is_symlink()
+        if fixture['log_present']:
+            try:
+                with log.open('rb') as stream:
+                    utf16 = stream.read(2) == b'\xff\xfe'
+                    stream.seek(0, 2)
+                    start = max(0, stream.tell() - 1024 * 1024)
+                    if utf16:
+                        start -= start % 2
+                    stream.seek(start)
+                    text = stream.read(1024 * 1024).decode('utf-16-le' if utf16 else 'utf-8', errors='replace')
+                fixture['log_tail_readable'] = True
+                fixture['markers'] = sorted(label for label, marker in INNO_MARKERS.items() if marker in text)
+            except OSError:
+                pass
+        break
+    return returncode, kind, fixture
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--target', choices=('windows-arm64', 'windows-x64'), required=True)
@@ -388,8 +456,11 @@ def main():
             script = Path(frame.f_code.co_filename).resolve()
             if script.parent == ROOT / 'scripts' and script.name in allowed:
                 frames.append({'script': script.name, 'line': line})
+        returncode, kind, fixture = safe_installer_evidence(args, error, stage)
         print('SAFE_WINDOWS_PAIR_DIAGNOSTIC ' + json.dumps(
-            {'stage': stage, 'exception_class': exception, 'frames': frames}, separators=(',', ':')), file=sys.stderr)
+            {'stage': stage, 'exception_class': exception, 'frames': frames,
+             'subprocess_returncode': returncode, 'subprocess_kind': kind,
+             'artwork_fixture': fixture}, separators=(',', ':')), file=sys.stderr)
         return 1
     print('Both native producer proofs admitted; requested installer artwork journey passed' if args.parts else
           'Both native producer proofs admitted')
