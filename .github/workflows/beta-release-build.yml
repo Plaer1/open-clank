@@ -233,6 +233,48 @@ jobs:
           shutil.rmtree(original)
           '@ | python -B -
           if ($LASTEXITCODE -ne 0) { throw 'Exact emitted ZIP relocation failed closed.' }
+      - name: Seal unqualified portable retention identity
+        run: |
+          @'
+          import hashlib, json, os, re
+          from pathlib import Path
+          target = os.environ["RELEASE_TARGET"]
+          archives = list(Path("dist").glob(f"Open-Clank-*-{target}.zip"))
+          source = os.environ["GITHUB_SHA"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          if len(archives) != 1 or not re.fullmatch(r"[0-9a-f]{40}", source) or not re.fullmatch(r"[1-9][0-9]*", run_id):
+              raise RuntimeError("Require exact archive/source/run retention identity")
+          archive = archives[0]
+          with archive.open("rb") as stream:
+              digest = hashlib.file_digest(stream, "sha256").hexdigest()
+          checksum = Path(str(archive) + ".sha256").read_text().split()
+          relocation = json.loads(Path("dist/portable-zip-" + target + ".json").read_text())
+          if checksum != [digest, archive.name] and checksum != [digest, "*" + archive.name]:
+              raise RuntimeError("Retained archive checksum/name differs")
+          if relocation["target"] != target or relocation["zip_sha256"] != digest or relocation["qualification"] != "exact-emitted-zip-relocation-admitted":
+              raise RuntimeError("Retained archive was not byte-admitted by this job")
+          Path("dist/unqualified-portable-" + target + ".json").write_text(json.dumps({
+              "schema_version": 1, "role": "sealed-unqualified-portable-diagnostic-only",
+              "source_sha": source, "run_id": int(run_id), "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "target": target, "repository": os.environ["GITHUB_REPOSITORY"],
+              "ref": os.environ["GITHUB_REF"], "workflow": ".github/workflows/beta-release-build.yml",
+              "archive_name": archive.name, "archive_sha256": digest, "archive_bytes": archive.stat().st_size,
+              "qualification": "runtime-qualification-not-yet-performed"
+          }, indent=2) + "\n")
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'Unqualified portable retention identity failed closed.' }
+      - name: Retain sealed unqualified portable before runtime qualification
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Unqualified-portable-${{ matrix.target }}
+          path: |
+            dist/Open-Clank-*-${{ matrix.target }}.zip
+            dist/Open-Clank-*-${{ matrix.target }}.zip.sha256
+            dist/portable-zip-${{ matrix.target }}.json
+            dist/unqualified-portable-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
       - name: Acquire and verify shared artwork for disposable qualification
         env:
           GH_TOKEN: ${{ github.token }}

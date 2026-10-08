@@ -75,9 +75,21 @@ class Journey:
         if value.get('complete') is not expected:
             raise RuntimeError('Tutorial/Quest completion boundary differs from expected')
 
+    @staticmethod
+    def restart_state(snapshot):
+        state = dict(snapshot['state'])
+        # aggregate_visible_state builds these two read timestamps afresh on
+        # every GET. Exact native same-read/restart diagnosis binds this
+        # exception; all nested timestamps and business records stay strict.
+        for field in ('createdAt', 'updatedAt'):
+            value = state.pop(field)
+            if not isinstance(value, str) or not value:
+                raise RuntimeError('Treehouse aggregate read timestamp is malformed')
+        return state
+
     def capture(self):
         owner, learner = self.snapshot(), self.snapshot(self.learner)
-        self.persisted = (owner['state'], learner['state'], self.request(PREFIX + '/stats'))
+        self.persisted = (self.restart_state(owner), self.restart_state(learner), self.request(PREFIX + '/stats'))
 
     def verify_restart(self):
         if self.persisted is None:
@@ -85,10 +97,17 @@ class Journey:
         if getattr(self, 'file_proof', None):
             self.verify_file_proof()
             self.receipt['checks'].append('installed-treehouse-cold-instructor-file-after-restart')
-        current = (self.snapshot()['state'], self.snapshot(self.learner)['state'], self.request(PREFIX + '/stats'))
+        current = (self.restart_state(self.snapshot()), self.restart_state(self.snapshot(self.learner)), self.request(PREFIX + '/stats'))
         if current != self.persisted:
             raise RuntimeError('Installed Treehouse learning/stats changed across restart')
         self.receipt['checks'].append(RESTART_CHECK)
+        self.receipt['restart_comparison'] = {
+            'excluded_synthesized_aggregate_fields': [
+                'owner.state.createdAt', 'owner.state.updatedAt',
+                'learner.state.createdAt', 'learner.state.updatedAt',
+            ],
+            'nested_state_and_full_stats': 'exact',
+        }
 
     def verify_file_proof(self):
         path, expected = self.file_proof
