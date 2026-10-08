@@ -135,7 +135,7 @@ def qualify(installer, target, parts, output):
                         'DATABASE_URL', 'ODYSSEUS_DATA_DIR', 'PYTHONHOME', 'PYTHONPATH',
                         'OPEN_CLANK_RUNTIME_PYTHON', 'OPEN_CLANK_PYTHON', 'OPEN_CLANK_AGENT_HOME'}:
                     environment.pop(name, None)
-            system = Path(environment['SystemRoot'])
+            system = Path(os.environ['SystemRoot'])
             environment.update(OPEN_CLANK_DATA_DIR=str(data), TEMP=str(temporary), TMP=str(temporary),
                                APPDATA=str(case / 'appdata'), PATH=os.pathsep.join(str(system / p) for p in ['System32', '']))
             command = [str(installer), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART',

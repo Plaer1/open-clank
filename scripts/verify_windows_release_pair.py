@@ -350,7 +350,7 @@ def admit_pair(args):
         if shutil.disk_usage(args.artwork_output.parent).free < required_disk:
             raise RuntimeError('insufficient-disk-for-both-artwork-installation-modes')
         artwork_path = 'scripts/qualify_windows_installer_artwork.py'
-        if (sha(ROOT / artwork_path) != '10563f807acf1c97a4a04e543a2b976f299bf6595ea345bd59ae5b624882c26a' or
+        if (sha(ROOT / artwork_path) != '927124121ce5d41a5ff9c973ffe9e3cab9f2fab98c0055336d57e690c364d65e' or
             source_bytes('repos/Plaer1/open-clank', artwork_path, os.environ['GITHUB_SHA']) != (ROOT / artwork_path).read_bytes()):
             raise RuntimeError('exact-unchanged-artwork-journey-source-required')
         # Call the existing unchanged actual installer journey directly so its
