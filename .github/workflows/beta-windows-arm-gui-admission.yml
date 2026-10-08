@@ -1,0 +1,81 @@
+name: Exact retained ARM installer GUI admission
+
+on:
+  push:
+    branches: [codex/beta1-windows-arm-gui-admission-20261008]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: arm-gui-admission-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  admit:
+    if: github.ref == 'refs/heads/codex/beta1-windows-arm-gui-admission-20261008'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13.16'
+      - name: Admit exact successful ARM native producer without executing the application
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_log="$RUNNER_TEMP/arm-gui-admission-private.log"
+          if [ -e "$private_log" ]; then
+            echo 'Preserve existing private admission evidence.'
+            exit 1
+          fi
+          if ! python -B scripts/verify_windows_native_producer.py --purpose gui-target-only --target windows-arm64 --output dist/arm-gui-admitted --receipt dist/arm-gui-admission.json >"$private_log" 2>&1; then
+            python - "$private_log" <<'PYSAFE'
+          import json, re, sys
+          from pathlib import Path
+          prefix = 'SAFE_ARM_ADMISSION_DIAGNOSTIC '
+          stages = {'execution-source', 'producer-source', 'original-provenance', 'official-artifact', 'proof-and-members', 'native-receipts', 'export'}
+          scripts = {'verify_windows_native_producer.py', 'verify_retained_windows_release.py', 'qualify_retained_windows_release.py', 'qualify_treehouse.py', 'qualify_theme_emoji.py'}
+          try:
+              with Path(sys.argv[1]).open('rb') as stream:
+                  lines = stream.read(65536).decode('utf-8', errors='replace').splitlines()
+              for line in lines:
+                  if not line.startswith(prefix) or len(line) > 4096:
+                      continue
+                  record = json.loads(line[len(prefix):])
+                  if set(record) != {'stage', 'exception_class', 'frames'} or record['stage'] not in stages:
+                      continue
+                  if not isinstance(record['exception_class'], str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', record['exception_class']):
+                      continue
+                  frames = record['frames']
+                  if not isinstance(frames, list) or len(frames) > 32:
+                      continue
+                  if not all(isinstance(frame, dict) and set(frame) == {'script', 'line'} and frame['script'] in scripts and type(frame['line']) is int and frame['line'] > 0 for frame in frames):
+                      continue
+                  print(json.dumps({'stage': record['stage'], 'exception_class': record['exception_class'], 'frames': [{'script': frame['script'], 'line': frame['line']} for frame in frames]}, separators=(',', ':')))
+                  break
+          except Exception:
+              pass
+          PYSAFE
+            echo 'Exact target-only ARM producer admission failed; private diagnostics remain on runner.'
+            exit 1
+          fi
+          echo 'Exact ARM producer admission passed; release pair remains unverified.'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Admitted-ARM-GUI-installer
+          path: |
+            dist/arm-gui-admitted/Open-Clank-1.0.2-windows-arm64-Setup.exe
+            dist/arm-gui-admitted/Open-Clank-1.0.2-windows-arm64-Setup.exe.sha256
+            dist/arm-gui-admitted/Open-Clank-1.0.2-windows-arm64-Setup.provenance.json
+            dist/arm-gui-admitted/proof-chain.json
+            dist/arm-gui-admission.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
