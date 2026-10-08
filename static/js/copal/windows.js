@@ -24,6 +24,7 @@ export function createOpenClankWindow({
   onBeforeClose = null,
   onClosed = null,
   navigation = null,
+  navigationChrome = true,
   accountScope = null,
   workspaceScope = null,
 }) {
@@ -80,7 +81,7 @@ export function createOpenClankWindow({
   const body = document.createElement('main');
   body.className = 'copal-view';
   body.tabIndex = -1;
-  actions.append(backButton, forwardButton);
+  if (navigationChrome) actions.append(backButton, forwardButton);
   header.append(heading, actions, status, closeButton);
   content.append(header, body);
   root.append(content);
@@ -252,8 +253,10 @@ export function createOpenClankWindow({
       updateNavigationButtons();
     }
   };
-  backButton.addEventListener('click', () => invokeNavigation('back'));
-  forwardButton.addEventListener('click', () => invokeNavigation('forward'));
+  if (navigationChrome) {
+    backButton.addEventListener('click', () => invokeNavigation('back'));
+    forwardButton.addEventListener('click', () => invokeNavigation('forward'));
+  }
   updateNavigationButtons();
   closeButton.addEventListener('click', () => windowApi.requestClose());
   root.addEventListener('pointerdown', () => { activateInputContext(inputContext); onActivate?.(windowApi); }, true);

@@ -7003,6 +7003,92 @@ ASSETS.update({'beta1-wiki-20261005': {'id': 'beta1-wiki-20261005',
                                        'sha256': 'f9829561d5e11f5c917e1226dd1651cb38b8575662615c48170973b78a58c4f3'}],
                          'reduced_motion_url': '/static/docs/media/beta1-wiki-20261005/preview.webp'}})
 
+ASSETS.update({'treehouse-achievements-20261007': {'id': 'treehouse-achievements-20261007',
+                                     'state': 'ready',
+                                     'scene': 'Current responsive Achievements icon gallery and '
+                                              'collapsed achievement trail in isolated Testing7797.',
+                                     'alt': 'Open Clank Achievements showing Earned, All and Locked '
+                                            'filters, a progress trail and illustrated award cards.',
+                                     'caption': 'The current achievement collection in a disposable '
+                                                'Testing account. Cards show recorded award state and '
+                                                'requirements; the trail can expand for details.',
+                                     'provenance': {'kind': 'actual native Testing CUA capture',
+                                                    'capture_date': '2026-10-07',
+                                                    'revision': 'Joined Treehouse working-tree preview '
+                                                                'on isolated Testing7797; final '
+                                                                'integration acceptance remains '
+                                                                'pending.',
+                                                    'git_head': 'ae8e108f08f1edead35c1f2fc1e244e31654c00d',
+                                                    'source_frame': '03-achievements-desktop.jpg',
+                                                    'capture_framing': '1280x720 original app-browser '
+                                                                       'frame; no crop or pixel edit',
+                                                    'variant_derivation': 'WebP quality92 at original '
+                                                                          'dimensions from untouched '
+                                                                          'JPEG master',
+                                                    'data': 'Disposable Testing account; no personal '
+                                                            'chats or file names visible; frame '
+                                                            'reviewed by coordinator and documentation '
+                                                            'worker',
+                                                    'license': 'Open Clank UI captured with synthetic '
+                                                               'demonstration data'},
+                                     'masters': [{'path': 'static/docs/media/treehouse-achievements-20261007/master.jpg',
+                                                  'width': 1280,
+                                                  'height': 720,
+                                                  'mime': 'image/jpeg',
+                                                  'bytes': 104488,
+                                                  'sha256': '9a3845587d1b9c40679260d8f108d114cbfef17aa6e0a085a3fbf94785845089'}],
+                                     'variants': [{'role': 'image',
+                                                   'url': '/static/docs/media/treehouse-achievements-20261007/preview.webp',
+                                                   'width': 1280,
+                                                   'height': 720,
+                                                   'mime': 'image/webp',
+                                                   'bytes': 84646,
+                                                   'sha256': '02d43a73b6d1a435bf670a62630ee3ed9d02ba1594876e22c6f53bd0f1165c2c'}],
+                                     'reduced_motion_url': '/static/docs/media/treehouse-achievements-20261007/preview.webp'}})
+
+ASSETS.update({'treehouse-player-20261007': {'id': 'treehouse-player-20261007',
+                               'state': 'ready',
+                               'scene': 'Focused Quest lesson player with collapsible course index in '
+                                        'isolated Testing7797.',
+                               'alt': 'Open Clank TreeHouse Quest player showing a course index, '
+                                      'required missions and the current lesson in the shared applet '
+                                      'theme.',
+                               'caption': 'A Quest lesson in the focused player. The course index shows '
+                                          'required missions; opening a lesson alone does not satisfy '
+                                          'their work.',
+                               'provenance': {'kind': 'actual native Testing CUA capture',
+                                              'capture_date': '2026-10-07',
+                                              'revision': 'Joined Treehouse working-tree preview on '
+                                                          'isolated Testing7797 after learner layout '
+                                                          'corrections; final integration acceptance '
+                                                          'remains pending.',
+                                              'git_head': 'ae8e108f08f1edead35c1f2fc1e244e31654c00d',
+                                              'source_frame': '05-quest-player.jpg',
+                                              'capture_framing': '1142x1012 original app-browser frame; '
+                                                                 'no crop or pixel edit',
+                                              'variant_derivation': 'WebP quality92 at original '
+                                                                    'dimensions from untouched JPEG '
+                                                                    'master',
+                                              'data': 'Disposable Testing account and built-in lesson; '
+                                                      'no personal chats or file names visible; frame '
+                                                      'reviewed by coordinator and documentation worker',
+                                              'license': 'Open Clank UI captured with synthetic '
+                                                         'demonstration data'},
+                               'masters': [{'path': 'static/docs/media/treehouse-player-20261007/master.jpg',
+                                            'width': 1142,
+                                            'height': 1012,
+                                            'mime': 'image/jpeg',
+                                            'bytes': 152392,
+                                            'sha256': '939296366086a009ea52cdaa866ae593706669e2b3e5a77d4b5f5a1ceab82680'}],
+                               'variants': [{'role': 'image',
+                                             'url': '/static/docs/media/treehouse-player-20261007/preview.webp',
+                                             'width': 1142,
+                                             'height': 1012,
+                                             'mime': 'image/webp',
+                                             'bytes': 146812,
+                                             'sha256': 'fac9671bfa7f4183de24b13de2cfd5464a96df7223a605ec8bf36740cd5b0bd9'}],
+                               'reduced_motion_url': '/static/docs/media/treehouse-player-20261007/preview.webp'}})
+
 def article_media(asset_ids):
     """Resolve shipped stills; historical motion never becomes current evidence implicitly."""
     blocks = []

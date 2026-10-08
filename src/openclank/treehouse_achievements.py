@@ -1430,7 +1430,17 @@ class TreeHouseAchievementEngine:
     # -- presentation ------------------------------------------------------
 
     def presentation(self, account_id: str, *, admin: bool = False) -> dict[str, Any]:
-        return build_presentation(self.repository.earned_achievement_ids(account_id), admin=admin)
+        presentation = build_presentation(self.repository.earned_achievement_ids(account_id), admin=admin)
+        # Presentation metadata comes from the same account's existing award.
+        # Reference identifiers stay diagnostic; no underlying payload is copied.
+        for entry in presentation["entries"]:
+            if not entry.get("earned"):
+                continue
+            award = self.repository.get_achievement_award(account_id, entry["id"])
+            if award:
+                entry["earnedAt"] = award.get("earned_at")
+                entry["evidenceRefs"] = list((award.get("evidence") or {}).get("evidenceRefs") or [])
+        return presentation
 
     # -- backfill ----------------------------------------------------------
 
@@ -1579,6 +1589,7 @@ def _entry(definition: AchievementDefinition, *, earned: bool, locked: bool, adm
         "locked": locked,
         "evidenceKind": definition.evidence_kind,
         "summary": definition.summary if (earned or admin or definition.rarity == "normal") else "",
+        **({"iconKey": "k" + hashlib.sha256(f"openclank:achievement-art:v1:{definition.id}".encode()).hexdigest()[:12]} if earned or definition.rarity == "normal" else {}),
     }
 
 

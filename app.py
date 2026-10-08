@@ -962,7 +962,7 @@ app.include_router(setup_odysseus_files_routes())
 # active until Host/Copal/Gallery/Library parity is proven; this additive facade
 # owns opaque ResourceRefs and never shadows provider bytes.
 from routes.files_facade_routes import setup_files_facade_routes
-app.include_router(setup_files_facade_routes(policy_repository=files_policy_repository))
+app.include_router(setup_files_facade_routes(policy_repository=files_policy_repository, application_state=app.state))
 
 # Canonical Location/Workspace/People/Agent policy state. Compatibility root
 # routes remain during migration, but scoped resets write only this ledger.

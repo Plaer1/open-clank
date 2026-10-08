@@ -1,0 +1,49 @@
+.th-achievement-workspace { --th-accent:var(--accent,var(--red)); --th-radius:calc(12px * var(--theme-radius-scale,1)); container-type:inline-size; font:inherit; color:var(--fg); }
+.th-gallery-head { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:24px; border:1px solid var(--border); border-radius:var(--th-radius); background:radial-gradient(ellipse at 100% 0,color-mix(in srgb,var(--th-accent) 18%,transparent),transparent 65%),var(--panel); }
+.th-gallery-head h1 { font-size:clamp(1.6rem,4cqw,2.4rem); margin:9px 0 12px; line-height:1.15; }.th-gallery-head p { line-height:1.55; margin:0; font-size:.9em; opacity:.8; max-width:50ch; }
+.th-collection-count { display:flex; flex-direction:column; align-items:center; flex:0 0 auto; }.th-collection-count strong { font-size:2em; color:var(--th-accent); }.th-collection-count span { font-size:.8em; opacity:.7; }
+.th-collection-meter { height:7px; margin:12px 0 20px; background:color-mix(in srgb,var(--fg) 12%,transparent); border-radius:calc(4px * var(--theme-radius-scale,1)); overflow:hidden; }.th-collection-meter > span { height:100%; display:block; background:var(--th-accent); }
+.th-gallery-toolbar,.th-gallery-actions,.th-gallery-filter { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }.th-gallery-toolbar { justify-content:space-between; margin:22px 0 16px; }.th-gallery-toolbar input { flex:0 1 240px; max-width:100%; }.th-gallery-filter button { min-width:64px; }
+.th-achievement-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(210px,100%),1fr)); gap:16px; }
+.th-achievement-card { min-width:0; background:var(--panel); border:1px solid var(--border); border-radius:var(--th-radius); overflow:hidden; }.th-achievement-card.earned { border-color:color-mix(in srgb,var(--th-accent) 65%,var(--border)); }.th-achievement-card.concealed { border-style:dashed; }
+.th-achievement-workspace button.th-achievement-open { height:auto; min-height:310px; width:100%; display:flex; flex-direction:column; align-items:stretch; white-space:normal; padding:0; font:inherit; text-align:left; cursor:pointer; color:inherit; background:transparent; border:0; border-radius:var(--th-radius); line-height:1.5; }
+.th-achievement-open:hover { background:color-mix(in srgb,var(--fg) 4%,transparent)!important; }.th-achievement-open:focus-visible { outline:3px solid var(--th-accent); outline-offset:-3px; }
+.th-achievement-art { display:flex; align-items:center; justify-content:center; min-height:160px; padding:15px; background:radial-gradient(circle,color-mix(in srgb,var(--th-accent) 12%,transparent),transparent 70%); border-bottom:1px solid var(--border); }.th-achievement-art.oc-achievement-art-slot { max-width:none; width:auto; aspect-ratio:auto; flex:0 0 auto; }.th-achievement-art > svg,.th-achievement-art > img { width:132px!important; height:132px!important; max-width:100%; object-fit:contain; }.th-art-loading { font-size:3em; color:var(--th-accent); }
+.th-achievement-card-copy { padding:16px; display:flex; flex-direction:column; gap:9px; flex:1; }.th-achievement-card h2 { font-size:1.05em; line-height:1.25; margin:3px 0; }.th-achievement-card p { margin:0; font-size:.8em; line-height:1.6; opacity:.8; }.th-achievement-card small { margin-top:auto; font-size:.72em; opacity:.65; padding-top:6px; }
+.th-award-state { font-size:.7em; letter-spacing:.04em; font-weight:700; display:inline-block; color:var(--fg); opacity:.7; }.th-award-state.earned { color:var(--th-accent); opacity:1; }
+.th-achievement-detail { display:grid; grid-template-columns:minmax(180px,300px) minmax(0,1fr); align-items:start; gap:28px; padding:24px; margin:18px 0; border:1px solid var(--border); background:var(--panel); border-radius:var(--th-radius); }.th-detail-art { min-height:230px; border:1px solid var(--border); border-radius:var(--th-radius); }.th-detail-art > svg,.th-detail-art > img { width:230px!important; height:230px!important; }.th-achievement-detail h2 { font-size:1.7em; line-height:1.2; margin:9px 0 20px; overflow-wrap:anywhere; }.th-achievement-detail p { font-size:.92em; line-height:1.7; }.th-award-requirement { margin-top:24px; border-top:1px solid var(--border); padding-top:14px; }.th-award-requirement h3 { font-size:.95em; }.th-award-requirement p { font-size:.8em; opacity:.8; }
+.th-art-customization { margin-top:24px; padding:16px; border:1px solid var(--border); border-radius:var(--th-radius); }.th-art-customization summary { cursor:pointer; font-size:.9em; font-weight:600; }.th-art-customization p { font-size:.8em; line-height:1.65; opacity:.8; }.th-gallery-feedback { font-size:.85em; }
+.th-achievement-workspace .copal-btn { font:inherit; font-size:.85em; min-height:32px; }.th-achievement-workspace .copal-btn:focus-visible,.th-achievement-workspace summary:focus-visible { outline:2px solid var(--th-accent); outline-offset:3px; }
+@container (max-width:600px) { .th-gallery-head { padding:18px; gap:14px; }.th-gallery-head h1 { font-size:1.55em; }.th-collection-count strong { font-size:1.6em; }.th-achievement-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }.th-achievement-art { min-height:126px; padding:8px; }.th-achievement-art > svg,.th-achievement-art > img { width:110px!important; height:110px!important; }.th-achievement-card-copy { padding:12px; }.th-achievement-detail { grid-template-columns:1fr; padding:18px; gap:14px; }.th-detail-art { min-height:200px; }.th-detail-art > svg,.th-detail-art > img { width:180px!important; height:180px!important; } }
+@container (max-width:350px) { .th-achievement-grid { grid-template-columns:1fr; }.th-gallery-head { flex-direction:column; align-items:flex-start; }.th-collection-count { flex-direction:row; gap:10px; } }
+@media (prefers-reduced-motion:reduce) { .th-achievement-workspace * { transition:none!important; animation:none!important; scroll-behavior:auto!important; } }
+
+/* Keep the requested artwork collection in the first applet viewport. */
+.th-gallery-head { padding:16px 20px; gap:20px; }
+.th-gallery-head h1 { font-size:clamp(1.4rem,3cqw,1.8rem); margin:6px 0 7px; }
+.th-gallery-head p { font-size:.8em; }
+.th-collection-meter { margin:9px 0 12px; }
+.th-gallery-toolbar { margin:14px 0; }
+.th-gallery-trail { border:1px solid var(--border); border-radius:var(--th-radius); background:var(--panel); margin:10px 0 14px; }
+.th-gallery-trail > summary { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:12px 16px; cursor:pointer; }
+.th-gallery-trail > summary > span:first-child { display:flex; flex-wrap:wrap; align-items:baseline; gap:10px; }
+.th-gallery-trail summary strong { font-size:.86em; }.th-gallery-trail summary small { font-size:.72em; opacity:.7; }
+.th-trail-preview { display:flex; gap:7px; color:var(--fg); opacity:.55; }.th-trail-preview .achieved { color:var(--th-accent); opacity:1; }
+.th-gallery-trail .th-milestone-track { margin:0; border:0; background:transparent; }
+@container (max-width:600px) { .th-gallery-head { padding:14px 16px; }.th-gallery-head h1 { font-size:1.45em; }.th-gallery-trail > summary { padding:10px 12px; }.th-trail-preview { display:none; } }
+
+/* Theme accents decorate the collection; theme foreground carries its text. */
+.th-achievement-workspace .th-eyebrow,
+.th-achievement-workspace .th-collection-count strong,
+.th-achievement-workspace .th-award-state.earned,
+.th-achievement-workspace .th-trail-preview .achieved,
+.th-achievement-workspace .th-milestone-track header > strong {
+  color:var(--fg);
+}
+.th-achievement-workspace .th-gallery-filter .copal-btn.primary,
+.th-achievement-workspace .th-gallery-filter .copal-btn[aria-pressed="true"] {
+  color:var(--fg);
+  background:color-mix(in srgb,var(--fg) 8%,var(--panel));
+  font-weight:700;
+  text-shadow:none;
+}

@@ -90,10 +90,17 @@ def resume_account_activity(account: str, *, repository=None) -> bool:
     with _delivery_lock:
         for path in sorted(root.glob("*.json"), key=lambda item: item.stat().st_mtime_ns):
             try:
-                result = TreeHouseAchievementEngine(repo).ingest(account, [json.loads(path.read_text())], via="live")
-                if result.get("rejected"):
-                    complete = False
-                    continue
+                event = json.loads(path.read_text())
+                with repo.achievement_transaction():
+                    result = TreeHouseAchievementEngine(repo).ingest(account, [event], via="live")
+                    if result.get("rejected"):
+                        complete = False
+                        continue
+                    # Keep an independent server delivery digest in the existing
+                    # journal idempotency authority before removing its spool.
+                    source_id = str(event['source_event_id'])
+                    if not repo.journal_activity_delivered(account, source_id):
+                        repo.mark_journal_activity_delivered(account, source_id, hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest())
                 path.unlink()
             except Exception:
                 complete = False

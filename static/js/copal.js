@@ -277,7 +277,7 @@ async function loadDocuments(render = true) {
       for (const [view, context] of state.windows) if (context.window.visible) renderView(view);
       activateView(active);
     }
-    for (const [view, context] of state.windows) context.window.setStatus(planning.migrationRequired ? 'Saved Timeline notes need explicit workspace migration; source preserved.' : view === 'achievements' ? '' : `${state.docs.length} documents`);
+    for (const [view, context] of state.windows) context.window.setStatus(planning.migrationRequired ? 'Saved Timeline notes need explicit workspace migration; source preserved.' : ['achievements', 'treehouse'].includes(view) ? '' : `${state.docs.length} documents`);
     reconcileCalendarProjection().catch(() => {});
   } catch (error) {
     if (!current()) return;
@@ -3240,17 +3240,19 @@ function ensureViewWindow(view) {
     label:LABELS[view],
     icon: { notes:'code', wiki:'book', timeline:'timeline', graph:'graph', treehouse:'treehouse', achievements:'check', todo:'tasks' }[view] || 'document',
     subtitle:'Open Clank',
+    navigationChrome:view !== 'achievements',
     minWidth:view === 'timeline' ? 720 : 560,
     minHeight:420,
     sizeKey:copalStorageKey(`odysseus-copal-${view}-window-size`),
     className:`copal-view-window copal-${view}-window`,
     onActivate:() => {
       if (!state.windows.has(view)) return;
-      activateView(view); markActive(); localStorage.setItem(copalStorageKey('odysseus-copal-view'), view);
+      activateView(view); if (view === 'treehouse') treeHouse.refreshEngagement(); markActive(); localStorage.setItem(copalStorageKey('odysseus-copal-view'), view);
       if (resolveAppletLocation(location.pathname, location.search)?.target === 'editor') updateRoute(view, true);
     },
   onBeforeClose:() => ['notes', 'wiki'].includes(view) ? featureFor(view)?.beforeWindowClose?.() : true,
   onClosed:() => {
+    if (view === 'treehouse') treeHouse.stopEngagement();
     if (['notes', 'wiki'].includes(view)) featureFor(view)?.destroy();
     if (view === 'graph') state.windows.get('graph')?.window.body?.querySelector('.copal-graph-wrap')?._copalDestroy?.();
     markActive();
@@ -3274,8 +3276,9 @@ function ensureViewWindow(view) {
       h('button', { class:'copal-btn', icon:'search', title:'Quick switcher', 'aria-label':'Quick switcher', onclick:activate(() => featureFor(view)?.showChooser()) }),
       h('button', { class:'copal-btn', icon:'menu', title:'Editor commands', 'aria-label':'Editor commands', onclick:activate(() => featureFor(view)?.showCommands()) }),
     );
-  } else if (view === 'achievements') {
-    windowApi.actions.append(h('button', { class:'copal-btn', icon:'refresh', title:'Refresh Achievements', 'aria-label':'Refresh Achievements', onclick:activate(() => renderView('achievements')) }));
+  } else if (['achievements', 'treehouse'].includes(view)) {
+    // Learning actions live inside TreeHouse; achievements update from events.
+    // Keep shared navigation adapters available to other window consumers.
   } else {
     windowApi.actions.append(search);
     if (['wiki','treehouse'].includes(view)) windowApi.actions.append(h('button', { class:'copal-btn primary', icon:'add', text:'New', onclick:activate(createDocument) }));

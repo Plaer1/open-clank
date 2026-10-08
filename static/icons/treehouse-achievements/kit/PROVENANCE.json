@@ -1,0 +1,24 @@
+{
+  "kitVersion": "1",
+  "license": "AGPL-3.0",
+  "method": "deterministic vector composition",
+  "model": null,
+  "seed": null,
+  "sources": [
+    "Open Clank original SVG geometry, static/js/uiIcons.js",
+    "Open Clank identity mark, static/icons/open-clank-mark.svg",
+    "Original cat example authored for this kit"
+  ],
+  "generator": "generate.py, Python standard library",
+  "motifs": "actual source geometry in composition.json",
+  "layers": [
+    "background",
+    "mascot",
+    "foreground"
+  ],
+  "size": [
+    256,
+    256
+  ],
+  "externalDependencies": []
+}

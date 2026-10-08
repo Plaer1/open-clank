@@ -1,0 +1,195 @@
+{
+  "schemaVersion": 1,
+  "kitVersion": "1",
+  "size": 256,
+  "download": "/static/icons/treehouse-achievements/mascot-kit.zip",
+  "fallback": "/static/icons/treehouse-achievements/fallback.svg",
+  "concealed": "/static/icons/treehouse-achievements/concealed.svg",
+  "icons": {
+    "kfafb1912ff12": {
+      "src": "/static/icons/treehouse-achievements/kfafb1912ff12.svg",
+      "width": 256,
+      "height": 256
+    },
+    "ke376439c6944": {
+      "src": "/static/icons/treehouse-achievements/ke376439c6944.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k7804b3f9094a": {
+      "src": "/static/icons/treehouse-achievements/k7804b3f9094a.svg",
+      "width": 256,
+      "height": 256
+    },
+    "kd0afcf150ed9": {
+      "src": "/static/icons/treehouse-achievements/kd0afcf150ed9.svg",
+      "width": 256,
+      "height": 256
+    },
+    "kafcaab8143d2": {
+      "src": "/static/icons/treehouse-achievements/kafcaab8143d2.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k6cbe471b993b": {
+      "src": "/static/icons/treehouse-achievements/k6cbe471b993b.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k3ec87f123ccb": {
+      "src": "/static/icons/treehouse-achievements/k3ec87f123ccb.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k569c14e27d5e": {
+      "src": "/static/icons/treehouse-achievements/k569c14e27d5e.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k39d547cc2cb7": {
+      "src": "/static/icons/treehouse-achievements/k39d547cc2cb7.svg",
+      "width": 256,
+      "height": 256
+    },
+    "ke624f5562900": {
+      "src": "/static/icons/treehouse-achievements/ke624f5562900.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k603bfa4c8eb6": {
+      "src": "/static/icons/treehouse-achievements/k603bfa4c8eb6.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k220af4ab52a7": {
+      "src": "/static/icons/treehouse-achievements/k220af4ab52a7.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k5260f4b99bba": {
+      "src": "/static/icons/treehouse-achievements/k5260f4b99bba.svg",
+      "width": 256,
+      "height": 256
+    },
+    "kd16ba11de003": {
+      "src": "/static/icons/treehouse-achievements/kd16ba11de003.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k3972447d1496": {
+      "src": "/static/icons/treehouse-achievements/k3972447d1496.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k7f0eea914648": {
+      "src": "/static/icons/treehouse-achievements/k7f0eea914648.svg",
+      "width": 256,
+      "height": 256
+    },
+    "kc31fa234f2c7": {
+      "src": "/static/icons/treehouse-achievements/kc31fa234f2c7.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k944766daa885": {
+      "src": "/static/icons/treehouse-achievements/k944766daa885.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k8a5f4337e9f4": {
+      "src": "/static/icons/treehouse-achievements/k8a5f4337e9f4.svg",
+      "width": 256,
+      "height": 256
+    },
+    "ka37f56d2567e": {
+      "src": "/static/icons/treehouse-achievements/ka37f56d2567e.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k1f4eb2462f88": {
+      "src": "/static/icons/treehouse-achievements/k1f4eb2462f88.svg",
+      "width": 256,
+      "height": 256
+    },
+    "kd14d8b37535c": {
+      "src": "/static/icons/treehouse-achievements/kd14d8b37535c.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k1ec9ef342b87": {
+      "src": "/static/icons/treehouse-achievements/k1ec9ef342b87.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k91f4086e400d": {
+      "src": "/static/icons/treehouse-achievements/k91f4086e400d.svg",
+      "width": 256,
+      "height": 256
+    },
+    "keae5b544735c": {
+      "src": "/static/icons/treehouse-achievements/keae5b544735c.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k2d6e8c64bc2f": {
+      "src": "/static/icons/treehouse-achievements/k2d6e8c64bc2f.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k088f3634f21d": {
+      "src": "/static/icons/treehouse-achievements/k088f3634f21d.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k429b1bc0bc65": {
+      "src": "/static/icons/treehouse-achievements/k429b1bc0bc65.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k70b819f5bab4": {
+      "src": "/static/icons/treehouse-achievements/k70b819f5bab4.svg",
+      "width": 256,
+      "height": 256
+    },
+    "kd383e5b0f632": {
+      "src": "/static/icons/treehouse-achievements/kd383e5b0f632.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k1d0ad52f3693": {
+      "src": "/static/icons/treehouse-achievements/k1d0ad52f3693.svg",
+      "width": 256,
+      "height": 256
+    },
+    "kefcc8a4bb13f": {
+      "src": "/static/icons/treehouse-achievements/kefcc8a4bb13f.svg",
+      "width": 256,
+      "height": 256
+    },
+    "kcf1e222299e7": {
+      "src": "/static/icons/treehouse-achievements/kcf1e222299e7.svg",
+      "width": 256,
+      "height": 256
+    },
+    "kb1ed16fc2a44": {
+      "src": "/static/icons/treehouse-achievements/kb1ed16fc2a44.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k1a0b0789297b": {
+      "src": "/static/icons/treehouse-achievements/k1a0b0789297b.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k9462d238e4cf": {
+      "src": "/static/icons/treehouse-achievements/k9462d238e4cf.svg",
+      "width": 256,
+      "height": 256
+    },
+    "k30dd13f6efc4": {
+      "src": "/static/icons/treehouse-achievements/k30dd13f6efc4.svg",
+      "width": 256,
+      "height": 256
+    }
+  }
+}

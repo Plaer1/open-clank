@@ -1,0 +1,20 @@
+New round-eye artwork: built-in image_gen edit, 7 October 2026.
+Input supplied by the user. Original output preserved in Originals at 1254 × 1254 RGBA. 2048 export is an upscale; 1024 export is downsampled. Alpha preserved. This asset is raster, not an editable vector.
+
+Final prompt:
+Use case: style-transfer.
+Asset type: Open Clank brand mascot, square transparent PNG.
+Input image: source-eye-user-provided.png is the edit target.
+Primary request: Redesign this exact round eye as a noticeably toonier Open Clank brand asset. Preserve its recognizable concentric circular construction: broad outer rim, cream-white ring, large golden iris and very large round black pupil with two cute white gleams toward upper right. Keep the view directly front-on and centered, and keep it circular; do not change into an almond eye or add a pyramid.
+Style: playful polished kids-cartoon / chunky illustrated UI mascot, friendly and a little cheeky, bold clean charcoal contours, very simple two-tone cel shading with soft rounded forms. Much less photorealistic, no realistic iris texture, no metal, no shiny 3D bevels, no fire-like orange/red gradients. It must read clearly as an eye at small icon sizes.
+Colors: make iris dominantly Open Clank warm golden yellow #F6BE48, a small pale yellow highlight and restrained darker ochre shadow only. Pupil and thick outline charcoal #191A1E. Ring warm ivory #FFF1C7. Outer decorative rim warm gold/ochre instead of red-orange. Crisp white pupil gleams.
+Composition: single isolated eye, square canvas, 7 percent clear padding around full silhouette. True transparent alpha outside the eye. No background, white square, checkerboard drawn into the image, cast shadow behind it, extra shapes, lettering or watermark. Keep all eye interior opaque including cream ring and glints.
+
+
+FINAL REVISION — black lens rim, built-in image_gen edit.
+Edit input: clanker-round-eye-toon-transparent-native.png. Output: clanker-round-eye-black-rim-transparent-native.png. This final revision is used for the exported clanker-round-eye-toon PNGs. Gold-rim first draft is retained in Originals.
+
+Final revision prompt:
+Use case: precise-object-edit. Edit the attached cartoon Open Clank circular eye.
+Change ONLY the thick OUTERMOST GOLD BAND, the ring outside the cream-white ring: recolor that entire outer band to BLACK so it reads as the black rim around a lens. Give this black rim subtle charcoal two-tone cel shading (#191A1E with restrained #303239 highlights), still predominantly black. No gold/orange on this outer band.
+Keep absolutely everything INSIDE the cream ring unchanged: the golden yellow iris, black pupil, two white glints, inner cream-white ring, outlines, circular shape, size, composition and toon illustration style. Keep the transparent background and all current clear padding. No text, no new elements, no background or opaque canvas. This is a narrow recolor of the outside gold lens ring, not a redesign of the eye.

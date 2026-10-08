@@ -90,6 +90,26 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
     executable = bundle / 'openclank.exe'
     process = None
     receipt = {'target': target, 'checks': checks, 'qualification': 'failed'}
+
+    def start_fixture_server(log_name):
+        with (work / log_name).open('xb') as log:
+            started = subprocess.Popen([str(executable), '__managed-server', '--host', '127.0.0.1', '--port', str(port)],
+                                       env=environment, cwd=work, stdout=log, stderr=subprocess.STDOUT)
+        return started
+
+    def await_fixture_server():
+        deadline = time.monotonic() + 180
+        while True:
+            if process.poll() is not None:
+                raise RuntimeError('Packaged server exited before readiness; inspect private server log')
+            try:
+                if request('/api/health')['status'] == 'healthy':
+                    return
+            except (OSError, ValueError):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Packaged server readiness timed out')
+                time.sleep(1)
+
     try:
         with (work / 'payload-verify.json').open('wb') as verification:
             subprocess.run([str(executable), 'engine', 'verify', '--json'], env=environment,
@@ -118,20 +138,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
             checks.append('complete-pinned-external-artwork-verified-by-packaged-command')
         else:
             raise RuntimeError('Complete offline qualification requires --parts or --emoji-pack')
-        with (work / 'server.log').open('wb') as log:
-            process = subprocess.Popen([str(executable), '__managed-server', '--host', '127.0.0.1', '--port', str(port)],
-                                       env=environment, cwd=work, stdout=log, stderr=subprocess.STDOUT)
-        deadline = time.monotonic() + 180
-        while True:
-            if process.poll() is not None:
-                raise RuntimeError('Packaged server exited before readiness; inspect server.log')
-            try:
-                if request('/api/health')['status'] == 'healthy':
-                    break
-            except (OSError, ValueError):
-                if time.monotonic() >= deadline:
-                    raise RuntimeError('Packaged server readiness timed out')
-                time.sleep(1)
+        process = start_fixture_server('server.log')
+        await_fixture_server()
         checks.append('fresh-data-packaged-server-startup')
         password = secrets.token_urlsafe(24)
         if request('/api/auth/setup', {'username': 'releasefixture', 'password': password}).get('ok') is not True:
@@ -151,6 +159,10 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
             raise RuntimeError('Fixture login failed')
         password = None
         checks.append('actual-password-login-with-session-cookie')
+        from scripts.qualify_treehouse import CHECK as TREEHOUSE_CHECK, RESTART_CHECK, qualify_treehouse
+        treehouse = qualify_treehouse(base, opener, bundle / '_internal', detailed=False)
+        receipt['treehouse'] = treehouse.receipt
+        checks.append(TREEHOUSE_CHECK)
         from scripts.qualify_theme_emoji import CHECK, qualify_theme_emoji
         receipt['theme_emoji'] = qualify_theme_emoji(
             base, cookies, bundle / '_internal/static/vendor/google-emoji/bundle-manifest.json',
@@ -189,6 +201,14 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
             raise RuntimeError('Editor reopen differs from saved fixture')
         checks.append('editor-save-disk-bytes-and-reopen')
         receipt['fixture_sha256'] = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        treehouse.capture()
+        subprocess.run([str(system_root / 'System32/taskkill.exe'), '/PID', str(process.pid), '/T', '/F'],
+                       capture_output=True, timeout=30)
+        process.wait(timeout=30)
+        process = start_fixture_server('server-after-learning-restart.log')
+        await_fixture_server()
+        treehouse.verify_restart()
+        checks.append(RESTART_CHECK)
         # Stop the owned server before the final seal check, so worker shutdown
         # cannot introduce an unchecked payload mutation after acceptance.
         subprocess.run([str(system_root / 'System32/taskkill.exe'), '/PID', str(process.pid), '/T', '/F'],

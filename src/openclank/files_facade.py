@@ -563,7 +563,7 @@ def _validated_preparation(value: Mapping[str, Any], *, operation_id: str, expec
     target_identity = value.get("target_identity")
     if not isinstance(target_identity, Mapping):
         raise FilesFacadeError("provider preparation target identity is invalid", code="provider_unavailable")
-    if set(target_identity) - {"resource_key", "resource_ref", "kind", "course_id", "lesson_id"}:
+    if set(target_identity) - {"resource_key", "resource_ref", "kind", "course_id", "lesson_id", "assignment_id"}:
         raise FilesFacadeError("provider preparation target identity is invalid", code="provider_unavailable")
     safe_target: dict[str, str] = {}
     for key, raw in target_identity.items():
@@ -1495,7 +1495,7 @@ class FilesFacade:
             return {"operation_id": operation, "generation": original_generation, "state": "failed", "preparation": None}
         validated["generation"] = original_generation
         target_kind = validated.get("target_identity", {}).get("kind") if isinstance(validated.get("target_identity"), Mapping) else None
-        if target_kind != "treehouse_lesson" and (not isinstance(validated.get("asset"), Mapping) or not validated["asset"].get("resource_key")):
+        if target_kind not in {"treehouse_lesson", "treehouse_submission"} and (not isinstance(validated.get("asset"), Mapping) or not validated["asset"].get("resource_key")):
             return {"operation_id": operation, "generation": original_generation, "state": "pending", "preparation": None}
         return {"operation_id": operation, "generation": original_generation, "state": "complete", "preparation": validated}
 
@@ -1737,8 +1737,8 @@ class FilesFacade:
         if target_kind in {"copal_document", "host_document"}:
             if set(target) - {"kind", "resource_ref", "expected_revision"} or not str(target.get("resource_ref") or "").strip():
                 raise FilesFacadeError("attachment target descriptor is invalid", code="invalid_resource_request")
-        elif target_kind == "treehouse_lesson":
-            if set(target) - {"kind", "course_id", "lesson_id", "expected_revision"} or not str(target.get("course_id") or "").strip() or not str(target.get("lesson_id") or "").strip():
+        elif target_kind in {"treehouse_lesson", "treehouse_submission"}:
+            if set(target) - {"kind", "course_id", "lesson_id", "assignment_id", "expected_revision"} or not str(target.get("course_id") or "").strip() or not str(target.get("assignment_id" if target_kind == "treehouse_submission" else "lesson_id") or "").strip():
                 raise FilesFacadeError("attachment target descriptor is invalid", code="invalid_resource_request")
         else:
             raise FilesFacadeError("attachment target kind is unsupported", code="unsupported_provider_kind")
@@ -1767,7 +1767,7 @@ class FilesFacade:
                 target_adapter = self._attachment_targets.get(target_kind)
                 if target_adapter is None:
                     raise FilesFacadeError("attachment representation is unavailable", code="unsupported_provider_kind")
-        elif target_kind == "treehouse_lesson":
+        elif target_kind in {"treehouse_lesson", "treehouse_submission"}:
             target_adapter = self._attachment_targets.get(target_kind)
         # Workspace and account are part of the idempotency identity.  A
         # sealed Copal token may be reused only from the same tenant context;

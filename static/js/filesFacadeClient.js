@@ -39,11 +39,11 @@ function strictPreparation(value) {
     || typeof value.preparation_receipt_id !== 'string' || !value.preparation_receipt_id || value.preparation_receipt_id.length > 128) throw new FilesFacadeError('Files attachment preparation response is invalid');
   strictRevision(value.source_revision); strictRevision(value.target_revision);
   if (!value.target_identity || typeof value.target_identity !== 'object' || Array.isArray(value.target_identity)
-    || Object.keys(value.target_identity).some((key) => !['resource_key', 'resource_ref', 'kind', 'course_id', 'lesson_id'].includes(key))) throw new FilesFacadeError('Files attachment preparation response is invalid');
+    || Object.keys(value.target_identity).some((key) => !['resource_key', 'resource_ref', 'kind', 'course_id', 'lesson_id', 'assignment_id'].includes(key))) throw new FilesFacadeError('Files attachment preparation response is invalid');
   if (typeof value.target_identity.kind !== 'string' || !value.target_identity.kind) throw new FilesFacadeError('Files attachment preparation response is invalid');
   if (value.target_identity.resource_key != null) strictResourceKey(value.target_identity.resource_key);
   if (value.target_identity.resource_ref != null && (typeof value.target_identity.resource_ref !== 'string' || !value.target_identity.resource_ref)) throw new FilesFacadeError('Files attachment preparation response is invalid');
-  for (const key of ['course_id', 'lesson_id']) if (value.target_identity[key] != null && (typeof value.target_identity[key] !== 'string' || !value.target_identity[key] || value.target_identity[key].length > 512)) throw new FilesFacadeError('Files attachment preparation response is invalid');
+  for (const key of ['course_id', 'lesson_id', 'assignment_id']) if (value.target_identity[key] != null && (typeof value.target_identity[key] !== 'string' || !value.target_identity[key] || value.target_identity[key].length > 512)) throw new FilesFacadeError('Files attachment preparation response is invalid');
   if (!value.insertion || typeof value.insertion !== 'object' || Array.isArray(value.insertion)
     || Object.keys(value.insertion).some((key) => !['format', 'link_target', 'label', 'media_kind'].includes(key))
     || value.insertion.format !== 'markdown' || ['format', 'link_target', 'label', 'media_kind'].some((key) => typeof value.insertion[key] !== 'string' || !value.insertion[key] || value.insertion[key].length > 512)) throw new FilesFacadeError('Files attachment preparation response is invalid');
@@ -532,12 +532,14 @@ export class FilesFacadeClient {
     const targetExpected = target.expectedRevision || target.expected_revision;
     if (targetKind === 'copal_document') {
       if (!targetRef || targetKeys.some((key) => !['kind', 'resourceRef', 'resource_ref', 'expectedRevision', 'expected_revision'].includes(key))) throw new TypeError('attachment target is invalid');
+    } else if (targetKind === 'treehouse_submission') {
+      if (!target.courseId || !target.assignmentId || targetKeys.some(key => !['kind','courseId','assignmentId','expectedRevision'].includes(key))) throw new TypeError('submission attachment target is invalid');
     } else if (targetKind === 'treehouse_lesson') {
       if (!target.courseId && !target.course_id || !target.lessonId && !target.lesson_id || targetKeys.some((key) => !['kind', 'courseId', 'course_id', 'lessonId', 'lesson_id', 'expectedRevision', 'expected_revision'].includes(key))) throw new TypeError('attachment target is invalid');
     } else throw new TypeError('attachment target is invalid');
     const normalizedTarget = targetKind === 'copal_document'
       ? { kind: targetKind, resource_ref: String(targetRef), ...(targetExpected ? { expected_revision: strictRevision(targetExpected) } : {}) }
-      : { kind: targetKind, course_id: String(target.courseId || target.course_id), lesson_id: String(target.lessonId || target.lesson_id), ...(targetExpected ? { expected_revision: strictRevision(targetExpected) } : {}) };
+      : targetKind === 'treehouse_submission' ? {kind:targetKind,course_id:String(target.courseId),assignment_id:String(target.assignmentId),...(targetExpected?{expected_revision:strictRevision(targetExpected)}:{})} : { kind: targetKind, course_id: String(target.courseId || target.course_id), lesson_id: String(target.lessonId || target.lesson_id), ...(targetExpected ? { expected_revision: strictRevision(targetExpected) } : {}) };
     const workspaceQuery = workspace ? `?copal_workspace=${encodeURIComponent(String(workspace))}` : '';
     return this._request(`/attachments/prepare${workspaceQuery}`, { method: 'POST', signal, body: { operation_id: operation, generation: currentGeneration, source: normalizedSource, target: normalizedTarget, mode: normalizedMode } }).then((payload) => {
       const prepared = strictPreparation(payload);

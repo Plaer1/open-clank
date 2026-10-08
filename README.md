@@ -16,8 +16,8 @@ keeping files, knowledge and work together.
 > **Beta 1 is the first of several betas.** macOS is where we are building and
 > dogfooding. Windows source support is working and tested, including Files,
 > Editor save/reopen and History restore, and native image/video thumbnails.
-> Native ARM64 and x64 Windows packages are being qualified separately; use only
-> the architectures offered by the published release. Linux support is coming later. Read the [Beta 1 notes](docs/beta1.md) and
+> Install only the native ARM64 or x64 Windows architectures offered by the
+> published release, and check the artifact provenance. Linux support is coming later. Read the [Beta 1 notes](docs/beta1.md) and
 > [known limits](docs/known-limits.md).
 
 ## Everyday work
@@ -49,14 +49,24 @@ Source comments support click-in rich prose; right-click reveals raw source.
 Managed folders show direct children in a nested, paged hierarchy. Applets use
 thin frames and maximize beside the retained navigation.
 
+Treehouse separates **Tutorials**, click-through courses without required work,
+from **Quests**, courses with required activities and completion criteria.
+Authors preview and publish lessons; learners keep drafts, submit work and
+receive feedback or corrections. Files-backed submissions preserve account
+and reviewer access. Achievements update from supported actions and learning,
+with themed cards, an artwork gallery and a downloadable mascot source kit.
+Learning stats record supported activity and foreground time; there is no
+leaderboard. See [Treehouse limits](docs/known-limits.md#treehouse-learning)
+for practice, provider and interoperability boundaries.
+
 ## Start on macOS
 
 The packaged installation for Apple Silicon Macs running macOS 15 or later is
 `Open-Clank-1.0.2-macos-arm64.dmg` from the
 [`v1.0.2-beta.1` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1)
-when published. The native package and its menu-bar Open/Quit flow have passed
-qualification. The app is ad-hoc signed, not notarized; Intel/universal packages
-are not claimed.
+when published. Check its release checksum and artifact provenance for the
+source revision and target. The app is ad-hoc signed, not notarized;
+Intel/universal packages are not claimed.
 Drag **OpenClank.app** to Applications. It includes private Python, Engine and
 native helpers, so you do not need a checkout, Homebrew or system Python.
 [Install the verified offline artwork with its packaged CLI](docs/setup.md#macos-app-package),
@@ -74,7 +84,7 @@ The release label is `v1.0.2-beta.1`; its downloads become available when the
 Download `open-clank-1.0.2-beta.1-source.tar.gz` from the application release.
 The complete Google/Kitchen offline collection is preserved in a compact SVG/WebP pack (449 MB); Kitchen images use 160px lossless WebP, while Google SVG bytes remain exact.
 Obtain the matching artwork part and `emoji-assets.parts.json` from the
-[`v1.0.2-beta.1-artwork-compact` supporting release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact) when published, then extract
+[`v1.0.2-beta.1-artwork-compact` supporting release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact), which is already public. Keep both artwork files together, then extract
 the source archive:
 
 ```bash
@@ -104,13 +114,13 @@ as a data migration.
 
 ## Other installation paths
 
-For Windows, the easiest planned path is the per-user installer:
+For Windows, the per-user installer is the simplest installation path:
 `Open-Clank-1.0.2-windows-x64-Setup.exe` or the ARM64 counterpart. It includes
 private Python and native app dependencies, creates Start menu shortcuts, and
 can download and verify the complete offline artwork or use existing parts.
 No global Python/PATH changes are needed. ZIP packages remain an alternative.
-Installers and native packages are still awaiting qualification; use only
-architectures offered by the published release. See
+Use only architectures offered by the published release; check its checksums
+and artifact provenance. See
 [Windows installation](docs/setup.md#windows-release-package), including
 unsigned Beta and data-preserving uninstall details.
 
@@ -130,8 +140,9 @@ blob. A source checkout needs the matching release part files assembled once;
 Windows packages install the same pack into normal writable user data. The public assembly tool
 verifies pinned SHA-256, size, SQLite integrity and catalog counts and makes no
 network requests. See [source setup](docs/setup.md#offline-emoji-artwork).
-Downloads become available when the release is published; obtain only the
-payload matched to the installed manifest.
+The compact artwork release is already public; application downloads remain
+conditional on publication. Obtain only the payload matched to the installed
+manifest; this compact schema needs the matching application/source revision.
 
 ## First login and model access
 

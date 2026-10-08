@@ -1,15 +1,16 @@
 # Open Clank Beta 1
 
 Beta 1 is the first of several beta releases. macOS is where Open Clank is
-currently built and dogfooded. The macOS 15+ Apple Silicon package has passed
-native qualification, including menu-bar Open/Quit. Its pyramid-and-eye icon
+currently built and dogfooded. The macOS package targets Apple Silicon on
+macOS 15 or later. Its pyramid-and-eye menu-bar icon
 owns the app lifecycle; there is no Dock icon. It is ad-hoc signed and not
 notarized, with no Intel/universal claim. Windows source support is working and tested:
 Setup/Check, authenticated startup, Files, Editor save/reopen and History
 restore, native image/video thumbnails and host application dispatch passed
-focused checks. Shared fixes were also tested on macOS. Native ARM64 and x64
-frozen installers and packages still need final qualification; Linux release
-support is coming soon and remains unqualified.
+focused checks. Shared fixes were also tested on macOS. Install only the native
+architectures offered by the published release, and check each artifact's
+provenance for its source and target. Linux release support is coming soon and
+remains unqualified.
 Docker is not officially supported or tested. Retained Docker material is
 unsupported legacy reference and does not gate the Beta 1 release.
 
@@ -17,8 +18,11 @@ unsupported legacy reference and does not gate the Beta 1 release.
 The installed revision identifies the actual source/build. These notes do not
 announce a published application release or downloadable installer. Application
 downloads become available when `v1.0.2-beta.1` is published. The verified single
-offline-artwork part and manifest become available when the separate
-[`v1.0.2-beta.1-artwork-compact` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact) is published.
+offline-artwork part and manifests are already public in the separate
+[`v1.0.2-beta.1-artwork-compact` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact).
+Its 449 MB pack retains all available Kitchen combinations as 160px lossless
+WebP and the original Google SVG bytes. Use the matching compact-schema app
+or source revision; replacing an older app's pack alone is not an upgrade.
 CI artifact definitions are not platform acceptance.
 
 ## Current workspace
@@ -35,6 +39,32 @@ CI artifact definitions are not platform acceptance.
   themes, Hexes and History are part of the workspace. Their useful behavior
   depends on configured providers, permissions, native workers and supported
   data. See the handbook for individual tasks and limits.
+
+## Treehouse learning
+
+**Tutorials** are click-through courses without required work. **Quests** have
+required activities and completion criteria; missions are objectives within
+Quests. Reading a Quest does not complete its required work. Authoring includes
+rich lessons, preview and publication. Learners save drafts, submit text or
+Files-authorized material, receive instructor feedback and can retry after a
+correction. Protected file evidence retains account, reviewer and attempt scope.
+
+The learning library includes collections, scoped discussion and shared boards,
+personal completion records and course-scoped podcasts. Achievements update
+from supported producers and learning, with themed icons, details and progression.
+The gallery accepts artwork packs and offers a mascot source kit. Stats record
+supported activity and admitted foreground observations, without leaderboards
+or fabricated historical totals. Fresh databases initialize stats automatically.
+An older database missing stats needs a backed-up offline operator activation;
+creating a new account in that database does not activate them. The private
+activation tool is not shipped, and startup does not migrate those stores.
+
+Treehouse has bounded authenticated source-journey evidence; consult the
+release artifact provenance for installed-package coverage. Browser JavaScript and choices are
+practice, not trusted assessment grading. H5P/SCORM, richer AI/RAG and modalities,
+other-language execution, trusted code autograding and learning automation
+remain [explicit limitations](known-limits.md#treehouse-learning). This is not
+full upstream learning-platform parity.
 
 The inherited Odysseus document editor is no longer an improvement target.
 Editor and Wiki own future authoring work. Existing document data and email

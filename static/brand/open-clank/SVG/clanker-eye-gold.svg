@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000" color="#F6BE48"><title>clanker eye gold</title><defs><linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#F6BE48"/><stop offset=".42" stop-color="#F6BE48"/><stop offset=".42" stop-color="#FF776E"/><stop offset=".70" stop-color="#FF776E"/><stop offset=".70" stop-color="#ED6AB0"/><stop offset=".86" stop-color="#ED6AB0"/><stop offset=".86" stop-color="#B7A7E8"/><stop offset="1" stop-color="#B7A7E8"/></linearGradient></defs><g color="#F6BE48" transform="translate(-380 -435) scale(55)">
+  
+  <path d="M8.5 17Q16 7 23.5 17Q16 27 8.5 17ZM16 13.3a3.7 3.7 0 1 0 0 7.4 3.7 3.7 0 1 0 0-7.4Z" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"/>
+  <circle cx="16" cy="17" r="1.2" fill="currentColor"/>
+</g></svg>

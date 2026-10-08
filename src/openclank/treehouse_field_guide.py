@@ -42,6 +42,16 @@ CLASS_KEYS = (
 # Suggested order is a hint rendered in the overview.  It is never a lock.
 SUGGESTED_ORDER = CLASS_KEYS
 
+# Observation/practice completion is an explicit self-report. These lessons
+# do not have independent durable result verifiers; action awards stay separate.
+OBSERVATION_SELF_CHECK_KEYS = frozenset({
+    'house-documents.tabs-and-splits', 'house-connections.graph-modes',
+    'house-connections.filters-camera', 'house-connections.bases',
+    'house-stewardship.official-docs', 'house-stewardship.app-links',
+    'house-stewardship.theme-effects', 'house-connections.links',
+})
+SELF_CHECK_EXPLANATION = 'Completion is your self-report of this practice or observation; it does not claim verified mastery or award the underlying app action achievement.'
+
 # Hidden system sections compute aggregate achievement state without showing an
 # empty locked Class or demanding enrollment.  Catalog section visibility stays
 # separate from achievement rarity.
@@ -1103,8 +1113,7 @@ _CLASSES: tuple[dict[str, Any], ...] = (
                 (
                     "The maintained handbook ships with Open Clank and opens inside "
                     "[Editor](clank://editor) — there is no separate help browser. "
-                    "Official pages are read-only; **Make editable copy** keeps your "
-                    "own notes beside them and updates never touch your copy. The "
+                    "Official pages are maintained read-only reference material. The "
                     "Markdown Formatting Demo shows rendered Markdown and its exact "
                     "source."
                 ),
@@ -1385,6 +1394,9 @@ def field_guide_manifest() -> dict[str, Any]:
                 "suggestedPosition": len(course_lessons) + 1,
             }
             course_lessons.append(entry)
+            if entry['key'] in OBSERVATION_SELF_CHECK_KEYS:
+                entry['completion'] = 'self-check'
+                entry['body'] += '\n\n**Self-check.** ' + SELF_CHECK_EXPLANATION
             lessons.append(entry)
         courses.append({
             "key": class_key,
@@ -1609,6 +1621,38 @@ def _install_courses(result: dict[str, Any], owner_id: str, manifest: dict[str, 
     return result
 
 
+def reconcile_field_guide_completion(state: dict[str, Any]) -> dict[str, Any]:
+    """Correct built-in observation labels, retaining IDs, content and progress."""
+    if state.get('fieldGuide', {}).get('templateKey') != FIELD_GUIDE_TEMPLATE_KEY:
+        return state
+    result = copy.deepcopy(state)
+    changed = False
+    owner_id = str(state.get('fieldGuide', {}).get('ownerAccountId') or '')
+    if not owner_id:
+        return state
+    owner_suffix = hashlib.sha256(owner_id.encode('utf-8')).hexdigest()[:12]
+    for activity in result.get('activities', {}).values():
+        course = result.get('courses', {}).get(activity.get('courseId'), {})
+        key, class_key = activity.get('fieldGuideKey'), course.get('fieldGuideKey')
+        if key not in OBSERVATION_SELF_CHECK_KEYS or class_key not in CLASS_KEYS or activity.get('verifierSpec') or activity.get('id') != f'activity:{key}:{owner_suffix}' or course.get('id') != f'course:{class_key}:{owner_suffix}':
+            continue
+        if activity.get('completion') != 'self-check' or activity.get('completionExplanation') != SELF_CHECK_EXPLANATION:
+            activity.update(completion='self-check', selfCheck=True, completionExplanation=SELF_CHECK_EXPLANATION)
+            if SELF_CHECK_EXPLANATION not in activity.get('content', ''):
+                activity['content'] = activity.get('content', '') + '\n\n**Self-check.** ' + SELF_CHECK_EXPLANATION
+            changed = True
+        if activity.get('fieldGuideKey') == 'house-stewardship.official-docs':
+            old = 'Official pages are read-only; **Make editable copy** keeps your own notes beside them and updates never touch your copy. The '
+            if old in activity.get('content', ''):
+                activity['content'] = activity['content'].replace(old, 'Official pages are maintained read-only reference material. The ')
+                changed = True
+    if changed:
+        result['revision'] = int(state.get('revision', 0)) + 1
+        result.setdefault('extensions', {})['fieldGuideManifest'] = field_guide_manifest()
+        result['fieldGuide']['completionLabelVersion'] = '2026-10-07.1'
+    return result if changed else state
+
+
 def instantiate_field_guide(state: dict[str, Any], owner_id: str) -> dict[str, Any]:
     """Install the current guide into fresh state; existing versions must be current."""
     result = copy.deepcopy(state)
@@ -1617,7 +1661,7 @@ def instantiate_field_guide(state: dict[str, Any], owner_id: str) -> dict[str, A
 
     installed = result.get("fieldGuide") or {}
     if installed.get("templateKey") == FIELD_GUIDE_TEMPLATE_KEY and installed.get("templateVersion") == FIELD_GUIDE_TEMPLATE_VERSION:
-        return result
+        return reconcile_field_guide_completion(result)
 
     if installed:
         raise ValueError("This Field Guide uses an unsupported source format. Preserve it and convert it offline before importing it into the current release.")

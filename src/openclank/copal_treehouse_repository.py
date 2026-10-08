@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from src.openclank import treehouse_stats
+
 
 class TreeHouseRepositoryError(RuntimeError):
     def __init__(self, code: str, message: str, *, status: int = 409, details: dict[str, Any] | None = None):
@@ -248,6 +250,19 @@ class TreeHouseRepository:
                 """
             )
 
+            treehouse_stats.initialize(db)
+
+    def personal_stats(self, account_id: str, workspace_id: str, *, before: int | None = None, limit: int = 30) -> dict[str, Any]:
+        with self._connect() as db:
+            result = treehouse_stats.read(db, account_id, workspace_id, before=before, limit=limit)
+            result["currentProgressGenerations"] = [
+                {"courseOwnerId": row["owner_account_id"], "courseId": row["course_id"], "generation": row["reset_epoch"]}
+                for row in db.execute("SELECT owner_account_id,course_id,reset_epoch FROM treehouse_progress WHERE learner_account_id=? AND workspace_id=?", (account_id, workspace_id))
+            ]
+            catalogue = db.execute("SELECT state_json FROM treehouse_catalogues WHERE owner_account_id=? AND workspace_id=?", (account_id, workspace_id)).fetchone()
+            result["ownerProgressGenerations"] = {key: value for key, value in (json.loads(catalogue[0]).get("progressResets", {}) if catalogue else {}).items() if key.startswith(account_id + ":")}
+            return result
+
     @staticmethod
     def _digest(payload: dict[str, Any]) -> str:
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -296,7 +311,7 @@ class TreeHouseRepository:
                     db.rollback()
                     raise TreeHouseRepositoryError("stale_access", "Course access changed while the write was in flight", details={"grantId": access_grant_id})
             row = db.execute(
-                "SELECT revision FROM treehouse_catalogues WHERE owner_account_id=? AND workspace_id=?",
+                "SELECT revision,state_json FROM treehouse_catalogues WHERE owner_account_id=? AND workspace_id=?",
                 (owner_account_id, workspace_id),
             ).fetchone()
             current = int(row[0]) if row else 0
@@ -313,6 +328,7 @@ class TreeHouseRepository:
                     "UPDATE treehouse_catalogues SET state_json=?,revision=?,updated_at=? WHERE owner_account_id=? AND workspace_id=? AND revision=?",
                     (payload, revision, time.time(), owner_account_id, workspace_id, current),
                 )
+            treehouse_stats.capture_state(db, state, json.loads(row["state_json"]) if row else {}, owner_id=owner_account_id, workspace_id=workspace_id)
             db.commit()
         return revision
 
@@ -396,14 +412,14 @@ class TreeHouseRepository:
     def prepare_lesson_attachment(
         self, *, caller_account_id: str, owner_account_id: str, workspace_id: str,
         course_id: str, lesson_id: str, operation_id: str, grant_revision: int,
-        catalogue_revision: int, policy_generation: int = 0, source: dict[str, Any], source_digest: str, mode: str,
+        catalogue_revision: int, policy_generation: int = 0, source: dict[str, Any], source_digest: str, mode: str, target_kind: str = "treehouse_lesson",
     ) -> dict[str, Any]:
         """Reserve one immutable lesson preparation after current grant/CAS checks."""
         digest = self._digest({
             "caller": caller_account_id, "owner": owner_account_id, "workspace": workspace_id,
             "course": course_id, "lesson": lesson_id, "grantRevision": int(grant_revision),
             "catalogueRevision": int(catalogue_revision), "source": source,
-            "sourceDigest": source_digest, "mode": mode,
+            "sourceDigest": source_digest, "mode": mode, "targetKind": target_kind,
         })
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -412,7 +428,7 @@ class TreeHouseRepository:
                 (caller_account_id, workspace_id, operation_id),
             ).fetchone()
             if prior:
-                if str(prior["source_digest"]) != source_digest or str(prior["result_json"] or "") == "":
+                if str(prior["source_digest"]) != source_digest or str(prior["course_id"]) != course_id or str(prior["lesson_id"]) != lesson_id or str(prior["mode"]) != mode or str(prior["result_json"] or "") == "" or json.loads(prior["result_json"]).get("targetKind", "treehouse_lesson") != target_kind:
                     db.rollback()
                     raise TreeHouseRepositoryError("idempotency_conflict", "Attachment operation was reused with different source", status=409)
                 db.rollback()
@@ -426,7 +442,7 @@ class TreeHouseRepository:
                 raise TreeHouseRepositoryError("stale", "TreeHouse catalogue changed while preparing the lesson", details={"revision": int(catalogue["revision"]) if catalogue else 0})
             state = json.loads(catalogue["state_json"])
             course = (state.get("courses") or {}).get(course_id)
-            activity = (state.get("activities") or {}).get(lesson_id)
+            activity = (state.get("assignments" if target_kind == "treehouse_submission" else "activities") or {}).get(lesson_id)
             if not isinstance(course, dict) or course.get("deletedAt") or not isinstance(activity, dict) or activity.get("deletedAt") or str(activity.get("courseId") or "") != course_id:
                 db.rollback()
                 raise TreeHouseRepositoryError("lesson_not_found", "TreeHouse lesson is unavailable", status=404)
@@ -436,7 +452,7 @@ class TreeHouseRepository:
                     "SELECT grant_id,role,revision FROM treehouse_grants WHERE owner_account_id=? AND workspace_id=? AND course_id=? AND recipient_account_id=? AND accepted_at IS NOT NULL AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1",
                     (owner_account_id, workspace_id, course_id, caller_account_id),
                 ).fetchone()
-                if not grant or grant["role"] != "edit" or int(grant["revision"]) != int(grant_revision):
+                if not grant or (target_kind != "treehouse_submission" and grant["role"] != "edit") or int(grant["revision"]) != int(grant_revision):
                     db.rollback()
                     raise TreeHouseRepositoryError("stale_access", "Lesson editor access changed while preparing", details={"revision": int(grant["revision"]) if grant else None})
                 grant_id = grant["grant_id"]
@@ -444,7 +460,7 @@ class TreeHouseRepository:
                 db.rollback()
                 raise TreeHouseRepositoryError("stale_access", "Owner lesson grant revision is invalid")
             preparation_id = "treehouse-prep:" + secrets.token_urlsafe(18)
-            result = {"preparationReceiptId": preparation_id, "operationId": operation_id, "courseId": course_id, "lessonId": lesson_id, "workspaceId": workspace_id, "policyGeneration": int(policy_generation), "grantRevision": int(grant_revision), "catalogueRevision": int(catalogue_revision), "source": copy.deepcopy(source), "sourceDigest": source_digest, "mode": mode}
+            result = {"preparationReceiptId": preparation_id, "operationId": operation_id, "courseId": course_id, "lessonId": lesson_id, "workspaceId": workspace_id, "policyGeneration": int(policy_generation), "grantRevision": int(grant_revision), "catalogueRevision": int(catalogue_revision), "source": copy.deepcopy(source), "sourceDigest": source_digest, "mode": mode, "targetKind": target_kind}
             db.execute(
                 "INSERT INTO treehouse_attachment_preparations(preparation_id,operation_id,caller_account_id,owner_account_id,workspace_id,course_id,lesson_id,policy_generation,grant_revision,catalogue_revision,source_json,source_digest,mode,result_json,consumed_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (preparation_id, operation_id, caller_account_id, owner_account_id, workspace_id, course_id, lesson_id, int(policy_generation), int(grant_revision), int(catalogue_revision), json.dumps(source, ensure_ascii=False, separators=(",", ":")), source_digest, mode, json.dumps(result, ensure_ascii=False, separators=(",", ":")), None, time.time()),
@@ -652,6 +668,24 @@ class TreeHouseRepository:
             db.commit()
         return {"grantId": grant_id, "revoked": True, "revision": revision, "catalogueRevision": catalogue_revision}
 
+    def course_progress_for_review(self, requester_account_id: str, owner_account_id: str, workspace_id: str, course_id: str) -> list[dict[str, Any]]:
+        """Return learner partitions only to the current course grading authority."""
+        with self._lock, self._connect() as db:
+            if requester_account_id != owner_account_id:
+                grant = db.execute("SELECT role FROM treehouse_grants WHERE owner_account_id=? AND workspace_id=? AND course_id=? AND recipient_account_id=? AND accepted_at IS NOT NULL AND revoked_at IS NULL", (owner_account_id, workspace_id, course_id, requester_account_id)).fetchone()
+                if not grant or grant["role"] != "edit":
+                    raise TreeHouseRepositoryError("forbidden", "Course editor access is required to review learner work", status=403)
+            rows = db.execute("SELECT learner_account_id,state_json,revision,reset_epoch FROM treehouse_progress WHERE owner_account_id=? AND workspace_id=? AND course_id=?", (owner_account_id, workspace_id, course_id)).fetchall()
+            result = []
+            for row in rows:
+                state = json.loads(row["state_json"])
+                for collection in ("enrollments", "submissions", "evidence"):
+                    state[collection] = {key: value for key, value in state.get(collection, {}).items() if value.get("courseId") == course_id}
+                state["events"] = [event for event in state.get("events", []) if event.get("data", {}).get("courseId") == course_id or event.get("entityId") == course_id]
+                state.pop("richLearning", None)
+                result.append({"learnerAccountId": row["learner_account_id"], "state": state, "revision": int(row["revision"]), "resetEpoch": int(row["reset_epoch"])})
+            return result
+
     def get_progress(self, learner_account_id: str, owner_account_id: str, workspace_id: str, course_id: str) -> tuple[dict[str, Any] | None, int]:
         with self._connect() as db:
             row = db.execute("SELECT state_json,revision FROM treehouse_progress WHERE learner_account_id=? AND owner_account_id=? AND workspace_id=? AND course_id=?", (learner_account_id, owner_account_id, workspace_id, course_id)).fetchone()
@@ -692,6 +726,7 @@ class TreeHouseRepository:
         expected_reset_epoch: int | None = None,
         grant_id: str | None = None,
         access_revision: int | None = None,
+        stats_context: dict[str, Any] | None = None,
     ) -> int:
         """Commit learner state behind one guarded SQLite transaction.
 
@@ -731,7 +766,7 @@ class TreeHouseRepository:
             elif access_revision is not None:
                 db.rollback()
                 raise TreeHouseRepositoryError("invalid_access_guard", "An access revision requires a grant", status=400)
-            row = db.execute("SELECT revision FROM treehouse_progress WHERE learner_account_id=? AND owner_account_id=? AND workspace_id=? AND course_id=?", (learner_account_id, owner_account_id, workspace_id, course_id)).fetchone()
+            row = db.execute("SELECT revision,state_json FROM treehouse_progress WHERE learner_account_id=? AND owner_account_id=? AND workspace_id=? AND course_id=?", (learner_account_id, owner_account_id, workspace_id, course_id)).fetchone()
             current = int(row[0]) if row else 0
             if expected_revision is not None and current != expected_revision:
                 db.rollback()
@@ -771,6 +806,7 @@ class TreeHouseRepository:
                 db.execute("UPDATE treehouse_progress SET state_json=?,revision=?,reset_epoch=?,updated_at=? WHERE learner_account_id=? AND owner_account_id=? AND workspace_id=? AND course_id=?", values)
             else:
                 db.execute("INSERT INTO treehouse_progress(state_json,revision,reset_epoch,updated_at,learner_account_id,owner_account_id,workspace_id,course_id) VALUES(?,?,?,?,?,?,?,?)", values)
+            treehouse_stats.capture_state(db, state, json.loads(row["state_json"]) if row else {}, owner_id=owner_account_id, workspace_id=workspace_id, account_id=learner_account_id, context=stats_context, generation=reset_epoch)
             db.commit()
         return revision
 
@@ -902,6 +938,7 @@ class TreeHouseRepository:
                 "INSERT INTO treehouse_idempotency VALUES(?,?,?,?,?,?)",
                 (learner_account_id, workspace_id, command_id, digest, json.dumps(result), time.time()),
             )
+            treehouse_stats.capture(db, account_id=learner_account_id, workspace_id=workspace_id, source_owner=f"treehouse-reset:{workspace_id}", source_event_id=command_id, source_revision=str(generation), family="progress.reset", occurred_at=_now_iso(), entity_kind="progress", entity_id=learner_account_id, generation=generation, facts={"generation": generation})
             db.commit()
         return result
 
@@ -944,10 +981,12 @@ class TreeHouseRepository:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT source_event_id FROM treehouse_activity_receipts WHERE account_id=? AND source_event_id=?",
+                "SELECT source_event_id,evidence_digest FROM treehouse_activity_receipts WHERE account_id=? AND source_event_id=?",
                 (account_id, source_event_id),
             ).fetchone()
             if row is not None:
+                if row["evidence_digest"] != evidence_digest:
+                    raise TreeHouseRepositoryError("stats_source_conflict", "Activity source ID was replayed with different facts", details={"sourceEventId": source_event_id})
                 db.commit()
                 return {"inserted": False, "sourceEventId": source_event_id}
             db.execute(
@@ -962,6 +1001,7 @@ class TreeHouseRepository:
                     source_hash, evidence_digest, via, time.time(),
                 ),
             )
+            treehouse_stats.capture(db, account_id=account_id, workspace_id=workspace_id or "", source_owner=f"achievement-receipt:{event_family}", source_event_id=source_event_id, source_revision=str(schema_version), family=f"source.{event_family}", occurred_at=occurred_at, entity_kind=event_family, entity_id=source_event_id, trust_class="verified-source" if event_family in {"goal.verified.completed", "class.published"} else "observation", facts={**facts, "kind": kind, "result": result, "actorKind": actor_kind})
             db.commit()
         return {"inserted": True, "sourceEventId": source_event_id}
 
@@ -1001,6 +1041,8 @@ class TreeHouseRepository:
                 ") VALUES(?,?,?,?,?,?,?,?)",
                 (account_id, achievement_id, predicate_version, catalog_revision, earned_at, evidence_json, awarded_via, time.time()),
             )
+            award_generation = db.execute("SELECT coalesce(max(id),0) FROM treehouse_stats_occurrences WHERE account_id=? AND family='achievement.reset'", (account_id,)).fetchone()[0] if treehouse_stats.available(db) else 0
+            treehouse_stats.capture(db, account_id=account_id, workspace_id=str(facts.get("workspaceId") or ""), source_owner="achievement-award", source_event_id=f"{achievement_id}:{award_generation}:{earned_at}", source_revision=predicate_version, family="achievement.awarded", occurred_at=earned_at, entity_kind="achievement", entity_id=achievement_id, generation=award_generation, trust_class="verified-source", facts={"achievementId": achievement_id, "predicateVersion": predicate_version, "catalogRevision": catalog_revision})
             db.commit()
         return {"inserted": True, "achievementId": achievement_id}
 
@@ -1011,6 +1053,34 @@ class TreeHouseRepository:
                 (account_id,),
             ).fetchall()
         return [str(row["achievement_id"]) for row in rows]
+
+    def activity_receipt(self, account_id: str, source_event_id: str) -> dict[str, Any] | None:
+        """Read a canonical producer receipt for server-side work verification."""
+        with self._connect() as db:
+            row = db.execute("SELECT source_event_id,event_family,kind,result,actor_kind,workspace_id,occurred_at,evidence_digest FROM treehouse_activity_receipts WHERE account_id=? AND source_event_id=?", (account_id, source_event_id)).fetchone()
+        return dict(row) if row else None
+
+    def canonical_producer_receipts(self, account_id: str, event_families: tuple[str, ...], workspace_id: str) -> list[dict[str, Any]]:
+        """Crosscheck receipt content against server-only delivery digests.
+
+        Browser ingestion cannot write journal markers. Prefixes alone never
+        establish authority, and ambiguous historical live rows remain unmarked.
+        """
+        from src.openclank.treehouse_achievements import ActivityEvent
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM treehouse_activity_receipts WHERE account_id=? ORDER BY occurred_at,ingested_at,source_event_id", (account_id,)).fetchall()
+            markers = {str(row['command_id']): str(row['payload_digest']) for row in db.execute("SELECT command_id,payload_digest FROM treehouse_idempotency WHERE principal_account_id=? AND workspace_id='__achievement_journal__'", (account_id,))}
+        result = []
+        for row in rows:
+            if row['event_family'] not in event_families or row['workspace_id'] not in (None, '', workspace_id):
+                continue
+            event = ActivityEvent(source_event_id=row['source_event_id'], event_family=row['event_family'], kind=row['kind'], result=row['result'], actor_kind=row['actor_kind'], occurred_at=row['occurred_at'], facts=json.loads(row['facts_json']), workspace_id=row['workspace_id'], schema_version=row['schema_version'], source_hash=row['source_hash']).normalized()
+            source_id = event['source_event_id']
+            marker_key = source_id.removeprefix('journal:') if source_id.startswith('journal:') else source_id
+            digest = hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest()
+            if markers.get(marker_key) == digest:
+                result.append(event)
+        return result
 
     def get_achievement_award(self, account_id: str, achievement_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
@@ -1239,6 +1309,7 @@ class TreeHouseRepository:
             ):
                 cur = db.execute(f"DELETE FROM {table} WHERE account_id=?", (account_id,))
                 counts[table] = int(cur.rowcount or 0)
+            treehouse_stats.capture(db, account_id=account_id, workspace_id="", source_owner="achievement-reset", source_event_id=str(time.time_ns()), source_revision="1", family="achievement.reset", occurred_at=_now_iso(), entity_kind="achievement", entity_id=account_id)
             db.commit()
         return counts
 

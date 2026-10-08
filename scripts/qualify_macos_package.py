@@ -237,6 +237,10 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
             base, cookies, bundle / 'Contents/Resources/runtime/_internal/static/vendor/google-emoji/bundle-manifest.json',
             work / 'data/assets/google-emoji/emoji-assets.pack')
         checks.append(CHECK)
+        from scripts.qualify_treehouse import qualify_treehouse
+        treehouse = qualify_treehouse(base, opener, bundle / 'Contents/Resources/runtime/_internal', detailed=True)
+        receipt['treehouse'] = treehouse.receipt
+        checks.extend(treehouse.receipt['checks'])
         roots = request('/api/files-v1/roots')
         host = next(item for item in roots['entries'] if item.get('name') == 'Host locations')
         home_resource = next(item for item in children(host) if item.get('name') == 'Home')
@@ -270,6 +274,7 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
             raise RuntimeError('Editor reopen differs from saved fixture')
         checks.append('editor-save-disk-bytes-and-reopen')
         receipt['fixture_sha256'] = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        treehouse.capture()
         # Quit the actual packaged owner; it must stop its managed server.
         process.terminate()
         process.wait(timeout=30)
@@ -298,6 +303,10 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
                 time.sleep(1)
         if fixture.read_bytes() != after.encode('utf-8'):
             raise RuntimeError('Saved user data changed across restart')
+        # The first business request after restart is the instructor's cold
+        # submitted-file read, before Files or Treehouse snapshots are mounted.
+        treehouse.verify_restart()
+        checks.append('installed-treehouse-learning-and-stats-persist-after-restart')
         if reopened['payload']['text'] != after:
             raise RuntimeError('Saved Editor content changed')
         reopened_again = request('/api/files-v1/open-resource', {'resource_ref': opened['resource']['ref']})

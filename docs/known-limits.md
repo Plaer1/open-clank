@@ -3,8 +3,9 @@
 Beta 1 is the first of several betas. macOS is the current build/dogfood focus.
 Windows source support is working and tested, including authenticated startup,
 Files, Editor save/reopen and History restore, native PNG/JPEG/MP4 thumbnails,
-and host application dispatch. Shared fixes were also tested on macOS. Native
-ARM64 and x64 frozen release packages remain unqualified; Linux remains
+and host application dispatch. Shared fixes were also tested on macOS. Install
+only architectures offered by the release; consult artifact provenance for the
+source, target and bounded installed-package coverage. Linux remains
 unqualified. Docker is not officially supported or tested; retained Docker
 files and instructions are unsupported legacy reference.
 
@@ -13,7 +14,7 @@ files and instructions are unsupported legacy reference.
 | Source launcher / service | Current development/dogfood path | Setup/Check and authenticated startup tested with x64 Python plus ARM Engine/sidecars | Source setup available; unqualified |
 | Files and Editor | Approved Locations, save/reopen and recovery tested | Files, workspace binding, Editor save/reopen and History restore tested | Unqualified |
 | Native previews / host apps | Native helpers and host dispatch tested | Native PNG/JPEG/MP4 thumbnails, icons and Paint dispatch tested; PDF/DOCX use the native fallback when no handler is available | Unqualified |
-| Release packages | See the specific artifact's provenance | Native ARM64 and x64 frozen packages still require qualification | Unqualified |
+| Release packages | Apple Silicon macOS 15+; see artifact provenance | Native ARM64/x64 when offered by the release; see artifact provenance | Unqualified |
 | Local models | Metal/Apfel or compatible endpoints with backend-specific formats | Use a compatible endpoint or supported local runtime; GPU serving requirements depend on the backend | Runtime/driver requirements depend on the backend; native app unqualified |
 | Docker | Unsupported; no official testing | Unsupported; no official testing | Unsupported; no official testing |
 
@@ -40,6 +41,35 @@ sandbox. [SECURITY.md](../SECURITY.md) explains deployment boundaries.
 Declarative Hexes activation does not authorize custom executable checks. Beta 1
 does not yet provide a supported fresh-install workflow to grant or revoke that
 execution trust. Missing, expired or revoked trust remains refused.
+
+## Treehouse learning
+
+The native Tutorial/Quest, submission/review/correction, protected Files evidence,
+achievement artwork and foreground-stats journeys have bounded authenticated
+source evidence. This does not establish every theme, course, provider or
+installed package, or full upstream learning-platform parity.
+
+- Tutorials have no required work; Quests require their configured activities
+  and completion criteria. Observation/self-check lessons are explicitly marked;
+  verified lessons need canonical producer evidence. Historical unmarked evidence
+  may require fresh practice rather than silently becoming verified.
+- Browser JavaScript and choices are practice. Browser memory has no hard quota;
+  results are not trusted assessment grades. Other-language execution and trusted
+  code autograding are unavailable.
+- H5P and SCORM package import/runtime/sequencing adapters are unavailable.
+  Native curriculum exports do not transport Files grants or bundle media bytes;
+  imported media needs fresh Files authorization.
+- Assistant authoring stages prompts for explicit review/send with configured
+  providers. Actual provider generation remains unqualified; automatic structured
+  course/quiz application, image/audio generation and RAG ingestion are unavailable.
+- Learning-specific scheduler/event replay/cancellation and outbound webhook
+  adapters are unavailable. No leaderboard is implemented.
+- Fresh databases initialize stats automatically. An older database missing the
+  stats tables reports unavailable until a backed-up offline operator activation;
+  a new account in that old database does not fix it. The private activation tool
+  is not distributed. Startup performs no stats migration or historical backfill.
+  Activity, progress and stats resets remain separate; preserve existing awards
+  and course data when planning an upgrade.
 
 ## Data and evidence
 
@@ -74,8 +104,8 @@ production login, language dialect or provider workflow. Wiki and Copal Help
 still open the shared read-only handbook; personal pages remain personal.
 
 Windows Files, Editor and native image/video thumbnails are implemented and
-tested. Native ARM64 and x64 frozen release artifacts remain unqualified; Linux
-remains unqualified.
+tested. Native release coverage is recorded in the corresponding artifact
+provenance; Linux remains unqualified.
 
 ## Fresh source-install evidence — October 6, 2026
 

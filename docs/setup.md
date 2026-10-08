@@ -4,8 +4,8 @@ This guide covers installation, deployment, troubleshooting and configuration.
 **Beta 1 is the first of several beta releases.** macOS is the current
 build/dogfood focus. Windows source support is working and tested, including
 Files, Editor save/reopen and History restore, and native image/video thumbnails.
-Native ARM64 and x64 Windows packages are being qualified separately; install
-only the architectures offered by the published release. Linux support is
+Install only the native ARM64 or x64 Windows architectures offered by the
+published release, and check the artifact provenance. Linux support is
 coming later. See [known limits](known-limits.md) and
 [Beta 1 notes](beta1.md). Machine version: `1.0.2`.
 
@@ -42,8 +42,8 @@ actions.
 
 The Apple Silicon download for macOS 15 or later is `Open-Clank-1.0.2-macos-arm64.dmg` from
 the [`v1.0.2-beta.1` application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1)
-when published. Native package and menu-bar Open/Quit qualification have passed;
-no Intel/universal or older macOS qualification is claimed. This Beta app is
+when published. Check the release checksum and artifact provenance for its
+source revision and target. No Intel/universal or older macOS support is claimed. This Beta app is
 ad-hoc signed, without Developer ID signing or notarization. Check its release
 checksum and signing information before deciding to open it; these instructions
 do not disable Gatekeeper.
@@ -53,7 +53,7 @@ The app includes private Python, Engine and native helpers and needs no checkout
 Homebrew, Cargo or system Python. Download the artwork part and
 `emoji-assets.parts.json` from the separate
 [`v1.0.2-beta.1-artwork-compact` release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact)
-which becomes available when published, keeping them together in one directory. Install them with the
+which is already public, keeping both files together in one directory. Install them with the
 app's packaged command in Terminal:
 
 ```bash
@@ -93,7 +93,7 @@ Downloads become available when `v1.0.2-beta.1` is published on the
 [application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1). Obtain
 `open-clank-1.0.2-beta.1-source.tar.gz` from the application release. Obtain
 `emoji-assets.parts.json` and `emoji-assets.pack.part-001` from the separate `v1.0.2-beta.1-artwork-compact` supporting
-[release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact), when published. Check the source archive against the release checksum
+[release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact), which is already public. Check the source archive against the release checksum
 file. Keep both artwork files together in a separate directory.
 
 ```bash
@@ -153,11 +153,11 @@ selected model. Cookbook background downloads and serves use `tmux`.
 
 ### Windows release package
 
-The easiest planned installation is the per-user Setup executable:
+The simplest installation is the per-user Setup executable:
 `Open-Clank-1.0.2-windows-x64-Setup.exe` or
-`Open-Clank-1.0.2-windows-arm64-Setup.exe`. Installer and native package
-qualification is still pending; downloads become available after publication,
-and only architectures actually offered by the release should be installed.
+`Open-Clank-1.0.2-windows-arm64-Setup.exe`. Downloads become available after
+publication; install only architectures actually offered by the release, and
+check the checksum and artifact provenance.
 This Beta is unsigned. Windows may show an unsigned-app warning; check the
 release source and checksum before deciding to run it.
 
@@ -184,7 +184,7 @@ loopback by default. Uninstall removes the installed program and shortcuts,
 while preserving personal data and installed artwork; it is not a data reset.
 
 For a portable alternative, download `Open-Clank-1.0.2-windows-x64.zip` or
-`Open-Clank-1.0.2-windows-arm64.zip` from the same qualified release.
+`Open-Clank-1.0.2-windows-arm64.zip` from the same application release.
 Extract the ZIP and keep its entire `openclank` directory together, including
 `_internal` and checksum files. Download the shared artwork part and
 `emoji-assets.parts.json` into a separate directory. From the extracted app
@@ -560,8 +560,9 @@ Windows source Setup/Check, authenticated startup, Files, Editor save/reopen
 and History restore, native PNG/JPEG/MP4 thumbnails, and host application dispatch
 have passed focused Windows checks. Shared fixes were also tested on macOS.
 The tested source setup used x64 Python with ARM Engine and native sidecars.
-Native ARM64 and x64 frozen release packages remain separately unqualified;
-CI artifact definitions do not qualify those packages.
+For native ARM64 or x64 frozen packages, use only architectures offered by the
+release and consult artifact provenance for installed-package coverage.
+CI artifact definitions alone do not qualify a package.
 
 **Launcher for a fresh installation** (creates the venv, installs
 dependencies, runs setup and starts the validated bootstrap). First clone
@@ -834,12 +835,12 @@ To back up or restore the configured data paths, see the
 **Complete this step before first launch from source or a packaged app.**
 Git checkouts, source archives, macOS DMGs and Windows ZIPs omit the large pack; the shared
 one part installs the full offline artwork once. The supporting artwork release
-becomes available when published; application downloads remain separate and become available
+is already public; application downloads remain separate and become available
 when the application release is published. Source code alone does not complete
 installation.
 
 Obtain these two installation files from the release matching your source or package on the
-[artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact), when published:
+[artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact):
 
 - `emoji-assets.parts.json`
 - `emoji-assets.pack.part-001`
@@ -847,7 +848,7 @@ Obtain these two installation files from the release matching your source or pac
 Save them together in one directory. With GitHub CLI installed, the equivalent
 commands below download assets only; they do not create or publish a release.
 Beta 1 uses the separate `v1.0.2-beta.1-artwork-compact` supporting release. Use the
-command after publication to obtain the artwork and confirm both installation files are present.
+command to obtain the already-published artwork and confirm both installation files are present.
 The application binaries and source use the separate `v1.0.2-beta.1` release.
 
 ```bash
@@ -866,7 +867,8 @@ and running the assembly command with their directory works too. For files
 provided directly by the maintainer, skip the `gh` command and supply that local
 directory with `--parts`.
 
-The compact runtime uses schema2 SQLite: exact Google SVG (compressed only at rest) and 160px lossless Kitchen WebP. All available identities remain offline. Raw local acquisition provenance is retained privately and is not a release asset.
+This pack requires the matching compact-schema application or source revision;
+do not replace an older app's pack alone. The compact runtime uses schema2 SQLite: exact Google SVG (compressed only at rest) and 160px lossless Kitchen WebP. All available identities remain offline. Raw local acquisition provenance is retained privately and is not a release asset.
 
 Assembly verifies every part, the pinned total hash/size, SQLite integrity and
 runtime catalog counts, then publishes the pack atomically at

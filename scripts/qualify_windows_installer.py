@@ -29,6 +29,36 @@ def powershell(script, *arguments, environment=None):
     return result.stdout.strip()
 
 
+def shortcut_detail(link, *, environment=None):
+    # CreateShortcut also accepts nonexistent files and returns empty fields;
+    # that behavior must not disguise a wrong known-folder assumption.
+    if not link.is_file():
+        return None
+    return json.loads(powershell("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($args[0]);[ordered]@{Target=$s.TargetPath;Arguments=$s.Arguments;WorkingDirectory=$s.WorkingDirectory}|ConvertTo-Json -Compress", link, environment=environment))
+
+
+def windows_shortcut_folders(*, environment=None, verify=True):
+    option = 'None' if verify else 'DoNotVerify'
+    folders = json.loads(powershell(
+        "[ordered]@{Programs=[Environment]::GetFolderPath('Programs','" + option +
+        "');Desktop=[Environment]::GetFolderPath('Desktop','" + option +
+        "')}|ConvertTo-Json -Compress", environment=environment))
+    if any(not value or not Path(value).is_absolute() for value in folders.values()):
+        raise RuntimeError('Windows shortcut known-folder resolution returned an empty or relative path')
+    return folders
+
+
+def shortcut_comparison(link, executable, arguments, *, role, environment=None):
+    detail = shortcut_detail(link, environment=environment)
+    safe = {'role': role, 'exists': detail is not None, 'target_equal': False,
+            'arguments_equal': False, 'working_directory_equal': False}
+    if detail is not None:
+        safe.update(target_equal=Path(detail['Target']).resolve() == executable.resolve(),
+                    arguments_equal=detail['Arguments'] == arguments,
+                    working_directory_equal=Path(detail['WorkingDirectory']).resolve() == executable.parent.resolve())
+    return safe, detail
+
+
 def qualify(installer, target, output, pack):
     if os.name != 'nt':
         raise RuntimeError('Installer qualification requires actual Windows')
@@ -60,7 +90,7 @@ def qualify(installer, target, output, pack):
 
     if registered():
         raise RuntimeError('An existing personal beta installation must remain untouched')
-    folders = json.loads(powershell("[ordered]@{Programs=[Environment]::GetFolderPath('Programs');Desktop=[Environment]::GetFolderPath('Desktop')}|ConvertTo-Json -Compress"))
+    folders = windows_shortcut_folders(verify=False)
     group_name = 'Open Clank qualification ' + secrets.token_hex(8)
     group = Path(folders['Programs']) / group_name
     desktop = Path(folders['Desktop']) / f'Open Clank Beta ({target}).lnk'
@@ -122,11 +152,23 @@ def qualify(installer, target, output, pack):
         if global_runtime_state() != runtime_state_before:
             raise RuntimeError('Installation changed Python registration or global/user PATH')
         checks.append('per-user-install-private-runtime-python-registration-and-path-preserved')
-        for link, args in [(group / 'Open Clank.lnk', 'server start --open-browser'),
-                           (group / 'Stop Open Clank.lnk', 'server stop'), (desktop, 'server start --open-browser')]:
-            detail = json.loads(powershell("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($args[0]);[ordered]@{Target=$s.TargetPath;Arguments=$s.Arguments;WorkingDirectory=$s.WorkingDirectory}|ConvertTo-Json -Compress", link))
-            if Path(detail['Target']).resolve() != executable.resolve() or detail['Arguments'] != args or Path(detail['WorkingDirectory']).resolve() != executable.parent.resolve():
-                raise RuntimeError('Installed shortcut target, arguments or working directory is incorrect')
+        # Inno ran under the fixture environment and has now created these
+        # folders. Earlier default GetFolderPath calls could return empty.
+        folders = windows_shortcut_folders(environment=environment)
+        group = Path(folders['Programs']) / group_name
+        desktop = Path(folders['Desktop']) / f'Open Clank Beta ({target}).lnk'
+        receipt['shortcuts'] = []
+        raw_shortcuts = []
+        for role, link, args in [('start-menu-launch', group / 'Open Clank.lnk', 'server start --open-browser'),
+                                ('start-menu-stop', group / 'Stop Open Clank.lnk', 'server stop'),
+                                ('desktop-launch', desktop, 'server start --open-browser')]:
+            safe, detail = shortcut_comparison(link, executable, args, role=role, environment=environment)
+            receipt['shortcuts'].append(safe)
+            raw_shortcuts.append({'role': role, 'expected_link': str(link), 'actual': detail})
+        (work / 'shortcut-details-private.json').write_text(json.dumps(raw_shortcuts, indent=2) + '\n', encoding='utf-8')
+        for shortcut in receipt['shortcuts']:
+            if not all(shortcut[field] for field in ('exists', 'target_equal', 'arguments_equal', 'working_directory_equal')):
+                raise RuntimeError('Installed shortcut comparison failed: ' + json.dumps(shortcut, sort_keys=True))
         checks.append('start-menu-desktop-stop-shortcut-targets')
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))

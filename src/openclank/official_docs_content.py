@@ -728,23 +728,49 @@ Open [Graph](clank://graph) after saving personal links, or [TreeHouse](clank://
 """),
     ("openclank-docs-treehouse", "TreeHouse and Field Guide", """# TreeHouse and Field Guide
 
-Open [TreeHouse](clank://treehouse) for guided app discovery. The existing Field Guide and contextual Help point into the same supported app surfaces as this handbook.
+Open [TreeHouse](clank://treehouse) for guided app discovery and your own learning paths. The **Learning hub** lets you search **All paths**, **Tutorials** or **Quests**, explore a published course, and continue where you left off. The Field Guide and contextual Help point into the same supported app surfaces as this handbook.
 
-## Follow one lesson
+## Tutorials, Quests and missions
 
-Choose the feature you want to learn, follow its destination and try the action on personal material. Wiki owns page navigation and rich authoring; Editor offers document tabs, splits, tables and source. They share canonical identity and buffers. Files owns image browsing and Imps work.
+A **Tutorial** is a whole click-through course with no required learner work. Use **Continue** to read its steps and **Finish Tutorial** at the end; exercises and resources are optional. A **Quest** is a course with required work and explicit completion criteria. Its **missions** are objectives within the Quest. A Quest may include lessons, self-checks, tasks or assessments; a graded exam is optional. Clicking **Next step** does not satisfy required work.
 
-Return to the guide to continue. Lessons and achievements are learning state, not proof that a provider request, backup or save completed. Inspect the actual resource or task outcome for that evidence.
+Open a path from the hub, use **Start learning** when enrollment is needed, and follow its **Course index**. The focused player keeps the lesson, resources, required tasks and feedback together. **Previous** and **Next step** navigate the course; return to **Learning hub** to choose another path. Prerequisites and required-work notices explain what remains. Reopen the course to resume saved progress.
 
-## Achievements
+When a lesson sends you to another app, try the action on personal material and return to continue. Wiki owns page navigation and rich authoring; Editor offers document tabs, splits, tables and source. They share canonical identity and buffers. Files owns image browsing and Imps work. A read lesson, self-check or visit records that specific action; it does not prove a provider request, backup or save succeeded. Inspect the actual resource or task outcome for that evidence.
 
-Open TreeHouse's **Achievements** section and use **Earned**, **All** or **Locked**. Its count and detail describe recorded awards, while Courses, Skills and Assignments describe learning progress. First use can earn **open your clanker**; the shell's account-aware listener can deliver a newly earned notice even when the TreeHouse window is closed. Award messages open their original achievement detail. A visit award proves that visit, not every feature's backend or provider operation.
+## Author and assess a path
 
-The catalog records a limited set of account-wide achievements from specific committed work or an acknowledged UI event. Open the achievement's description to see what evidence it requires. A lesson page, screen visit or pending operation does not count as a completed save or successful provider request; only the recorded earned state confirms an award. Some entries are shown as unrevealed mystery items until the account earns them.
+Choose **Author** to create or edit a Tutorial or Quest, organize chapters and activities, choose prerequisites and required work, and preview the learner experience before publishing. Lesson content uses the shared rich Editor with its formatting toolbar. Save an activity before attaching image, audio, video, PDF or other resources through Files. Sharing a course does not automatically grant access to its source files; an unavailable or changed source must be resolved through Files.
+
+Use **Assignments** for text work, file submissions or choice quizzes. Authors configure objectives, rubrics, availability and pass requirements. Learners can save a draft, submit an attempt, read feedback and retry. Saving a draft does not submit it. Submitted work and reviewed passing work are different completion conditions; the Quest's declared rules decide which is required. A grade correction or new attempt can change completion. Files submissions use the supported upload/select flow and its prepared attachment receipt.
+
+**Skills** shows prerequisites, evidence and missions alongside learning badges. Follow a skill or mission back to its course and required work. Content completion, self-reported work and reviewed assessment evidence carry different meanings; a practice result alone does not establish verified mastery.
+
+## Library, discussion and completion records
+
+**Library** searches accessible courses and collections. **Discuss & board** keeps discussion, replies, reactions and a shared text learning board within the selected course's access. Refresh the board before saving; conflicting edits need a manual merge. It is a shared saved board, without live coediting.
+
+**Credentials** offers your eligible completion records and printable HTML or JSON exports. A Tutorial record describes content traversal; a Quest record describes required work, with reviewed assessment context when its actual requirements support that claim. Records are not third-party accreditation. Changed curriculum, grade corrections, new attempts or a progress reset can supersede a record; an author can explicitly revoke one.
+
+**Podcasts** groups published audio lessons into course-scoped episodes. Prepared, accessible Files audio and caption sources are required. Playback can save a personal resume position; listening position alone is not completion or mastery. Podcast publication makes episodes discoverable to authorized course recipients, without publishing a public RSS feed.
+
+## Interactive content and assistance
+
+Native choice activities and browser JavaScript exercises provide practice feedback. JavaScript results are not trusted assessment grades. H5P and SCORM package import, runtime and export are currently unavailable; native course packages do not transfer source-file access or embed a complete media bundle.
+
+Author assistance can stage lesson source and drafting instructions in the configured Assistant. Review the draft and choose whether to send it, then apply reviewed text through the author editor. Availability depends on the configured provider. This workflow does not promise automatic course/quiz application or a qualified generation path. Other-language execution, trusted code autograding and learning-specific webhook/scheduler adapters remain unavailable. These native features do not establish full LearnHouse or SkillTree parity.
+
+## Achievements and learning stats
+
+Open **Achievements** from the launcher or TreeHouse and use **Earned**, **All** or **Locked**, search the icon cards, expand your achievement trail and open a card for requirements, progress and recorded evidence. Locked cards retain readable states as themes and layout change. Existing awards and mystery rules remain: hidden entries may enter the visible count only after they are earned. The artwork includes an editable mascot source kit for custom icon packs.
+
+First use can earn **open your clanker**; the shell's account-aware listener can deliver a newly earned notice even when the TreeHouse window is closed. Award messages open their original achievement detail. A visit award proves that visit, not every feature's backend or provider operation. Account-wide achievements depend on their specific committed work or acknowledged UI event. A lesson page, pending save or practice result does not replace the evidence an award requires.
+
+Achievements updates automatically and has no applet Back, Forward or Refresh controls. Course previous/next navigation remains in the learning player. **Analytics** retains instructor learning views. Numeric learning observations distinguish content completion, required work and reviewed assessment; recorded playback or discussion activity does not become mastery or reward points. There is no leaderboard or ranking view.
 
 Open **Settings → Advanced → Achievements** for **Enable system notifications** and **Test system notification**. In-app notices remain available; system popups need this browser's permission and can still be suppressed by browser/OS settings.
 
-**Reset achievements** clears your account's achievement progress, receipts and pending unlock notices after confirmation; new activity can earn them again. Courses, source activity and other accounts are preserved. TreeHouse's **Reset my progress** is separate: it resets the visible course progress, submissions, evidence and course completion awards, while account-wide House achievements remain. Read the confirmation's scope before resetting.
+**Reset achievements** clears your account's achievement progress, receipts and pending unlock notices after confirmation; new activity can earn them again. Courses, source activity and other accounts are preserved. TreeHouse's **Reset my progress** is separate: it resets current learning progress and completion evidence while preserving retained attempt/review history; account-wide House achievements remain. Read the confirmation's scope before resetting. Lifetime observations, current progress and reset generations are distinct.
 
 ## Help beside the work
 
@@ -955,7 +981,7 @@ ARTICLE_ASSETS = {'openclank-docs-home': ('beta1-welcome-20261005', 'beta1-help-
                                  'beta1-wiki-source-20261004',
                                  'beta1-wiki-reopen-20261004',
                                  'beta1-templates-20261004'),
- 'openclank-docs-treehouse': ('beta1-treehouse-20261004', 'beta1-achievements-20261004'),
+ 'openclank-docs-treehouse': ('treehouse-player-20261007', 'treehouse-achievements-20261007'),
  'openclank-docs-workspace-hexes': ('beta1-hexes-20261004',),
  'openclank-docs-app-windows': ('beta1-shell-menu-20261004',
                                 'beta1-shell-dock-20261004',

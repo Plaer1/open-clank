@@ -28,8 +28,14 @@ from src.openclank.treehouse_field_guide import (
     FIELD_GUIDE_TEMPLATE_KEY,
     FIELD_GUIDE_TEMPLATE_VERSION,
     instantiate_field_guide,
+    reconcile_field_guide_completion,
 )
 from src.openclank.file_policy import FilePolicyRepository
+from src.openclank.files_facade import FilesFacadeError, ProviderContext
+from src.openclank.treehouse_assessment import builtin_activity_verification
+from src.openclank.treehouse_engagement import create_engagement_router, attach_engagement_context
+from routes.treehouse_learning_extensions_routes import setup_learning_extensions_routes
+from routes.treehouse_rich_learning_routes import setup_rich_learning_routes
 from src.constants import DATA_DIR
 from src.auth_helpers import require_user
 from src.openclank.achievement_producers import record_account_activity, record_journal_activity, reset_account_activity
@@ -175,18 +181,24 @@ def setup_treehouse_routes(
                 and installed.get("templateVersion") != FIELD_GUIDE_TEMPLATE_VERSION
             ):
                 raise HTTPException(409, detail={"code": "manual_migration_required", "message": "Legacy Field Guide requires .clanker/tools/migrations/python/secondary.py copal-field-guide"})
+            reconciled = reconcile_field_guide_completion(state)
+            if reconciled is not state:
+                revision = repo.put_catalogue(account_id, workspace, reconciled, expected_revision=revision)
+                state = reconciled
             return state, revision
         candidate = instantiate_field_guide(new_treehouse_state(account_id), account_id)
         winner, winner_revision, _created = repo.create_catalogue_if_absent(account_id, workspace, candidate)
         return winner, winner_revision
 
     _PROGRESS_FIELDS = ("profiles", "enrollments", "submissions", "evidence", "events", "processedCommands", "progressResets")
-    _PROGRESS_COMMANDS = {"enrollment.enroll", "enrollment.unenroll", "enrollment.drop", "activity.complete", "submission.submit", "evidence.submit", "progress.reset"}
+    _PROGRESS_COMMANDS = {"course.open", "enrollment.enroll", "enrollment.unenroll", "enrollment.drop", "activity.complete", "submission.submit", "submission.draft", "evidence.submit", "progress.reset"}
     _PORTABLE_DEFINITION_KINDS = ("courses", "modules", "activities", "assignments", "skills", "badges", "quests")
     _PORTABILITY_FORBIDDEN_KEYS = frozenset({
         "profiles", "enrollments", "submissions", "evidence", "events", "processedCommands",
         "progressResets", "courseGrants", "shareToken", "tokenHash", "grantId", "grant_id",
         "learnerId", "profileId", "submissionId", "awardId", "accessRevision",
+        "sourceAttachments", "preparationReceiptId", "operationId", "captionOperationId",
+        "resource_ref", "resourceRef", "resource_key", "resourceKey", "richLearning",
     })
 
     def portable_definition(value: Any) -> Any:
@@ -226,6 +238,12 @@ def setup_treehouse_routes(
                 record[field] = mapping[ref_kind].get(str(record[field]), str(record[field]))
         if kind == "courses":
             remap_list("moduleIds", "modules"); remap_list("prerequisites", "courses")
+            if isinstance(record.get("completionCriteria"), dict):
+                criteria = copy.deepcopy(record["completionCriteria"])
+                for field, ref_kind in (("activityIds", "activities"), ("assignmentIds", "assignments")):
+                    if isinstance(criteria.get(field), list):
+                        criteria[field] = [mapping[ref_kind].get(str(item), str(item)) for item in criteria[field]]
+                record["completionCriteria"] = criteria
         elif kind == "modules":
             remap_field("courseId", "courses"); remap_list("activityIds", "activities"); remap_list("assignmentIds", "assignments")
         elif kind in {"activities", "assignments"}:
@@ -264,6 +282,9 @@ def setup_treehouse_routes(
                 else:
                     state[key] = progress[key]
 
+        if progress.get("richLearning"):
+            state.setdefault("richLearning", {}).update(copy.deepcopy(progress["richLearning"]))
+
     def progress_projection(state: dict[str, Any], account_id: str) -> dict[str, Any]:
         result = {"schemaVersion": state.get("schemaVersion"), "revision": state.get("revision", 0), "profiles": {account_id: state.get("profiles", {}).get(account_id, {})}, "enrollments": {}, "submissions": {}, "evidence": {}, "events": [], "processedCommands": {}, "progressResets": {}}
         for key in ("enrollments", "submissions", "evidence"):
@@ -280,6 +301,8 @@ def setup_treehouse_routes(
             key: value for key, value in state.get("processedCommands", {}).items()
             if value.get("actorId") == account_id
         }
+        if state.get("richLearning"):
+            result["richLearning"] = copy.deepcopy(state["richLearning"])
         result["progressResets"] = {key: value for key, value in state.get("progressResets", {}).items() if key.startswith(account_id + ":") or key == account_id}
         return result
 
@@ -317,13 +340,15 @@ def setup_treehouse_routes(
         ensure_account_profile(aggregate, account_id)
         refs = repo.accessible_course_refs(account_id, workspace)
         for ref in refs:
-            source, _ = repo.get_catalogue(ref["ownerAccountId"], workspace)
+            source, source_revision = repo.get_catalogue(ref["ownerAccountId"], workspace)
             if not source:
                 continue
             course_id = ref["courseId"]
             course = (source.get("courses") or {}).get(course_id)
             if not course or course.get("deletedAt"):
                 continue
+            # Per-owner source revision survives the multi-catalogue union.
+            course = {**copy.deepcopy(course), "curriculumRevision": source_revision}
             visible = {"courses": {course_id: course}, "modules": {}, "activities": {}, "assignments": {}, "skills": {}, "badges": {}, "quests": {}, "courseGrants": {}}
             module_ids = set(course.get("moduleIds") or [])
             visible["modules"] = {key: value for key, value in (source.get("modules") or {}).items() if key in module_ids and not value.get("deletedAt")}
@@ -354,6 +379,10 @@ def setup_treehouse_routes(
                 aggregate["fieldGuide"] = copy.deepcopy(source["fieldGuide"])
             if source.get("extensions", {}).get("fieldGuideManifest") and "fieldGuideManifest" not in aggregate.setdefault("extensions", {}):
                 aggregate["extensions"]["fieldGuideManifest"] = copy.deepcopy(source["extensions"]["fieldGuideManifest"])
+            if repo.access(account_id, workspace, ref["ownerAccountId"], course_id, "edit"):
+                for reviewed in repo.course_progress_for_review(account_id, ref["ownerAccountId"], workspace, course_id):
+                    if reviewed["learnerAccountId"] != account_id:
+                        overlay_progress(aggregate, reviewed["state"])
             visible_entities = {course_id, *set(visible["modules"]), *set(visible["activities"]), *set(visible["assignments"]), *set(visible["skills"]), *set(visible["quests"]), *set(visible["badges"])}
             visible_events = [
                 event for event in source.get("events", [])
@@ -424,6 +453,12 @@ def setup_treehouse_routes(
             detail = exc.payload() if isinstance(exc, TreeHouseError) else {"code": "corrupt_state", "message": "TreeHouse state is not valid JSON"}
             raise HTTPException(409, detail=detail) from exc
         return doc, state
+
+    def engagement_snapshot(state, actor_id, request, scope):
+        snapshot = public_treehouse_snapshot(state, actor_id)
+        if account_scoped(request, scope):
+            attach_engagement_context(repository(request), scope["account_id"], scope["workspace_id"], snapshot)
+        return snapshot
 
     def resume_class_publications(request: Request, scope: dict[str, str]) -> None:
         repo = repository(request)
@@ -573,6 +608,16 @@ def setup_treehouse_routes(
             "badges": portable_definition(badges),
             "quests": portable_definition(quests),
         }
+        from src.openclank.treehouse_rich_learning import export_podcasts
+        package["learningAdapters"] = {"podcasts": export_podcasts(state, course_ids)}
+        # Descriptions are portable; opaque Files grants and preparation receipts are not.
+        for ident, activity in activities.items():
+            descriptors = []
+            for attachment in activity.get("sourceAttachments", []):
+                receipt = repo.lesson_attachment_preparation(caller_account_id=scope["account_id"], workspace_id=scope["workspace_id"], operation_id=attachment.get("operationId", ""))
+                source = (receipt or {}).get("source", {})
+                descriptors.append({"name": str(source.get("name", "Resource"))[:240], "mimeType": str(source.get("mime_type", "application/octet-stream"))[:128], "mode": attachment.get("mode", "link")})
+            if descriptors: package["activities"][ident]["portableResources"] = descriptors
         package["packageId"] = course_package_digest(package)
         return package
 
@@ -716,6 +761,14 @@ def setup_treehouse_routes(
                     record["authorIds"] = [scope["account_id"]]
                 state[kind][target_id] = record
                 imported.setdefault(kind, {})[str(ident)] = target_id
+        from src.openclank.treehouse_rich_learning import import_podcasts, validate_adapter
+        try:
+            for record in state["activities"].values():
+                if record.get("id") in mapping["activities"].values() and "adapter" in record:
+                    record["adapter"] = validate_adapter(record["adapter"], record.get("activityType", "lesson"))
+            import_podcasts(package.get("learningAdapters"), state, mapping)
+        except TreeHouseError as exc:
+            raise fail(exc) from exc
         state["revision"] = int(state.get("revision") or revision) + 1
         receipt = {"courseId": mapping["courses"].get(str(course["id"])), "revision": state["revision"], "idMap": imported}
         receipts[package_id] = receipt
@@ -750,7 +803,7 @@ def setup_treehouse_routes(
                         scope["account_id"], owner_id, scope["workspace_id"], course_id, progress,
                         expected_revision=int(scope.get("_progress_revision") or 0),
                         reset_epoch=next_epoch, expected_reset_epoch=previous_epoch,
-                        grant_id=scope.get("_grant_id"),
+                        grant_id=scope.get("_grant_id"), stats_context=state,
                         access_revision=int(scope["_grant_revision"]) if scope.get("_grant_revision") is not None else None,
                     )
                 else:
@@ -789,11 +842,11 @@ def setup_treehouse_routes(
                     raise HTTPException(404, "TreeHouse course not found")
             resume_class_publications(request, scope)
             state = aggregate_visible_state(repository(request), scope["account_id"], scope["workspace_id"])
-            snapshot = public_treehouse_snapshot(state, actor_id)
+            snapshot = engagement_snapshot(state, actor_id, request, scope)
             return {**snapshot, "recipientOptions": recipient_options(request, scope["account_id"]), "document": {"id": None, "head": str(state.get("revision", 0))}, "workspace": scope["workspace_id"], "fingerprint": state_fingerprint(state), "accountId": scope["account_id"]}
         doc, state = await load_state(request, scope, initialize=False)
         try:
-            snapshot = public_treehouse_snapshot(state, actor_id)
+            snapshot = engagement_snapshot(state, actor_id, request, scope)
         except TreeHouseError as exc:
             raise fail(exc) from exc
         return {**snapshot, "document": {"id": doc["id"], "head": doc.get("head")}, "workspace": scope["workspace_id"], "fingerprint": state_fingerprint(state), "accountId": scope.get("account_id")}
@@ -856,8 +909,69 @@ def setup_treehouse_routes(
                 command_id=command.command_id, payload={"type": command.type, "payload": command.payload},
             )
             visible = aggregate_visible_state(repo, scope["account_id"], scope["workspace_id"])
-            snapshot = public_treehouse_snapshot(visible, scope["account_id"])
+            snapshot = engagement_snapshot(visible, scope["account_id"], request, scope)
             return {"ok": True, "changed": bool(reset_rows) and not reset_result.get("replayed"), "result": reset_result, **snapshot, "accountId": scope["account_id"], "workspace": scope["workspace_id"], "document": {"id": None, "head": str(visible.get("revision", 0))}}
+        if repo and command.type == "submission.grade":
+            # Grading changes the learner's existing progress partition. The
+            # reviewer never becomes the subject and no catalogue gradebook
+            # copy is introduced. The shared transaction guards current grant,
+            # curriculum, reset generation, attempt and target progress CAS.
+            with repo.achievement_transaction():
+                selected = None
+                for ref in repo.accessible_course_refs(scope["account_id"], scope["workspace_id"]):
+                    if command.payload.get("courseId") and command.payload["courseId"] != ref["courseId"]:
+                        continue
+                    if not repo.access(scope["account_id"], scope["workspace_id"], ref["ownerAccountId"], ref["courseId"], "edit"):
+                        continue
+                    for row in repo.course_progress_for_review(scope["account_id"], ref["ownerAccountId"], scope["workspace_id"], ref["courseId"]):
+                        if str(command.payload.get("submissionId") or "") in row["state"].get("submissions", {}):
+                            selected = (ref, row)
+                            break
+                    if selected:
+                        break
+                if not selected:
+                    # Older owner catalogue records join the same learner
+                    # partition on their first review; their stable IDs remain.
+                    for ref in repo.accessible_course_refs(scope["account_id"], scope["workspace_id"]):
+                        if not repo.access(scope["account_id"], scope["workspace_id"], ref["ownerAccountId"], ref["courseId"], "edit"):
+                            continue
+                        legacy, _ = repo.get_catalogue(ref["ownerAccountId"], scope["workspace_id"])
+                        old = (legacy or {}).get("submissions", {}).get(str(command.payload.get("submissionId") or ""))
+                        if old and old.get("courseId") == ref["courseId"]:
+                            partition, revision = repo.get_progress(old["profileId"], ref["ownerAccountId"], scope["workspace_id"], ref["courseId"])
+                            selected = (ref, {"learnerAccountId": old["profileId"], "state": partition or {}, "revision": revision, "resetEpoch": repo.progress_reset_epoch(old["profileId"], ref["ownerAccountId"], scope["workspace_id"], ref["courseId"])})
+                            break
+                if not selected:
+                    raise HTTPException(403, detail={"code": "review_unavailable", "message": "This submitted attempt is unavailable to the current course editor"})
+                ref, row = selected
+                working, catalogue_revision = repo.get_catalogue(ref["ownerAccountId"], scope["workspace_id"])
+                expected_curriculum = command.payload.get("curriculumRevision")
+                if expected_curriculum is not None and int(expected_curriculum) != catalogue_revision:
+                    raise HTTPException(409, detail={"code": "stale", "message": "Curriculum changed; reopen the review", "revision": catalogue_revision})
+                working = copy.deepcopy(working)
+                ensure_account_profile(working, scope["account_id"])
+                ensure_account_profile(working, row["learnerAccountId"])
+                merge_grants(working, repo, scope["account_id"], scope["workspace_id"])
+                overlay_progress(working, row["state"])
+                try:
+                    next_state, result, changed = apply_treehouse_command(working, {"type": command.type, "payload": command.payload}, actor_id=scope["account_id"], command_id=command.command_id, expected_revision=working["revision"])
+                    if changed:
+                        progress_state = progress_projection(next_state, row["learnerAccountId"])
+                        for collection in ("enrollments", "submissions", "evidence"):
+                            progress_state[collection] = {key: value for key, value in progress_state[collection].items() if value.get("courseId") == ref["courseId"]}
+                        progress_state["events"] = [event for event in progress_state["events"] if event.get("data", {}).get("courseId") == ref["courseId"] or event.get("entityId") == ref["courseId"]]
+                        progress_state["processedCommands"][command.command_id] = next_state["processedCommands"][command.command_id]
+                        learner_grant = repo.active_grant(row["learnerAccountId"], scope["workspace_id"], ref["ownerAccountId"], ref["courseId"]) if row["learnerAccountId"] != ref["ownerAccountId"] else None
+                        if row["learnerAccountId"] != ref["ownerAccountId"] and not learner_grant:
+                            raise HTTPException(403, "Learner course access was revoked")
+                        repo.put_progress(row["learnerAccountId"], ref["ownerAccountId"], scope["workspace_id"], ref["courseId"], progress_state, expected_revision=row["revision"], reset_epoch=row["resetEpoch"], expected_reset_epoch=row["resetEpoch"], grant_id=learner_grant["grant_id"] if learner_grant else None, access_revision=int(learner_grant["revision"]) if learner_grant else None, stats_context=next_state)
+                except TreeHouseError as exc:
+                    raise fail(exc) from exc
+                except TreeHouseRepositoryError as exc:
+                    raise repository_error(exc) from exc
+            visible = aggregate_visible_state(repo, scope["account_id"], scope["workspace_id"])
+            publish(scope, "document", {"treehouse": True, "operation": "submission-review", "revision": visible["revision"]})
+            return {"ok": True, "changed": changed, "result": result, **engagement_snapshot(visible, scope["account_id"], request, scope), "accountId": scope["account_id"], "workspace": scope["workspace_id"]}
         owner_for_command = repo.owner_for_course(scope["account_id"], scope["workspace_id"], str(command.payload.get("courseId") or command.payload.get("course_id") or "")) if repo and command.payload.get("courseId") else None
         if repo and not owner_for_command:
             entity_id = str(command.payload.get("activityId") or command.payload.get("assignmentId") or command.payload.get("moduleId") or "")
@@ -982,11 +1096,47 @@ def setup_treehouse_routes(
                         result, changed = {"outcome": "committed", "operationId": operation_id, "preparationReceiptId": preparation_id}, True
             else:
                 next_state = None
-            if scope.get("_progress_only") and command.type in {"activity.complete", "submission.submit", "evidence.submit"}:
+            if scope.get("_progress_only") and command.type in {"course.open", "activity.complete", "submission.submit", "submission.draft", "evidence.submit"}:
                 # The generation is captured before the command starts.  The
                 # repository checks it again inside BEGIN IMMEDIATE, so a
                 # reset that wins a concurrent race rejects this callback.
                 command_payload.setdefault("resetGeneration", int(scope.get("_attempt_reset_epoch") or 0))
+            if command.type == "activity.complete":
+                activity = state.get("activities", {}).get(str(command_payload.get("activityId") or ""), {})
+                if activity.get("completion") == "verified" or activity.get("verifierSpec"):
+                    try:
+                        state['_activityVerification'] = builtin_activity_verification(repo, scope["account_id"], scope["workspace_id"], activity, guide_owner_id=state.get('courses', {}).get(activity.get('courseId'), {}).get('ownerId'))
+                    except ValueError as exc:
+                        raise HTTPException(409, detail={"code": "verifier_result_required", "message": str(exc)}) from exc
+            if command.type in {"submission.submit", "submission.draft"}:
+                assignment = state.get("assignments", {}).get(str(command_payload.get("assignmentId") or ""), {})
+                if assignment.get("assessmentType") == "file":
+                    current_policy = file_policy(request)
+                    factory = getattr(request.app.state, "treehouse_files_facade", None)
+                    context_factory = getattr(request.app.state, "treehouse_files_context", None)
+                    if not callable(factory) or not callable(context_factory):
+                        raise HTTPException(503, detail={"code": "files_unavailable", "message": "Open Files and prepare your submission attachment first"})
+                    files_context = context_factory(request, workspace=scope["workspace_id"])
+                    files = factory(request, copal_workspace=scope["workspace_id"])
+                    validated = set()
+                    answer = command_payload.get("answer")
+                    receipts = answer.get("fileReceipts", []) if isinstance(answer, dict) else []
+                    if not isinstance(receipts, list) or len(receipts) > 16:
+                        raise HTTPException(400, "Invalid file receipts")
+                    for item in receipts:
+                        receipt = repo.lesson_attachment_preparation(caller_account_id=scope["account_id"], workspace_id=scope["workspace_id"], operation_id=str(item.get("operationId") or "")) if repo and isinstance(item, dict) else None
+                        if not receipt or receipt.get("targetKind") != "treehouse_submission" or receipt.get("lessonId") != assignment.get("id") or receipt.get("courseId") != assignment.get("courseId") or receipt.get("preparationReceiptId") != item.get("preparationReceiptId"):
+                            raise HTTPException(403, detail={"code": "submission_attachment_denied", "message": "File evidence receipt does not belong to this account and task"})
+                        if receipt.get("policyGeneration") != current_policy.generation() or receipt.get("catalogueRevision") != int(doc.get("head") or 0) or receipt.get("grantRevision") != int(scope.get("_grant_revision") or 0):
+                            raise HTTPException(409, detail={"code": "submission_attachment_stale", "message": "File access or curriculum changed; select and prepare the file again"})
+                        try:
+                            source = await files.stat(files_context, resource_ref=receipt["source"]["resource_ref"])
+                            if source.get("revision") != receipt["source"].get("revision"):
+                                raise HTTPException(409, "Submission source changed; prepare it again")
+                        except FilesFacadeError as exc:
+                            raise HTTPException(403, detail={"code": exc.code, "message": str(exc)}) from exc
+                        validated.add(receipt["preparationReceiptId"])
+                    state['_validatedSubmissionReceipts'] = sorted(validated)
             if next_state is None:
                 next_state, result, changed = apply_treehouse_command(
                     state,
@@ -1046,9 +1196,13 @@ def setup_treehouse_routes(
                 # Recipient identity lives in auth and the grant index.  It is
                 # never copied into the owner's curriculum profile catalogue.
                 next_state["profiles"].pop(str(command.payload.get("recipientId")), None)
+            next_state.pop("_activityVerification", None)
+            state.pop("_activityVerification", None)
+            next_state.pop("_validatedSubmissionReceipts", None)
+            state.pop("_validatedSubmissionReceipts", None)
             if changed and not share_committed and not revoke_committed and not accept_committed and not lesson_repository_committed:
                 await write_state(request, scope, doc, next_state)
-            snapshot = public_treehouse_snapshot(next_state, actor_id)
+            snapshot = engagement_snapshot(next_state, actor_id, request, scope)
         except TreeHouseError as exc:
             raise fail(exc) from exc
         if changed and command.type == "course.publish":
@@ -1100,6 +1254,13 @@ def setup_treehouse_routes(
         if not account_scoped(request, scope):
             raise HTTPException(401, detail={"code": "not_authenticated", "message": "Achievements require an authenticated account"})
         return str(scope["account_id"])
+
+    @router.get("/stats")
+    async def get_personal_stats(request: Request, workspace: str | None = None,
+                                 before: int | None = Query(None, ge=1), limit: int = Query(30, ge=1, le=100)):
+        scope = account_scope(request, scope_for(request, workspace))
+        account_id = _require_account(request, scope)
+        return repository(request).personal_stats(account_id, scope["workspace_id"], before=before, limit=limit)
 
     @router.get("/achievements")
     async def get_achievements(
@@ -1247,4 +1408,73 @@ def setup_treehouse_routes(
             return {"ok": True, **repo.mark_notification_failed(outbox_id)}
         raise HTTPException(404, detail={"code": "notification_not_found", "message": "No pending notification with that id"})
 
+    @router.get("/courses/{course_id}/activities/{activity_id}/resources/{operation_id}")
+    async def lesson_resource(course_id: str, activity_id: str, operation_id: str, request: Request, workspace: str | None = None):
+        scope = account_scope(request, scope_for(request, workspace))
+        repo = repository(request)
+        owner = repo.owner_for_course(scope["account_id"], scope["workspace_id"], course_id)
+        if not owner or not repo.access(scope["account_id"], scope["workspace_id"], owner, course_id, "learn"):
+            raise HTTPException(403, "Course resource access is unavailable")
+        state, _ = repo.get_catalogue(owner, scope["workspace_id"])
+        activity = (state or {}).get("activities", {}).get(activity_id, {})
+        if activity.get("courseId") != course_id or activity.get("deletedAt") or not any(x.get("operationId") == operation_id for x in activity.get("sourceAttachments", [])):
+            raise HTTPException(404, "Prepared lesson resource not found")
+        receipt = repo.lesson_attachment_preparation(caller_account_id=scope["account_id"], workspace_id=scope["workspace_id"], operation_id=operation_id)
+        factory = getattr(request.app.state, "treehouse_files_facade", None)
+        context_factory = getattr(request.app.state, "treehouse_files_context", None)
+        if not receipt or receipt.get("targetKind", "treehouse_lesson") != "treehouse_lesson" or not callable(factory) or not callable(context_factory):
+            raise HTTPException(403, "Source resource requires current Files authorization; reopen Files or ask the author to adopt a shareable asset")
+        ctx = context_factory(request, workspace=scope["workspace_id"])
+        try:
+            resource = await factory(request, copal_workspace=scope["workspace_id"]).stat(ctx, resource_ref=receipt["source"]["resource_ref"])
+            if resource.get("revision") != receipt["source"].get("revision"):
+                raise HTTPException(409, "Resource changed; ask the author to prepare it again")
+        except FilesFacadeError as exc:
+            raise HTTPException(403, detail={"code": exc.code, "message": str(exc)}) from exc
+        return {"name": resource.get("name"), "mimeType": resource.get("mime_type"), "resourceRef": resource.get("ref") or resource.get("resource_ref")}
+
+    @router.api_route("/courses/{course_id}/submissions/{submission_id}/files/{operation_id}", methods=["GET", "HEAD"])
+    async def submitted_file_content(course_id: str, submission_id: str, operation_id: str, request: Request, attemptId: str, workspace: str | None = None):
+        scope = account_scope(request, scope_for(request, workspace))
+        repo = repository(request)
+        owner = repo.owner_for_course(scope["account_id"], scope["workspace_id"], course_id)
+        if not owner or not repo.access(scope["account_id"], scope["workspace_id"], owner, course_id, "edit"):
+            raise HTTPException(403, "Submitted evidence requires current course review access")
+        rows = repo.course_progress_for_review(scope["account_id"], owner, scope["workspace_id"], course_id)
+        selected = next((row for row in rows if submission_id in row["state"].get("submissions", {})), None)
+        submission = selected["state"]["submissions"][submission_id] if selected else None
+        if not submission or submission.get("courseId") != course_id or submission.get("status") not in {"submitted", "graded"} or submission.get("attemptId") != attemptId:
+            raise HTTPException(409, "This submitted attempt changed; reopen the review")
+        learner = selected["learnerAccountId"]
+        answer = next((item.get("answer") for item in submission.get("attemptHistory", []) if item.get("attemptId") == attemptId), None)
+        item = next((item for item in (answer or {}).get("fileReceipts", []) if isinstance(item, dict) and item.get("operationId") == operation_id), None) if isinstance(answer, dict) else None
+        receipt = repo.lesson_attachment_preparation(caller_account_id=learner, workspace_id=scope["workspace_id"], operation_id=operation_id)
+        if not item or not receipt or receipt.get("targetKind") != "treehouse_submission" or receipt.get("courseId") != course_id or receipt.get("lessonId") != submission.get("assignmentId") or receipt.get("preparationReceiptId") != item.get("preparationReceiptId"):
+            raise HTTPException(403, "File is not evidence in this submitted attempt")
+        catalogue, _ = repo.get_catalogue(owner, scope["workspace_id"])
+        task = (catalogue or {}).get("assignments", {}).get(submission.get("assignmentId"), {})
+        if task.get("courseId") != course_id or task.get("deletedAt"):
+            raise HTTPException(403, "Submitted task is no longer available")
+        policy = file_policy(request)
+        manager = getattr(request.app.state, "auth_manager", None)
+        username = manager.username_for_account_id(learner) if manager else None
+        content_response = getattr(request.app.state, "treehouse_files_content_response", None)
+        if not username or not callable(content_response):
+            raise HTTPException(503, "Submitted evidence source is unavailable; reopen Files")
+        grant = repo.active_grant(learner, scope["workspace_id"], owner, course_id) if learner != owner else None
+        if receipt.get("policyGeneration") != policy.generation() or (learner != owner and (not grant or int(grant["revision"]) != receipt.get("grantRevision"))):
+            raise HTTPException(403, "Submitted evidence source access changed or was revoked")
+        def still_authorized():
+            current, _ = repo.get_progress(learner, owner, scope["workspace_id"], course_id)
+            current_submission = (current or {}).get("submissions", {}).get(submission_id, {})
+            current_grant = repo.active_grant(learner, scope["workspace_id"], owner, course_id) if learner != owner else None
+            return bool(manager.username_for_account_id(learner) == username and manager.is_admin(username) == context.is_admin and repo.access(scope["account_id"], scope["workspace_id"], owner, course_id, "edit") and repo.access(learner, scope["workspace_id"], owner, course_id, "learn") and (learner == owner or (current_grant and int(current_grant["revision"]) == receipt.get("grantRevision"))) and current_submission.get("attemptId") == attemptId and current_submission.get("status") in {"submitted", "graded"})
+        context = ProviderContext(owner_subject_id=learner, owner_username=username, policy_generation=policy.generation(), is_admin=manager.is_admin(username), workspace_id=scope["workspace_id"])
+        # This internal context never escapes: the existing Files content plane
+        # opens only the immutable submitted receipt's source and revision.
+        return await content_response(receipt["source"]["resource_ref"], request, "download", source_context=context, expected_revision=receipt["source"]["revision"], access_guard=still_authorized)
+
+    router.include_router(setup_rich_learning_routes(repository=repository, scope_for=scope_for, account_scope=account_scope, aggregate_visible_state=aggregate_visible_state, publish=publish))
+    router.include_router(setup_learning_extensions_routes(repository=repository, scope_for=scope_for, account_scope=account_scope, aggregate_visible_state=aggregate_visible_state, overlay_progress=overlay_progress, publish=publish))
+    router.include_router(create_engagement_router(scope_for=scope_for, account_scope=account_scope, repository=repository))
     return router

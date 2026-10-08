@@ -39,7 +39,7 @@ from src.openclank.media_attachment_targets import (
     adopt_loose_media_for_workspace,
 )
 from src.openclank.history_capture import trusted_tool_context
-from src.openclank.treehouse_files_adapter import TreeHouseLessonAttachmentTarget
+from src.openclank.treehouse_files_adapter import TreeHouseLessonAttachmentTarget, TreeHouseSubmissionAttachmentTarget
 from src.constants import DATA_DIR
 from src.openclank.workspace_policy_service import (
     WorkspacePolicyServiceError,
@@ -177,10 +177,11 @@ class AttachmentSourceRequest(_StrictModel):
 
 
 class AttachmentTargetRequest(_StrictModel):
-    kind: Literal["copal_document", "host_document", "treehouse_lesson"]
+    kind: Literal["copal_document", "host_document", "treehouse_lesson", "treehouse_submission"]
     resource_ref: str | None = Field(default=None, min_length=8, max_length=16_384)
     course_id: str | None = Field(default=None, min_length=1, max_length=256)
     lesson_id: str | None = Field(default=None, min_length=1, max_length=256)
+    assignment_id: str | None = Field(default=None, min_length=1, max_length=256)
     expected_revision: AttachmentRevision | None = None
 
     @model_validator(mode="after")
@@ -189,6 +190,8 @@ class AttachmentTargetRequest(_StrictModel):
             raise ValueError(f"{self.kind} attachment target requires a resource ref")
         if self.kind == "treehouse_lesson" and (self.course_id is None or self.lesson_id is None or self.resource_ref is not None):
             raise ValueError("TreeHouse attachment target requires course and lesson IDs")
+        if self.kind == "treehouse_submission" and (self.course_id is None or self.assignment_id is None or self.resource_ref is not None or self.lesson_id is not None):
+            raise ValueError("Submission attachment target requires course and assignment IDs")
         return self
 
 
@@ -315,6 +318,7 @@ def _open_path_content(content) -> tuple[int, os.stat_result]:
 
 def setup_files_facade_routes(
     *,
+    application_state: Any = None,
     policy_repository: FilePolicyRepository | None = None,
     session_factory: Callable = SessionLocal,
     filesystem_registry: FilesystemRootRegistry | None = None,
@@ -371,6 +375,9 @@ def setup_files_facade_routes(
             configured = os.environ.get("TREEHOUSE_REPOSITORY_PATH")
             treehouse_repository = TreeHouseRepository(Path(configured) if configured else Path(DATA_DIR) / "treehouse.sqlite3")
             app_state.treehouse_repository = treehouse_repository
+        app_state.treehouse_files_facade = facade
+        app_state.treehouse_files_context = context
+        app_state.treehouse_files_content_response = content_response
         return FilesFacade(
             providers,
             place_repository=repository,
@@ -378,6 +385,7 @@ def setup_files_facade_routes(
             attachment_targets={
                 "host_document": HostDocumentAttachmentTarget(provider=host_provider, operation_store=repository),
                 "treehouse_lesson": TreeHouseLessonAttachmentTarget(treehouse_repository),
+                "treehouse_submission": TreeHouseSubmissionAttachmentTarget(treehouse_repository),
             },
         )
 
@@ -931,6 +939,9 @@ def setup_files_facade_routes(
         request: Request,
         purpose: Literal["download", "preview"] = "download",
     ):
+        return await content_response(resource_ref, request, purpose)
+
+    async def content_response(resource_ref, request, purpose="download", *, source_context=None, expected_revision=None, access_guard=None):
         """Download one provider resource through its opaque canonical ref.
 
         This compatibility data plane opens provider-owned files once and keeps
@@ -939,13 +950,21 @@ def setup_files_facade_routes(
         """
         descriptor = None
         try:
-            ctx = context_for_ref(request, resource_ref)
-            source = await facade(request).content(
+            ctx = source_context or context_for_ref(request, resource_ref)
+            files = facade(request, copal_workspace=ctx.workspace_id)
+            source = await files.content(
                 ctx,
                 resource_ref=resource_ref,
                 capability=purpose,
             )
-            guard = _generation_guard(ctx.policy_generation)
+            policy_guard = _generation_guard(ctx.policy_generation)
+            guard = lambda: policy_guard() and (access_guard is None or access_guard())
+            if expected_revision is not None:
+                current_resource = await files.stat(ctx, resource_ref=resource_ref)
+                if current_resource.get("revision") != expected_revision:
+                    raise FilesFacadeError("Submitted source changed; its saved evidence remains preserved", code="resource_changed")
+            if not guard():
+                raise FilesFacadeError("Submitted evidence access was revoked", code="permission_denied")
             if source.path is not None:
                 descriptor, current = _open_path_content(source)
                 size = int(current.st_size)
@@ -1157,6 +1176,10 @@ def setup_files_facade_routes(
             },
         )
 
+    if application_state is not None:
+        application_state.treehouse_files_facade = facade
+        application_state.treehouse_files_context = context
+        application_state.treehouse_files_content_response = content_response
     return router
 
 

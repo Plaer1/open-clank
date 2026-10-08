@@ -35,23 +35,10 @@ def windows_powershell_environment(environment=None):
     return child
 
 
-def build(bundle, target, output, tools, qualification):
-    if os.name != 'nt':
-        raise RuntimeError('Installer compilation requires actual Windows')
-    if tools.exists() or output.exists():
-        raise RuntimeError('Installer tool/output directory already exists; preserve it')
-    payload = json.loads((bundle / 'portable-provenance.json').read_text())
-    payload_bytes = sum(p.stat().st_size for p in bundle.rglob('*') if p.is_file())
-    receipt = json.loads(qualification.read_text())
-    if payload['target'] != target or receipt.get('target') != target or receipt.get('qualification') != 'packaged-startup-auth-files-editor-passed':
-        raise RuntimeError('Native portable qualification is required before installer compilation')
-    for path in bundle.rglob('*'):
-        if path.is_symlink() or path.name == 'emoji-assets.pack' or path.name.startswith('emoji-assets.pack.part-'):
-            raise RuntimeError('Installer refuses symlinks or bundled external artwork')
-    subprocess.run([str(bundle / 'openclank.exe'), 'engine', 'verify', '--json'],
-                   check=True, timeout=180, stdout=subprocess.DEVNULL)
+def install_compiler(tools):
+    if os.name != 'nt' or tools.exists():
+        raise RuntimeError('Compiler installation requires Windows and a fresh task directory')
     tools.mkdir(parents=True)
-    output.mkdir(parents=True)
     vendor = tools / 'innosetup-7.1.0-x64.exe'
     with urllib.request.urlopen(TOOL_URL, timeout=120) as response, vendor.open('xb') as stream:
         while data := response.read(1024 * 1024):
@@ -71,6 +58,26 @@ def build(bundle, target, output, tools, qualification):
     version = subprocess.run([str(compiler), '--version'], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
     if TOOL_VERSION not in version:
         raise RuntimeError('Installed compiler does not report the pinned release version')
+    return compiler
+
+
+def build(bundle, target, output, tools, qualification):
+    if os.name != 'nt':
+        raise RuntimeError('Installer compilation requires actual Windows')
+    if tools.exists() or output.exists():
+        raise RuntimeError('Installer tool/output directory already exists; preserve it')
+    payload = json.loads((bundle / 'portable-provenance.json').read_text())
+    payload_bytes = sum(p.stat().st_size for p in bundle.rglob('*') if p.is_file())
+    receipt = json.loads(qualification.read_text())
+    if payload['target'] != target or receipt.get('target') != target or receipt.get('qualification') != 'packaged-startup-auth-files-editor-passed':
+        raise RuntimeError('Native portable qualification is required before installer compilation')
+    for path in bundle.rglob('*'):
+        if path.is_symlink() or path.name == 'emoji-assets.pack' or path.name.startswith('emoji-assets.pack.part-'):
+            raise RuntimeError('Installer refuses symlinks or bundled external artwork')
+    subprocess.run([str(bundle / 'openclank.exe'), 'engine', 'verify', '--json'],
+                   check=True, timeout=180, stdout=subprocess.DEVNULL)
+    output.mkdir(parents=True)
+    compiler = install_compiler(tools)
     subprocess.run([str(compiler), '--no-signing', '--no-ide-signtools', '/DTarget=' + target,
                     '/DBundleRoot=' + str(bundle), '/DAppVersion=1.0.2', '/DOutputRoot=' + str(output), str(SOURCE)], check=True, timeout=1800)
     installer = output / f'Open-Clank-1.0.2-{target}-Setup.exe'
