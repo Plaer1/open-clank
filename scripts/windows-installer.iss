@@ -68,19 +68,38 @@ const
   ArtworkBaseURL = 'https://github.com/Plaer1/open-clank/releases/download/v1.0.2-beta.1-artwork-compact/';
   ArtworkBytes = 449189888;
 var
-  ArtworkPage: TInputDirWizardPage;
+  ArtworkPage: TInputQueryWizardPage;
+  ArtworkBrowseButton: TNewButton;
   DownloadPage: TDownloadWizardPage;
   PartsDirectory: String;
 
+procedure BrowseArtworkParts(Sender: TObject);
+var
+  Directory: String;
+begin
+  Directory := ArtworkPage.Values[0];
+  if BrowseForFolder('Select the folder containing the artwork release files', Directory, False) then
+    ArtworkPage.Values[0] := Directory;
+end;
+
 procedure InitializeWizard;
 begin
-  ArtworkPage := CreateInputDirPage(wpSelectTasks, 'Offline emoji artwork',
+  ArtworkPage := CreateInputQueryPage(wpSelectTasks, 'Offline emoji artwork',
     'Download the complete artwork or use existing release files',
     'Leave the folder empty to download the verified release artwork with progress. ' +
     'If you already have emoji-assets.pack.part-001 and emoji-assets.parts.json, select their folder. ' +
     'Artwork stays in your personal application data and is preserved on uninstall. ' +
-    'This beta installer is unsigned.', False, '');
-  ArtworkPage.Add('Existing artwork parts folder (optional):');
+    'This beta installer is unsigned.');
+  ArtworkPage.Add('Existing artwork parts folder (optional):', False);
+  ArtworkBrowseButton := TNewButton.Create(ArtworkPage);
+  ArtworkBrowseButton.Parent := ArtworkPage.Surface;
+  ArtworkBrowseButton.Caption := 'Browse...';
+  ArtworkBrowseButton.Left := ArtworkPage.SurfaceWidth - ScaleX(85);
+  ArtworkBrowseButton.Top := ArtworkPage.Edits[0].Top - ScaleY(1);
+  ArtworkBrowseButton.Width := ScaleX(85);
+  ArtworkBrowseButton.Height := WizardForm.NextButton.Height;
+  ArtworkBrowseButton.OnClick := @BrowseArtworkParts;
+  ArtworkPage.Edits[0].Width := ArtworkBrowseButton.Left - ScaleX(10);
   ArtworkPage.Values[0] := ExpandConstant('{param:ARTWORKPARTS|}');
   DownloadPage := CreateDownloadPage('Downloading offline emoji artwork',
     'Downloading about 449 MB from the published Open Clank Beta release; verifying every file.', nil);
