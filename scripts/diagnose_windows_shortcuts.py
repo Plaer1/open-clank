@@ -12,7 +12,7 @@ import subprocess
 import traceback
 
 from build_windows_installer import SOURCE, TOOL_SHA256, TOOL_VERSION, digest, install_compiler
-from qualify_windows_installer import powershell, shortcut_comparison
+from qualify_windows_installer import powershell, shortcut_comparison, windows_shortcut_folders
 
 FOLDERS = "[ordered]@{Programs=[Environment]::GetFolderPath('Programs');Desktop=[Environment]::GetFolderPath('Desktop')}|ConvertTo-Json -Compress"
 
@@ -33,6 +33,7 @@ def diagnose(target, output, work):
     appdata.mkdir()
     environment.update(USERPROFILE=str(home), HOME=str(home), APPDATA=str(appdata))
     after = json.loads(powershell(FOLDERS, environment=environment))
+    no_verify = windows_shortcut_folders(environment=environment, verify=False)
     group_name = 'Open Clank diagnostic ' + secrets.token_hex(8)
     desktop_name = f'Open Clank Beta ({target}).lnk'
     # Refuse every possible product-shaped desktop collision before Inno runs.
@@ -67,15 +68,18 @@ def diagnose(target, output, work):
                'fixture_source_sha256': digest(fixture_source), 'fixture_target_sha256': digest(bundle / 'openclank.exe'),
                'known_folders_equal_under_override': {key.lower(): before[key] == after[key] for key in before},
                'comparisons': [], 'uninstalled': False}
-    raw = {'folders_before': before, 'folders_with_override': after, 'comparisons': []}
+    raw = {'folders_before': before, 'folders_with_override': after, 'folders_no_verify': no_verify, 'comparisons': []}
     uninstaller = installation / 'unins000.exe'
     try:
         subprocess.run([str(installer), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART',
                         '/DIR=' + str(installation), '/GROUP=' + group_name, '/TASKS=desktopicon',
                         '/LOG=' + str(work / 'installer-private.log')], env=environment, check=True, timeout=180)
+        post_install = windows_shortcut_folders(environment=environment)
+        raw['folders_post_install'] = post_install
         # Test historical and same-environment known folders, plus the exact
         # APPDATA-derived location Inno may select. No user-wide search.
         locations = [('before-override', before), ('same-environment', after),
+                     ('same-environment-no-verify', no_verify), ('post-install-same-environment', post_install),
                      ('appdata-environment', {'Programs': str(appdata / 'Microsoft/Windows/Start Menu/Programs'),
                                                'Desktop': str(home / 'Desktop')})]
         for location, folders in locations:
@@ -100,6 +104,11 @@ def diagnose(target, output, work):
             safe['location'] = 'private-fixture-discovered'
             receipt['comparisons'].append(safe)
             raw['comparisons'].append({'location': 'private-fixture-discovered', 'role': role, 'link': str(link), 'actual': detail})
+        repaired = [item for item in receipt['comparisons'] if item['location'] == 'post-install-same-environment']
+        receipt['repaired_exact_shortcut_comparisons_passed'] = len(repaired) == 3 and all(
+            all(item[field] for field in ('exists', 'target_equal', 'arguments_equal', 'working_directory_equal')) for item in repaired)
+        if not receipt['repaired_exact_shortcut_comparisons_passed']:
+            raise RuntimeError('Post-install same-environment exact shortcut assertions failed')
     finally:
         if uninstaller.is_file():
             subprocess.run([str(uninstaller), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
