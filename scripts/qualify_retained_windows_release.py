@@ -197,7 +197,8 @@ def tool_identity(target):
         'qualification_event': 'push'}
 
 
-def qualify(args):
+def qualify(args, checkpoint):
+    checkpoint["stage"] = "tool-identity"
     architecture = platform.machine().lower()
     expected_architecture = {'windows-arm64': {'arm64', 'aarch64'},
                              'windows-x64': {'amd64', 'x86_64'}}[args.target]
@@ -206,30 +207,36 @@ def qualify(args):
     if args.work.exists() or args.output.exists():
         raise RuntimeError('preserve-existing-qualification-paths')
     identity = tool_identity(args.target)
+    checkpoint["tool_identity_verified"] = True
     args.work.mkdir(parents=True)
     chain = {'schema_version': 1, 'role': 'independently-requalified-retained-native-payload',
         'runtime_source_sha': SOURCE, 'target': args.target, 'original_run_id': RUN,
         'original_mainrun_conclusion': 'failure', **identity}
+    checkpoint["stage"] = "retained-admission"
     bundle = admit(args.work, chain, args.target)
     from qualify_windows_portable import qualify as qualify_portable
     from qualify_windows_installer import qualify as qualify_installed
     from build_windows_installer import build
     portable_output = args.work / 'portable-qualification'
+    checkpoint["stage"] = "full-portable"
     portable = qualify_portable(bundle, args.target, portable_output, emoji_pack=args.emoji_pack)
     if portable['qualification'] != 'packaged-startup-auth-files-editor-passed':
         raise RuntimeError('full-retained-portable-qualification-required')
     installer_output = args.work / 'installers'
+    checkpoint["stage"] = "compiler"
     build(bundle, args.target, installer_output, args.work / 'compiler', portable_output / 'receipt.json')
     setups = list(installer_output.glob('*-Setup.exe'))
     if len(setups) != 1:
         raise RuntimeError('require-one-recompiled-native-payload-setup')
     setup = setups[0]
     installed_output = args.work / 'installed-qualification'
+    checkpoint["stage"] = "full-installed"
     installed = qualify_installed(setup, args.target, installed_output, args.emoji_pack)
     if installed['qualification'] != 'per-user-installer-start-stop-auth-files-editor-uninstall-passed':
         raise RuntimeError('full-retained-installed-qualification-required')
     # Export only named payloads and safe receipts after EVERY real gate passed.
     # The private account/data fixtures and command logs remain under --work.
+    checkpoint["stage"] = "export"
     args.output.mkdir(parents=True)
     retained = args.work / ('unqualified-portable-' + args.target + '.json')
     record = json.loads(retained.read_text())
@@ -261,19 +268,65 @@ def qualify(args):
     (args.output / 'proof-chain.json').write_text(json.dumps(chain, indent=2) + '\n')
 
 
+
+def positive_environment_integer(name):
+    value = os.environ.get(name, '')
+    return int(value) if re.fullmatch(r'[1-9][0-9]{0,19}', value) else None
+
+
+def safe_failure(error, checkpoint):
+    allowed = {'qualify_retained_windows_release.py', 'qualify_windows_installer.py',
+        'qualify_windows_portable.py', 'qualify_treehouse.py', 'qualify_theme_emoji.py',
+        'emoji_runtime_schema.py', 'emoji_asset_bundle.py', 'build_windows_installer.py'}
+    frames = []
+    for frame, line in traceback.walk_tb(error.__traceback__):
+        script = Path(frame.f_code.co_filename).resolve()
+        function = frame.f_code.co_name
+        if (script.parent == ROOT / 'scripts' and script.name in allowed and
+            re.fullmatch(r'[A-Za-z_<>][A-Za-z0-9_<>]{0,127}', function)):
+            frames.append({'script': script.name, 'line': line, 'function': function})
+    exception_class = type(error).__name__
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', exception_class):
+        exception_class = 'Exception'
+    record = {**checkpoint, 'outcome': 'failed-not-release-admission',
+        'exception_class': exception_class, 'traceback_frames': frames}
+    if isinstance(error, subprocess.CalledProcessError) and type(error.returncode) is int:
+        record['subprocess_returncode'] = error.returncode
+    return record
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--target', choices=tuple(PRODUCERS), required=True)
     parser.add_argument('--work', type=Path, required=True)
     parser.add_argument('--emoji-pack', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--failure-receipt', type=Path, required=True)
     args = parser.parse_args()
+    supplied_source = os.environ.get('GITHUB_SHA', '')
+    checkpoint = {'schema_version': 1, 'role': 'safe-retained-native-failure-evidence',
+        'repository': 'Plaer1/open-clank',
+        'repository_identity_matched': os.environ.get('GITHUB_REPOSITORY') == 'Plaer1/open-clank',
+        'runtime_source_sha': SOURCE, 'original_run_id': RUN, 'target': args.target,
+        'tool_source_sha': supplied_source if re.fullmatch(r'[0-9a-f]{40}', supplied_source) else None,
+        'tool_run_id': positive_environment_integer('GITHUB_RUN_ID'),
+        'tool_run_attempt': positive_environment_integer('GITHUB_RUN_ATTEMPT'),
+        'tool_identity_verified': False, 'stage': 'tool-identity'}
+    failure_path = args.failure_receipt.resolve()
+    if (failure_path.exists() or failure_path == args.output.resolve() or
+        failure_path.is_relative_to(args.output.resolve()) or
+        failure_path.is_relative_to(args.work.resolve())):
+        print('A fresh independent safe failure receipt path is required')
+        return 1
     try:
-        qualify(args)
-    except Exception:
+        qualify(args, checkpoint)
+    except Exception as error:
         # The release workflow redirects this entire process to a private log.
         # Preserve the failed gate there; only fixed workflow status is public.
         traceback.print_exc()
+        failure_path.parent.mkdir(parents=True, exist_ok=True)
+        with failure_path.open('x', encoding='utf-8') as stream:
+            json.dump(safe_failure(error, checkpoint), stream, indent=2)
+            stream.write('\n')
         return 1
     print('Full retained native portable and installed qualification passed')
     return 0

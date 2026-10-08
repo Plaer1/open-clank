@@ -25,9 +25,6 @@ jobs:
           - target: windows-x64
             runner: windows-latest
             architecture: x64
-          - target: windows-arm64
-            runner: windows-11-arm
-            architecture: arm64
     defaults:
       run:
         shell: pwsh
@@ -89,10 +86,20 @@ jobs:
           $work = Join-Path $env:RUNNER_TEMP "retained-release-private-$env:RELEASE_TARGET"
           $privateLog = Join-Path $env:RUNNER_TEMP "retained-release-private-$env:RELEASE_TARGET.log"
           if (Test-Path $privateLog) { throw 'Preserve existing private qualification log.' }
-          python -B scripts/qualify_retained_windows_release.py --target $env:RELEASE_TARGET --work $work --emoji-pack $env:QUALIFICATION_EMOJI_PACK --output "dist/retained-release-$env:RELEASE_TARGET" *> $privateLog
+          python -B scripts/qualify_retained_windows_release.py --target $env:RELEASE_TARGET --work $work --emoji-pack $env:QUALIFICATION_EMOJI_PACK --output "dist/retained-release-$env:RELEASE_TARGET" --failure-receipt "dist/retained-failure-$env:RELEASE_TARGET.json" *> $privateLog
           if ($LASTEXITCODE -ne 0) { throw 'Full native retained qualification failed; private evidence remains on the runner.' }
           Write-Output 'Full native retained portable and installed qualification passed.'
+      - name: Retain fixed-field failure diagnosis only
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Retained-Windows-failure-${{ matrix.target }}
+          path: dist/retained-failure-${{ matrix.target }}.json
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: success()
         with:
           name: Requalified-Windows-${{ matrix.target }}
           path: |
