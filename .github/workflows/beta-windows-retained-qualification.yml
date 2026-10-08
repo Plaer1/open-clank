@@ -1,0 +1,112 @@
+name: Retained native Windows release qualification
+
+on:
+  push:
+    branches: [codex/beta1-retained-windows-qualification-20261008]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: retained-windows-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    if: github.ref == 'refs/heads/codex/beta1-retained-windows-qualification-20261008'
+    name: qualify-${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-latest
+            architecture: x64
+          - target: windows-arm64
+            runner: windows-11-arm
+            architecture: arm64
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13.16'
+          architecture: ${{ matrix.architecture }}
+      - name: Admit native target and reserve disposable qualification space
+        run: |
+          @'
+          import os, platform, shutil
+          target = os.environ["RELEASE_TARGET"]
+          expected = {"windows-x64": {"amd64", "x86_64"}, "windows-arm64": {"arm64", "aarch64"}}
+          if os.name != "nt" or platform.machine().lower() not in expected[target]:
+              raise SystemExit("Matching native Windows Python is mandatory")
+          if shutil.disk_usage(os.environ["RUNNER_TEMP"]).free < 8 * 1024**3:
+              raise SystemExit("Insufficient fresh runner space for retained payload, installed fixtures and proof output")
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'Native target or disk admission failed.' }
+      - name: Acquire exact existing public compact artwork
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $parts = Join-Path $env:RUNNER_TEMP "retained-artwork-parts-$env:RELEASE_TARGET"
+          if (Test-Path $parts) { throw 'Preserve existing artwork staging.' }
+          gh release download v1.0.2-beta.1-artwork-compact --repo $env:GITHUB_REPOSITORY --pattern bundle-manifest.json --pattern emoji-assets.parts.json --pattern 'emoji-assets.pack.part-*' --dir $parts
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned public compact artwork download failed.' }
+          $env:RETAINED_ARTWORK_PARTS = $parts
+          @'
+          import hashlib, json, os
+          from pathlib import Path
+          parts = Path(os.environ["RETAINED_ARTWORK_PARTS"])
+          sealed = Path("static/vendor/google-emoji/bundle-manifest.json")
+          expected = "03bfa768ea11381d9859464bd05f848f4709f848085537b10029abe9e64fd385"
+          if hashlib.sha256(sealed.read_bytes()).hexdigest() != expected or (parts / "bundle-manifest.json").read_bytes() != sealed.read_bytes():
+              raise SystemExit("Public manifest must match exact sealed source pin")
+          if hashlib.sha256((parts / "emoji-assets.parts.json").read_bytes()).hexdigest() != "f58411bc3aee12c7947ef27271f86cde9e4813df230c97d6394c1a715acdb2f9":
+              raise SystemExit("Parts manifest differs from approved compact pin")
+          pin = json.loads(sealed.read_text())
+          if pin["pack_bytes"] != 449189888 or pin["pack_sha256"] != "42adf0a79e4012ae71be7f5b3c348b51cdbfddc254a02829547cb60a58a4074c":
+              raise SystemExit("Sealed compact runtime identity differs")
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'Exact public compact pin admission failed.' }
+          $pack = Join-Path $env:RUNNER_TEMP "retained-emoji-$env:RELEASE_TARGET.pack"
+          python -B scripts/emoji_asset_bundle.py assemble --parts $parts --pack $pack
+          if ($LASTEXITCODE -ne 0) { throw 'Complete artwork hash/SQLite/catalog verification failed.' }
+          Remove-Item $parts -Recurse -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "QUALIFICATION_EMOJI_PACK=$pack"
+      - name: Qualify exact retained native portable and installed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "retained-release-private-$env:RELEASE_TARGET"
+          $privateLog = Join-Path $env:RUNNER_TEMP "retained-release-private-$env:RELEASE_TARGET.log"
+          if (Test-Path $privateLog) { throw 'Preserve existing private qualification log.' }
+          python -B scripts/qualify_retained_windows_release.py --target $env:RELEASE_TARGET --work $work --emoji-pack $env:QUALIFICATION_EMOJI_PACK --output "dist/retained-release-$env:RELEASE_TARGET" *> $privateLog
+          if ($LASTEXITCODE -ne 0) { throw 'Full native retained qualification failed; private evidence remains on the runner.' }
+          Write-Output 'Full native retained portable and installed qualification passed.'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Requalified-Windows-${{ matrix.target }}
+          path: |
+            dist/retained-release-${{ matrix.target }}/Open-Clank-*-${{ matrix.target }}.zip
+            dist/retained-release-${{ matrix.target }}/Open-Clank-*-${{ matrix.target }}.zip.sha256
+            dist/retained-release-${{ matrix.target }}/original-retention.json
+            dist/retained-release-${{ matrix.target }}/original-relocation.json
+            dist/retained-release-${{ matrix.target }}/Open-Clank-*-${{ matrix.target }}-Setup.exe
+            dist/retained-release-${{ matrix.target }}/Open-Clank-*-${{ matrix.target }}-Setup.exe.sha256
+            dist/retained-release-${{ matrix.target }}/Open-Clank-*-${{ matrix.target }}-Setup.provenance.json
+            dist/retained-release-${{ matrix.target }}/portable-qualification.json
+            dist/retained-release-${{ matrix.target }}/installed-qualification.json
+            dist/retained-release-${{ matrix.target }}/installed-runtime-qualification.json
+            dist/retained-release-${{ matrix.target }}/proof-chain.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

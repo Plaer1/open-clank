@@ -200,7 +200,7 @@ def qualify(installer, target, output, pack):
             raise RuntimeError('Second browser shortcut launch did not reuse the owned server')
         checks.append('second-browser-shortcut-reuses-verified-owned-instance')
         children = json.loads(powershell(
-            "$all=@(Get-CimInstance Win32_Process);$ids=@([int]$args[0]);$found=@();do{$next=@($all|Where-Object {$_.ParentProcessId -in $ids -and $_.ProcessId -notin $found.ProcessId});$found+=@($next);$ids=@($next.ProcessId)}while($ids.Count -gt 0);ConvertTo-Json -InputObject @($found|Select-Object ProcessId,CreationDate) -Compress", server_pid))
+            "$all=@(Get-CimInstance Win32_Process);$ids=@([int]$args[0]);$found=@();do{$next=@($all|Where-Object {$_.ParentProcessId -in $ids -and $_.ProcessId -notin $found.ProcessId});$found+=@($next);if($next.Count -eq 0){break};$ids=@($next|ForEach-Object {$_.ProcessId})}while($ids.Count -gt 0);ConvertTo-Json -InputObject @($found|Select-Object ProcessId,CreationDate) -Compress", server_pid))
         powershell('Start-Process -FilePath $args[0] -Wait', group / 'Stop Open Clank.lnk', environment=environment)
         launcher_started = False
         try:
