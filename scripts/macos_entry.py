@@ -109,7 +109,7 @@ def app_owner() -> int:
         host, port = manager._address(profile)
         _OWNER_PHASE = "server-start"
         status = manager._start_locked(profile, host=host, port=port,
-                                       wait_seconds=120, allow_auth_setup=True)
+                                       wait_seconds=240, allow_auth_setup=True)
         owned = status.pid != before.pid or not before.running
         generation = manager._read_state().get("instance_id")
     if owned and status.pid:
