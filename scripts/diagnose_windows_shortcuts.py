@@ -87,6 +87,19 @@ def diagnose(target, output, work):
                 safe['location'] = location
                 receipt['comparisons'].append(safe)
                 raw['comparisons'].append({'location': location, 'role': role, 'link': str(link), 'actual': detail})
+        roles = {'Open Clank.lnk': ('start-menu-launch', 'server start --open-browser'),
+                 'Stop Open Clank.lnk': ('start-menu-stop', 'server stop'),
+                 desktop_name: ('desktop-launch', 'server start --open-browser')}
+        # Only this freshly created private fixture is searched. Windows can
+        # expand known-folder registry variables differently from .NET APIs.
+        for link in sorted(work.rglob('*.lnk')):
+            if link.name not in roles:
+                continue
+            role, arguments = roles[link.name]
+            safe, detail = shortcut_comparison(link, executable, arguments, role=role, environment=environment)
+            safe['location'] = 'private-fixture-discovered'
+            receipt['comparisons'].append(safe)
+            raw['comparisons'].append({'location': 'private-fixture-discovered', 'role': role, 'link': str(link), 'actual': detail})
     finally:
         if uninstaller.is_file():
             subprocess.run([str(uninstaller), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
