@@ -1,0 +1,58 @@
+name: Native Windows shortcut diagnostic
+
+on:
+  push:
+    branches: [codex/beta1-windows-shortcut-diagnostic-20261007]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-shortcut-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  shortcuts:
+    if: github.ref == 'refs/heads/codex/beta1-windows-shortcut-diagnostic-20261007'
+    name: Native ${{ matrix.target }} shortcut fixture
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-latest
+            architecture: x64
+          - target: windows-arm64
+            runner: windows-11-arm
+            architecture: arm64
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13.16'
+          architecture: ${{ matrix.architecture }}
+      - name: Native pinned compiler and isolated shortcut fixture only
+        env:
+          DIAGNOSTIC_TARGET: ${{ matrix.target }}
+        run: |
+          $safe = Join-Path $env:RUNNER_TEMP 'shortcut-safe-receipt'
+          $private = Join-Path $env:RUNNER_TEMP 'shortcut-private-fixture'
+          $log = Join-Path $env:RUNNER_TEMP 'shortcut-private-console.log'
+          & python -B scripts/diagnose_windows_shortcuts.py --target $env:DIAGNOSTIC_TARGET --output $safe --work-root $private *> $log
+          if ($LASTEXITCODE -ne 0) { throw 'Native shortcut diagnostic failed; only allowlisted receipt fields may be uploaded.' }
+          Write-Output 'Native shortcut diagnostic completed; this is not app/package acceptance.'
+      - name: Retain only safe diagnostic receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Open-Clank-shortcut-diagnostic-${{ matrix.target }}
+          path: ${{ runner.temp }}/shortcut-safe-receipt/receipt.json
+          if-no-files-found: warn
+          retention-days: 7
